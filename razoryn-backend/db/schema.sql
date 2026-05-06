@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS products (
   price_shopify      NUMERIC(10,2),
   price_ebay         NUMERIC(10,2),
   cost_price         NUMERIC(10,2),
+  image_url          TEXT,
   location_id        INTEGER REFERENCES locations(id) ON DELETE SET NULL,
   -- External IDs for sync
   shopify_product_id    TEXT,
@@ -262,6 +263,22 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS audit_user_idx ON audit_log (user_id, created_at DESC);
+
+-- Migrations to support adding columns on existing deployments
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'products' AND column_name = 'image_url'
+  ) THEN
+    ALTER TABLE products ADD COLUMN image_url TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'avatar_url'
+  ) THEN
+    ALTER TABLE users ADD COLUMN avatar_url TEXT;
+  END IF;
+END $$;
 
 -- Triggers — auto-update updated_at
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$

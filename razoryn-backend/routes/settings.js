@@ -48,6 +48,73 @@ router.post('/sync-now', requireAdmin, async (req, res) => {
   }
 });
 
+// POST /api/settings/import-shopify (admin) — pull all products from Shopify into the warehouse DB.
+// Upsert by shopify_variant_id (so re-running it is safe and updates titles/prices/images).
+router.post('/import-shopify', requireAdmin, async (req, res) => {
+  const shopify = require('../services/shopify');
+  if (!shopify.isConfigured()) {
+    return res.status(400).json({ error: 'shopify_not_configured' });
+  }
+  let inserted = 0, updated = 0, errors = [];
+  try {
+    for await (const v of shopify.iterateAllProductsAndVariants()) {
+      try {
+        const existing = await query(
+          `SELECT id FROM products WHERE shopify_variant_id = $1 OR sku = $2 LIMIT 1`,
+          [v.shopify_variant_id, v.sku]
+        );
+        if (existing.rows.length) {
+          await query(`
+            UPDATE products SET
+              shopify_product_id = $1, shopify_variant_id = $2, shopify_inventory_id = $3,
+              title = $4, brand = COALESCE($5, brand), model = COALESCE($6, model),
+              barcode = COALESCE($7, barcode),
+              price_shopify = $8, image_url = COALESCE($9, image_url),
+              qty_on_hand = $10, updated_at = now()
+            WHERE id = $11`,
+            [v.shopify_product_id, v.shopify_variant_id, v.shopify_inventory_id,
+             v.title, v.brand, v.model, v.barcode,
+             v.price_shopify, v.image_url, v.qty_on_hand, existing.rows[0].id]
+          );
+          updated++;
+        } else {
+          await query(`
+            INSERT INTO products
+              (sku, title, brand, model, barcode, price_shopify, image_url,
+               qty_on_hand, shopify_product_id, shopify_variant_id, shopify_inventory_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            [v.sku, v.title, v.brand, v.model, v.barcode,
+             v.price_shopify, v.image_url, v.qty_on_hand,
+             v.shopify_product_id, v.shopify_variant_id, v.shopify_inventory_id]
+          );
+          inserted++;
+        }
+      } catch (e) {
+        errors.push({ sku: v.sku, error: e.message });
+      }
+    }
+    await audit(req, 'import_shopify', null, null, { inserted, updated, errors: errors.length });
+    res.json({ ok: true, inserted, updated, errors });
+  } catch (e) {
+    console.error('[import-shopify] failed:', e);
+    res.status(500).json({ error: 'import_failed', message: e.message });
+  }
+});
+
+// GET /api/settings/shopify-locations (admin) — helper to find the warehouse location ID
+router.get('/shopify-locations', requireAdmin, async (req, res) => {
+  const shopify = require('../services/shopify');
+  if (!shopify.isConfigured()) {
+    return res.status(400).json({ error: 'shopify_not_configured' });
+  }
+  try {
+    const locations = await shopify.getLocations();
+    res.json({ locations });
+  } catch (e) {
+    res.status(500).json({ error: 'fetch_failed', message: e.message });
+  }
+});
+
 // GET /api/settings/sync-state
 router.get('/sync-state', async (req, res) => {
   const { rows } = await query('SELECT * FROM sync_state ORDER BY channel');

@@ -822,7 +822,6 @@ function adaptProduct(p) {
     partNumber: p.part_number,
     priceShopify: parseFloat(p.price_shopify || 0),
     priceEbay: parseFloat(p.price_ebay || 0),
-    // Single physical stock; UI's two columns both reflect the same source of truth
     qtyShopify: p.qty_on_hand,
     qtyEbay: p.qty_on_hand,
     qtyOnHand: p.qty_on_hand,
@@ -832,6 +831,9 @@ function adaptProduct(p) {
     locationId: p.location_id,
     locationDesc: '',
     locationPhoto: null,
+    imageUrl: p.image_url,
+    shopifyProductId: p.shopify_product_id,
+    shopifyVariantId: p.shopify_variant_id,
   };
 }
 function adaptSale(s) {
@@ -1484,6 +1486,7 @@ function renderInventory() {
         <div class="table-wrap">
           <table class="table">
             <thead><tr>
+              <th style="width:64px"></th>
               <th>Product</th><th>Part #</th><th>Location</th>
               <th class="num">Shopify</th><th class="num">eBay</th><th class="num">Total</th>
               <th class="num">Price</th><th></th>
@@ -1510,16 +1513,22 @@ function renderInventory() {
     });
     el('inv-tbody').innerHTML = filtered.map(p => `
       <tr>
+        <td>
+          ${p.imageUrl
+            ? `<img src="${p.imageUrl}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:6px;background:var(--line-2)">`
+            : `<div style="width:48px;height:48px;border-radius:6px;background:var(--line-2);display:flex;align-items:center;justify-content:center;color:var(--ink-soft)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>`
+          }
+        </td>
         <td><div style="font-weight:500">${p.title}</div><div style="color:var(--ink-soft);font-size:11px">${p.sku}</div></td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${p.partNumber||'—'}</td>
-        <td><div style="font-size:12px">${p.location}</div></td>
+        <td><div style="font-size:12px">${p.location || '—'}</div></td>
         <td class="num">${p.qtyShopify}</td>
         <td class="num">${p.qtyEbay}</td>
         <td class="num"><strong>${totalQty(p)}</strong> ${totalQty(p)<=p.lowThresh ? `<span class="pill ${totalQty(p)===0?'red':'amber'}" style="margin-left:6px">${totalQty(p)===0?'Out':'Low'}</span>`:''}</td>
         <td class="num">${gbp(p.priceShopify)}</td>
         <td><button class="btn btn-outline btn-sm" onclick="openProductModal('${p.id}')">Edit</button></td>
       </tr>
-    `).join('') || '<tr><td colspan="8"><div class="empty"><div class="t">No products match</div></div></td></tr>';
+    `).join('') || '<tr><td colspan="9"><div class="empty"><div class="t">No products match</div></div></td></tr>';
   }
   paint();
   ['inv-search','inv-brand','inv-stock'].forEach(id => el(id).addEventListener('input', paint));
@@ -2691,18 +2700,28 @@ function renderSettings() {
       <div class="page-head"><h1>Settings</h1></div>
 
       <div class="card" style="margin-bottom:16px">
-        <div class="card-head"><h3>Integrations</h3></div>
+        <div class="card-head"><h3>Shopify integration</h3></div>
         <div class="card-body">
-          <div class="perm-row">
-            <div><div class="perm-name">Shopify connection</div><div class="perm-desc">razoryn.co.uk · live sync of inventory and orders</div></div>
-            <span class="pill ${State.settings.shopifyConnected?'green':'red'}"><span class="dot"></span>${State.settings.shopifyConnected?'Connected':'Disconnected'}</span>
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">
+            Pull your full Shopify catalogue into the warehouse, including product images, prices, and current stock levels. Re-running this is safe — it updates existing products by SKU.
+          </p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+            <button class="btn btn-primary" onclick="findShopifyLocations()">📍 Find my Location ID</button>
+            <button class="btn btn-primary" onclick="importFromShopify()">⬇ Import all products</button>
+            <button class="btn btn-outline" onclick="syncNow()">↻ Sync orders &amp; stock now</button>
           </div>
-          <div class="perm-row">
-            <div><div class="perm-name">eBay connection</div><div class="perm-desc">Razoryn e-Parts seller account</div></div>
-            <span class="pill ${State.settings.ebayConnected?'green':'red'}"><span class="dot"></span>${State.settings.ebayConnected?'Connected':'Disconnected'}</span>
-          </div>
-          <div style="margin-top:14px;padding:12px;background:var(--blue-light);border-radius:8px;font-size:12px;color:var(--blue)">
-            <strong>Production note:</strong> Real connections need OAuth flows + API keys (Shopify Admin API, eBay Sell API). The prototype simulates with realistic mock data. Add credentials in your Railway environment variables when you build the backend.
+          <div id="shopify-result" style="font-size:12px;color:var(--ink-soft)"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>eBay integration</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">
+            Once eBay credentials are set in Railway, eBay listings will be matched to your products by SKU. Make sure your eBay listings have the same SKU as the Shopify variants.
+          </p>
+          <div style="padding:12px;background:var(--blue-light);color:var(--blue);border-radius:8px;font-size:12px">
+            Configure <strong>EBAY_CLIENT_ID</strong>, <strong>EBAY_CLIENT_SECRET</strong>, and <strong>EBAY_REFRESH_TOKEN</strong> in Railway, then click <em>Sync orders &amp; stock now</em> above.
           </div>
         </div>
       </div>
@@ -2725,17 +2744,42 @@ function renderSettings() {
         </div>
       </div>
 
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-head"><h3>Reset prototype data</h3></div>
-        <div class="card-body">
-          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">Clear all data and reload seed data. Useful for testing.</p>
-          <button class="btn btn-danger" onclick="resetData()">Reset all data</button>
-        </div>
-      </div>
-
       <div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="saveSettings()">Save settings</button></div>
     </div>
   `;
+}
+
+async function findShopifyLocations() {
+  const out = el('shopify-result');
+  if (out) out.innerHTML = 'Loading…';
+  try {
+    const r = await Api.get('/api/settings/shopify-locations');
+    if (out) {
+      out.innerHTML = '<strong>Locations on your Shopify store:</strong><br>' +
+        r.locations.map(l => `<code style="display:inline-block;padding:2px 6px;background:var(--line-2);border-radius:4px;margin:2px 4px 2px 0">${l.id}</code> — ${l.name}${l.address1 ? ' (' + l.address1 + ')' : ''}`).join('<br>') +
+        '<br><br>Copy the ID for your <strong>warehouse location</strong>, then add it as <code>SHOPIFY_LOCATION_ID</code> in Railway env vars and redeploy.';
+    }
+  } catch (e) {
+    if (out) out.innerHTML = '<span style="color:var(--red)">Failed: ' + (e.data?.error || e.message) + '. Make sure SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_TOKEN are set in Railway.</span>';
+  }
+}
+
+async function importFromShopify() {
+  if (!confirm('Pull all products from Shopify into the warehouse? Safe to re-run — existing products will be updated.')) return;
+  const out = el('shopify-result');
+  if (out) out.innerHTML = 'Importing… this can take a minute for large catalogues.';
+  try {
+    const r = await Api.post('/api/settings/import-shopify');
+    if (out) {
+      out.innerHTML = `<strong style="color:var(--green)">Done.</strong> Inserted <strong>${r.inserted}</strong>, updated <strong>${r.updated}</strong>` +
+        (r.errors && r.errors.length ? `, <span style="color:var(--red)">${r.errors.length} errors</span>` : '') +
+        '. Refresh Inventory to see them.';
+    }
+    await Store.refresh('products');
+    toast('Shopify import complete', 'success');
+  } catch (e) {
+    if (out) out.innerHTML = '<span style="color:var(--red)">Import failed: ' + (e.data?.message || e.message) + '</span>';
+  }
 }
 async function saveSettings() {
   try {
