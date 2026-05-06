@@ -1,0 +1,2695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#c8202d">
+<title>Razoryn Warehouse Hub</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root {
+    --red: #c8202d;
+    --red-dark: #a51823;
+    --red-light: #fce8ea;
+    --ink: #0f1115;
+    --ink-2: #1c1f26;
+    --ink-soft: #4a5260;
+    --line: #e6e8ec;
+    --line-2: #f0f2f5;
+    --bg: #fafbfc;
+    --white: #ffffff;
+    --green: #1a7f3e;
+    --green-light: #e3f4e9;
+    --amber: #b76b00;
+    --amber-light: #fff4e0;
+    --blue: #1e5ae8;
+    --blue-light: #e8eefd;
+    --shadow: 0 1px 2px rgba(15,17,21,.04), 0 4px 12px rgba(15,17,21,.04);
+    --shadow-lg: 0 8px 32px rgba(15,17,21,.12);
+    --radius: 10px;
+    --radius-sm: 6px;
+  }
+  [data-theme="dark"] {
+    --red: #e94654;
+    --red-dark: #c8202d;
+    --red-light: #3a1418;
+    --ink: #f0f2f5;
+    --ink-2: #d4d8df;
+    --ink-soft: #8a93a3;
+    --line: #2a2e36;
+    --line-2: #1f232a;
+    --bg: #0d0f13;
+    --white: #161a21;
+    --green: #4ade80;
+    --green-light: #0e2a18;
+    --amber: #f0a040;
+    --amber-light: #2e1f0a;
+    --blue: #6b8fff;
+    --blue-light: #131a30;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 12px rgba(0,0,0,.3);
+    --shadow-lg: 0 8px 32px rgba(0,0,0,.5);
+  }
+  [data-theme="dark"] img { filter: brightness(.92); }
+  html { color-scheme: light; }
+  html[data-theme="dark"] { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overscroll-behavior: none; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font-family: inherit; cursor: pointer; border: none; background: none; }
+  input, select, textarea { font-family: inherit; font-size: 14px; color: var(--ink); }
+  a { color: var(--red); text-decoration: none; }
+
+  /* ==================== LOGIN ==================== */
+  .login-screen {
+    position: fixed; inset: 0;
+    background: linear-gradient(135deg, #0f1115 0%, #1c1f26 100%);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px; z-index: 1000;
+  }
+  .login-card {
+    background: var(--white); border-radius: 16px;
+    padding: 40px; width: 100%; max-width: 380px;
+    box-shadow: var(--shadow-lg);
+  }
+  .login-logo {
+    text-align: center; margin-bottom: 28px;
+  }
+  .login-logo .mark {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-weight: 800; font-size: 22px; letter-spacing: -0.02em;
+  }
+  .login-logo .mark .dot {
+    width: 28px; height: 28px; background: var(--red); border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-size: 14px;
+  }
+  .login-logo .sub {
+    font-size: 12px; color: var(--ink-soft); margin-top: 6px;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .login-tabs {
+    display: flex; background: var(--line-2); border-radius: 8px;
+    padding: 4px; margin-bottom: 24px;
+  }
+  .login-tab {
+    flex: 1; padding: 8px; border-radius: 6px;
+    font-size: 13px; font-weight: 600; color: var(--ink-soft);
+  }
+  .login-tab.active { background: var(--white); color: var(--ink); box-shadow: var(--shadow); }
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px; color: var(--ink-soft); }
+  .field input, .field select, .field textarea {
+    width: 100%; padding: 11px 14px; border: 1px solid var(--line);
+    border-radius: 8px; background: var(--white); transition: border .15s;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--red); }
+  .btn {
+    padding: 11px 18px; border-radius: 8px; font-weight: 600;
+    font-size: 14px; transition: all .15s; display: inline-flex;
+    align-items: center; gap: 8px; justify-content: center;
+  }
+  .btn-primary { background: var(--red); color: white; }
+  .btn-primary:hover { background: var(--red-dark); }
+  .btn-secondary { background: var(--ink); color: white; }
+  .btn-ghost { background: transparent; color: var(--ink-soft); }
+  .btn-ghost:hover { background: var(--line-2); color: var(--ink); }
+  .btn-outline { background: white; color: var(--ink); border: 1px solid var(--line); }
+  .btn-outline:hover { border-color: var(--ink); }
+  .btn-block { width: 100%; }
+  .btn-sm { padding: 7px 12px; font-size: 12px; }
+  .btn-danger { background: var(--red); color: white; }
+  .btn-success { background: var(--green); color: white; }
+
+  /* PIN pad */
+  .pin-display {
+    display: flex; justify-content: center; gap: 10px; margin: 20px 0;
+  }
+  .pin-dot {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--line); transition: all .15s;
+  }
+  .pin-dot.filled { background: var(--red); border-color: var(--red); }
+  .pin-pad {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+  }
+  .pin-key {
+    height: 56px; background: var(--line-2); border-radius: 10px;
+    font-size: 20px; font-weight: 600; color: var(--ink);
+    transition: background .1s;
+  }
+  .pin-key:active { background: var(--line); }
+  .pin-hint { text-align: center; color: var(--ink-soft); font-size: 12px; margin-top: 14px; }
+  .pin-error { color: var(--red); text-align: center; font-size: 13px; margin-top: 10px; min-height: 18px; }
+
+  /* ==================== APP SHELL ==================== */
+  .app { display: none; height: 100vh; flex-direction: column; }
+  .app.active { display: flex; }
+
+  .topbar {
+    height: 56px; background: var(--white); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; padding: 0 16px; gap: 16px;
+    flex-shrink: 0;
+  }
+  .topbar .logo {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 800; font-size: 16px; letter-spacing: -0.02em;
+  }
+  .topbar .logo .mark {
+    width: 28px; height: 28px; background: var(--red); border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-size: 14px; font-weight: 800;
+  }
+  .topbar .logo .sub { color: var(--ink-soft); font-weight: 500; font-size: 12px; }
+  .topbar .spacer { flex: 1; }
+  .menu-btn { display: none; width: 36px; height: 36px; border-radius: 8px; align-items: center; justify-content: center; }
+  .menu-btn:hover { background: var(--line-2); }
+
+  .topbar-actions { display: flex; align-items: center; gap: 8px; }
+  .icon-btn {
+    width: 36px; height: 36px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--ink-soft); position: relative;
+  }
+  .icon-btn:hover { background: var(--line-2); color: var(--ink); }
+  .badge {
+    position: absolute; top: 4px; right: 4px;
+    background: var(--red); color: white;
+    font-size: 10px; font-weight: 700;
+    min-width: 16px; height: 16px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0 4px;
+  }
+  .user-chip {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 10px 4px 4px; border-radius: 18px; background: var(--line-2);
+  }
+  .avatar {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: var(--red); color: white;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 12px;
+  }
+  .user-chip .name { font-size: 13px; font-weight: 600; }
+  .user-chip .role { font-size: 10px; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.05em; }
+
+  .body-wrap { flex: 1; display: flex; overflow: hidden; }
+
+  .sidebar {
+    width: 240px; background: var(--white); border-right: 1px solid var(--line);
+    overflow-y: auto; flex-shrink: 0;
+  }
+  .nav-section { padding: 12px 8px; }
+  .nav-label {
+    padding: 8px 12px 6px; font-size: 11px; font-weight: 700;
+    color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; border-radius: 8px; font-size: 14px;
+    color: var(--ink-2); font-weight: 500; width: 100%; text-align: left;
+    cursor: pointer; margin-bottom: 1px;
+  }
+  .nav-item:hover { background: var(--line-2); }
+  .nav-item.active { background: var(--red-light); color: var(--red); font-weight: 600; }
+  .nav-item .ic { width: 18px; height: 18px; flex-shrink: 0; }
+  .nav-item .ct {
+    margin-left: auto; background: var(--line-2); color: var(--ink-soft);
+    font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 10px;
+  }
+  .nav-item.active .ct { background: var(--red); color: white; }
+  .nav-item.alert .ct { background: var(--amber); color: white; }
+
+  .content {
+    flex: 1; overflow-y: auto; padding: 24px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .page { max-width: 1280px; margin: 0 auto; }
+  .page-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 16px; margin-bottom: 20px; flex-wrap: wrap;
+  }
+  .page-head h1 {
+    font-size: 22px; font-weight: 700; letter-spacing: -0.02em;
+  }
+  .page-head .desc { color: var(--ink-soft); margin-top: 2px; font-size: 13px; }
+  .page-head .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* Cards & generic blocks */
+  .card {
+    background: var(--white); border: 1px solid var(--line);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+  }
+  .card-head {
+    padding: 16px 18px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .card-head h3 { font-size: 15px; font-weight: 600; }
+  .card-body { padding: 18px; }
+
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+
+  .stat {
+    background: var(--white); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px;
+  }
+  .stat .label { font-size: 12px; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+  .stat .value { font-size: 24px; font-weight: 700; margin-top: 4px; letter-spacing: -0.02em; }
+  .stat .delta { font-size: 12px; margin-top: 2px; color: var(--green); font-weight: 600; }
+  .stat .delta.down { color: var(--red); }
+  .stat .icon-wrap {
+    width: 36px; height: 36px; border-radius: 8px; background: var(--red-light);
+    color: var(--red); display: flex; align-items: center; justify-content: center;
+    margin-bottom: 10px;
+  }
+
+  /* Tables */
+  .table-wrap { overflow-x: auto; }
+  .table { width: 100%; border-collapse: collapse; }
+  .table th, .table td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .table th { background: var(--line-2); font-weight: 600; color: var(--ink-soft); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; position: sticky; top: 0; }
+  .table tr:hover td { background: var(--bg); }
+  .table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 12px; font-size: 11px;
+    font-weight: 600; background: var(--line-2); color: var(--ink-soft);
+  }
+  .pill.red { background: var(--red-light); color: var(--red); }
+  .pill.green { background: var(--green-light); color: var(--green); }
+  .pill.amber { background: var(--amber-light); color: var(--amber); }
+  .pill.blue { background: var(--blue-light); color: var(--blue); }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  /* Search/filter bar */
+  .toolbar {
+    display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px;
+    align-items: center;
+  }
+  .search-input {
+    flex: 1; min-width: 200px; max-width: 400px;
+    padding: 9px 14px 9px 36px; border: 1px solid var(--line);
+    border-radius: 8px; background: var(--white); color: var(--ink);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%234a5260' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='11' r='8'/><path d='m21 21-4.3-4.3'/></svg>");
+    background-repeat: no-repeat; background-position: 12px center;
+  }
+  .filter-select {
+    padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--white); color: var(--ink); font-size: 13px;
+  }
+
+  .seg {
+    display: inline-flex; background: var(--line-2); border-radius: 8px; padding: 3px;
+  }
+  .seg button {
+    padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: 600; color: var(--ink-soft);
+  }
+  .seg button.active { background: var(--white); color: var(--ink); box-shadow: var(--shadow); }
+
+  /* Modal */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(15,17,21,.5);
+    z-index: 999; display: flex; align-items: center; justify-content: center;
+    padding: 16px; backdrop-filter: blur(4px);
+    opacity: 0; pointer-events: none; transition: opacity .15s;
+  }
+  .modal-overlay.open { opacity: 1; pointer-events: auto; }
+  .modal {
+    background: var(--white); border-radius: 14px;
+    width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto;
+    box-shadow: var(--shadow-lg);
+    transform: scale(.96); transition: transform .15s;
+  }
+  .modal-overlay.open .modal { transform: scale(1); }
+  .modal-head {
+    padding: 18px 20px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .modal-head h3 { font-size: 16px; font-weight: 600; }
+  .modal-body { padding: 20px; }
+  .modal-foot {
+    padding: 14px 20px; border-top: 1px solid var(--line);
+    display: flex; gap: 8px; justify-content: flex-end;
+  }
+  .modal-large { max-width: 720px; }
+
+  /* Toast */
+  .toast-host {
+    position: fixed; top: 70px; right: 16px; z-index: 1100;
+    display: flex; flex-direction: column; gap: 8px;
+    pointer-events: none;
+  }
+  .toast {
+    background: var(--ink); color: white; padding: 12px 16px;
+    border-radius: 10px; box-shadow: var(--shadow-lg);
+    font-size: 13px; font-weight: 500; max-width: 320px;
+    display: flex; align-items: center; gap: 10px;
+    pointer-events: auto;
+    animation: slide .25s ease-out;
+  }
+  .toast.success { background: var(--green); }
+  .toast.error { background: var(--red); }
+  .toast.warn { background: var(--amber); }
+  @keyframes slide {
+    from { transform: translateX(20px); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
+
+  /* Scanner */
+  #scanner-region { width: 100%; min-height: 280px; background: #000; border-radius: 8px; overflow: hidden; }
+
+  /* Locations */
+  .loc-card {
+    background: white; border: 1px solid var(--line); border-radius: var(--radius);
+    overflow: hidden; cursor: pointer; transition: transform .15s, box-shadow .15s;
+  }
+  .loc-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+  .loc-img {
+    width: 100%; aspect-ratio: 4/3; background: var(--line-2);
+    display: flex; align-items: center; justify-content: center; color: var(--ink-soft);
+    background-size: cover; background-position: center;
+  }
+  .loc-meta { padding: 12px; }
+  .loc-title { font-weight: 600; font-size: 13px; }
+  .loc-desc { color: var(--ink-soft); font-size: 12px; margin-top: 2px; }
+
+  /* Schedule */
+  .task-row {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .task-check {
+    width: 22px; height: 22px; border: 2px solid var(--line);
+    border-radius: 6px; flex-shrink: 0; display: flex;
+    align-items: center; justify-content: center;
+  }
+  .task-check.done { background: var(--green); border-color: var(--green); color: white; }
+  .task-row.done .task-title { text-decoration: line-through; color: var(--ink-soft); }
+  .task-info { flex: 1; }
+  .task-title { font-weight: 500; font-size: 13px; }
+  .task-meta { color: var(--ink-soft); font-size: 12px; margin-top: 2px; }
+
+  /* Returns */
+  .return-photos {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+    gap: 6px; margin-top: 8px;
+  }
+  .return-photos img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; }
+
+  /* Knowledge base */
+  .kb-card {
+    background: white; border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px; cursor: pointer; transition: border-color .15s;
+  }
+  .kb-card:hover { border-color: var(--ink); }
+  .kb-card .kb-cat {
+    font-size: 11px; font-weight: 700; color: var(--red);
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .kb-card .kb-title { font-weight: 600; margin-top: 4px; font-size: 14px; }
+  .kb-card .kb-desc { color: var(--ink-soft); font-size: 12px; margin-top: 4px; }
+  .kb-locked {
+    display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px;
+    background: var(--amber-light); color: var(--amber);
+    border-radius: 4px; font-size: 10px; font-weight: 700; margin-top: 6px;
+  }
+
+  /* Videos */
+  .video-card { cursor: pointer; }
+  .video-thumb {
+    width: 100%; aspect-ratio: 16/9; background: var(--ink-2);
+    border-radius: var(--radius); display: flex; align-items: center;
+    justify-content: center; color: white; position: relative;
+    background-size: cover; background-position: center;
+  }
+  .video-thumb::after {
+    content: ''; position: absolute; inset: 0;
+    background: rgba(0,0,0,.3); border-radius: var(--radius);
+  }
+  .video-thumb svg { position: relative; z-index: 1; opacity: .95; }
+  .video-meta { padding-top: 10px; }
+  .video-title { font-weight: 600; font-size: 14px; }
+  .video-desc { color: var(--ink-soft); font-size: 12px; margin-top: 2px; }
+
+  /* Pricing tool */
+  .pt-result {
+    display: grid; gap: 10px; margin-top: 16px;
+  }
+  .pt-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px; border: 1px solid var(--line); border-radius: var(--radius);
+  }
+  .pt-row.featured { background: var(--red-light); border-color: var(--red); }
+  .pt-row .ch-name { font-weight: 600; font-size: 13px; }
+  .pt-row .ch-meta { color: var(--ink-soft); font-size: 12px; }
+  .pt-row .ch-price { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+
+  /* Empty state */
+  .empty {
+    text-align: center; padding: 48px 20px;
+    color: var(--ink-soft);
+  }
+  .empty svg { opacity: .3; margin-bottom: 12px; }
+  .empty .t { font-weight: 600; font-size: 15px; color: var(--ink); margin-bottom: 4px; }
+
+  /* Switch */
+  .switch {
+    position: relative; display: inline-block; width: 38px; height: 22px;
+    flex-shrink: 0;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch span {
+    position: absolute; cursor: pointer; inset: 0;
+    background: var(--line); border-radius: 22px; transition: .15s;
+  }
+  .switch span::before {
+    content: ''; position: absolute; height: 16px; width: 16px;
+    left: 3px; top: 3px; background: white; border-radius: 50%; transition: .15s;
+  }
+  .switch input:checked + span { background: var(--green); }
+  .switch input:checked + span::before { transform: translateX(16px); }
+
+  .perm-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 0; border-bottom: 1px solid var(--line);
+  }
+  .perm-row:last-child { border-bottom: none; }
+  .perm-row .perm-name { font-weight: 500; font-size: 13px; }
+  .perm-row .perm-desc { color: var(--ink-soft); font-size: 12px; }
+
+  /* Mobile */
+  @media (max-width: 900px) {
+    .menu-btn { display: flex; }
+    .sidebar {
+      position: fixed; top: 56px; bottom: 0; left: 0; z-index: 90;
+      transform: translateX(-100%); transition: transform .2s;
+      box-shadow: var(--shadow-lg);
+    }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-backdrop {
+      position: fixed; inset: 56px 0 0 0; background: rgba(0,0,0,.4);
+      z-index: 80; display: none;
+    }
+    .sidebar-backdrop.open { display: block; }
+    .content { padding: 16px; }
+    .user-chip .name { display: none; }
+    .user-chip .role { display: none; }
+    .user-chip { padding: 4px; }
+    .topbar .logo .sub { display: none; }
+  }
+  @media (max-width: 540px) {
+    .page-head h1 { font-size: 18px; }
+    .stat .value { font-size: 20px; }
+    .table th, .table td { padding: 10px; font-size: 12px; }
+  }
+
+  /* Hide on mobile - admin-only desktop features */
+  .admin-only { display: none; }
+  body.is-admin .admin-only { display: initial; }
+  body.is-admin .nav-item.admin-only { display: flex; }
+</style>
+</head>
+<body>
+
+<!-- ==================== LOGIN ==================== -->
+<div class="login-screen" id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="mark"><div class="dot">R</div>Razoryn</div>
+      <div class="sub">Warehouse Hub</div>
+    </div>
+    <div class="login-tabs">
+      <button class="login-tab active" data-mode="pin">PIN</button>
+      <button class="login-tab" data-mode="email">Email</button>
+    </div>
+
+    <div id="login-pin">
+      <div class="pin-display">
+        <div class="pin-dot"></div><div class="pin-dot"></div>
+        <div class="pin-dot"></div><div class="pin-dot"></div>
+      </div>
+      <div class="pin-pad">
+        <button class="pin-key">1</button><button class="pin-key">2</button><button class="pin-key">3</button>
+        <button class="pin-key">4</button><button class="pin-key">5</button><button class="pin-key">6</button>
+        <button class="pin-key">7</button><button class="pin-key">8</button><button class="pin-key">9</button>
+        <button class="pin-key" data-act="clear">⌫</button>
+        <button class="pin-key">0</button>
+        <button class="pin-key" data-act="enter" style="background:var(--red);color:white">→</button>
+      </div>
+      <div class="pin-error" id="pin-error"></div>
+      <div class="pin-hint">Try <strong>1234</strong> (warehouse) or <strong>9999</strong> (admin)</div>
+    </div>
+
+    <div id="login-email" style="display:none">
+      <div class="field">
+        <label>Email</label>
+        <input type="email" id="email-input" placeholder="ali@razoryn.co.uk" value="ali@razoryn.co.uk">
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input type="password" id="pwd-input" placeholder="••••••••" value="demo">
+      </div>
+      <button class="btn btn-primary btn-block" id="email-login">Sign in</button>
+      <div class="pin-hint" style="margin-top:14px">Demo: any email, password = <strong>demo</strong></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== APP ==================== -->
+<div class="app" id="app">
+  <header class="topbar">
+    <button class="menu-btn icon-btn" id="menu-toggle" aria-label="Menu">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="logo">
+      <div class="mark">R</div>
+      <span>Razoryn</span>
+      <span class="sub">Warehouse Hub</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="topbar-actions">
+      <button class="icon-btn" id="quick-scan-btn" title="Quick scan" aria-label="Quick scan">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><line x1="7" y1="12" x2="7" y2="12"/><line x1="12" y1="7" x2="12" y2="17"/><line x1="17" y1="12" x2="17" y2="12"/></svg>
+      </button>
+      <button class="icon-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
+        <svg class="theme-icon-light" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+        <svg class="theme-icon-dark" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+      </button>
+      <button class="icon-btn" id="notif-btn" title="Notifications" aria-label="Notifications">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+        <span class="badge" id="notif-badge">3</span>
+      </button>
+      <div class="user-chip">
+        <div class="avatar" id="user-avatar">A</div>
+        <div>
+          <div class="name" id="user-name">Ali</div>
+          <div class="role" id="user-role">Admin</div>
+        </div>
+      </div>
+      <button class="icon-btn" id="logout-btn" title="Logout" aria-label="Logout">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="body-wrap">
+    <div class="sidebar-backdrop" id="sb-backdrop"></div>
+    <aside class="sidebar" id="sidebar">
+      <div class="nav-section">
+        <div class="nav-label">Operations</div>
+        <button class="nav-item active" data-page="dashboard">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+          Dashboard
+        </button>
+        <button class="nav-item" data-page="inventory">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+          Inventory
+          <span class="ct" id="nav-inv-count">0</span>
+        </button>
+        <button class="nav-item" data-page="scan">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><line x1="7" y1="12" x2="7" y2="12"/><line x1="12" y1="7" x2="12" y2="17"/><line x1="17" y1="12" x2="17" y2="12"/></svg>
+          Stock Check
+        </button>
+        <button class="nav-item" data-page="locations">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+          Locations
+        </button>
+        <button class="nav-item" data-page="returns">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+          Returns
+          <span class="ct" id="nav-ret-count">0</span>
+        </button>
+        <button class="nav-item" data-page="sales">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          Sales
+        </button>
+        <button class="nav-item" data-page="pricing">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+          Phone Pricing
+        </button>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-label">Resources</div>
+        <button class="nav-item" data-page="schedule">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          Schedule
+        </button>
+        <button class="nav-item" data-page="videos">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+          How-To Videos
+        </button>
+        <button class="nav-item" data-page="kb">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          Knowledge Base
+        </button>
+        <button class="nav-item alert" data-page="notifications">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+          Notifications
+          <span class="ct" id="nav-notif-count">0</span>
+        </button>
+      </div>
+
+      <div class="nav-section admin-only">
+        <div class="nav-label">Admin</div>
+        <button class="nav-item admin-only" data-page="staff">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          Staff & Access
+        </button>
+        <button class="nav-item admin-only" data-page="settings">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          Settings
+        </button>
+      </div>
+    </aside>
+
+    <main class="content" id="content"></main>
+  </div>
+</div>
+
+<!-- Toast host -->
+<div class="toast-host" id="toast-host"></div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal" id="modal">
+    <div class="modal-head">
+      <h3 id="modal-title">Modal</h3>
+      <button class="icon-btn" id="modal-close" aria-label="Close">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-foot" id="modal-foot"></div>
+  </div>
+</div>
+
+<script>
+/* ==========================================================
+   STATE & STORAGE
+   ========================================================== */
+const State = {
+  user: null,
+  page: 'dashboard',
+  products: [],
+  sales: [],
+  returns: [],
+  staff: [],
+  schedule: [],
+  videos: [],
+  knowledge: [],
+  notifications: [],
+  settings: {
+    lowStockDefault: 3,
+    cashDiscount: 10, // percentage off eBay price for cash
+    shopifyConnected: true,
+    ebayConnected: true,
+    showLoginsToWarehouse: false,
+  }
+};
+
+/* ==========================================================
+   API CLIENT — talks to the Express backend.
+   When window.location.origin matches the API host, requests
+   are same-origin and cookies handle auth. JWT is stored in
+   window.storage as a fallback for when cookies are blocked.
+   ========================================================== */
+const API_BASE = ''; // same-origin
+let API_TOKEN = null;
+
+const Api = {
+  async _req(method, path, body, isMultipart = false) {
+    const headers = {};
+    if (!isMultipart) headers['Content-Type'] = 'application/json';
+    if (API_TOKEN) headers['Authorization'] = 'Bearer ' + API_TOKEN;
+    const res = await fetch(API_BASE + path, {
+      method,
+      headers,
+      credentials: 'include',
+      body: body ? (isMultipart ? body : JSON.stringify(body)) : undefined,
+    });
+    if (res.status === 401) {
+      API_TOKEN = null;
+      try { await window.storage.delete('rzn_token'); } catch (_) {}
+      throw new Error('unauthorized');
+    }
+    let data = null;
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) data = await res.json();
+    if (!res.ok) {
+      const msg = (data && data.error) ? data.error : ('http_' + res.status);
+      const err = new Error(msg);
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  },
+  get(path)         { return this._req('GET', path); },
+  post(path, body)  { return this._req('POST', path, body); },
+  patch(path, body) { return this._req('PATCH', path, body); },
+  delete(path)      { return this._req('DELETE', path); },
+  postForm(path, formData) { return this._req('POST', path, formData, true); },
+
+  // ----- auth -----
+  auth: {
+    async loginPin(pin) {
+      const r = await Api.post('/api/auth/login-pin', { pin });
+      API_TOKEN = r.token;
+      try { await window.storage.set('rzn_token', r.token); } catch(_) {}
+      return r.user;
+    },
+    async loginEmail(email, password) {
+      const r = await Api.post('/api/auth/login', { email, password });
+      API_TOKEN = r.token;
+      try { await window.storage.set('rzn_token', r.token); } catch(_) {}
+      return r.user;
+    },
+    async logout() {
+      try { await Api.post('/api/auth/logout'); } catch(_) {}
+      API_TOKEN = null;
+      try { await window.storage.delete('rzn_token'); } catch(_) {}
+    },
+    async me() {
+      const r = await Api.get('/api/auth/me');
+      return r.user;
+    },
+  },
+};
+
+/* Legacy shape adapters — convert API responses (snake_case, single qty)
+   into the field names the existing render functions expect. */
+function adaptProduct(p) {
+  return {
+    id: p.id,
+    sku: p.sku,
+    barcode: p.barcode,
+    title: p.title,
+    brand: p.brand,
+    model: p.model,
+    position: p.position,
+    partNumber: p.part_number,
+    priceShopify: parseFloat(p.price_shopify || 0),
+    priceEbay: parseFloat(p.price_ebay || 0),
+    // Single physical stock; UI's two columns both reflect the same source of truth
+    qtyShopify: p.qty_on_hand,
+    qtyEbay: p.qty_on_hand,
+    qtyOnHand: p.qty_on_hand,
+    lowThresh: p.low_stock_threshold,
+    location: p.location_name || (p.location_code ? `(${p.location_code})` : ''),
+    locationCode: p.location_code,
+    locationId: p.location_id,
+    locationDesc: '',
+    locationPhoto: null,
+  };
+}
+function adaptSale(s) {
+  // API channel values: shopify | ebay_em | ebay_cl | direct_cash | direct_bank
+  // Legacy UI uses:    shopify | ebay | cash | bank
+  const channelMap = {
+    shopify: 'shopify', ebay_em: 'ebay', ebay_cl: 'ebay',
+    direct_cash: 'cash', direct_bank: 'bank',
+  };
+  return {
+    id: s.id,
+    productId: null,         // resolved per-line if needed
+    sku: s.sku || '',
+    title: s.title || s.notes || '(multi-item sale)',
+    channel: channelMap[s.channel] || s.channel,
+    amount: parseFloat(s.total),
+    date: s.occurred_at,
+    customer: s.customer_name || '—',
+    invoice: s.invoice_number || (s.external_order_id ? '#' + s.external_order_id : '—'),
+    apiChannel: s.channel,
+  };
+}
+function adaptReturn(r) {
+  return {
+    id: r.id,
+    saleId: r.sale_id,
+    productId: r.product_id,
+    sku: r.sku,
+    title: r.title,
+    channel: r.channel,
+    qty: r.qty,
+    reason: r.reason,
+    resolution: r.resolution,
+    refundAmount: parseFloat(r.refund_amount || 0),
+    status: r.status,
+    notes: r.notes,
+    photos: [],
+    date: r.created_at,
+  };
+}
+function adaptTask(t) {
+  return {
+    id: t.id,
+    task: t.title,                     // legacy field name
+    title: t.title,
+    type: t.task_type,
+    when: t.due_time ? t.due_time.slice(0, 5) : '',
+    time: t.due_time,
+    date: t.scheduled_for,
+    done: t.status === 'done',
+    status: t.status,
+    assignee: t.assignee_name || (t.assigned_to ? '#' + t.assigned_to : 'Any'),
+    frequency: t.recurrence || 'none',
+    recurrence: t.recurrence,
+  };
+}
+function adaptUser(u) {
+  return {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    role: u.role,
+    perms: u.permissions || {},          // legacy
+    permissions: u.permissions || {},
+    pin: '••••',
+    active: u.active,
+  };
+}
+function adaptKb(k) {
+  return {
+    id: k.id,
+    title: k.title,
+    cat: k.category || 'General',         // legacy
+    category: k.category,
+    desc: (k.body || '').split('\n')[0].slice(0, 120),  // legacy short desc
+    body: k.body,
+    content: k.body,                       // legacy
+    sensitive: k.sensitive,
+  };
+}
+function adaptVideo(v) {
+  return {
+    id: v.id,
+    title: v.title,
+    description: v.description,
+    category: v.category,
+    url: v.video_url,
+    thumb: v.thumbnail_url,
+    duration: v.duration_seconds,
+  };
+}
+function adaptNotification(n) {
+  return {
+    id: n.id,
+    type: n.type,
+    title: n.title,
+    body: n.body,
+    severity: n.severity,
+    read: !!n.read_at,
+    date: n.created_at,
+  };
+}
+
+/* ==========================================================
+   STORE — refreshes State from API on every page navigation
+   that needs fresh data. Each mutation calls the API and then
+   refreshes the relevant slice of state.
+   ========================================================== */
+const Store = {
+  async refreshAll() {
+    // Fan out — if any single endpoint fails, log it but keep going so a
+    // single broken slice doesn't take down the whole UI.
+    const calls = [
+      ['products',      () => Api.get('/api/products?pageSize=200').then(r => r.products.map(adaptProduct))],
+      ['sales',         () => Api.get('/api/sales?pageSize=200').then(r => r.sales.map(adaptSale))],
+      ['returns',       () => Api.get('/api/returns').then(r => r.returns.map(adaptReturn))],
+      ['schedule',      () => Api.get('/api/schedule').then(r => r.tasks.map(adaptTask))],
+      ['videos',        () => Api.get('/api/videos').then(r => r.videos.map(adaptVideo))],
+      ['knowledge',     () => Api.get('/api/kb').then(r => r.entries.map(adaptKb))],
+      ['notifications', () => Api.get('/api/notifications').then(r => r.notifications.map(adaptNotification))],
+    ];
+    if (State.user && State.user.role === 'admin') {
+      calls.push(['staff', () => Api.get('/api/staff').then(r => r.users.map(adaptUser))]);
+    }
+    const settingsCall = Api.get('/api/settings').then(r => ({
+      lowStockDefault: 3,
+      cashDiscount: parseFloat(r.settings.cash_discount_pct || 10),
+      vatRate: parseFloat(r.settings.vat_rate || 20),
+      freeDeliveryThreshold: parseFloat(r.settings.free_delivery_threshold || 50),
+      shopifyConnected: true,
+      ebayConnected: true,
+    })).catch(() => State.settings);
+
+    const results = await Promise.all(calls.map(async ([k, fn]) => {
+      try { return [k, await fn()]; }
+      catch (e) { console.warn('[store] failed to load', k, e.message); return [k, State[k]]; }
+    }));
+    for (const [k, v] of results) State[k] = v;
+    State.settings = await settingsCall;
+  },
+
+  async refresh(key) {
+    const map = {
+      products:      () => Api.get('/api/products?pageSize=200').then(r => r.products.map(adaptProduct)),
+      sales:         () => Api.get('/api/sales?pageSize=200').then(r => r.sales.map(adaptSale)),
+      returns:       () => Api.get('/api/returns').then(r => r.returns.map(adaptReturn)),
+      schedule:      () => Api.get('/api/schedule').then(r => r.tasks.map(adaptTask)),
+      videos:        () => Api.get('/api/videos').then(r => r.videos.map(adaptVideo)),
+      knowledge:     () => Api.get('/api/kb').then(r => r.entries.map(adaptKb)),
+      notifications: () => Api.get('/api/notifications').then(r => r.notifications.map(adaptNotification)),
+      staff:         () => Api.get('/api/staff').then(r => r.users.map(adaptUser)),
+    };
+    if (!map[key]) return;
+    try { State[key] = await map[key](); } catch (e) { console.warn('[store] refresh', key, e.message); }
+  },
+
+  // No-ops kept for backwards compatibility with any older calls.
+  async load(_key, def) { return def; },
+  async save(_key, _val) { /* mutations now go through Api.* */ },
+};
+
+/* ==========================================================
+   SEED DATA
+   ========================================================== */
+const SEED_PRODUCTS = [
+  { id:'p1', sku:'KIA-NIRO-HL-RH-2022', barcode:'5901234123457', title:'Kia Niro 2022-2024 Front Right Headlight', brand:'Kia', model:'Niro', position:'Front RH', partNumber:'92102-AT000', priceShopify:249.99, priceEbay:259.99, qtyShopify:4, qtyEbay:4, lowThresh:2, location:'Aisle B, Rack 3, Shelf 2', locationPhoto:null, locationDesc:'Top shelf, behind the Hyundai Kona stock' },
+  { id:'p2', sku:'HYU-KONA-HL-LH-2024', barcode:'5901234123458', title:'Hyundai Kona MK2 2023-2026 LH Headlight', brand:'Hyundai', model:'Kona MK2', position:'Front LH', partNumber:'92101BE030', priceShopify:249.99, priceEbay:269.99, qtyShopify:6, qtyEbay:6, lowThresh:3, location:'Aisle A, Rack 1, Shelf 1', locationPhoto:null, locationDesc:'Front-most rack as you walk in, eye level' },
+  { id:'p3', sku:'HYU-KONA-HL-RH-2024', barcode:'5901234123459', title:'Hyundai Kona MK2 2023-2026 RH Headlight', brand:'Hyundai', model:'Kona MK2', position:'Front RH', partNumber:'92102BE030', priceShopify:249.99, priceEbay:269.99, qtyShopify:3, qtyEbay:3, lowThresh:3, location:'Aisle A, Rack 1, Shelf 1', locationPhoto:null, locationDesc:'Next to the LH headlights' },
+  { id:'p4', sku:'HYU-KONA-WING-LH', barcode:'5901234123460', title:'Hyundai Kona MK2 Front Left Wing Fender', brand:'Hyundai', model:'Kona MK2', position:'Front LH', partNumber:'66311-BE900', priceShopify:149.99, priceEbay:159.99, qtyShopify:8, qtyEbay:8, lowThresh:2, location:'Bay 2, Body Panels Rack', locationPhoto:null, locationDesc:'Upright in the body panel rack at the back' },
+  { id:'p5', sku:'HYU-KONA-BONNET-HINGE-LH', barcode:'5901234123461', title:'Hyundai Kona MK2 LH Bonnet Hinge', brand:'Hyundai', model:'Kona MK2', position:'Front LH', partNumber:'66910-BE000', priceShopify:29.99, priceEbay:32.99, qtyShopify:14, qtyEbay:14, lowThresh:5, location:'Aisle C, Small Parts Bin 14', locationPhoto:null, locationDesc:'In the small parts bin marked "Bonnet hinges"' },
+  { id:'p6', sku:'HYU-KONA-BONNET-HINGE-RH', barcode:'5901234123462', title:'Hyundai Kona MK2 RH Bonnet Hinge', brand:'Hyundai', model:'Kona MK2', position:'Front RH', partNumber:'66920-BE000', priceShopify:29.99, priceEbay:32.99, qtyShopify:1, qtyEbay:1, lowThresh:5, location:'Aisle C, Small Parts Bin 14', locationPhoto:null, locationDesc:'Same bin as the LH hinges' },
+  { id:'p7', sku:'HYU-KONA-SLAM-PANEL', barcode:'5901234123463', title:'Hyundai Kona MK2 Front Slam Panel Carrier', brand:'Hyundai', model:'Kona MK2', position:'Front', partNumber:'64101-BE000', priceShopify:249.99, priceEbay:269.99, qtyShopify:2, qtyEbay:2, lowThresh:2, location:'Bay 3, Large Items', locationPhoto:null, locationDesc:'Floor of bay 3, against the wall' },
+  { id:'p8', sku:'HYU-KONA-DRL-RH', barcode:'5901234123464', title:'Hyundai Kona 2019-2024 RH Daytime Running Light', brand:'Hyundai', model:'Kona', position:'Front RH', partNumber:'92208-J9500', priceShopify:109.99, priceEbay:119.99, qtyShopify:7, qtyEbay:7, lowThresh:3, location:'Aisle B, Rack 2, Shelf 1', locationPhoto:null, locationDesc:'On the right-hand side of rack 2' },
+];
+
+const SEED_SALES = [
+  { id:'s1', productId:'p2', sku:'HYU-KONA-HL-LH-2024', title:'Hyundai Kona MK2 LH Headlight', channel:'shopify', amount:249.99, date: daysAgo(0), customer:'D. Murray', invoice:'INV-1042' },
+  { id:'s2', productId:'p1', sku:'KIA-NIRO-HL-RH-2022', title:'Kia Niro RH Headlight', channel:'ebay', amount:259.99, date: daysAgo(0), customer:'james_r88', invoice:'EBY-2210' },
+  { id:'s3', productId:'p5', sku:'HYU-KONA-BONNET-HINGE-LH', title:'Kona MK2 LH Bonnet Hinge', channel:'cash', amount:25.00, date: daysAgo(1), customer:'Walk-in (S. Khan)', invoice:'CASH-0091' },
+  { id:'s4', productId:'p4', sku:'HYU-KONA-WING-LH', title:'Kona MK2 LH Wing Fender', channel:'bank', amount:135.00, date: daysAgo(1), customer:'Trade: AutoBody Ltd', invoice:'BANK-0044' },
+  { id:'s5', productId:'p3', sku:'HYU-KONA-HL-RH-2024', title:'Hyundai Kona MK2 RH Headlight', channel:'shopify', amount:249.99, date: daysAgo(2), customer:'A. Patel', invoice:'INV-1041' },
+  { id:'s6', productId:'p8', sku:'HYU-KONA-DRL-RH', title:'Kona DRL RH', channel:'ebay', amount:119.99, date: daysAgo(2), customer:'partshunter_uk', invoice:'EBY-2209' },
+  { id:'s7', productId:'p2', sku:'HYU-KONA-HL-LH-2024', title:'Hyundai Kona MK2 LH Headlight', channel:'cash', amount:225.00, date: daysAgo(3), customer:'Walk-in (M. Singh)', invoice:'CASH-0090' },
+  { id:'s8', productId:'p7', sku:'HYU-KONA-SLAM-PANEL', title:'Kona Slam Panel Carrier', channel:'shopify', amount:249.99, date: daysAgo(3), customer:'L. Jensen', invoice:'INV-1040' },
+  { id:'s9', productId:'p1', sku:'KIA-NIRO-HL-RH-2022', title:'Kia Niro RH Headlight', channel:'ebay', amount:259.99, date: daysAgo(4), customer:'autoparts_pro', invoice:'EBY-2208' },
+];
+
+const SEED_RETURNS = [
+  { id:'r1', productId:'p2', sku:'HYU-KONA-HL-LH-2024', title:'Hyundai Kona MK2 LH Headlight', channel:'ebay', reason:'Damaged in transit', status:'pending', photos:[], date: daysAgo(1), customer:'fastcars_uk', notes:'Top mounting tab cracked' },
+  { id:'r2', productId:'p4', sku:'HYU-KONA-WING-LH', title:'Hyundai Kona MK2 LH Wing', channel:'shopify', reason:'Wrong fitment', status:'received', photos:[], date: daysAgo(2), customer:'R. Hassan', notes:'Customer ordered for MK1, wrong model' },
+];
+
+const SEED_STAFF = [
+  { id:'u1', name:'Ali', email:'ali@razoryn.co.uk', role:'admin', pin:'9999', perms:{ inventory:true, scan:true, locations:true, returns:true, sales:true, pricing:true, schedule:true, videos:true, kb:true, kbSensitive:true } },
+  { id:'u2', name:'Marek', email:'marek@razoryn.co.uk', role:'warehouse', pin:'1234', perms:{ inventory:true, scan:true, locations:true, returns:true, sales:false, pricing:true, schedule:true, videos:true, kb:true, kbSensitive:false } },
+  { id:'u3', name:'Tom', email:'tom@razoryn.co.uk', role:'warehouse', pin:'5678', perms:{ inventory:true, scan:true, locations:true, returns:true, sales:false, pricing:false, schedule:true, videos:true, kb:true, kbSensitive:false } },
+];
+
+const SEED_SCHEDULE = [
+  { id:'t1', task:'Stock check — Aisle A & B', when:'09:30', frequency:'Weekly (Mon)', assignee:'All warehouse', done:false },
+  { id:'t2', task:'Process pending returns', when:'10:30', frequency:'Daily', assignee:'Marek', done:false },
+  { id:'t3', task:'Pack & label dispatches', when:'11:00', frequency:'Daily', assignee:'All warehouse', done:true },
+  { id:'t4', task:'Final dispatch handover (12:00 cutoff)', when:'11:45', frequency:'Daily', assignee:'All warehouse', done:false },
+  { id:'t5', task:'Lunch', when:'12:30', frequency:'Daily', assignee:'—', done:false },
+  { id:'t6', task:'Process eBay/Shopify orders received', when:'14:00', frequency:'Daily', assignee:'Tom', done:false },
+  { id:'t7', task:'Stock check — Aisle C (small parts)', when:'15:00', frequency:'Weekly (Wed)', assignee:'Marek', done:false },
+  { id:'t8', task:'Tidy bays & sweep floor', when:'16:30', frequency:'Daily', assignee:'All warehouse', done:false },
+  { id:'t9', task:'Full inventory audit', when:'09:00', frequency:'Monthly (1st)', assignee:'Ali + warehouse', done:false },
+];
+
+const SEED_VIDEOS = [
+  { id:'v1', title:'How to do a stock check', desc:'Walk-through of the daily stock check process using the scanner', duration:'4:32', thumb:'#c8202d' },
+  { id:'v2', title:'Packing a headlight safely', desc:'Bubble wrap, corners, label placement — protect against transit damage', duration:'3:18', thumb:'#0f1115' },
+  { id:'v3', title:'Processing a return (Shopify)', desc:'From received to refunded — full Shopify return flow', duration:'5:46', thumb:'#1e5ae8' },
+  { id:'v4', title:'Processing a return (eBay)', desc:'eBay returns differ from Shopify — here\'s what to do', duration:'6:02', thumb:'#1a7f3e' },
+  { id:'v5', title:'Phone enquiry pricing', desc:'How to use the phone pricing tool when a customer calls', duration:'2:54', thumb:'#b76b00' },
+  { id:'v6', title:'Receiving new stock', desc:'Unboxing, scanning, and putting stock away in the right location', duration:'4:11', thumb:'#a51823' },
+];
+
+const SEED_KB = [
+  { id:'k1', cat:'Couriers', title:'Royal Mail Tracked 24/48 — booking', desc:'How to book Royal Mail collections from the warehouse', sensitive:false, content:'Royal Mail Click & Drop login: razoryn-eparts. Cutoff for same-day collection is 11:30. Print labels in batches of 10 max.' },
+  { id:'k2', cat:'Couriers', title:'FedEx — heavy/oversize parts', desc:'Use FedEx for items > 20kg or large body panels', sensitive:false, content:'FedEx account: see Logins (sensitive). Booking: fedex.com/en-gb/shipping. Always tick "fragile" for headlights.' },
+  { id:'k3', cat:'Couriers', title:'DropFleet — local Watford same-day', desc:'For local same-day delivery within ~30 miles', sensitive:false, content:'Use DropFleet for same-day to London/Watford/St Albans area. Book via the DropFleet app.' },
+  { id:'k4', cat:'Contacts', title:'Suppliers', desc:'Main parts suppliers — Hyundai, Kia, Tesla aftermarket', sensitive:false, content:'Hyundai aftermarket (China): Wang Lei +86 138 0000 0000. Kia parts (UK trade): KP Distributors 020 7946 0001. Always confirm part numbers before ordering.' },
+  { id:'k5', cat:'Logins', title:'eBay warehouse account', desc:'Login for the eBay seller console', sensitive:true, content:'Username: razoryn_eparts | Password: stored in 1Password. Use this only for marking dispatched and printing eBay labels.' },
+  { id:'k6', cat:'Logins', title:'Shopify warehouse access', desc:'Limited Shopify staff account for warehouse', sensitive:true, content:'Email: warehouse@razoryn.co.uk | Password: stored in 1Password. Limited to Orders + Products only — cannot access settings or finance.' },
+  { id:'k7', cat:'Procedures', title:'Free delivery threshold', desc:'When to offer free delivery on orders', sensitive:false, content:'Free UK delivery on orders over £50. Large body panels are flat-rate £15 regardless. Same-day dispatch cutoff is 12:00.' },
+  { id:'k8', cat:'Procedures', title:'Damaged stock procedure', desc:'What to do when you find or receive damaged stock', sensitive:false, content:'1) Photograph damage. 2) Mark as damaged in stock check. 3) Quarantine in Bay 4. 4) Notify Ali via WhatsApp. 5) Decide: claim from supplier vs scrap.' },
+];
+
+const SEED_NOTIFICATIONS = [
+  { id:'n1', type:'low-stock', productId:'p6', message:'RH Bonnet Hinge running low (1 left, threshold 5)', date: hoursAgo(2), read:false },
+  { id:'n2', type:'low-stock', productId:'p7', message:'Slam Panel Carrier at threshold (2 left, threshold 2)', date: hoursAgo(5), read:false },
+  { id:'n3', type:'return', message:'New eBay return received — Kona MK2 LH Headlight', date: hoursAgo(8), read:false },
+  { id:'n4', type:'sync', message:'Shopify ↔ eBay sync completed (8 products updated)', date: hoursAgo(12), read:true },
+];
+
+function daysAgo(n) { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString(); }
+function hoursAgo(n) { const d = new Date(); d.setHours(d.getHours() - n); return d.toISOString(); }
+function fmtDate(iso) {
+  const d = new Date(iso); const now = new Date();
+  const diffH = (now - d) / 36e5;
+  if (diffH < 1) return Math.round(diffH * 60) + 'm ago';
+  if (diffH < 24) return Math.round(diffH) + 'h ago';
+  return d.toLocaleDateString('en-GB', { day:'numeric', month:'short' });
+}
+function gbp(n) { return '£' + Number(n).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+/* ==========================================================
+   INIT
+   ========================================================== */
+async function init() {
+  // Theme: load saved preference or fall back to system preference
+  await loadTheme();
+
+  // Try to restore an existing session via the API. If we have a token saved
+  // OR the cookie is still valid, /me will return the user and we can skip login.
+  try {
+    const saved = await window.storage.get('rzn_token').catch(() => null);
+    if (saved && saved.value) API_TOKEN = saved.value;
+    const me = await Api.auth.me();
+    State.user = me;
+    await Store.refreshAll();
+    enterApp();
+    return;
+  } catch (e) {
+    // Not logged in — show login screen
+  }
+
+  bindLogin();
+}
+
+/* ==================== THEME ==================== */
+async function loadTheme() {
+  let theme = null;
+  try {
+    const r = await window.storage.get('theme');
+    if (r && r.value) theme = r.value;
+  } catch (e) { /* not set yet */ }
+  if (!theme) {
+    theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  applyTheme(theme);
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', async (e) => {
+      try {
+        const r = await window.storage.get('theme-user-set');
+        if (r && r.value === '1') return;
+      } catch (_) {}
+      applyTheme(e.matches ? 'dark' : 'light');
+    });
+  }
+}
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', theme === 'dark' ? '#0d0f13' : '#c8202d');
+  const lightIcon = document.querySelector('.theme-icon-light');
+  const darkIcon = document.querySelector('.theme-icon-dark');
+  if (lightIcon && darkIcon) {
+    lightIcon.style.display = theme === 'dark' ? 'none' : '';
+    darkIcon.style.display  = theme === 'dark' ? '' : 'none';
+  }
+}
+async function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'light';
+  const next = cur === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  try {
+    await window.storage.set('theme', next);
+    await window.storage.set('theme-user-set', '1');
+  } catch (e) { /* non-fatal */ }
+}
+
+// All mutations now go through Api directly. persistAll is kept as a stub
+// so any legacy callers don't break — it just refreshes from the server.
+async function persistAll() {
+  await Store.refreshAll();
+}
+
+/* ==========================================================
+   LOGIN
+   ========================================================== */
+function bindLogin() {
+  const tabs = document.querySelectorAll('.login-tab');
+  const pinView = document.getElementById('login-pin');
+  const emailView = document.getElementById('login-email');
+  tabs.forEach(t => t.addEventListener('click', () => {
+    tabs.forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    if (t.dataset.mode === 'pin') { pinView.style.display='block'; emailView.style.display='none'; }
+    else { pinView.style.display='none'; emailView.style.display='block'; }
+  }));
+
+  let pin = '';
+  const dots = document.querySelectorAll('.pin-dot');
+  function renderDots() {
+    dots.forEach((d, i) => d.classList.toggle('filled', i < pin.length));
+  }
+  async function tryPin() {
+    const errEl = document.getElementById('pin-error');
+    errEl.textContent = '';
+    try {
+      const user = await Api.auth.loginPin(pin);
+      State.user = user;
+      pin = ''; renderDots();
+      await Store.refreshAll();
+      enterApp();
+    } catch (e) {
+      errEl.textContent = e.message === 'unauthorized' || e.status === 401
+        ? 'Invalid PIN' : 'Login failed — check your connection';
+      pin = ''; renderDots();
+      setTimeout(() => errEl.textContent = '', 2500);
+    }
+  }
+  document.querySelectorAll('.pin-key').forEach(k => k.addEventListener('click', () => {
+    const act = k.dataset.act;
+    if (act === 'clear') { pin = pin.slice(0, -1); renderDots(); return; }
+    if (act === 'enter') { if (pin.length === 4) tryPin(); return; }
+    if (pin.length < 4) { pin += k.textContent; renderDots(); }
+    if (pin.length === 4) setTimeout(tryPin, 150);
+  }));
+
+  document.getElementById('email-login').addEventListener('click', async () => {
+    const email = document.getElementById('email-input').value.trim();
+    const pwd = document.getElementById('pwd-input').value;
+    if (!email || !pwd) { toast('Email and password required', 'error'); return; }
+    try {
+      const user = await Api.auth.loginEmail(email, pwd);
+      State.user = user;
+      await Store.refreshAll();
+      enterApp();
+    } catch (e) {
+      toast(e.status === 401 ? 'Invalid email or password' : 'Login failed', 'error');
+    }
+  });
+}
+
+function enterApp() {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').classList.add('active');
+  document.body.classList.toggle('is-admin', State.user.role === 'admin');
+
+  document.getElementById('user-avatar').textContent = State.user.name.charAt(0).toUpperCase();
+  document.getElementById('user-name').textContent = State.user.name;
+  document.getElementById('user-role').textContent = State.user.role === 'admin' ? 'Admin' : 'Warehouse';
+
+  bindNav();
+  bindHeader();
+  routeTo('dashboard');
+  refreshNavCounts();
+
+  toast('Welcome, ' + State.user.name + ' 👋', 'success');
+
+  // Refresh data periodically while the app is open so multi-device changes
+  // (other staff working concurrently, or sync workers) become visible.
+  if (window._rznRefreshTimer) clearInterval(window._rznRefreshTimer);
+  window._rznRefreshTimer = setInterval(() => {
+    if (!State.user) return;
+    Store.refresh('notifications');
+    if (State.page === 'dashboard' || State.page === 'inventory') Store.refresh('products');
+    if (State.page === 'sales') Store.refresh('sales');
+    if (State.page === 'returns') Store.refresh('returns');
+  }, 30_000);
+}
+
+function bindHeader() {
+  document.getElementById('logout-btn').addEventListener('click', async () => {
+    await Api.auth.logout();
+    State.user = null;
+    if (window._rznRefreshTimer) clearInterval(window._rznRefreshTimer);
+    document.getElementById('app').classList.remove('active');
+    document.getElementById('login-screen').style.display = 'flex';
+  });
+  document.getElementById('notif-btn').addEventListener('click', () => routeTo('notifications'));
+  document.getElementById('quick-scan-btn').addEventListener('click', () => routeTo('scan'));
+  document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+  document.getElementById('menu-toggle').addEventListener('click', () => {
+    document.getElementById('sidebar').classList.toggle('open');
+    document.getElementById('sb-backdrop').classList.toggle('open');
+  });
+  document.getElementById('sb-backdrop').addEventListener('click', () => {
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('sb-backdrop').classList.remove('open');
+  });
+}
+
+/* ==========================================================
+   ROUTER & PERMISSIONS
+   ========================================================== */
+function bindNav() {
+  document.querySelectorAll('.nav-item').forEach(n => {
+    n.addEventListener('click', () => routeTo(n.dataset.page));
+  });
+}
+
+function hasPerm(page) {
+  if (State.user.role === 'admin') return true;
+  const map = { dashboard:true, inventory:'inventory', scan:'scan', locations:'locations',
+    returns:'returns', sales:'sales', pricing:'pricing', schedule:'schedule',
+    videos:'videos', kb:'kb', notifications:true, staff:false, settings:false };
+  const v = map[page];
+  if (v === true) return true;
+  if (v === false) return false;
+  return State.user.perms[v] === true;
+}
+
+function routeTo(page) {
+  if (!hasPerm(page)) { toast('You don\'t have access to this page', 'error'); return; }
+  State.page = page;
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
+  // Close mobile sidebar
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sb-backdrop').classList.remove('open');
+
+  const pages = {
+    dashboard: renderDashboard, inventory: renderInventory, scan: renderScan,
+    locations: renderLocations, returns: renderReturns, sales: renderSales,
+    pricing: renderPricing, schedule: renderSchedule, videos: renderVideos,
+    kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings
+  };
+  (pages[page] || renderDashboard)();
+  document.getElementById('content').scrollTo(0, 0);
+}
+
+function refreshNavCounts() {
+  document.getElementById('nav-inv-count').textContent = State.products.length;
+  document.getElementById('nav-ret-count').textContent = State.returns.filter(r => r.status === 'pending').length;
+  const unread = State.notifications.filter(n => !n.read).length;
+  document.getElementById('nav-notif-count').textContent = unread;
+  document.getElementById('notif-badge').textContent = unread;
+  document.getElementById('notif-badge').style.display = unread ? 'flex' : 'none';
+}
+
+/* ==========================================================
+   DASHBOARD
+   ========================================================== */
+function renderDashboard() {
+  const lowStock = State.products.filter(p => totalQty(p) <= p.lowThresh);
+  const todayRev = State.sales.filter(s => isToday(s.date)).reduce((a,b)=>a+b.amount,0);
+  const totalUnits = State.products.reduce((a,b)=>a+totalQty(b),0);
+  const todaySales = State.sales.filter(s => isToday(s.date));
+  const pendingReturns = State.returns.filter(r => r.status === 'pending').length;
+
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div>
+          <h1>Welcome back, ${State.user.name}</h1>
+          <div class="desc">${new Date().toLocaleDateString('en-GB', { weekday:'long', day:'numeric', month:'long' })} · Razoryn e-Parts, Watford</div>
+        </div>
+        <div class="actions">
+          <button class="btn btn-outline" onclick="syncNow()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Sync now
+          </button>
+          <button class="btn btn-primary" onclick="routeTo('scan')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><line x1="7" y1="12" x2="7" y2="12"/><line x1="12" y1="7" x2="12" y2="17"/><line x1="17" y1="12" x2="17" y2="12"/></svg>
+            Scan barcode
+          </button>
+        </div>
+      </div>
+
+      <div class="grid-4" style="margin-bottom:20px">
+        <div class="stat">
+          <div class="icon-wrap"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+          <div class="label">Today's revenue</div>
+          <div class="value">${gbp(todayRev)}</div>
+          <div class="delta">${todaySales.length} sales</div>
+        </div>
+        <div class="stat">
+          <div class="icon-wrap"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></div>
+          <div class="label">Units in stock</div>
+          <div class="value">${totalUnits}</div>
+          <div class="delta">${State.products.length} SKUs</div>
+        </div>
+        <div class="stat">
+          <div class="icon-wrap" style="background:var(--amber-light);color:var(--amber)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
+          <div class="label">Low stock</div>
+          <div class="value">${lowStock.length}</div>
+          <div class="delta down">Needs reorder</div>
+        </div>
+        <div class="stat">
+          <div class="icon-wrap" style="background:var(--blue-light);color:var(--blue)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></div>
+          <div class="label">Pending returns</div>
+          <div class="value">${pendingReturns}</div>
+          <div class="delta">${State.returns.length} total this month</div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h3>Low-stock alerts</h3>
+            <button class="btn btn-ghost btn-sm" onclick="routeTo('inventory')">View all →</button>
+          </div>
+          <div class="card-body" style="padding:0">
+            ${lowStock.length ? lowStock.slice(0,5).map(p => `
+              <div style="display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--line)">
+                <div style="flex:1">
+                  <div style="font-weight:600;font-size:13px">${p.title}</div>
+                  <div style="color:var(--ink-soft);font-size:12px">${p.sku} · ${p.location}</div>
+                </div>
+                <div class="pill ${totalQty(p)===0 ? 'red' : 'amber'}">${totalQty(p)} left</div>
+              </div>
+            `).join('') : '<div class="empty"><div class="t">All stock healthy</div>Nothing below threshold.</div>'}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>Today's tasks</h3>
+            <button class="btn btn-ghost btn-sm" onclick="routeTo('schedule')">View all →</button>
+          </div>
+          <div class="card-body" style="padding:0">
+            ${State.schedule.slice(0,5).map(t => `
+              <div class="task-row ${t.done ? 'done' : ''}">
+                <div class="task-check ${t.done ? 'done' : ''}">${t.done ? '✓' : ''}</div>
+                <div class="task-info">
+                  <div class="task-title">${t.task}</div>
+                  <div class="task-meta">${t.when} · ${t.assignee}</div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+
+      <div style="height:16px"></div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>Recent sales (today)</h3>
+          <button class="btn btn-ghost btn-sm" onclick="routeTo('sales')">View all sales →</button>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Time</th><th>Channel</th><th>Item</th><th>Customer</th><th class="num">Amount</th></tr></thead>
+            <tbody>
+              ${todaySales.length ? todaySales.map(s => `
+                <tr>
+                  <td>${new Date(s.date).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</td>
+                  <td>${channelPill(s.channel)}</td>
+                  <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
+                  <td>${s.customer}</td>
+                  <td class="num"><strong>${gbp(s.amount)}</strong></td>
+                </tr>
+              `).join('') : '<tr><td colspan="5"><div class="empty"><div class="t">No sales yet today</div></div></td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function isToday(iso) {
+  const d = new Date(iso); const now = new Date();
+  return d.toDateString() === now.toDateString();
+}
+function totalQty(p) { return p.qtyShopify; /* eBay & Shopify share the same physical stock */ }
+
+function channelPill(ch) {
+  const map = {
+    shopify: ['green', 'Shopify'],
+    ebay: ['blue', 'eBay'],
+    cash: ['amber', 'Cash'],
+    bank: ['amber', 'Bank']
+  };
+  const [c, l] = map[ch] || ['', ch];
+  return `<span class="pill ${c}"><span class="dot"></span>${l}</span>`;
+}
+
+/* ==========================================================
+   INVENTORY
+   ========================================================== */
+function renderInventory() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Inventory</h1><div class="desc">Live stock synced across Shopify and eBay</div></div>
+        <div class="actions">
+          <button class="btn btn-outline" onclick="syncNow()">↻ Sync</button>
+          <button class="btn btn-primary admin-only" onclick="openProductModal()">+ Add product</button>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <input type="search" class="search-input" id="inv-search" placeholder="Search by name, SKU, part #...">
+        <select class="filter-select" id="inv-brand"><option value="">All brands</option>${[...new Set(State.products.map(p=>p.brand))].map(b=>`<option>${b}</option>`).join('')}</select>
+        <select class="filter-select" id="inv-stock">
+          <option value="">All stock levels</option>
+          <option value="low">Low stock</option>
+          <option value="ok">In stock</option>
+          <option value="out">Out of stock</option>
+        </select>
+      </div>
+
+      <div class="card">
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr>
+              <th>Product</th><th>Part #</th><th>Location</th>
+              <th class="num">Shopify</th><th class="num">eBay</th><th class="num">Total</th>
+              <th class="num">Price</th><th></th>
+            </tr></thead>
+            <tbody id="inv-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+
+  function paint() {
+    const q = el('inv-search').value.toLowerCase();
+    const b = el('inv-brand').value;
+    const s = el('inv-stock').value;
+    const filtered = State.products.filter(p => {
+      if (q && !(p.title.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.partNumber||'').toLowerCase().includes(q))) return false;
+      if (b && p.brand !== b) return false;
+      const tq = totalQty(p);
+      if (s === 'low' && tq > p.lowThresh) return false;
+      if (s === 'ok' && tq <= p.lowThresh) return false;
+      if (s === 'out' && tq !== 0) return false;
+      return true;
+    });
+    el('inv-tbody').innerHTML = filtered.map(p => `
+      <tr>
+        <td><div style="font-weight:500">${p.title}</div><div style="color:var(--ink-soft);font-size:11px">${p.sku}</div></td>
+        <td style="font-family:ui-monospace,monospace;font-size:12px">${p.partNumber||'—'}</td>
+        <td><div style="font-size:12px">${p.location}</div></td>
+        <td class="num">${p.qtyShopify}</td>
+        <td class="num">${p.qtyEbay}</td>
+        <td class="num"><strong>${totalQty(p)}</strong> ${totalQty(p)<=p.lowThresh ? `<span class="pill ${totalQty(p)===0?'red':'amber'}" style="margin-left:6px">${totalQty(p)===0?'Out':'Low'}</span>`:''}</td>
+        <td class="num">${gbp(p.priceShopify)}</td>
+        <td><button class="btn btn-outline btn-sm" onclick="openProductModal('${p.id}')">Edit</button></td>
+      </tr>
+    `).join('') || '<tr><td colspan="8"><div class="empty"><div class="t">No products match</div></div></td></tr>';
+  }
+  paint();
+  ['inv-search','inv-brand','inv-stock'].forEach(id => el(id).addEventListener('input', paint));
+}
+
+function openProductModal(id) {
+  const p = id ? State.products.find(x => x.id === id) : { id:'p'+Date.now(), title:'', sku:'', barcode:'', brand:'', model:'', position:'', partNumber:'', priceShopify:0, priceEbay:0, qtyShopify:0, qtyEbay:0, lowThresh:3, location:'', locationDesc:'', locationPhoto:null };
+  modal({
+    title: id ? 'Edit product' : 'New product',
+    body: `
+      <div class="grid-2" style="grid-template-columns:1fr 1fr">
+        <div class="field"><label>Title</label><input id="m-title" value="${p.title}"></div>
+        <div class="field"><label>SKU</label><input id="m-sku" value="${p.sku}"></div>
+        <div class="field"><label>Brand</label><input id="m-brand" value="${p.brand}"></div>
+        <div class="field"><label>Model</label><input id="m-model" value="${p.model}"></div>
+        <div class="field"><label>Part number</label><input id="m-pn" value="${p.partNumber||''}"></div>
+        <div class="field"><label>Position</label><input id="m-pos" value="${p.position||''}"></div>
+        <div class="field"><label>Barcode</label><input id="m-bc" value="${p.barcode||''}"></div>
+        <div class="field"><label>Low-stock threshold</label><input type="number" id="m-thresh" value="${p.lowThresh}"></div>
+        <div class="field"><label>Shopify price (£)</label><input type="number" step="0.01" id="m-pshop" value="${p.priceShopify}"></div>
+        <div class="field"><label>eBay price (£)</label><input type="number" step="0.01" id="m-peby" value="${p.priceEbay}"></div>
+        <div class="field"><label>Shopify qty</label><input type="number" id="m-qshop" value="${p.qtyShopify}"></div>
+        <div class="field"><label>eBay qty</label><input type="number" id="m-qeby" value="${p.qtyEbay}"></div>
+      </div>
+      <div class="field"><label>Storage location</label><input id="m-loc" value="${p.location||''}" placeholder="Aisle B, Rack 3, Shelf 2"></div>
+      <div class="field"><label>Storage notes</label><textarea id="m-locdesc" rows="2">${p.locationDesc||''}</textarea></div>
+    `,
+    actions: [
+      { label: id ? 'Save changes' : 'Add product', primary: true, onClick: async () => {
+        const payload = {
+          title: el('m-title').value, sku: el('m-sku').value, brand: el('m-brand').value,
+          model: el('m-model').value, partNumber: el('m-pn').value, position: el('m-pos').value,
+          barcode: el('m-bc').value, lowStockThreshold: +el('m-thresh').value,
+          priceShopify: +el('m-pshop').value, priceEbay: +el('m-peby').value,
+        };
+        try {
+          if (id) {
+            await Api.patch('/api/products/' + id, payload);
+            // Stock changes should go through stock-checks or the adjust-stock endpoint
+            // so they leave an audit trail. Editing the qty fields here syncs current
+            // qty if it was changed.
+            const newQty = +el('m-qshop').value;
+            if (newQty !== p.qtyOnHand) {
+              await Api.post('/api/products/' + id + '/adjust-stock', {
+                delta: newQty - p.qtyOnHand, reason: 'manual', notes: 'Edited from product modal',
+              });
+            }
+          } else {
+            await Api.post('/api/products', { ...payload, qtyOnHand: +el('m-qshop').value });
+          }
+          await Store.refresh('products');
+          closeModal();
+          toast('Saved · stock will sync to Shopify + eBay', 'success');
+          renderInventory();
+          refreshNavCounts();
+        } catch (e) {
+          toast('Save failed: ' + e.message, 'error');
+        }
+      }},
+      { label: 'Cancel', onClick: closeModal }
+    ]
+  });
+}
+
+/* ==========================================================
+   STOCK CHECK / SCAN
+   ========================================================== */
+let scanner = null;
+function renderScan() {
+  const isMobile = /android|iphone|ipad/i.test(navigator.userAgent);
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Stock Check & Scan</h1><div class="desc">${isMobile ? 'Use your camera to scan' : 'Use a USB barcode scanner or your camera'}</div></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h3>Scanner</h3><div class="seg">
+            <button class="active" data-method="cam" onclick="switchScanMethod('cam')">📷 Camera</button>
+            <button data-method="usb" onclick="switchScanMethod('usb')">⌨️ USB scanner</button>
+          </div></div>
+          <div class="card-body">
+            <div id="scan-cam">
+              <div id="scanner-region"></div>
+              <div style="display:flex;gap:8px;margin-top:12px">
+                <button class="btn btn-primary" id="scan-start">Start camera</button>
+                <button class="btn btn-outline" id="scan-stop" style="display:none">Stop</button>
+              </div>
+            </div>
+            <div id="scan-usb" style="display:none">
+              <div class="field">
+                <label>Click here, then scan</label>
+                <input id="scan-input" placeholder="Barcode will appear here..." autofocus style="font-size:18px;padding:14px">
+              </div>
+              <div style="color:var(--ink-soft);font-size:12px">USB scanners type the barcode + Enter automatically. Just point and shoot.</div>
+            </div>
+            <div style="margin-top:14px;padding:12px;background:var(--line-2);border-radius:8px;font-size:12px;color:var(--ink-soft)">
+              <strong>No barcode?</strong> Search by SKU below.
+            </div>
+            <div class="field" style="margin-top:8px">
+              <input id="scan-manual" placeholder="Type SKU or part number...">
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>Last scanned</h3></div>
+          <div class="card-body" id="scan-result">
+            <div class="empty">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></svg>
+              <div class="t">Ready to scan</div>
+              No item scanned yet
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  el('scan-start').addEventListener('click', startCamera);
+  el('scan-stop').addEventListener('click', stopCamera);
+  el('scan-input').addEventListener('keypress', e => {
+    if (e.key === 'Enter') { handleScan(el('scan-input').value); el('scan-input').value=''; }
+  });
+  el('scan-manual').addEventListener('keypress', e => {
+    if (e.key === 'Enter') { handleManualSearch(el('scan-manual').value); el('scan-manual').value=''; }
+  });
+}
+function switchScanMethod(m) {
+  document.querySelectorAll('.seg button[data-method]').forEach(b => b.classList.toggle('active', b.dataset.method===m));
+  el('scan-cam').style.display = m==='cam' ? 'block' : 'none';
+  el('scan-usb').style.display = m==='usb' ? 'block' : 'none';
+  if (m==='usb') setTimeout(()=>el('scan-input').focus(), 100);
+  if (m!=='cam') stopCamera();
+}
+function startCamera() {
+  if (typeof Html5Qrcode === 'undefined') { toast('Scanner library not loaded', 'error'); return; }
+  if (scanner && scanner.isScanning) return;
+  scanner = new Html5Qrcode("scanner-region");
+  el('scan-start').style.display='none';
+  el('scan-stop').style.display='inline-flex';
+  scanner.start(
+    { facingMode: 'environment' },
+    { fps: 10, qrbox: { width: 250, height: 150 } },
+    (decoded) => { handleScan(decoded); },
+    () => {}
+  ).catch(err => {
+    toast('Camera access denied', 'error');
+    el('scan-start').style.display='inline-flex';
+    el('scan-stop').style.display='none';
+  });
+}
+function stopCamera() {
+  if (scanner && scanner.isScanning) scanner.stop().then(()=>scanner.clear()).catch(()=>{});
+  el('scan-start').style.display='inline-flex';
+  el('scan-stop').style.display='none';
+}
+function handleScan(code) {
+  const p = State.products.find(x => x.barcode === code || x.sku === code);
+  if (!p) {
+    el('scan-result').innerHTML = `<div class="empty"><div class="t">Not found: ${code}</div>No product matches this barcode. <br><br><button class="btn btn-primary admin-only" onclick="openProductModal()">+ Add as new product</button></div>`;
+    toast('Barcode not in inventory', 'warn');
+    return;
+  }
+  toast('Found: ' + p.title, 'success');
+  showProductScanCard(p);
+}
+function handleManualSearch(q) {
+  q = q.trim().toLowerCase(); if (!q) return;
+  const p = State.products.find(x => x.sku.toLowerCase().includes(q) || x.partNumber?.toLowerCase().includes(q) || x.title.toLowerCase().includes(q));
+  if (!p) { toast('No match found', 'warn'); return; }
+  showProductScanCard(p);
+}
+function showProductScanCard(p) {
+  el('scan-result').innerHTML = `
+    <div style="font-weight:600;font-size:15px;margin-bottom:4px">${p.title}</div>
+    <div style="color:var(--ink-soft);font-size:12px;margin-bottom:14px">${p.sku} · ${p.partNumber||''}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+      <div style="padding:10px;background:var(--line-2);border-radius:8px"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;font-weight:600">Stock</div><div style="font-size:22px;font-weight:700">${totalQty(p)}</div></div>
+      <div style="padding:10px;background:var(--line-2);border-radius:8px"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;font-weight:600">Location</div><div style="font-size:13px;font-weight:600;margin-top:2px">${p.location||'—'}</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <button class="btn btn-success" onclick="adjustStock('${p.id}', 'check')">✓ Stock matches</button>
+      <button class="btn btn-outline" onclick="adjustStock('${p.id}', 'adjust')">Adjust qty</button>
+      <button class="btn btn-outline" onclick="adjustStock('${p.id}', 'damaged')">Mark damaged</button>
+      <button class="btn btn-outline" onclick="adjustStock('${p.id}', 'sold')">Mark sold (cash)</button>
+    </div>
+  `;
+}
+function adjustStock(id, action) {
+  const p = State.products.find(x => x.id === id);
+  if (action === 'check') { toast('✓ ' + p.sku + ' confirmed', 'success'); return; }
+  if (action === 'adjust') {
+    modal({
+      title: 'Adjust stock — ' + p.sku,
+      body: `
+        <div class="field"><label>Current stock</label><div style="padding:10px;background:var(--line-2);border-radius:8px">${totalQty(p)}</div></div>
+        <div class="field"><label>New stock count</label><input id="adj-qty" type="number" value="${totalQty(p)}"></div>
+        <div class="field"><label>Reason</label><select id="adj-reason"><option>Stock count correction</option><option>Damaged</option><option>Lost</option><option>Cash sale</option><option>Bank transfer sale</option><option>Replacement</option><option>Other</option></select></div>
+        <div class="field"><label>Notes (optional)</label><textarea id="adj-notes" rows="2"></textarea></div>`,
+      actions: [
+        { label: 'Save', primary: true, onClick: async () => {
+          const newQ = +el('adj-qty').value;
+          const reason = el('adj-reason').value;
+          const delta = newQ - (p.qtyOnHand ?? totalQty(p));
+          if (delta === 0) { closeModal(); return; }
+          try {
+            await Api.post('/api/products/' + p.id + '/adjust-stock', {
+              delta, reason: reason.toLowerCase().replace(/\s+/g, '_'),
+              notes: el('adj-notes').value,
+            });
+            await Store.refresh('products');
+            const updated = State.products.find(x => x.id === p.id);
+            closeModal();
+            toast(`Updated ${p.sku} → ${newQ} (${reason})`, 'success');
+            if (updated) showProductScanCard(updated);
+            refreshNavCounts();
+          } catch (e) { toast('Failed: ' + e.message, 'error'); }
+        }},
+        { label: 'Cancel', onClick: closeModal }
+      ]
+    });
+  }
+  if (action === 'damaged') {
+    modal({
+      title: 'Mark as damaged — ' + p.sku,
+      body: `<div class="field"><label>How many damaged?</label><input id="dmg-qty" type="number" value="1" min="1" max="${totalQty(p)}"></div><div class="field"><label>Notes</label><textarea id="dmg-notes" rows="2" placeholder="Where on the part is the damage? Cause?"></textarea></div>`,
+      actions: [
+        { label: 'Mark damaged', primary: true, onClick: async () => {
+          const q = +el('dmg-qty').value;
+          try {
+            await Api.post('/api/products/' + p.id + '/adjust-stock', {
+              delta: -q, reason: 'damage', notes: el('dmg-notes').value,
+            });
+            await Store.refresh('products');
+            const updated = State.products.find(x => x.id === p.id);
+            closeModal();
+            toast(`Marked ${q} damaged. Stock reduced.`, 'warn');
+            if (updated) showProductScanCard(updated);
+          } catch (e) { toast('Failed: ' + e.message, 'error'); }
+        }},
+        { label: 'Cancel', onClick: closeModal }
+      ]
+    });
+  }
+  if (action === 'sold') {
+    modal({
+      title: 'Cash sale — ' + p.sku,
+      body: `
+        <div class="field"><label>Channel</label><select id="sold-ch"><option value="direct_cash">Cash on collection</option><option value="direct_bank">Bank transfer</option></select></div>
+        <div class="field"><label>Amount (£)</label><input id="sold-amt" type="number" step="0.01" value="${(p.priceEbay/0.9).toFixed(2)}"></div>
+        <div class="field"><label>Customer name / reference</label><input id="sold-cust" placeholder="Walk-in / company name"></div>`,
+      actions: [
+        { label: 'Record sale', primary: true, onClick: async () => {
+          try {
+            const channel = el('sold-ch').value;
+            const unit = +el('sold-amt').value;
+            // Backend computes VAT itself; pass unit price and let it derive subtotal/vat.
+            // Quick path: send the unit price as ex-VAT and let backend add 20%.
+            // For simplicity, treat the entered amount as inc-VAT and back out the subtotal.
+            const vatRate = (State.settings.vatRate ?? 20) / 100;
+            const subtotalUnit = +(unit / (1 + vatRate)).toFixed(2);
+            await Api.post('/api/sales', {
+              channel,
+              customerName: el('sold-cust').value || 'Walk-in',
+              items: [{ productId: p.id, qty: 1, unitPrice: subtotalUnit }],
+              shipping: 0,
+            });
+            await Store.refresh('products');
+            await Store.refresh('sales');
+            const updated = State.products.find(x => x.id === p.id);
+            closeModal();
+            toast('Sale recorded · stock decremented · syncing', 'success');
+            if (updated) showProductScanCard(updated);
+          } catch (e) { toast('Failed: ' + (e.data?.error || e.message), 'error'); }
+        }},
+        { label: 'Cancel', onClick: closeModal }
+      ]
+    });
+  }
+}
+
+/* ==========================================================
+   LOCATIONS
+   ========================================================== */
+function renderLocations() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Storage Locations</h1><div class="desc">Where each item is stored — with photos to help find them fast</div></div>
+      </div>
+      <div class="toolbar"><input type="search" class="search-input" id="loc-search" placeholder="Search by item or location..."></div>
+      <div class="grid-3" id="loc-grid"></div>
+    </div>
+  `;
+  function paint() {
+    const q = el('loc-search').value.toLowerCase();
+    const items = State.products.filter(p => !q || p.title.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.location||'').toLowerCase().includes(q));
+    el('loc-grid').innerHTML = items.map(p => `
+      <div class="loc-card" onclick="openLocationModal('${p.id}')">
+        <div class="loc-img" style="${p.locationPhoto ? `background-image:url(${p.locationPhoto})` : ''}">
+          ${!p.locationPhoto ? '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' : ''}
+        </div>
+        <div class="loc-meta">
+          <div class="loc-title">${p.title}</div>
+          <div class="loc-desc">${p.location || 'No location set'}</div>
+          ${p.locationDesc ? `<div class="loc-desc" style="margin-top:4px">${p.locationDesc}</div>`:''}
+        </div>
+      </div>
+    `).join('') || '<div class="empty"><div class="t">No matches</div></div>';
+  }
+  paint();
+  el('loc-search').addEventListener('input', paint);
+}
+
+function openLocationModal(id) {
+  const p = State.products.find(x => x.id === id);
+  modal({
+    title: 'Location — ' + p.sku,
+    body: `
+      <div class="field"><label>Item</label><div style="padding:10px;background:var(--line-2);border-radius:8px"><strong>${p.title}</strong></div></div>
+      <div class="field"><label>Location reference</label><input id="lm-loc" value="${p.location||''}" placeholder="Aisle B, Rack 3, Shelf 2"></div>
+      <div class="field"><label>Description (helps staff find it)</label><textarea id="lm-desc" rows="2">${p.locationDesc||''}</textarea></div>
+      <div class="field"><label>Photo</label>
+        <div id="lm-preview" style="aspect-ratio:4/3;background:var(--line-2);border-radius:8px;margin-bottom:8px;background-size:cover;background-position:center;${p.locationPhoto?`background-image:url(${p.locationPhoto})`:''}"></div>
+        <input type="file" id="lm-photo" accept="image/*" capture="environment">
+        <div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Tap to take or pick a photo of where this item is stored</div>
+      </div>
+    `,
+    actions: [
+      { label: 'Save', primary: true, onClick: async () => {
+        p.location = el('lm-loc').value; p.locationDesc = el('lm-desc').value;
+        const file = el('lm-photo').files[0];
+        if (file) {
+          p.locationPhoto = await fileToDataUrl(file);
+        }
+        await persistAll();
+        closeModal();
+        toast('Location saved', 'success');
+        renderLocations();
+      }},
+      { label: 'Cancel', onClick: closeModal }
+    ]
+  });
+  setTimeout(() => {
+    el('lm-photo').addEventListener('change', async e => {
+      const file = e.target.files[0]; if (!file) return;
+      const url = await fileToDataUrl(file);
+      el('lm-preview').style.backgroundImage = `url(${url})`;
+    });
+  }, 50);
+}
+function fileToDataUrl(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+}
+
+/* ==========================================================
+   RETURNS
+   ========================================================== */
+function renderReturns() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Returns</h1><div class="desc">Live returns from Shopify and eBay, plus walk-in returns</div></div>
+        <div class="actions"><button class="btn btn-primary" onclick="openReturnModal()">+ Log return</button></div>
+      </div>
+      <div class="seg" style="margin-bottom:14px">
+        <button class="active" data-rfilter="all" onclick="filterReturns('all')">All</button>
+        <button data-rfilter="pending" onclick="filterReturns('pending')">Pending</button>
+        <button data-rfilter="received" onclick="filterReturns('received')">Received</button>
+        <button data-rfilter="resolved" onclick="filterReturns('resolved')">Resolved</button>
+      </div>
+      <div id="ret-list"></div>
+    </div>
+  `;
+  filterReturns('all');
+}
+function filterReturns(f) {
+  document.querySelectorAll('[data-rfilter]').forEach(b => b.classList.toggle('active', b.dataset.rfilter === f));
+  const items = f === 'all' ? State.returns : State.returns.filter(r => r.status === f);
+  el('ret-list').innerHTML = items.length ? items.map(r => `
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-body" style="padding:14px">
+        <div style="display:flex;align-items:flex-start;gap:12px">
+          <div style="flex:1">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
+              ${channelPill(r.channel)}
+              <span class="pill ${r.status==='pending'?'amber':r.status==='received'?'blue':'green'}">${r.status}</span>
+              <span style="font-size:12px;color:var(--ink-soft)">${fmtDate(r.date)}</span>
+            </div>
+            <div style="font-weight:600">${r.title}</div>
+            <div style="color:var(--ink-soft);font-size:12px">${r.sku} · ${r.customer}</div>
+            <div style="margin-top:6px;font-size:13px"><strong>Reason:</strong> ${r.reason}</div>
+            ${r.notes ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:4px">${r.notes}</div>`:''}
+            ${r.photos && r.photos.length ? `<div class="return-photos">${r.photos.map(p=>`<img src="${p}">`).join('')}</div>` : ''}
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            ${r.status==='pending' ? `<button class="btn btn-outline btn-sm" onclick="advanceReturn('${r.id}','received')">Mark received</button>`:''}
+            ${r.status==='received' ? `<button class="btn btn-outline btn-sm" onclick="advanceReturn('${r.id}','resolved')">Mark resolved</button>`:''}
+            <button class="btn btn-ghost btn-sm" onclick="addReturnPhoto('${r.id}')">+ Add photo</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `).join('') : '<div class="empty"><div class="t">No returns in this view</div></div>';
+}
+function openReturnModal() {
+  modal({
+    title: 'Log return',
+    body: `
+      <div class="field"><label>Item (search)</label><input id="r-search" placeholder="SKU or part #" list="r-products"><datalist id="r-products">${State.products.map(p=>`<option value="${p.sku}">${p.title}</option>`).join('')}</datalist></div>
+      <div class="field"><label>Channel</label><select id="r-ch"><option value="shopify">Shopify</option><option value="ebay">eBay</option><option value="cash">Cash / walk-in</option></select></div>
+      <div class="field"><label>Customer</label><input id="r-cust"></div>
+      <div class="field"><label>Reason</label><select id="r-reason"><option>Damaged in transit</option><option>Wrong fitment</option><option>Defective part</option><option>Customer changed mind</option><option>Wrong item shipped</option><option>Other</option></select></div>
+      <div class="field"><label>Notes</label><textarea id="r-notes" rows="2"></textarea></div>
+      <div class="field"><label>Photos</label><input type="file" id="r-photos" accept="image/*" capture="environment" multiple></div>
+    `,
+    actions: [
+      { label: 'Log return', primary: true, onClick: async () => {
+        const sku = el('r-search').value;
+        const p = State.products.find(x => x.sku === sku);
+        // Map UI channel ('cash' / 'shopify' / 'ebay') to API channel
+        const chMap = { shopify: 'shopify', ebay: 'ebay_em', cash: 'direct_cash' };
+        try {
+          const created = await Api.post('/api/returns', {
+            productId: p?.id || null,
+            channel: chMap[el('r-ch').value] || 'direct_cash',
+            qty: 1,
+            reason: el('r-reason').value,
+            notes: el('r-notes').value,
+          });
+          // Upload photos one by one
+          const files = el('r-photos').files;
+          for (const f of files) {
+            const fd = new FormData();
+            fd.append('photo', f);
+            try { await Api.postForm('/api/returns/' + created.return.id + '/photos', fd); }
+            catch (e) { console.warn('photo upload failed:', e.message); }
+          }
+          await Store.refresh('returns');
+          closeModal();
+          toast('Return logged', 'success');
+          renderReturns();
+          refreshNavCounts();
+        } catch (e) { toast('Failed: ' + e.message, 'error'); }
+      }},
+      { label: 'Cancel', onClick: closeModal }
+    ]
+  });
+}
+async function advanceReturn(id, status) {
+  // Map legacy status terms to API
+  const statusMap = { pending: 'open', received: 'received', processed: 'processed', closed: 'closed' };
+  try {
+    await Api.patch('/api/returns/' + id, { status: statusMap[status] || status });
+    await Store.refresh('returns');
+    toast('Return marked ' + status, 'success');
+    renderReturns(); refreshNavCounts();
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+function addReturnPhoto(id) {
+  const i = document.createElement('input');
+  i.type = 'file'; i.accept = 'image/*'; i.capture = 'environment';
+  i.onchange = async () => {
+    try {
+      const fd = new FormData();
+      fd.append('photo', i.files[0]);
+      await Api.postForm('/api/returns/' + id + '/photos', fd);
+      await Store.refresh('returns');
+      toast('Photo added', 'success');
+      renderReturns();
+    } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
+  };
+  i.click();
+}
+
+/* ==========================================================
+   SALES
+   ========================================================== */
+function renderSales() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Sales</h1><div class="desc">Unified sales across all channels</div></div>
+        <div class="actions">
+          <button class="btn btn-outline" onclick="generateInvoice()">Generate invoice</button>
+          <button class="btn btn-primary" onclick="syncNow()">↻ Pull latest</button>
+        </div>
+      </div>
+
+      <div class="grid-4" style="margin-bottom:16px" id="sales-stats"></div>
+
+      <div class="seg" style="margin-bottom:14px" id="sales-filter">
+        <button class="active" data-sf="all">All channels</button>
+        <button data-sf="shopify">Shopify</button>
+        <button data-sf="ebay">eBay</button>
+        <button data-sf="cash">Cash</button>
+        <button data-sf="bank">Bank</button>
+      </div>
+
+      <div class="card">
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Date</th><th>Invoice</th><th>Channel</th><th>Item</th><th>Customer</th><th class="num">Amount</th><th></th></tr></thead>
+            <tbody id="sales-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+
+  function paintStats(filter='all') {
+    const subset = filter==='all' ? State.sales : State.sales.filter(s => s.channel === filter);
+    const total = subset.reduce((a,b)=>a+b.amount, 0);
+    const totalShop = State.sales.filter(s=>s.channel==='shopify').reduce((a,b)=>a+b.amount,0);
+    const totalEby = State.sales.filter(s=>s.channel==='ebay').reduce((a,b)=>a+b.amount,0);
+    const totalDirect = State.sales.filter(s=>s.channel==='cash'||s.channel==='bank').reduce((a,b)=>a+b.amount,0);
+    el('sales-stats').innerHTML = `
+      <div class="stat"><div class="label">Total revenue</div><div class="value">${gbp(State.sales.reduce((a,b)=>a+b.amount,0))}</div><div class="delta">${State.sales.length} sales</div></div>
+      <div class="stat"><div class="label">Shopify</div><div class="value">${gbp(totalShop)}</div><div class="delta">${State.sales.filter(s=>s.channel==='shopify').length} orders</div></div>
+      <div class="stat"><div class="label">eBay</div><div class="value">${gbp(totalEby)}</div><div class="delta">${State.sales.filter(s=>s.channel==='ebay').length} orders</div></div>
+      <div class="stat"><div class="label">Direct (cash + bank)</div><div class="value">${gbp(totalDirect)}</div><div class="delta">${State.sales.filter(s=>s.channel==='cash'||s.channel==='bank').length} orders</div></div>
+    `;
+  }
+  function paintTable(filter='all') {
+    const subset = filter==='all' ? State.sales : State.sales.filter(s => s.channel === filter);
+    el('sales-tbody').innerHTML = subset.length ? subset.map(s => `
+      <tr>
+        <td>${fmtDate(s.date)}</td>
+        <td style="font-family:ui-monospace,monospace;font-size:12px">${s.invoice||'—'}</td>
+        <td>${channelPill(s.channel)}</td>
+        <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
+        <td>${s.customer}</td>
+        <td class="num"><strong>${gbp(s.amount)}</strong></td>
+        <td><button class="btn btn-ghost btn-sm" onclick="generateInvoice('${s.id}')">Invoice</button></td>
+      </tr>
+    `).join('') : '<tr><td colspan="7"><div class="empty"><div class="t">No sales</div></div></td></tr>';
+  }
+  paintStats(); paintTable();
+  document.querySelectorAll('[data-sf]').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('[data-sf]').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    paintStats(b.dataset.sf); paintTable(b.dataset.sf);
+  }));
+}
+
+function generateInvoice(id) {
+  let html;
+  if (id) {
+    const s = State.sales.find(x => x.id === id);
+    html = invoiceHtml([s]);
+  } else {
+    // Generate invoice for whatever filter is active
+    const active = document.querySelector('[data-sf].active');
+    const filter = active?.dataset.sf || 'all';
+    const subset = filter==='all' ? State.sales : State.sales.filter(s => s.channel === filter);
+    html = invoiceHtml(subset, filter);
+  }
+  const w = window.open('', '_blank');
+  w.document.write(html);
+  w.document.close();
+  toast('Invoice generated · ready to print or save as PDF', 'success');
+}
+function invoiceHtml(items, filter) {
+  const total = items.reduce((a,b)=>a+b.amount, 0);
+  const today = new Date().toLocaleDateString('en-GB');
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Invoice — Razoryn e-Parts</title>
+  <style>body{font-family:Inter,sans-serif;padding:40px;max-width:800px;margin:auto;color:#0f1115}
+  .top{display:flex;justify-content:space-between;border-bottom:3px solid #c8202d;padding-bottom:20px;margin-bottom:30px}
+  .logo{font-size:28px;font-weight:800}.logo span{color:#c8202d}
+  table{width:100%;border-collapse:collapse;margin:20px 0}
+  th,td{padding:10px;text-align:left;border-bottom:1px solid #ddd}
+  th{background:#f5f5f5}.num{text-align:right}.tot{font-size:20px;font-weight:700}
+  .small{font-size:12px;color:#666}
+  </style></head><body>
+  <div class="top">
+    <div><div class="logo">Razoryn<span>.</span></div><div class="small">e-Parts Ltd · Watford</div></div>
+    <div style="text-align:right">
+      <div><strong>Invoice</strong></div>
+      <div class="small">Date: ${today}</div>
+      <div class="small">${filter && filter !== 'all' ? 'Channel: ' + filter : 'All channels'}</div>
+    </div>
+  </div>
+  <p><strong>Razoryn Ecommerce Limited</strong> · Unit 4 Shakespeare Industrial Estate, Watford · Co. 16466013</p>
+  <table>
+    <thead><tr><th>Date</th><th>Invoice</th><th>Channel</th><th>Item</th><th>Customer</th><th class="num">Amount</th></tr></thead>
+    <tbody>${items.map(s => `<tr><td>${new Date(s.date).toLocaleDateString('en-GB')}</td><td>${s.invoice||'—'}</td><td>${s.channel}</td><td>${s.title}<br><span class="small">${s.sku}</span></td><td>${s.customer}</td><td class="num">£${s.amount.toFixed(2)}</td></tr>`).join('')}</tbody>
+    <tfoot><tr><td colspan="5" class="num"><strong>Total</strong></td><td class="num tot">£${total.toFixed(2)}</td></tr></tfoot>
+  </table>
+  <p class="small">Thank you for your business. VAT 20% included. Returns within 30 days. eparts@razoryn.co.uk · +44 7494589542</p>
+  <script>setTimeout(()=>window.print(),300)<\/script>
+  </body></html>`;
+}
+
+/* ==========================================================
+   PHONE PRICING TOOL
+   ========================================================== */
+function renderPricing() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Phone Pricing Tool</h1><div class="desc">Customer on the phone? Find the part and quote them on the spot.</div></div>
+      </div>
+      <div class="card">
+        <div class="card-body">
+          <div class="field"><label>Search the part</label><input id="pt-q" placeholder="Try 'Kia Niro headlight' or '92102'..." style="font-size:16px;padding:14px"></div>
+          <div id="pt-list"></div>
+        </div>
+      </div>
+      <div id="pt-detail"></div>
+    </div>
+  `;
+  el('pt-q').addEventListener('input', () => {
+    const q = el('pt-q').value.trim().toLowerCase();
+    if (!q) { el('pt-list').innerHTML=''; return; }
+    const matches = State.products.filter(p =>
+      p.title.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) ||
+      (p.partNumber||'').toLowerCase().includes(q) || (p.brand+' '+p.model).toLowerCase().includes(q)
+    ).slice(0, 6);
+    el('pt-list').innerHTML = matches.map(p => `
+      <div onclick="quotePrice('${p.id}')" style="padding:12px;border-top:1px solid var(--line);cursor:pointer;display:flex;align-items:center;gap:12px">
+        <div style="flex:1">
+          <div style="font-weight:600">${p.title}</div>
+          <div style="color:var(--ink-soft);font-size:12px">${p.sku} · ${p.partNumber||''} · <strong>${totalQty(p)} in stock</strong></div>
+        </div>
+        <div style="font-size:18px;font-weight:700">${gbp(p.priceEbay)}</div>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+    `).join('') || '<div class="empty"><div class="t">No matches</div></div>';
+  });
+}
+function quotePrice(id) {
+  const p = State.products.find(x => x.id === id);
+  const cashPrice = p.priceEbay * (1 - State.settings.cashDiscount/100);
+  el('pt-detail').innerHTML = `
+    <div style="height:16px"></div>
+    <div class="card">
+      <div class="card-head"><h3>Quote for: ${p.title}</h3></div>
+      <div class="card-body">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
+          <span class="pill ${totalQty(p)>0?'green':'red'}">${totalQty(p)>0 ? totalQty(p) + ' in stock' : 'Out of stock'}</span>
+          <span style="color:var(--ink-soft);font-size:13px">${p.location}</span>
+        </div>
+        <div class="pt-result">
+          <div class="pt-row featured">
+            <div><div class="ch-name">💰 Cash on collection</div><div class="ch-meta">eBay price minus ${State.settings.cashDiscount}% — best price for the customer</div></div>
+            <div class="ch-price">${gbp(cashPrice)}</div>
+          </div>
+          <div class="pt-row">
+            <div><div class="ch-name">🛒 Shopify (online order)</div><div class="ch-meta">Free delivery on orders over £50</div></div>
+            <div class="ch-price">${gbp(p.priceShopify)}</div>
+          </div>
+          <div class="pt-row">
+            <div><div class="ch-name">📦 eBay listing</div><div class="ch-meta">If they want eBay buyer protection</div></div>
+            <div class="ch-price">${gbp(p.priceEbay)}</div>
+          </div>
+          <div class="pt-row">
+            <div><div class="ch-name">🏦 Bank transfer (trade)</div><div class="ch-meta">Trade rate — same as cash, invoice issued</div></div>
+            <div class="ch-price">${gbp(cashPrice)}</div>
+          </div>
+        </div>
+        <div style="margin-top:16px;padding:12px;background:var(--amber-light);border-radius:8px;font-size:13px;color:var(--amber)">
+          <strong>📞 Reminder:</strong> Confirm fitment (year + model + position) before quoting. Same-day dispatch if confirmed before 12:00.
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/* ==========================================================
+   SCHEDULE
+   ========================================================== */
+function renderSchedule() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Schedule</h1><div class="desc">Daily and recurring tasks</div></div>
+        <div class="actions admin-only"><button class="btn btn-primary" onclick="openTaskModal()">+ Add task</button></div>
+      </div>
+      <div class="card">
+        <div id="sched-list"></div>
+      </div>
+    </div>
+  `;
+  paintSchedule();
+}
+function paintSchedule() {
+  el('sched-list').innerHTML = State.schedule.map(t => `
+    <div class="task-row ${t.done?'done':''}">
+      <button class="task-check ${t.done?'done':''}" onclick="toggleTask('${t.id}')">${t.done?'✓':''}</button>
+      <div class="task-info">
+        <div class="task-title">${t.task}</div>
+        <div class="task-meta">${t.when} · ${t.frequency} · ${t.assignee}</div>
+      </div>
+      ${State.user?.role === 'admin' ? `<button class="btn btn-ghost btn-sm" onclick="deleteTask('${t.id}')">Remove</button>`:''}
+    </div>
+  `).join('');
+}
+async function toggleTask(id) {
+  const t = State.schedule.find(x => x.id === id);
+  if (!t) return;
+  const newStatus = t.done ? 'pending' : 'done';
+  try {
+    await Api.patch('/api/schedule/' + id, { status: newStatus });
+    await Store.refresh('schedule');
+    paintSchedule();
+  } catch (e) { toast('Update failed: ' + e.message, 'error'); }
+}
+async function deleteTask(id) {
+  try {
+    await Api.delete('/api/schedule/' + id);
+    await Store.refresh('schedule');
+    paintSchedule();
+  } catch (e) { toast('Delete failed: ' + e.message, 'error'); }
+}
+function openTaskModal() {
+  modal({
+    title: 'Add task',
+    body: `
+      <div class="field"><label>Task</label><input id="t-task" placeholder="e.g. Stock check Aisle B"></div>
+      <div class="field"><label>Date</label><input id="t-date" type="date" value="${new Date().toISOString().slice(0,10)}"></div>
+      <div class="field"><label>Time</label><input id="t-when" type="time" placeholder="09:30"></div>
+      <div class="field"><label>Type</label>
+        <select id="t-type">
+          <option value="custom">Custom</option>
+          <option value="stock_check">Stock check</option>
+          <option value="returns">Returns</option>
+          <option value="packing">Packing</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
+      <div class="field"><label>Recurrence</label>
+        <select id="t-freq">
+          <option value="none">One-off</option>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+        </select>
+      </div>`,
+    actions: [
+      { label: 'Add', primary: true, onClick: async () => {
+        try {
+          await Api.post('/api/schedule', {
+            title: el('t-task').value,
+            scheduledFor: el('t-date').value,
+            dueTime: el('t-when').value || null,
+            taskType: el('t-type').value,
+            recurrence: el('t-freq').value,
+          });
+          await Store.refresh('schedule');
+          closeModal(); paintSchedule(); toast('Task added','success');
+        } catch (e) { toast('Failed: ' + e.message, 'error'); }
+      }},
+      { label: 'Cancel', onClick: closeModal }
+    ]
+  });
+}
+
+/* ==========================================================
+   VIDEOS
+   ========================================================== */
+function renderVideos() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>How-To Videos</h1><div class="desc">Watch when you need help with a task</div></div>
+        <div class="actions admin-only"><button class="btn btn-primary" onclick="openVideoModal()">+ Upload video</button></div>
+      </div>
+      <div class="grid-3">
+        ${State.videos.map(v => `
+          <div class="video-card" onclick="playVideo('${v.id}')">
+            <div class="video-thumb" style="background:${v.thumb}">
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="white" stroke="white" stroke-width="1"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            </div>
+            <div class="video-meta">
+              <div class="video-title">${v.title}</div>
+              <div class="video-desc">${v.desc}</div>
+              <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">⏱ ${v.duration}</div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+function playVideo(id) {
+  const v = State.videos.find(x => x.id === id);
+  modal({
+    title: v.title,
+    body: `
+      <div style="aspect-ratio:16/9;background:var(--ink);border-radius:8px;display:flex;align-items:center;justify-content:center;color:white;flex-direction:column;gap:12px;margin-bottom:14px">
+        <svg width="60" height="60" viewBox="0 0 24 24" fill="white" stroke="white" stroke-width="1"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        <div style="font-size:13px;opacity:.7">Video player would load here</div>
+      </div>
+      <p style="color:var(--ink-soft);font-size:13px">${v.desc}</p>
+      <div style="margin-top:14px;padding:12px;background:var(--blue-light);border-radius:8px;font-size:12px;color:var(--blue)">
+        <strong>Production note:</strong> Videos would be uploaded to Mux/Bunny.net or Vimeo and embedded here. The upload flow stores the video and metadata in the database.
+      </div>
+    `,
+    actions: [{ label: 'Close', onClick: closeModal }]
+  });
+}
+function openVideoModal() {
+  modal({
+    title: 'Add training video',
+    body: `
+      <div class="field"><label>Title</label><input id="v-title" placeholder="How to do X"></div>
+      <div class="field"><label>Description</label><textarea id="v-desc" rows="2"></textarea></div>
+      <div class="field"><label>Category</label>
+        <select id="v-cat">
+          <option value="onboarding">Onboarding</option>
+          <option value="returns">Returns</option>
+          <option value="packing">Packing</option>
+          <option value="stock_check">Stock check</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <div class="field"><label>Video URL (YouTube / Vimeo / Mux)</label><input id="v-url" placeholder="https://youtu.be/..."></div>
+      <div style="font-size:12px;color:var(--ink-soft);margin-top:-6px">Direct upload coming soon — for now host on YouTube (unlisted) or Vimeo and paste the URL.</div>`,
+    actions: [
+      { label: 'Add', primary: true, onClick: async () => {
+        try {
+          await Api.post('/api/videos', {
+            title: el('v-title').value,
+            description: el('v-desc').value,
+            category: el('v-cat').value,
+            videoUrl: el('v-url').value,
+          });
+          await Store.refresh('videos');
+          closeModal(); renderVideos(); toast('Video added','success');
+        } catch (e) { toast('Failed: ' + e.message, 'error'); }
+      }},
+      { label: 'Cancel', onClick: closeModal }
+    ]
+  });
+}
+
+/* ==========================================================
+   KNOWLEDGE BASE
+   ========================================================== */
+function renderKB() {
+  const isAdmin = State.user.role === 'admin';
+  const canSensitive = isAdmin || State.user.perms?.kbSensitive;
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Knowledge Base</h1><div class="desc">Couriers, contacts, procedures, logins</div></div>
+        <div class="actions admin-only"><button class="btn btn-primary" onclick="openKBModal()">+ Add entry</button></div>
+      </div>
+      <div class="toolbar"><input type="search" class="search-input" id="kb-search" placeholder="Search..."></div>
+      <div id="kb-list"></div>
+    </div>
+  `;
+  function paint() {
+    const q = el('kb-search').value.toLowerCase();
+    const items = State.knowledge.filter(k => {
+      if (k.sensitive && !canSensitive) return false;
+      return !q || k.title.toLowerCase().includes(q) || k.cat.toLowerCase().includes(q) || k.desc.toLowerCase().includes(q);
+    });
+    const groups = {};
+    items.forEach(k => { (groups[k.cat] = groups[k.cat] || []).push(k); });
+    el('kb-list').innerHTML = Object.keys(groups).map(cat => `
+      <h3 style="font-size:14px;margin:18px 0 10px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">${cat}</h3>
+      <div class="grid-2">
+        ${groups[cat].map(k => `
+          <div class="kb-card" onclick="openKBView('${k.id}')">
+            <div class="kb-cat">${k.cat}</div>
+            <div class="kb-title">${k.title}</div>
+            <div class="kb-desc">${k.desc}</div>
+            ${k.sensitive ? '<div class="kb-locked">🔒 Sensitive</div>' : ''}
+          </div>
+        `).join('')}
+      </div>
+    `).join('') || '<div class="empty"><div class="t">No entries</div></div>';
+  }
+  paint();
+  el('kb-search').addEventListener('input', paint);
+}
+function openKBView(id) {
+  const k = State.knowledge.find(x => x.id === id);
+  modal({
+    title: k.title,
+    body: `
+      <div style="font-size:11px;font-weight:700;color:var(--red);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">${k.cat}</div>
+      <p style="color:var(--ink-soft);margin-bottom:14px">${k.desc}</p>
+      <div style="padding:14px;background:var(--line-2);border-radius:8px;font-size:14px;line-height:1.6;white-space:pre-wrap">${k.content}</div>
+      ${k.sensitive ? '<div style="margin-top:12px;padding:10px;background:var(--amber-light);color:var(--amber);border-radius:8px;font-size:12px"><strong>🔒 Sensitive:</strong> Do not share these credentials. Admin can revoke access in Staff → Permissions.</div>':''}
+    `,
+    actions: [{ label: 'Close', onClick: closeModal }]
+  });
+}
+function openKBModal() {
+  modal({
+    title: 'New knowledge entry',
+    body: `
+      <div class="field"><label>Category</label><input id="kb-cat" placeholder="Couriers / Contacts / Procedures / Logins"></div>
+      <div class="field"><label>Title</label><input id="kb-title"></div>
+      <div class="field"><label>Short description</label><input id="kb-desc"></div>
+      <div class="field"><label>Content</label><textarea id="kb-content" rows="5"></textarea></div>
+      <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="kb-sens"><span></span></label> Sensitive (hide from staff without permission)</label></div>`,
+    actions: [
+      { label: 'Add', primary: true, onClick: async () => {
+        try {
+          const cat = el('kb-cat').value;
+          const desc = el('kb-desc').value;
+          const content = el('kb-content').value;
+          const body = desc ? (desc + '\n\n' + content) : content;
+          await Api.post('/api/kb', {
+            title: el('kb-title').value,
+            category: cat,
+            body,
+            sensitive: el('kb-sens').checked,
+          });
+          await Store.refresh('knowledge');
+          closeModal(); renderKB(); toast('Entry added','success');
+        } catch (e) { toast('Failed: ' + e.message, 'error'); }
+      }},
+      { label: 'Cancel', onClick: closeModal }
+    ]
+  });
+}
+
+/* ==========================================================
+   NOTIFICATIONS
+   ========================================================== */
+function renderNotifications() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Notifications</h1><div class="desc">Low stock alerts, returns, sync events</div></div>
+        <div class="actions"><button class="btn btn-outline" onclick="markAllRead()">Mark all read</button></div>
+      </div>
+      <div class="card">
+        <div id="notif-list"></div>
+      </div>
+    </div>
+  `;
+  paintNotifs();
+}
+function paintNotifs() {
+  el('notif-list').innerHTML = State.notifications.length ? State.notifications.map(n => {
+    const icon = n.type === 'low-stock' ? '⚠️' : n.type === 'return' ? '↩️' : n.type === 'sync' ? '🔄' : '🔔';
+    return `
+    <div style="display:flex;align-items:flex-start;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);${n.read?'':'background:var(--red-light)'}">
+      <div style="font-size:20px">${icon}</div>
+      <div style="flex:1">
+        <div style="font-weight:${n.read?500:600};font-size:13px">${n.message}</div>
+        <div style="color:var(--ink-soft);font-size:11px;margin-top:2px">${fmtDate(n.date)}</div>
+      </div>
+      ${!n.read ? `<button class="btn btn-ghost btn-sm" onclick="markRead('${n.id}')">Mark read</button>`:''}
+    </div>
+  `}).join('') : '<div class="empty"><div class="t">No notifications</div>You\'ll see low-stock alerts and returns here.</div>';
+}
+async function markRead(id) {
+  try {
+    await Api.post('/api/notifications/' + id + '/read');
+    await Store.refresh('notifications');
+    paintNotifs(); refreshNavCounts();
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+async function markAllRead() {
+  try {
+    await Api.post('/api/notifications/read-all');
+    await Store.refresh('notifications');
+    paintNotifs(); refreshNavCounts();
+    toast('All marked read', 'success');
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+/* ==========================================================
+   STAFF (admin only)
+   ========================================================== */
+function renderStaff() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Staff & Access</h1><div class="desc">Manage warehouse accounts and permissions</div></div>
+        <div class="actions"><button class="btn btn-primary" onclick="openStaffModal()">+ Add staff member</button></div>
+      </div>
+      <div class="grid-2" id="staff-grid"></div>
+    </div>
+  `;
+  paintStaff();
+}
+function paintStaff() {
+  el('staff-grid').innerHTML = State.staff.map(u => `
+    <div class="card">
+      <div class="card-body">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+          <div class="avatar" style="width:48px;height:48px;font-size:18px">${u.name.charAt(0)}</div>
+          <div style="flex:1">
+            <div style="font-weight:600;font-size:15px">${u.name}</div>
+            <div style="color:var(--ink-soft);font-size:12px">${u.email}</div>
+          </div>
+          <span class="pill ${u.role==='admin'?'red':'blue'}">${u.role}</span>
+        </div>
+        <div style="margin-bottom:10px;font-size:12px;color:var(--ink-soft)">PIN: <strong style="font-family:ui-monospace,monospace">${u.pin}</strong></div>
+        <div style="margin-bottom:10px;font-size:12px;font-weight:600;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">Permissions</div>
+        ${permRow(u, 'inventory', 'Inventory', 'View and edit products')}
+        ${permRow(u, 'scan', 'Stock check / Scan', 'Use scanner and adjust stock')}
+        ${permRow(u, 'locations', 'Locations', 'View and edit storage locations')}
+        ${permRow(u, 'returns', 'Returns', 'Process returns')}
+        ${permRow(u, 'sales', 'Sales view', 'See sales figures and invoices')}
+        ${permRow(u, 'pricing', 'Phone pricing', 'Quote prices to customers')}
+        ${permRow(u, 'kb', 'Knowledge base', 'View KB entries')}
+        ${permRow(u, 'kbSensitive', 'Sensitive KB', 'Login info, supplier contacts')}
+        ${u.role !== 'admin' ? `<div style="margin-top:14px;display:flex;gap:8px"><button class="btn btn-outline btn-sm" onclick="editStaff('${u.id}')">Edit</button><button class="btn btn-ghost btn-sm" onclick="deleteStaff('${u.id}')">Remove</button></div>`:''}
+      </div>
+    </div>
+  `).join('');
+}
+function permRow(u, key, name, desc) {
+  return `<div class="perm-row">
+    <div><div class="perm-name">${name}</div><div class="perm-desc">${desc}</div></div>
+    <label class="switch"><input type="checkbox" ${u.perms[key]?'checked':''} ${u.role==='admin'?'disabled':''} onchange="togglePerm('${u.id}','${key}',this.checked)"><span></span></label>
+  </div>`;
+}
+async function togglePerm(uid, key, val) {
+  const u = State.staff.find(x => x.id == uid);
+  if (!u) return;
+  const newPerms = { ...u.perms, [key]: val };
+  try {
+    await Api.patch('/api/staff/' + uid, { permissions: newPerms });
+    await Store.refresh('staff');
+    toast(u.name + ' · ' + key + ' = ' + (val ? 'on' : 'off'), 'success');
+    paintStaff();
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+function editStaff(id) { openStaffModal(id); }
+async function deleteStaff(id) {
+  if (!confirm('Deactivate this staff member? Their account will be disabled but their history is kept.')) return;
+  try {
+    await Api.delete('/api/staff/' + id);
+    await Store.refresh('staff');
+    paintStaff();
+    toast('Staff deactivated', 'success');
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+function openStaffModal(id) {
+  const u = id ? State.staff.find(x => x.id == id) : { id: null, name:'', email:'', role:'warehouse', pin:'', perms:{ inventory:true, scan:true, locations:true, returns:true, sales:false, pricing:true, schedule:true, videos:true, kb:true, kbSensitive:false } };
+  modal({
+    title: id ? 'Edit staff' : 'Add staff',
+    body: `
+      <div class="field"><label>Full name</label><input id="s-name" value="${u.name}"></div>
+      <div class="field"><label>Email (admin only)</label><input id="s-email" value="${u.email||''}"></div>
+      <div class="field"><label>Role</label><select id="s-role"><option value="warehouse" ${u.role==='warehouse'?'selected':''}>Warehouse</option><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option></select></div>
+      <div class="field"><label>4-digit PIN (set/reset)</label><input id="s-pin" maxlength="6" pattern="[0-9]{4,6}" placeholder="${id ? 'Leave blank to keep current' : '1234'}"></div>
+      ${id ? '' : '<div class="field"><label>Password (admin only)</label><input id="s-pwd" type="password" placeholder="Required if role = admin"></div>'}`,
+    actions: [
+      { label: id?'Save':'Add', primary: true, onClick: async () => {
+        const payload = {
+          name: el('s-name').value,
+          email: el('s-email').value || null,
+          role: el('s-role').value,
+        };
+        if (el('s-pin') && el('s-pin').value) payload.pin = el('s-pin').value;
+        if (!id && el('s-pwd') && el('s-pwd').value) payload.password = el('s-pwd').value;
+        try {
+          if (id) {
+            await Api.patch('/api/staff/' + id, payload);
+          } else {
+            await Api.post('/api/staff', payload);
+          }
+          await Store.refresh('staff');
+          closeModal(); paintStaff(); toast('Saved', 'success');
+        } catch (e) { toast('Failed: ' + (e.data?.error || e.message), 'error'); }
+      }},
+      { label: 'Cancel', onClick: closeModal }
+    ]
+  });
+}
+
+/* ==========================================================
+   SETTINGS
+   ========================================================== */
+function renderSettings() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head"><h1>Settings</h1></div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Integrations</h3></div>
+        <div class="card-body">
+          <div class="perm-row">
+            <div><div class="perm-name">Shopify connection</div><div class="perm-desc">razoryn.co.uk · live sync of inventory and orders</div></div>
+            <span class="pill ${State.settings.shopifyConnected?'green':'red'}"><span class="dot"></span>${State.settings.shopifyConnected?'Connected':'Disconnected'}</span>
+          </div>
+          <div class="perm-row">
+            <div><div class="perm-name">eBay connection</div><div class="perm-desc">Razoryn e-Parts seller account</div></div>
+            <span class="pill ${State.settings.ebayConnected?'green':'red'}"><span class="dot"></span>${State.settings.ebayConnected?'Connected':'Disconnected'}</span>
+          </div>
+          <div style="margin-top:14px;padding:12px;background:var(--blue-light);border-radius:8px;font-size:12px;color:var(--blue)">
+            <strong>Production note:</strong> Real connections need OAuth flows + API keys (Shopify Admin API, eBay Sell API). The prototype simulates with realistic mock data. Add credentials in your Railway environment variables when you build the backend.
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Pricing rules</h3></div>
+        <div class="card-body">
+          <div class="field"><label>Cash discount (% off eBay price)</label><input type="number" id="set-cash" value="${State.settings.cashDiscount}" min="0" max="50"></div>
+          <div class="field"><label>Default low-stock threshold</label><input type="number" id="set-thresh" value="${State.settings.lowStockDefault}"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Knowledge base visibility</h3></div>
+        <div class="card-body">
+          <div class="perm-row">
+            <div><div class="perm-name">Show sensitive logins to warehouse</div><div class="perm-desc">When ON, warehouse staff with KB access also see logins/contacts. When OFF, sensitive items are hidden.</div></div>
+            <label class="switch"><input type="checkbox" id="set-showlogins" ${State.settings.showLoginsToWarehouse?'checked':''}><span></span></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Reset prototype data</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">Clear all data and reload seed data. Useful for testing.</p>
+          <button class="btn btn-danger" onclick="resetData()">Reset all data</button>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="saveSettings()">Save settings</button></div>
+    </div>
+  `;
+}
+async function saveSettings() {
+  try {
+    await Api.patch('/api/settings', {
+      cashDiscountPct: +el('set-cash').value,
+    });
+    State.settings.cashDiscount = +el('set-cash').value;
+    State.settings.lowStockDefault = +el('set-thresh').value;
+    State.settings.showLoginsToWarehouse = el('set-showlogins').checked;
+    toast('Settings saved', 'success');
+  } catch (e) {
+    toast('Save failed: ' + e.message, 'error');
+  }
+}
+async function resetData() {
+  // In production mode this is disabled — wiping a real DB requires using
+  // psql or running `npm run seed -- --force` from the server.
+  toast('Reset disabled in production. Use server-side scripts.', 'warn');
+}
+
+/* ==========================================================
+   UTILITIES
+   ========================================================== */
+function el(id) { return document.getElementById(id); }
+async function syncNow() {
+  toast('Syncing Shopify ↔ eBay...', 'success');
+  try {
+    const result = await Api.post('/api/settings/sync-now');
+    let msg = 'Sync complete';
+    if (result.result) {
+      const parts = [];
+      if (result.result.shopify) parts.push(`Shopify: ${result.result.shopify.inserted ?? 0} new`);
+      if (result.result.ebay)    parts.push(`eBay: ${result.result.ebay.inserted ?? 0} new`);
+      if (parts.length) msg += ' · ' + parts.join(', ');
+    }
+    toast(msg, 'success');
+    await Store.refreshAll();
+    if (typeof renderDashboard === 'function' && State.page === 'dashboard') renderDashboard();
+  } catch (e) {
+    toast('Sync failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+function toast(msg, type='') {
+  const t = document.createElement('div');
+  t.className = 'toast ' + type;
+  t.textContent = msg;
+  el('toast-host').appendChild(t);
+  setTimeout(() => { t.style.opacity='0'; setTimeout(()=>t.remove(),200); }, 3000);
+}
+function modal({ title, body, actions=[] }) {
+  el('modal-title').textContent = title;
+  el('modal-body').innerHTML = body;
+  el('modal-foot').innerHTML = '';
+  actions.forEach(a => {
+    const b = document.createElement('button');
+    b.className = 'btn ' + (a.primary ? 'btn-primary' : 'btn-outline');
+    b.textContent = a.label;
+    b.onclick = a.onClick;
+    el('modal-foot').appendChild(b);
+  });
+  el('modal-overlay').classList.add('open');
+}
+function closeModal() { el('modal-overlay').classList.remove('open'); }
+el('modal-close').addEventListener('click', closeModal);
+el('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
+
+// Boot
+init();
+</script>
+</body>
+</html>
