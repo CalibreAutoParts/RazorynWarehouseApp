@@ -164,12 +164,24 @@
     display: flex; align-items: center; gap: 12px;
     font-weight: 800; font-size: 16px; letter-spacing: -0.02em;
   }
-  .topbar .logo img.brand-logo {
-    height: 36px; width: auto; display: block;
-    border-radius: 6px;
-    /* Logo PNG has white background — wrap with subtle border in dark mode so it doesn't float */
+  .topbar .logo .brand-wrap {
+    /* The PNG has white space — wrap it in a fixed-aspect container with the
+       brand logo positioned to fill, so it always reads as a brand mark. */
+    height: 40px;
+    width: 40px;
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
   }
-  [data-theme="dark"] .topbar .logo img.brand-logo {
+  .topbar .logo .brand-wrap img {
+    width: 110%; height: auto; max-height: none;
+    object-fit: contain;
+  }
+  [data-theme="dark"] .topbar .logo .brand-wrap {
     box-shadow: 0 0 0 1px var(--line);
   }
   .topbar .logo .sub {
@@ -535,7 +547,7 @@
 <div class="login-screen" id="login-screen">
   <div class="login-card">
     <div class="login-logo">
-      <img src="/logo.png" alt="Razoryn e-Parts" style="max-width:200px;width:80%;height:auto;display:block;margin:0 auto 4px;">
+      <div style="background:white;border-radius:12px;padding:20px;display:inline-block;margin-bottom:8px"><img src="/logo.png" alt="Razoryn e-Parts" style="width:200px;height:auto;display:block;"></div>
       <div class="sub">Warehouse Hub</div>
     </div>
     <div class="login-tabs">
@@ -582,7 +594,7 @@
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
     <div class="logo">
-      <img class="brand-logo" src="/logo.png" alt="Razoryn e-Parts">
+      <div class="brand-wrap"><img src="/logo.png" alt="Razoryn e-Parts"></div>
       <span class="sub">Warehouse Hub</span>
     </div>
     <div class="spacer"></div>
@@ -901,14 +913,24 @@ function adaptKb(k) {
   };
 }
 function adaptVideo(v) {
+  // Format duration_seconds (e.g. 225) into "3:45"
+  let dur = '';
+  if (v.duration_seconds) {
+    const m = Math.floor(v.duration_seconds / 60);
+    const s = String(v.duration_seconds % 60).padStart(2, '0');
+    dur = `${m}:${s}`;
+  }
   return {
     id: v.id,
     title: v.title,
-    description: v.description,
+    desc: v.description || '',                  // legacy field
+    description: v.description || '',
     category: v.category,
     url: v.video_url,
-    thumb: v.thumbnail_url,
-    duration: v.duration_seconds,
+    videoUrl: v.video_url,
+    thumb: v.thumbnail_url || 'var(--red)',     // legacy
+    duration: dur,
+    durationSeconds: v.duration_seconds,
   };
 }
 function adaptNotification(n) {
@@ -1504,7 +1526,7 @@ function renderInventory() {
 }
 
 function openProductModal(id) {
-  const p = id ? State.products.find(x => x.id === id) : { id:'p'+Date.now(), title:'', sku:'', barcode:'', brand:'', model:'', position:'', partNumber:'', priceShopify:0, priceEbay:0, qtyShopify:0, qtyEbay:0, lowThresh:3, location:'', locationDesc:'', locationPhoto:null };
+  const p = id ? State.products.find(x => x.id == id) : { id:'p'+Date.now(), title:'', sku:'', barcode:'', brand:'', model:'', position:'', partNumber:'', priceShopify:0, priceEbay:0, qtyShopify:0, qtyEbay:0, lowThresh:3, location:'', locationDesc:'', locationPhoto:null };
   modal({
     title: id ? 'Edit product' : 'New product',
     body: `
@@ -1689,7 +1711,7 @@ function showProductScanCard(p) {
   `;
 }
 function adjustStock(id, action) {
-  const p = State.products.find(x => x.id === id);
+  const p = State.products.find(x => x.id == id);
   if (action === 'check') { toast('✓ ' + p.sku + ' confirmed', 'success'); return; }
   if (action === 'adjust') {
     modal({
@@ -1815,7 +1837,7 @@ function renderLocations() {
 }
 
 function openLocationModal(id) {
-  const p = State.products.find(x => x.id === id);
+  const p = State.products.find(x => x.id == id);
   modal({
     title: 'Location — ' + p.sku,
     body: `
@@ -1830,24 +1852,22 @@ function openLocationModal(id) {
     `,
     actions: [
       { label: 'Save', primary: true, onClick: async () => {
-        p.location = el('lm-loc').value; p.locationDesc = el('lm-desc').value;
-        const file = el('lm-photo').files[0];
-        if (file) {
-          p.locationPhoto = await fileToDataUrl(file);
-        }
-        await persistAll();
+        // Per-product location text + photos require a schema field that isn't in the
+        // backend yet. The Locations admin page (via /api/locations with code/name/photo)
+        // is the canonical place to manage where things are stored.
+        toast('Per-product location storage coming with the Locations admin page', 'warn');
         closeModal();
-        toast('Location saved', 'success');
-        renderLocations();
       }},
       { label: 'Cancel', onClick: closeModal }
     ]
   });
   setTimeout(() => {
-    el('lm-photo').addEventListener('change', async e => {
+    const photoInput = el('lm-photo');
+    if (photoInput) photoInput.addEventListener('change', async e => {
       const file = e.target.files[0]; if (!file) return;
       const url = await fileToDataUrl(file);
-      el('lm-preview').style.backgroundImage = `url(${url})`;
+      const preview = el('lm-preview');
+      if (preview) preview.style.backgroundImage = `url(${url})`;
     });
   }, 50);
 }
@@ -2053,7 +2073,7 @@ function renderSales() {
 function generateInvoice(id) {
   let html;
   if (id) {
-    const s = State.sales.find(x => x.id === id);
+    const s = State.sales.find(x => x.id == id);
     html = invoiceHtml([s]);
   } else {
     // Generate invoice for whatever filter is active
@@ -2136,7 +2156,7 @@ function renderPricing() {
   });
 }
 function quotePrice(id) {
-  const p = State.products.find(x => x.id === id);
+  const p = State.products.find(x => x.id == id);
   const cashPrice = p.priceEbay * (1 - State.settings.cashDiscount/100);
   el('pt-detail').innerHTML = `
     <div style="height:16px"></div>
@@ -2191,7 +2211,9 @@ function renderSchedule() {
   paintSchedule();
 }
 function paintSchedule() {
-  el('sched-list').innerHTML = State.schedule.map(t => `
+  const list = el('sched-list');
+  if (!list) return;
+  list.innerHTML = State.schedule.map(t => `
     <div class="task-row ${t.done?'done':''}">
       <button class="task-check ${t.done?'done':''}" onclick="toggleTask('${t.id}')">${t.done?'✓':''}</button>
       <div class="task-info">
@@ -2200,10 +2222,10 @@ function paintSchedule() {
       </div>
       ${State.user?.role === 'admin' ? `<button class="btn btn-ghost btn-sm" onclick="deleteTask('${t.id}')">Remove</button>`:''}
     </div>
-  `).join('');
+  `).join('') || '<div class="empty"><div class="t">No tasks scheduled</div></div>';
 }
 async function toggleTask(id) {
-  const t = State.schedule.find(x => x.id === id);
+  const t = State.schedule.find(x => x.id == id);
   if (!t) return;
   const newStatus = t.done ? 'pending' : 'done';
   try {
@@ -2290,7 +2312,7 @@ function renderVideos() {
   `;
 }
 function playVideo(id) {
-  const v = State.videos.find(x => x.id === id);
+  const v = State.videos.find(x => x.id == id);
   modal({
     title: v.title,
     body: `
@@ -2383,17 +2405,61 @@ function renderKB() {
   el('kb-search').addEventListener('input', paint);
 }
 function openKBView(id) {
-  const k = State.knowledge.find(x => x.id === id);
+  const k = State.knowledge.find(x => x.id == id);
+  if (!k) return;
+  const isAdmin = State.user && State.user.role === 'admin';
+  const actions = [{ label: 'Close', onClick: closeModal }];
+  if (isAdmin) {
+    actions.unshift({ label: 'Delete', onClick: () => deleteKB(k.id) });
+    actions.unshift({ label: 'Edit', onClick: () => { closeModal(); editKB(k.id); } });
+  }
   modal({
     title: k.title,
     body: `
       <div style="font-size:11px;font-weight:700;color:var(--red);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">${k.cat}</div>
-      <p style="color:var(--ink-soft);margin-bottom:14px">${k.desc}</p>
-      <div style="padding:14px;background:var(--line-2);border-radius:8px;font-size:14px;line-height:1.6;white-space:pre-wrap">${k.content}</div>
-      ${k.sensitive ? '<div style="margin-top:12px;padding:10px;background:var(--amber-light);color:var(--amber);border-radius:8px;font-size:12px"><strong>🔒 Sensitive:</strong> Do not share these credentials. Admin can revoke access in Staff → Permissions.</div>':''}
+      ${k.desc ? `<p style="color:var(--ink-soft);margin-bottom:14px">${k.desc}</p>` : ''}
+      <div style="padding:14px;background:var(--line-2);border-radius:8px;font-size:14px;line-height:1.6;white-space:pre-wrap">${k.content || ''}</div>
+      ${k.sensitive ? '<div style="margin-top:12px;padding:10px;background:var(--amber-light);color:var(--amber);border-radius:8px;font-size:12px"><strong>🔒 Sensitive:</strong> Do not share these credentials.</div>':''}
     `,
-    actions: [{ label: 'Close', onClick: closeModal }]
+    actions,
   });
+}
+function editKB(id) {
+  const k = State.knowledge.find(x => x.id == id);
+  if (!k) return;
+  modal({
+    title: 'Edit entry',
+    body: `
+      <div class="field"><label>Category</label><input id="kb-cat" value="${(k.cat || '').replace(/"/g, '&quot;')}"></div>
+      <div class="field"><label>Title</label><input id="kb-title" value="${(k.title || '').replace(/"/g, '&quot;')}"></div>
+      <div class="field"><label>Content</label><textarea id="kb-content" rows="6">${k.content || ''}</textarea></div>
+      <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="kb-sens" ${k.sensitive?'checked':''}><span></span></label> Sensitive (hide from staff without permission)</label></div>`,
+    actions: [
+      { label: 'Save', primary: true, onClick: async () => {
+        try {
+          await Api.patch('/api/kb/' + id, {
+            title: el('kb-title').value,
+            category: el('kb-cat').value,
+            body: el('kb-content').value,
+            sensitive: el('kb-sens').checked,
+          });
+          await Store.refresh('knowledge');
+          closeModal(); renderKB(); toast('Saved', 'success');
+        } catch (e) { toast('Failed: ' + e.message, 'error'); }
+      }},
+      { label: 'Cancel', onClick: closeModal },
+    ],
+  });
+}
+async function deleteKB(id) {
+  if (!confirm('Delete this entry permanently?')) return;
+  try {
+    await Api.delete('/api/kb/' + id);
+    await Store.refresh('knowledge');
+    closeModal();
+    renderKB();
+    toast('Entry deleted', 'success');
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 function openKBModal() {
   modal({
@@ -2444,7 +2510,9 @@ function renderNotifications() {
   paintNotifs();
 }
 function paintNotifs() {
-  el('notif-list').innerHTML = State.notifications.length ? State.notifications.map(n => {
+  const list = el('notif-list');
+  if (!list) return;
+  list.innerHTML = State.notifications.length ? State.notifications.map(n => {
     const icon = n.type === 'low-stock' ? '⚠️' : n.type === 'return' ? '↩️' : n.type === 'sync' ? '🔄' : '🔔';
     return `
     <div style="display:flex;align-items:flex-start;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);${n.read?'':'background:var(--red-light)'}">
@@ -2489,37 +2557,75 @@ function renderStaff() {
   paintStaff();
 }
 function paintStaff() {
-  el('staff-grid').innerHTML = State.staff.map(u => `
+  const grid = el('staff-grid');
+  if (!grid) return;
+  grid.innerHTML = State.staff.map(u => {
+    const isAdmin = u.role === 'admin';
+    const isSelf = State.user && u.id == State.user.id;
+    return `
     <div class="card">
       <div class="card-body">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
           <div class="avatar" style="width:48px;height:48px;font-size:18px">${u.name.charAt(0)}</div>
           <div style="flex:1">
-            <div style="font-weight:600;font-size:15px">${u.name}</div>
-            <div style="color:var(--ink-soft);font-size:12px">${u.email}</div>
+            <div style="font-weight:600;font-size:15px">${u.name}${isSelf ? ' <span style="font-size:11px;color:var(--ink-soft);font-weight:500">(you)</span>' : ''}</div>
+            <div style="color:var(--ink-soft);font-size:12px">${u.email || '—'}</div>
           </div>
-          <span class="pill ${u.role==='admin'?'red':'blue'}">${u.role}</span>
+          <span class="pill ${isAdmin?'red':'blue'}">${u.role}</span>
         </div>
-        <div style="margin-bottom:10px;font-size:12px;color:var(--ink-soft)">PIN: <strong style="font-family:ui-monospace,monospace">${u.pin}</strong></div>
-        <div style="margin-bottom:10px;font-size:12px;font-weight:600;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">Permissions</div>
-        ${permRow(u, 'inventory', 'Inventory', 'View and edit products')}
-        ${permRow(u, 'scan', 'Stock check / Scan', 'Use scanner and adjust stock')}
-        ${permRow(u, 'locations', 'Locations', 'View and edit storage locations')}
-        ${permRow(u, 'returns', 'Returns', 'Process returns')}
-        ${permRow(u, 'sales', 'Sales view', 'See sales figures and invoices')}
-        ${permRow(u, 'pricing', 'Phone pricing', 'Quote prices to customers')}
-        ${permRow(u, 'kb', 'Knowledge base', 'View KB entries')}
-        ${permRow(u, 'kbSensitive', 'Sensitive KB', 'Login info, supplier contacts')}
-        ${u.role !== 'admin' ? `<div style="margin-top:14px;display:flex;gap:8px"><button class="btn btn-outline btn-sm" onclick="editStaff('${u.id}')">Edit</button><button class="btn btn-ghost btn-sm" onclick="deleteStaff('${u.id}')">Remove</button></div>`:''}
+
+        <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+          <button class="btn btn-outline btn-sm" onclick="resetPin('${u.id}','${u.name.replace(/'/g, "\\'")}')">Reset PIN</button>
+          ${isAdmin ? `<button class="btn btn-outline btn-sm" onclick="resetPassword('${u.id}','${u.name.replace(/'/g, "\\'")}')">Reset password</button>` : ''}
+        </div>
+
+        ${isAdmin ? `
+          <div style="padding:12px;background:var(--red-light);color:var(--red);border-radius:8px;font-size:12px;font-weight:600">
+            🛡 Admin · full access to everything
+          </div>
+        ` : `
+          <div style="margin-bottom:10px;font-size:12px;font-weight:600;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">Permissions</div>
+          ${permRow(u, 'inventory', 'Inventory', 'View and edit products')}
+          ${permRow(u, 'scan', 'Stock check / Scan', 'Use scanner and adjust stock')}
+          ${permRow(u, 'locations', 'Locations', 'View and edit storage locations')}
+          ${permRow(u, 'returns', 'Returns', 'Process returns')}
+          ${permRow(u, 'sales', 'Sales view', 'See sales figures and invoices')}
+          ${permRow(u, 'pricing', 'Phone pricing', 'Quote prices to customers')}
+          ${permRow(u, 'schedule', 'Schedule', 'View and complete tasks')}
+          ${permRow(u, 'videos', 'How-to videos', 'View training videos')}
+          ${permRow(u, 'kb', 'Key Information', 'View KB entries')}
+          ${permRow(u, 'kbSensitive', 'Sensitive entries', 'Login info, supplier contacts')}
+        `}
+
+        ${!isSelf ? `<div style="margin-top:14px;display:flex;gap:8px"><button class="btn btn-outline btn-sm" onclick="editStaff('${u.id}')">Edit details</button><button class="btn btn-ghost btn-sm" onclick="deleteStaff('${u.id}')" style="color:var(--red)">Deactivate</button></div>` : ''}
       </div>
     </div>
-  `).join('');
+    `;
+  }).join('');
 }
 function permRow(u, key, name, desc) {
   return `<div class="perm-row">
     <div><div class="perm-name">${name}</div><div class="perm-desc">${desc}</div></div>
-    <label class="switch"><input type="checkbox" ${u.perms[key]?'checked':''} ${u.role==='admin'?'disabled':''} onchange="togglePerm('${u.id}','${key}',this.checked)"><span></span></label>
+    <label class="switch"><input type="checkbox" ${u.perms[key]?'checked':''} onchange="togglePerm('${u.id}','${key}',this.checked)"><span></span></label>
   </div>`;
+}
+async function resetPin(uid, uname) {
+  const newPin = prompt('Enter new 4-digit PIN for ' + uname + ':');
+  if (!newPin) return;
+  if (!/^\d{4,6}$/.test(newPin)) { toast('PIN must be 4-6 digits', 'error'); return; }
+  try {
+    await Api.patch('/api/staff/' + uid, { pin: newPin });
+    toast('PIN reset for ' + uname, 'success');
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+async function resetPassword(uid, uname) {
+  const newPwd = prompt('Enter new password for ' + uname + ' (min 8 chars):');
+  if (!newPwd) return;
+  if (newPwd.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
+  try {
+    await Api.patch('/api/staff/' + uid, { password: newPwd });
+    toast('Password reset for ' + uname, 'success');
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 async function togglePerm(uid, key, val) {
   const u = State.staff.find(x => x.id == uid);
