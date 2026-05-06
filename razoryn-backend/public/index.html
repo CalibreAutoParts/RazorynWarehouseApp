@@ -123,7 +123,7 @@
   .btn-secondary { background: var(--ink); color: white; }
   .btn-ghost { background: transparent; color: var(--ink-soft); }
   .btn-ghost:hover { background: var(--line-2); color: var(--ink); }
-  .btn-outline { background: white; color: var(--ink); border: 1px solid var(--line); }
+  .btn-outline { background: var(--white); color: var(--ink); border: 1px solid var(--line); }
   .btn-outline:hover { border-color: var(--ink); }
   .btn-block { width: 100%; }
   .btn-sm { padding: 7px 12px; font-size: 12px; }
@@ -161,18 +161,24 @@
     flex-shrink: 0;
   }
   .topbar .logo {
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; gap: 12px;
     font-weight: 800; font-size: 16px; letter-spacing: -0.02em;
   }
-  .topbar .logo .mark {
-    width: 28px; height: 28px; background: var(--red); border-radius: 6px;
-    display: flex; align-items: center; justify-content: center;
-    color: white; font-size: 14px; font-weight: 800;
+  .topbar .logo img.brand-logo {
+    height: 36px; width: auto; display: block;
+    border-radius: 6px;
+    /* Logo PNG has white background — wrap with subtle border in dark mode so it doesn't float */
   }
-  .topbar .logo .sub { color: var(--ink-soft); font-weight: 500; font-size: 12px; }
+  [data-theme="dark"] .topbar .logo img.brand-logo {
+    box-shadow: 0 0 0 1px var(--line);
+  }
+  .topbar .logo .sub {
+    color: var(--ink-soft); font-weight: 500; font-size: 12px;
+    padding-left: 12px; border-left: 1px solid var(--line);
+  }
   .topbar .spacer { flex: 1; }
-  .menu-btn { display: none; width: 36px; height: 36px; border-radius: 8px; align-items: center; justify-content: center; }
-  .menu-btn:hover { background: var(--line-2); }
+  .menu-btn.icon-btn { display: none; width: 36px; height: 36px; border-radius: 8px; align-items: center; justify-content: center; }
+  .menu-btn.icon-btn:hover { background: var(--line-2); }
 
   .topbar-actions { display: flex; align-items: center; gap: 8px; }
   .icon-btn {
@@ -268,6 +274,9 @@
   .stat .value { font-size: 24px; font-weight: 700; margin-top: 4px; letter-spacing: -0.02em; }
   .stat .delta { font-size: 12px; margin-top: 2px; color: var(--green); font-weight: 600; }
   .stat .delta.down { color: var(--red); }
+  .stat-clickable { cursor: pointer; transition: transform .12s, border-color .12s, box-shadow .12s; }
+  .stat-clickable:hover { transform: translateY(-2px); border-color: var(--ink-soft); box-shadow: var(--shadow-lg); }
+  .stat-clickable:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
   .stat .icon-wrap {
     width: 36px; height: 36px; border-radius: 8px; background: var(--red-light);
     color: var(--red); display: flex; align-items: center; justify-content: center;
@@ -371,7 +380,7 @@
 
   /* Locations */
   .loc-card {
-    background: white; border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--white); border: 1px solid var(--line); border-radius: var(--radius);
     overflow: hidden; cursor: pointer; transition: transform .15s, box-shadow .15s;
   }
   .loc-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
@@ -409,7 +418,7 @@
 
   /* Knowledge base */
   .kb-card {
-    background: white; border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--white); border: 1px solid var(--line); border-radius: var(--radius);
     padding: 14px; cursor: pointer; transition: border-color .15s;
   }
   .kb-card:hover { border-color: var(--ink); }
@@ -490,7 +499,7 @@
 
   /* Mobile */
   @media (max-width: 900px) {
-    .menu-btn { display: flex; }
+    .menu-btn.icon-btn { display: flex; }
     .sidebar {
       position: fixed; top: 56px; bottom: 0; left: 0; z-index: 90;
       transform: translateX(-100%); transition: transform .2s;
@@ -526,7 +535,7 @@
 <div class="login-screen" id="login-screen">
   <div class="login-card">
     <div class="login-logo">
-      <div class="mark"><div class="dot">R</div>Razoryn</div>
+      <img src="/logo.png" alt="Razoryn e-Parts" style="max-width:200px;width:80%;height:auto;display:block;margin:0 auto 4px;">
       <div class="sub">Warehouse Hub</div>
     </div>
     <div class="login-tabs">
@@ -573,8 +582,7 @@
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
     <div class="logo">
-      <div class="mark">R</div>
-      <span>Razoryn</span>
+      <img class="brand-logo" src="/logo.png" alt="Razoryn e-Parts">
       <span class="sub">Warehouse Hub</span>
     </div>
     <div class="spacer"></div>
@@ -652,7 +660,7 @@
         </button>
         <button class="nav-item" data-page="kb">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-          Knowledge Base
+          Key Information
         </button>
         <button class="nav-item alert" data-page="notifications">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
@@ -1316,25 +1324,25 @@ function renderDashboard() {
       </div>
 
       <div class="grid-4" style="margin-bottom:20px">
-        <div class="stat">
+        <div class="stat stat-clickable" onclick="routeTo('sales')" role="button" tabindex="0">
           <div class="icon-wrap"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
           <div class="label">Today's revenue</div>
           <div class="value">${gbp(todayRev)}</div>
           <div class="delta">${todaySales.length} sales</div>
         </div>
-        <div class="stat">
+        <div class="stat stat-clickable" onclick="routeTo('inventory')" role="button" tabindex="0">
           <div class="icon-wrap"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></div>
           <div class="label">Units in stock</div>
           <div class="value">${totalUnits}</div>
           <div class="delta">${State.products.length} SKUs</div>
         </div>
-        <div class="stat">
+        <div class="stat stat-clickable" onclick="routeTo('inventory'); setTimeout(()=>{const el=document.getElementById('inv-stock'); if(el){el.value='low';el.dispatchEvent(new Event('change'));}}, 100);" role="button" tabindex="0">
           <div class="icon-wrap" style="background:var(--amber-light);color:var(--amber)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
           <div class="label">Low stock</div>
           <div class="value">${lowStock.length}</div>
           <div class="delta down">Needs reorder</div>
         </div>
-        <div class="stat">
+        <div class="stat stat-clickable" onclick="routeTo('returns')" role="button" tabindex="0">
           <div class="icon-wrap" style="background:var(--blue-light);color:var(--blue)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></div>
           <div class="label">Pending returns</div>
           <div class="value">${pendingReturns}</div>
@@ -2342,7 +2350,7 @@ function renderKB() {
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
-        <div><h1>Knowledge Base</h1><div class="desc">Couriers, contacts, procedures, logins</div></div>
+        <div><h1>Key Information</h1><div class="desc">Couriers, contacts, procedures, logins</div></div>
         <div class="actions admin-only"><button class="btn btn-primary" onclick="openKBModal()">+ Add entry</button></div>
       </div>
       <div class="toolbar"><input type="search" class="search-input" id="kb-search" placeholder="Search..."></div>
@@ -2389,7 +2397,7 @@ function openKBView(id) {
 }
 function openKBModal() {
   modal({
-    title: 'New knowledge entry',
+    title: 'New entry',
     body: `
       <div class="field"><label>Category</label><input id="kb-cat" placeholder="Couriers / Contacts / Procedures / Logins"></div>
       <div class="field"><label>Title</label><input id="kb-title"></div>
