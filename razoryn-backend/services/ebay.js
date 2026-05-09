@@ -223,6 +223,7 @@ function decodeEntities(s) {
 async function getActiveListings() {
   if (!isConfigured()) return [];
   const all = [];
+  const seenItemIds = new Set(); // dedupe — eBay sometimes returns the same item twice across pages
   let page = 1;
   const perPage = 200;
   while (page < 50) { // safety cap (~10k listings)
@@ -233,19 +234,25 @@ async function getActiveListings() {
           <EntriesPerPage>${perPage}</EntriesPerPage>
           <PageNumber>${page}</PageNumber>
         </Pagination>
-      </ActiveList>
-      <DetailLevel>ReturnAll</DetailLevel>`);
+      </ActiveList>`);
 
     if (xml.includes('<Ack>Failure</Ack>')) {
       const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
       throw new Error('eBay error: ' + decodeEntities(err));
     }
 
-    const items = extractAll(xml, 'Item');
+    // Scope extraction to ActiveList > ItemArray. Without this, the regex picks up
+    // <Item> tags from elsewhere in the response (Summary section, etc.) inflating the count.
+    const activeListBlock = extractOne(xml, 'ActiveList') || '';
+    const itemArrayBlock = extractOne(activeListBlock, 'ItemArray') || '';
+    const items = extractAll(itemArrayBlock, 'Item');
     if (!items.length) break;
 
     for (const itemXml of items) {
       const itemId = extractOne(itemXml, 'ItemID');
+      if (!itemId || seenItemIds.has(itemId)) continue; // dedupe
+      seenItemIds.add(itemId);
+
       const title = decodeEntities(extractOne(itemXml, 'Title') || '');
       const sku = decodeEntities(extractOne(itemXml, 'SKU') || '');
       const startPrice = extractOne(itemXml, 'StartPrice') || extractOne(itemXml, 'CurrentPrice') || '0';
@@ -267,7 +274,8 @@ async function getActiveListings() {
       });
     }
 
-    const totalPages = parseInt(extractOne(xml, 'TotalNumberOfPages') || '1');
+    // PaginationResult lives inside ActiveList — read it from the scoped block
+    const totalPages = parseInt(extractOne(activeListBlock, 'TotalNumberOfPages') || '1');
     if (page >= totalPages) break;
     page++;
   }

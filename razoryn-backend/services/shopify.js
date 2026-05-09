@@ -231,7 +231,7 @@ async function findProductBySku(sku) {
 
 // Create a new Shopify product with SKU, barcode (= sku), price, and image URLs.
 // imageUrls is an array of public image URLs Shopify will fetch and host.
-async function createProduct({ title, sku, price, imageUrls = [], status = 'draft' }) {
+async function createProduct({ title, sku, price, imageUrls = [], status = 'draft', metafields = [] }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const r = await shopifyRequest('post', '/products.json', {
     data: {
@@ -248,24 +248,26 @@ async function createProduct({ title, sku, price, imageUrls = [], status = 'draf
       },
     },
   });
-  return r.data.product;
+  const product = r.data.product;
+  // Apply metafields after creation
+  if (metafields.length) {
+    await applyMetafields(product.id, metafields);
+  }
+  return product;
 }
 
 // Update an existing product's title, price, and replace images.
-async function updateProduct(productId, { title, sku, price, imageUrls = [], status }) {
+async function updateProduct(productId, { title, sku, price, imageUrls = [], status, metafields = [] }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
-  // First, get the existing variant ID
   const ex = await shopifyRequest('get', `/products/${productId}.json`);
   const existing = ex.data.product;
   const variant = existing.variants[0];
 
-  // Update product (title, status)
   const patchData = { product: { id: productId } };
   if (title) patchData.product.title = title;
   if (status) patchData.product.status = status;
   await shopifyRequest('put', `/products/${productId}.json`, { data: patchData });
 
-  // Update variant (sku, barcode, price)
   if (variant && (sku || price != null)) {
     await shopifyRequest('put', `/variants/${variant.id}.json`, {
       data: {
@@ -279,7 +281,6 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
     });
   }
 
-  // Replace images: delete existing, then add new ones
   if (imageUrls && imageUrls.length) {
     for (const img of existing.images || []) {
       try { await shopifyRequest('delete', `/products/${productId}/images/${img.id}.json`); } catch (e) {}
@@ -295,7 +296,32 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
     }
   }
 
+  if (metafields.length) {
+    await applyMetafields(productId, metafields);
+  }
+
   return (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
+}
+
+// Apply a list of metafields to a product. Each metafield: { namespace, key, value, type }.
+async function applyMetafields(productId, metafields) {
+  for (const mf of metafields) {
+    if (!mf.key || !mf.value) continue;
+    try {
+      await shopifyRequest('post', `/products/${productId}/metafields.json`, {
+        data: {
+          metafield: {
+            namespace: mf.namespace || 'custom',
+            key: mf.key,
+            value: String(mf.value),
+            type: mf.type || 'single_line_text_field',
+          },
+        },
+      });
+    } catch (e) {
+      console.warn(`[shopify] metafield ${mf.namespace}.${mf.key} failed:`, e.message);
+    }
+  }
 }
 
 module.exports = {
