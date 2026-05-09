@@ -685,7 +685,11 @@
         <div class="nav-label">Admin</div>
         <button class="nav-item admin-only" data-page="staff">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-          Staff & Access
+          Staff &amp; Access
+        </button>
+        <button class="nav-item admin-only" data-page="mirror">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+          Listing Mirror
         </button>
         <button class="nav-item admin-only" data-page="settings">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -1303,7 +1307,7 @@ function routeTo(page) {
     dashboard: renderDashboard, inventory: renderInventory, scan: renderScan,
     locations: renderLocations, returns: renderReturns, sales: renderSales,
     pricing: renderPricing, schedule: renderSchedule, videos: renderVideos,
-    kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings
+    kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror
   };
   (pages[page] || renderDashboard)();
   document.getElementById('content').scrollTo(0, 0);
@@ -2689,6 +2693,270 @@ function openStaffModal(id) {
       { label: 'Cancel', onClick: closeModal }
     ]
   });
+}
+
+/* ==========================================================
+   LISTING MIRROR — eBay → Shopify
+   ========================================================== */
+let MirrorState = {
+  listings: [],         // pulled from eBay
+  selected: new Set(),  // itemIds
+  selectedImages: {},   // itemId -> Set of image URLs to use
+  customPrices: {},     // itemId -> Number (user-entered override)
+  pricingMode: 'percent', // 'percent' | 'manual'
+  percentDiscount: 0,   // % off eBay price (e.g. 10 = 10% cheaper than eBay)
+  productStatus: 'draft', // 'draft' | 'active'
+};
+
+function renderMirror() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div>
+          <h1>Listing Mirror</h1>
+          <div class="desc">Copy eBay listings to Shopify — title, photos, SKU (= barcode), price</div>
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary" onclick="pullEbayListings()">⟳ Pull eBay listings</button>
+        </div>
+      </div>
+
+      <div id="mirror-empty" class="card">
+        <div class="card-body empty">
+          <div class="t">No listings loaded yet</div>
+          <div class="d">Click <strong>Pull eBay listings</strong> to fetch your active eBay listings. Make sure <code>EBAY_CLIENT_ID</code>, <code>EBAY_CLIENT_SECRET</code>, and <code>EBAY_REFRESH_TOKEN</code> are set in Railway first.</div>
+        </div>
+      </div>
+
+      <div id="mirror-toolbar" style="display:none">
+        <div class="card" style="margin-bottom:14px">
+          <div class="card-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;align-items:end">
+              <div>
+                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Pricing</div>
+                <select id="mr-pricing-mode" class="select" onchange="updatePricingMode()">
+                  <option value="percent">% off eBay price</option>
+                  <option value="manual">Set each price manually</option>
+                </select>
+              </div>
+              <div id="mr-percent-wrap">
+                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">% Discount</div>
+                <input type="number" id="mr-percent" value="0" min="0" max="100" step="0.5" oninput="repaintPrices()" placeholder="e.g. 10 for 10% off">
+              </div>
+              <div>
+                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Status on Shopify</div>
+                <select id="mr-status" class="select" onchange="MirrorState.productStatus=this.value">
+                  <option value="draft">Draft (review before publishing)</option>
+                  <option value="active">Active (live immediately)</option>
+                </select>
+              </div>
+            </div>
+            <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn btn-outline btn-sm" onclick="selectAll(true)">Select all</button>
+              <button class="btn btn-outline btn-sm" onclick="selectAll(false)">Deselect all</button>
+              <span id="mr-counter" style="margin-left:auto;font-size:13px;color:var(--ink-soft)"></span>
+              <button class="btn btn-primary" onclick="mirrorSelected()" id="mr-mirror-btn">Mirror selected to Shopify →</button>
+            </div>
+          </div>
+        </div>
+        <div id="mirror-list"></div>
+      </div>
+    </div>
+  `;
+  if (MirrorState.listings.length) {
+    el('mirror-empty').style.display = 'none';
+    el('mirror-toolbar').style.display = 'block';
+    paintMirrorList();
+  }
+}
+
+async function pullEbayListings() {
+  toast('Pulling eBay listings… can take 30s for big stores', 'info');
+  try {
+    const r = await Api.get('/api/listings/ebay-active');
+    MirrorState.listings = r.listings || [];
+    MirrorState.selected = new Set(MirrorState.listings.map(l => l.itemId));
+    MirrorState.selectedImages = {};
+    MirrorState.customPrices = {};
+    for (const l of MirrorState.listings) {
+      const goodImages = (l.imageMeta || []).filter(im => !im.likelyTemplate).map(im => im.url);
+      MirrorState.selectedImages[l.itemId] = new Set(goodImages.length ? goodImages : l.pictureUrls);
+    }
+    el('mirror-empty').style.display = 'none';
+    el('mirror-toolbar').style.display = 'block';
+    paintMirrorList();
+    toast(`Loaded ${MirrorState.listings.length} listings`, 'success');
+  } catch (e) {
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+function updatePricingMode() {
+  MirrorState.pricingMode = el('mr-pricing-mode').value;
+  el('mr-percent-wrap').style.display = MirrorState.pricingMode === 'percent' ? '' : 'none';
+  paintMirrorList();
+}
+
+function repaintPrices() {
+  MirrorState.percentDiscount = parseFloat(el('mr-percent').value) || 0;
+  for (const l of MirrorState.listings) {
+    const row = document.querySelector(`[data-row="${l.itemId}"]`);
+    if (!row) continue;
+    const priceEl = row.querySelector('[data-price-out]');
+    if (priceEl) priceEl.textContent = gbp(computeShopifyPrice(l));
+  }
+}
+
+function computeShopifyPrice(listing) {
+  if (MirrorState.pricingMode === 'manual') {
+    return MirrorState.customPrices[listing.itemId] != null
+      ? MirrorState.customPrices[listing.itemId]
+      : listing.priceEbay;
+  }
+  const pct = MirrorState.percentDiscount || 0;
+  return Math.round((listing.priceEbay * (1 - pct / 100)) * 100) / 100;
+}
+
+function paintMirrorList() {
+  const list = el('mirror-list');
+  if (!list) return;
+  const manualMode = MirrorState.pricingMode === 'manual';
+  list.innerHTML = MirrorState.listings.map(l => {
+    const sel = MirrorState.selected.has(l.itemId);
+    const imgSet = MirrorState.selectedImages[l.itemId] || new Set();
+    return `
+      <div class="card" style="margin-bottom:10px;${sel ? '' : 'opacity:0.5'}" data-row="${l.itemId}">
+        <div class="card-body">
+          <div style="display:flex;gap:14px;align-items:flex-start">
+            <label class="switch" style="margin-top:4px"><input type="checkbox" ${sel?'checked':''} onchange="toggleListing('${l.itemId}',this.checked)"><span></span></label>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;justify-content:space-between;gap:14px;align-items:flex-start;margin-bottom:8px">
+                <div style="flex:1;min-width:0">
+                  <div style="font-weight:600;font-size:14px">${escapeHtml(l.title)}</div>
+                  <div style="display:flex;gap:14px;font-size:12px;color:var(--ink-soft);margin-top:4px;flex-wrap:wrap">
+                    <span>SKU: <strong style="font-family:ui-monospace,monospace;color:var(--ink)">${escapeHtml(l.sku || '— missing —')}</strong></span>
+                    <span>Item: ${l.itemId}</span>
+                    <span>eBay price: <strong style="color:var(--ink)">${gbp(l.priceEbay)}</strong></span>
+                  </div>
+                </div>
+                <div style="text-align:right;flex-shrink:0">
+                  <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Shopify price</div>
+                  ${manualMode
+                    ? `<input type="number" step="0.01" value="${computeShopifyPrice(l)}" onchange="MirrorState.customPrices['${l.itemId}']=parseFloat(this.value)||0" style="width:120px;text-align:right">`
+                    : `<div data-price-out style="font-size:18px;font-weight:700">${gbp(computeShopifyPrice(l))}</div>`
+                  }
+                </div>
+              </div>
+              ${l.sku ? '' : '<div style="padding:8px;background:var(--amber-light);color:var(--amber);border-radius:6px;font-size:12px;margin-bottom:8px">⚠ This eBay listing has no SKU. Add one on eBay before mirroring.</div>'}
+              <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Photos to import (${imgSet.size} of ${l.pictureUrls.length} selected)</div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                ${(l.imageMeta || l.pictureUrls.map(u=>({url:u}))).map((im, i) => {
+                  const url = im.url || im;
+                  const checked = imgSet.has(url);
+                  const tmpl = im.likelyTemplate;
+                  return `
+                    <label style="position:relative;display:block;cursor:pointer" title="${tmpl ? 'Likely template image (appears in multiple listings)' : ''}">
+                      <input type="checkbox" ${checked?'checked':''} onchange="toggleImage('${l.itemId}','${escapeAttr(url)}',this.checked)" style="position:absolute;top:4px;left:4px;z-index:2">
+                      <img src="${escapeAttr(url)}" style="width:80px;height:80px;object-fit:cover;border-radius:6px;border:2px solid ${checked?'var(--red)':'var(--line)'};${tmpl?'filter:grayscale(0.7)':''}" loading="lazy" referrerpolicy="no-referrer">
+                      ${tmpl ? '<span style="position:absolute;bottom:2px;right:2px;background:var(--amber);color:white;font-size:9px;padding:1px 4px;border-radius:3px;font-weight:600">TMPL</span>' : ''}
+                    </label>
+                  `;
+                }).join('')}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+  updateMirrorCounter();
+}
+
+function escapeHtml(s) { return String(s||'').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
+function escapeAttr(s) { return String(s||'').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+
+function toggleListing(itemId, on) {
+  if (on) MirrorState.selected.add(itemId);
+  else MirrorState.selected.delete(itemId);
+  paintMirrorList();
+}
+function toggleImage(itemId, url, on) {
+  const set = MirrorState.selectedImages[itemId] || new Set();
+  if (on) set.add(url); else set.delete(url);
+  MirrorState.selectedImages[itemId] = set;
+  // Update count label without full repaint
+  const row = document.querySelector(`[data-row="${itemId}"]`);
+  if (row) {
+    const label = row.querySelector('div[style*="Photos to import"]');
+    if (label) {
+      const total = MirrorState.listings.find(l => l.itemId == itemId)?.pictureUrls.length || 0;
+      label.textContent = `Photos to import (${set.size} of ${total} selected)`;
+    }
+  }
+}
+function selectAll(on) {
+  if (on) MirrorState.selected = new Set(MirrorState.listings.map(l => l.itemId));
+  else MirrorState.selected.clear();
+  paintMirrorList();
+}
+function updateMirrorCounter() {
+  const n = MirrorState.selected.size;
+  const t = MirrorState.listings.length;
+  const c = el('mr-counter');
+  if (c) c.textContent = `${n} of ${t} selected`;
+}
+
+async function mirrorSelected() {
+  const selected = MirrorState.listings.filter(l => MirrorState.selected.has(l.itemId));
+  if (!selected.length) { toast('Nothing selected', 'warn'); return; }
+
+  const missingSku = selected.filter(l => !l.sku);
+  if (missingSku.length) {
+    if (!confirm(`${missingSku.length} listing(s) have no SKU and will be skipped. Continue with the rest?`)) return;
+  }
+  const valid = selected.filter(l => l.sku);
+
+  // Check Shopify for conflicts
+  toast('Checking Shopify for existing products…', 'info');
+  let conflicts = [];
+  try {
+    const r = await Api.post('/api/listings/check-conflicts', { skus: valid.map(l => l.sku) });
+    conflicts = r.conflicts || [];
+  } catch (e) {
+    toast('Conflict check failed: ' + e.message, 'error');
+    return;
+  }
+
+  let overwriteConflicts = false;
+  if (conflicts.length) {
+    overwriteConflicts = confirm(
+      `${conflicts.length} of these SKUs already exist on Shopify:\n\n` +
+      conflicts.slice(0, 10).map(c => `• ${c.sku} — ${c.title}`).join('\n') +
+      (conflicts.length > 10 ? `\n…and ${conflicts.length - 10} more` : '') +
+      '\n\nClick OK to OVERWRITE these (replaces title, price, and images).\nClick Cancel to SKIP them and only mirror the new ones.'
+    );
+  }
+
+  // Build payload
+  const items = valid.map(l => ({
+    itemId: l.itemId,
+    sku: l.sku,
+    title: l.title,
+    price: computeShopifyPrice(l),
+    imageUrls: Array.from(MirrorState.selectedImages[l.itemId] || []),
+    status: MirrorState.productStatus,
+  }));
+
+  toast(`Mirroring ${items.length} listings to Shopify…`, 'info');
+  try {
+    const r = await Api.post('/api/listings/mirror', { items, overwriteConflicts });
+    let msg = `Created: ${r.created}, Updated: ${r.updated}, Skipped: ${r.skipped}`;
+    if (r.errors && r.errors.length) msg += `, Errors: ${r.errors.length}`;
+    toast(msg, r.errors?.length ? 'warn' : 'success');
+    if (r.errors?.length) console.warn('Mirror errors:', r.errors);
+  } catch (e) {
+    toast('Mirror failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 /* ==========================================================

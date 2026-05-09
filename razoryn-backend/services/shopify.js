@@ -192,6 +192,112 @@ async function pushStockForProduct(product) {
   return { ok: true };
 }
 
+// ---------- Listing creation (eBay → Shopify mirror) ----------
+
+// Find a Shopify product by SKU. Returns { product_id, variant_id, inventory_item_id, image_count } or null.
+async function findProductBySku(sku) {
+  if (!isConfigured() || !sku) return null;
+  // Shopify doesn't have a direct product search by SKU; we use the variants endpoint via GraphQL would be cleanest,
+  // but to avoid GraphQL token scope, we use the products.json with a search query.
+  // Most reliable: products.json?title= won't match SKU; fall back to scanning.
+  // Better: use GraphQL since 2024-04 — variantBySku requires read_products.
+  try {
+    const query = `query($sku: String!) {
+      productVariants(first: 1, query: $sku) {
+        edges { node { id sku product { id title images(first: 1) { edges { node { id } } } } inventoryItem { id } } }
+      }
+    }`;
+    const r = await shopifyRequest('post', '/graphql.json', {
+      data: { query, variables: { sku: `sku:${sku}` } },
+    });
+    const edge = r.data.data?.productVariants?.edges?.[0];
+    if (!edge) return null;
+    const node = edge.node;
+    if (node.sku !== sku) return null; // GraphQL returns close matches; require exact
+    // Convert GIDs back to numeric
+    const gid = (s) => s ? s.split('/').pop() : null;
+    return {
+      product_id: gid(node.product.id),
+      variant_id: gid(node.id),
+      inventory_item_id: gid(node.inventoryItem?.id),
+      title: node.product.title,
+      image_count: (node.product.images?.edges || []).length,
+    };
+  } catch (e) {
+    console.warn('[shopify] findProductBySku failed:', e.message);
+    return null;
+  }
+}
+
+// Create a new Shopify product with SKU, barcode (= sku), price, and image URLs.
+// imageUrls is an array of public image URLs Shopify will fetch and host.
+async function createProduct({ title, sku, price, imageUrls = [], status = 'draft' }) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const r = await shopifyRequest('post', '/products.json', {
+    data: {
+      product: {
+        title,
+        status, // 'draft' | 'active'
+        variants: [{
+          sku,
+          barcode: sku, // SKU = barcode for unified scanning
+          price: price != null ? String(price) : undefined,
+          inventory_management: 'shopify',
+        }],
+        images: imageUrls.map(src => ({ src })),
+      },
+    },
+  });
+  return r.data.product;
+}
+
+// Update an existing product's title, price, and replace images.
+async function updateProduct(productId, { title, sku, price, imageUrls = [], status }) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  // First, get the existing variant ID
+  const ex = await shopifyRequest('get', `/products/${productId}.json`);
+  const existing = ex.data.product;
+  const variant = existing.variants[0];
+
+  // Update product (title, status)
+  const patchData = { product: { id: productId } };
+  if (title) patchData.product.title = title;
+  if (status) patchData.product.status = status;
+  await shopifyRequest('put', `/products/${productId}.json`, { data: patchData });
+
+  // Update variant (sku, barcode, price)
+  if (variant && (sku || price != null)) {
+    await shopifyRequest('put', `/variants/${variant.id}.json`, {
+      data: {
+        variant: {
+          id: variant.id,
+          sku: sku || variant.sku,
+          barcode: sku || variant.barcode,
+          price: price != null ? String(price) : variant.price,
+        },
+      },
+    });
+  }
+
+  // Replace images: delete existing, then add new ones
+  if (imageUrls && imageUrls.length) {
+    for (const img of existing.images || []) {
+      try { await shopifyRequest('delete', `/products/${productId}/images/${img.id}.json`); } catch (e) {}
+    }
+    for (const src of imageUrls) {
+      try {
+        await shopifyRequest('post', `/products/${productId}/images.json`, {
+          data: { image: { src } },
+        });
+      } catch (e) {
+        console.warn('[shopify] image upload failed:', src, e.message);
+      }
+    }
+  }
+
+  return (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
@@ -200,4 +306,7 @@ module.exports = {
   getRecentOrders,
   pushStockForProduct,
   iterateAllProductsAndVariants,
+  findProductBySku,
+  createProduct,
+  updateProduct,
 };

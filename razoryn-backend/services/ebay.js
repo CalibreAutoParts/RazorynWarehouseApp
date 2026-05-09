@@ -39,6 +39,7 @@ async function getAccessToken() {
       scope: [
         'https://api.ebay.com/oauth/api_scope/sell.inventory',
         'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+        'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
       ].join(' '),
     }),
     {
@@ -96,6 +97,124 @@ async function pushStockForProduct(product) {
   await setInventoryQty(product.sku, product.qty_on_hand);
   return { ok: true };
 }
+
+// ---------- Trading API (XML) — needed for GetMyeBaySelling ----------
+// The newer Sell APIs only return listings migrated to the inventory model,
+// which most legacy listings aren't. Trading API works for everything.
+const TRADING_BASE = ENV === 'production'
+  ? 'https://api.ebay.com/ws/api.dll'
+  : 'https://api.sandbox.ebay.com/ws/api.dll';
+
+async function tradingCall(callName, bodyInner) {
+  const token = await getAccessToken();
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+<${callName}Request xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  ${bodyInner}
+</${callName}Request>`;
+  const r = await axios.post(TRADING_BASE, xml, {
+    headers: {
+      'Content-Type': 'text/xml',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1349',
+      'X-EBAY-API-CALL-NAME': callName,
+      'X-EBAY-API-SITEID': process.env.EBAY_SITE_ID || '3', // 3 = UK
+      'X-EBAY-API-IAF-TOKEN': token,
+    },
+    timeout: 60000,
+  });
+  return r.data; // raw XML string
+}
+
+// Tiny XML extractor — avoids pulling in a full XML parser dep
+function extractAll(xml, tag) {
+  const out = [];
+  const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'g');
+  let m;
+  while ((m = re.exec(xml)) !== null) out.push(m[1]);
+  return out;
+}
+function extractOne(xml, tag) {
+  const m = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`));
+  return m ? m[1] : null;
+}
+function decodeEntities(s) {
+  if (!s) return s;
+  return s
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&apos;/g, "'");
+}
+
+// Pull all active eBay listings (paginated)
+async function getActiveListings() {
+  if (!isConfigured()) return [];
+  const all = [];
+  let page = 1;
+  const perPage = 200;
+  while (page < 50) { // safety cap (~10k listings)
+    const xml = await tradingCall('GetMyeBaySelling', `
+      <ActiveList>
+        <Include>true</Include>
+        <Pagination>
+          <EntriesPerPage>${perPage}</EntriesPerPage>
+          <PageNumber>${page}</PageNumber>
+        </Pagination>
+      </ActiveList>
+      <DetailLevel>ReturnAll</DetailLevel>`);
+
+    if (xml.includes('<Ack>Failure</Ack>')) {
+      const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+      throw new Error('eBay error: ' + decodeEntities(err));
+    }
+
+    const items = extractAll(xml, 'Item');
+    if (!items.length) break;
+
+    for (const itemXml of items) {
+      const itemId = extractOne(itemXml, 'ItemID');
+      const title = decodeEntities(extractOne(itemXml, 'Title') || '');
+      const sku = decodeEntities(extractOne(itemXml, 'SKU') || '');
+      const startPrice = extractOne(itemXml, 'StartPrice') || extractOne(itemXml, 'CurrentPrice') || '0';
+      const buyItNow = extractOne(itemXml, 'BuyItNowPrice');
+      const currency = (extractOne(itemXml, 'StartPrice') || '').match(/currencyID="([^"]+)"/);
+      // PictureDetails > PictureURL (multiple)
+      const picBlock = extractOne(itemXml, 'PictureDetails') || '';
+      const pictureUrls = extractAll(picBlock, 'PictureURL').map(decodeEntities);
+      const galleryUrl = decodeEntities(extractOne(picBlock, 'GalleryURL') || '');
+      const allPics = [...new Set([galleryUrl, ...pictureUrls].filter(Boolean))];
+
+      all.push({
+        itemId,
+        sku: sku || null,
+        title,
+        priceEbay: parseFloat(buyItNow || startPrice) || 0,
+        currency: currency ? currency[1] : 'GBP',
+        pictureUrls: allPics,
+        viewItemURL: decodeEntities(extractOne(itemXml, 'ViewItemURL') || ''),
+      });
+    }
+
+    // Pagination — stop if this page wasn't full
+    const totalPages = parseInt(extractOne(xml, 'TotalNumberOfPages') || '1');
+    if (page >= totalPages) break;
+    page++;
+  }
+
+  // Auto-detect probable template images: any image URL appearing in 2+ listings
+  // is almost certainly a banner/policy/template, not a real product photo.
+  const urlCount = {};
+  for (const l of all) {
+    for (const u of l.pictureUrls) urlCount[u] = (urlCount[u] || 0) + 1;
+  }
+  for (const l of all) {
+    l.imageMeta = l.pictureUrls.map(u => ({
+      url: u,
+      likelyTemplate: (urlCount[u] || 0) > 1,
+    }));
+  }
+  return all;
+}
+
+module.exports.getActiveListings = getActiveListings;
 
 module.exports = {
   isConfigured,
