@@ -280,6 +280,17 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- Per-eBay-listing overrides (so SKU/title edits persist across mirror sessions)
+CREATE TABLE IF NOT EXISTS ebay_listing_overrides (
+  ebay_item_id  TEXT PRIMARY KEY,
+  override_sku  TEXT,
+  override_title TEXT,
+  custom_price  NUMERIC(10,2),
+  metafields    JSONB,
+  shipping_profile_id TEXT,
+  updated_at    TIMESTAMPTZ DEFAULT now()
+);
+
 -- Triggers — auto-update updated_at
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
 BEGIN NEW.updated_at = now(); RETURN NEW; END;
