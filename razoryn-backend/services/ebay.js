@@ -31,32 +31,51 @@ let cachedToken = null;
 let tokenExpiresAt = 0;
 
 async function getAccessToken() {
-  if (!isConfigured()) throw new Error('ebay_not_configured');
+  if (!isConfigured()) {
+    const have = {
+      EBAY_APP_ID_or_CLIENT_ID: !!CLIENT_ID,
+      EBAY_CERT_ID_or_CLIENT_SECRET: !!CLIENT_SECRET,
+      EBAY_REFRESH_TOKEN: !!REFRESH_TOKEN,
+    };
+    throw new Error('ebay_not_configured. Have: ' + JSON.stringify(have));
+  }
   if (cachedToken && Date.now() < tokenExpiresAt - 60_000) return cachedToken;
 
   const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
 
-  const r = await axios.post(
-    `${BASE}/identity/v1/oauth2/token`,
-    new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: REFRESH_TOKEN,
-      scope: [
-        'https://api.ebay.com/oauth/api_scope/sell.inventory',
-        'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
-        'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
-      ].join(' '),
-    }),
-    {
-      headers: {
-        Authorization: `Basic ${creds}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-    }
-  );
-  cachedToken = r.data.access_token;
-  tokenExpiresAt = Date.now() + (r.data.expires_in * 1000);
-  return cachedToken;
+  try {
+    const r = await axios.post(
+      `${BASE}/identity/v1/oauth2/token`,
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: REFRESH_TOKEN,
+        scope: [
+          // Basic scope — required for IAF tokens with Trading API
+          'https://api.ebay.com/oauth/api_scope',
+          'https://api.ebay.com/oauth/api_scope/sell.inventory',
+          'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+          'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
+        ].join(' '),
+      }),
+      {
+        headers: {
+          Authorization: `Basic ${creds}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        timeout: 15000,
+      }
+    );
+    cachedToken = r.data.access_token;
+    tokenExpiresAt = Date.now() + (r.data.expires_in * 1000);
+    return cachedToken;
+  } catch (e) {
+    const body = e.response?.data;
+    const errCode = body?.error || 'unknown';
+    const errDesc = body?.error_description || e.message;
+    const detail = `eBay token refresh failed [${errCode}]: ${errDesc}`;
+    console.error('[ebay] ' + detail, body);
+    throw new Error(detail);
+  }
 }
 
 async function http(method, url, data) {
@@ -112,22 +131,46 @@ const TRADING_BASE = ENV === 'production'
 
 async function tradingCall(callName, bodyInner) {
   const token = await getAccessToken();
+  // IAF auth: token goes in X-EBAY-API-IAF-TOKEN header.
+  // Do NOT include <RequesterCredentials><eBayAuthToken> in the body — that's for
+  // legacy Auth'n'Auth tokens and conflicts with IAF, causing 401 errors.
   const xml = `<?xml version="1.0" encoding="utf-8"?>
 <${callName}Request xmlns="urn:ebay:apis:eBLBaseComponents">
-  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
   ${bodyInner}
 </${callName}Request>`;
-  const r = await axios.post(TRADING_BASE, xml, {
-    headers: {
-      'Content-Type': 'text/xml',
-      'X-EBAY-API-COMPATIBILITY-LEVEL': '1349',
-      'X-EBAY-API-CALL-NAME': callName,
-      'X-EBAY-API-SITEID': process.env.EBAY_SITE_ID || '3', // 3 = UK
-      'X-EBAY-API-IAF-TOKEN': token,
-    },
-    timeout: 60000,
-  });
-  return r.data; // raw XML string
+  try {
+    const r = await axios.post(TRADING_BASE, xml, {
+      headers: {
+        'Content-Type': 'text/xml',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1349',
+        'X-EBAY-API-CALL-NAME': callName,
+        'X-EBAY-API-SITEID': process.env.EBAY_SITE_ID || '3', // 3 = UK
+        'X-EBAY-API-IAF-TOKEN': token,
+      },
+      timeout: 60000,
+    });
+    return r.data; // raw XML string
+  } catch (e) {
+    // Trading API returns errors as XML even with 200; or 401/500 with empty body.
+    // Surface whatever info we have.
+    const status = e.response?.status;
+    const body = e.response?.data;
+    let detail = `Trading API ${callName} failed`;
+    if (status) detail += ` (HTTP ${status})`;
+    if (typeof body === 'string') {
+      const short = extractOne(body, 'ShortMessage');
+      const long = extractOne(body, 'LongMessage');
+      const errCode = extractOne(body, 'ErrorCode');
+      if (short || long) detail += `: [${errCode || '?'}] ${decodeEntities(long || short)}`;
+      else detail += `: ${body.slice(0, 300)}`;
+    } else if (body) {
+      detail += `: ${JSON.stringify(body).slice(0, 300)}`;
+    } else {
+      detail += `: ${e.message}`;
+    }
+    console.error('[ebay] ' + detail);
+    throw new Error(detail);
+  }
 }
 
 // Tiny XML extractor — avoids pulling in a full XML parser dep
