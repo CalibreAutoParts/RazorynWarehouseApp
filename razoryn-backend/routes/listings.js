@@ -13,7 +13,10 @@ router.use(requireAuth);
 // GET /api/listings/ebay-active — pulls all active eBay listings + auto-flags template images
 router.get('/ebay-active', requireAdmin, async (req, res) => {
   if (!ebay.isConfigured()) {
-    return res.status(400).json({ error: 'ebay_not_configured', message: 'Add EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, EBAY_REFRESH_TOKEN in Railway.' });
+    return res.status(400).json({
+      error: 'ebay_not_configured',
+      message: 'Set either (EBAY_AUTH_TOKEN + EBAY_CLIENT_ID + EBAY_CLIENT_SECRET) for Auth\'n\'Auth, or (EBAY_CLIENT_ID + EBAY_CLIENT_SECRET + EBAY_REFRESH_TOKEN) for OAuth, in Railway.',
+    });
   }
   try {
     const listings = await ebay.getActiveListings();
