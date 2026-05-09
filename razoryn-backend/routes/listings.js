@@ -68,6 +68,7 @@ router.post('/mirror', requireAdmin, async (req, res) => {
           price: item.price,
           imageUrls: item.imageUrls || [],
           status: item.status || 'draft',
+          metafields: item.metafields || [],
         });
         results.updated++;
       } else {
@@ -77,6 +78,7 @@ router.post('/mirror', requireAdmin, async (req, res) => {
           price: item.price,
           imageUrls: item.imageUrls || [],
           status: item.status || 'draft',
+          metafields: item.metafields || [],
         });
         results.created++;
       }
