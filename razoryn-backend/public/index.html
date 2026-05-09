@@ -2745,8 +2745,11 @@ function renderMirror() {
               </div>
             </div>
             <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <button class="btn btn-outline btn-sm" onclick="selectAll(true)">Select all</button>
-              <button class="btn btn-outline btn-sm" onclick="selectAll(false)">Deselect all</button>
+              <button class="btn btn-outline btn-sm" onclick="selectAll(true)">Select all listings</button>
+              <button class="btn btn-outline btn-sm" onclick="selectAll(false)">Deselect all listings</button>
+              <span style="width:1px;height:18px;background:var(--line)"></span>
+              <button class="btn btn-outline btn-sm" onclick="resetPhotoSelections('first')">📷 First photo only</button>
+              <button class="btn btn-outline btn-sm" onclick="resetPhotoSelections('all')">📷 All photos</button>
               <span id="mr-counter" style="margin-left:auto;font-size:13px;color:var(--ink-soft)"></span>
               <button class="btn btn-primary" onclick="mirrorSelected()" id="mr-mirror-btn">Mirror selected to Shopify →</button>
             </div>
@@ -2764,24 +2767,43 @@ function renderMirror() {
 }
 
 async function pullEbayListings() {
-  toast('Pulling eBay listings… can take 30s for big stores', 'info');
+  toast('Pulling eBay listings + photos… ~1-2 min for big stores', 'info');
   try {
     const r = await Api.get('/api/listings/ebay-active');
     MirrorState.listings = r.listings || [];
     MirrorState.selected = new Set(MirrorState.listings.map(l => l.itemId));
     MirrorState.selectedImages = {};
     MirrorState.customPrices = {};
+    // Default: select only the FIRST photo per listing (user preference).
+    // Skip auto-template-detection for default selection — user wants 1 photo each, simple.
     for (const l of MirrorState.listings) {
-      const goodImages = (l.imageMeta || []).filter(im => !im.likelyTemplate).map(im => im.url);
-      MirrorState.selectedImages[l.itemId] = new Set(goodImages.length ? goodImages : l.pictureUrls);
+      MirrorState.selectedImages[l.itemId] = new Set(l.pictureUrls.length ? [l.pictureUrls[0]] : []);
     }
     el('mirror-empty').style.display = 'none';
     el('mirror-toolbar').style.display = 'block';
     paintMirrorList();
-    toast(`Loaded ${MirrorState.listings.length} listings`, 'success');
+    const noPhotos = MirrorState.listings.filter(l => !l.pictureUrls.length).length;
+    let msg = `Loaded ${MirrorState.listings.length} listings`;
+    if (noPhotos) msg += ` (${noPhotos} have no photos on eBay)`;
+    toast(msg, 'success');
   } catch (e) {
     toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+function resetPhotoSelections(mode) {
+  // mode: 'first' | 'all' | 'none'
+  for (const l of MirrorState.listings) {
+    if (mode === 'first') {
+      MirrorState.selectedImages[l.itemId] = new Set(l.pictureUrls.length ? [l.pictureUrls[0]] : []);
+    } else if (mode === 'all') {
+      MirrorState.selectedImages[l.itemId] = new Set(l.pictureUrls);
+    } else {
+      MirrorState.selectedImages[l.itemId] = new Set();
+    }
+  }
+  paintMirrorList();
+  toast(mode === 'first' ? 'Reset to first photo only' : mode === 'all' ? 'All photos selected' : 'All photos deselected', 'success');
 }
 
 function updatePricingMode() {
