@@ -226,6 +226,29 @@ async function pushStockForSaleItems(items) {
   }
 }
 
+// Push warehouse stock to Shopify for all products that have a Shopify ID.
+// Useful as part of a manual "Sync now" so stock changes from the warehouse
+// (sales, stock checks, returns) propagate to Shopify even if a previous push failed.
+async function pushAllStockToShopify() {
+  if (!shopify.isConfigured()) return { skipped: 'not_configured' };
+  const { rows } = await query(
+    `SELECT id, sku, qty_on_hand, shopify_inventory_id
+     FROM products
+     WHERE active = true AND shopify_inventory_id IS NOT NULL`
+  );
+  let pushed = 0, errors = 0;
+  for (const p of rows) {
+    try {
+      await shopify.pushStockForProduct(p);
+      pushed++;
+    } catch (e) {
+      errors++;
+      console.warn('[sync] push fail for', p.sku, e.message);
+    }
+  }
+  return { channel: 'shopify_stock', pushed, errors, total: rows.length };
+}
+
 // --------- Orchestrator ---------
 async function runFullSync() {
   const results = {};
@@ -241,6 +264,11 @@ async function runFullSync() {
     results.ebay = { error: e.message };
     await setCursor('ebay', { lastSyncedAt: new Date(), status: 'error', error: e.message });
   }
+  try { results.shopifyStock = await pushAllStockToShopify(); }
+  catch (e) {
+    console.error('[sync] stock push failed:', e.message);
+    results.shopifyStock = { error: e.message };
+  }
   return results;
 }
 
@@ -249,5 +277,6 @@ module.exports = {
   pullShopify,
   pullEbay,
   pushStockForSaleItems,
+  pushAllStockToShopify,
   recordLowStockIfNeeded,
 };
