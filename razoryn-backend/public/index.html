@@ -1523,12 +1523,40 @@ function renderInventory() {
         <td class="num">${p.qtyEbay}</td>
         <td class="num"><strong>${totalQty(p)}</strong> ${totalQty(p)<=p.lowThresh ? `<span class="pill ${totalQty(p)===0?'red':'amber'}" style="margin-left:6px">${totalQty(p)===0?'Out':'Low'}</span>`:''}</td>
         <td class="num">${gbp(p.priceShopify)}</td>
-        <td><button class="btn btn-outline btn-sm" onclick="openProductModal('${p.id}')">Edit</button></td>
+        <td style="white-space:nowrap"><button class="btn btn-outline btn-sm" onclick="openProductModal('${p.id}')">Edit</button> <button class="btn btn-ghost btn-sm" onclick="deleteProduct('${p.id}','${(p.title||'').replace(/'/g,"\\'")}')" style="color:var(--red)" title="Delete product">🗑</button></td>
       </tr>
     `).join('') || '<tr><td colspan="9"><div class="empty"><div class="t">No products match</div></div></td></tr>';
   }
   paint();
   ['inv-search','inv-brand','inv-stock'].forEach(id => el(id).addEventListener('input', paint));
+}
+
+async function deleteProduct(id, title) {
+  // Two-step confirm: first ask local-only or also remove from Shopify
+  const choice = prompt(
+    `Delete "${title}"?\n\n` +
+    `Type one of:\n` +
+    `  1 = remove from warehouse only (keep on Shopify)\n` +
+    `  2 = remove from BOTH warehouse AND Shopify\n` +
+    `  (anything else cancels)`
+  );
+  if (choice !== '1' && choice !== '2') return;
+  const removeFromShopify = choice === '2';
+  const confirmed = confirm(
+    removeFromShopify
+      ? `Confirm: PERMANENTLY delete "${title}" from Shopify and the warehouse. This cannot be undone.`
+      : `Confirm: remove "${title}" from the warehouse (Shopify untouched).`
+  );
+  if (!confirmed) return;
+  try {
+    const url = `/api/products/${id}?hard=true${removeFromShopify ? '&shopify=true' : ''}`;
+    await Api.delete(url);
+    await Store.refresh('products');
+    renderInventory();
+    toast(removeFromShopify ? 'Deleted from warehouse and Shopify' : 'Removed from warehouse', 'success');
+  } catch (e) {
+    toast('Delete failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 function openProductModal(id) {
@@ -3267,17 +3295,23 @@ async function resetData() {
    ========================================================== */
 function el(id) { return document.getElementById(id); }
 async function syncNow() {
-  toast('Syncing Shopify ↔ eBay...', 'success');
+  toast('Syncing Shopify ↔ eBay…', 'info');
   try {
     const result = await Api.post('/api/settings/sync-now');
-    let msg = 'Sync complete';
-    if (result.result) {
-      const parts = [];
-      if (result.result.shopify) parts.push(`Shopify: ${result.result.shopify.inserted ?? 0} new`);
-      if (result.result.ebay)    parts.push(`eBay: ${result.result.ebay.inserted ?? 0} new`);
-      if (parts.length) msg += ' · ' + parts.join(', ');
+    const parts = [];
+    if (result.result?.shopify) {
+      const s = result.result.shopify;
+      parts.push(s.skipped ? 'Shopify orders: skipped (not configured)' : `Shopify orders: ${s.inserted ?? 0} new`);
     }
-    toast(msg, 'success');
+    if (result.result?.ebay) {
+      const e = result.result.ebay;
+      parts.push(e.skipped ? 'eBay orders: skipped' : `eBay orders: ${e.inserted ?? 0} new`);
+    }
+    if (result.result?.shopifyStock) {
+      const ss = result.result.shopifyStock;
+      if (!ss.skipped) parts.push(`Stock pushed to Shopify: ${ss.pushed}/${ss.total}`);
+    }
+    toast('Sync complete · ' + (parts.join(' · ') || 'nothing to sync'), 'success');
     await Store.refreshAll();
     if (typeof renderDashboard === 'function' && State.page === 'dashboard') renderDashboard();
   } catch (e) {
