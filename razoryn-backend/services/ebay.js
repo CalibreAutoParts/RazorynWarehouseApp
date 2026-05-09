@@ -24,6 +24,10 @@ const CLIENT_SECRET = process.env.EBAY_CLIENT_SECRET || process.env.EBAY_CERT_ID
 const REFRESH_TOKEN = process.env.EBAY_REFRESH_TOKEN;
 
 function isConfigured() {
+  // Two valid configurations:
+  //  A. Auth'n'Auth: just need EBAY_AUTH_TOKEN + APP_ID + CERT_ID + DEV_ID (for Trading API)
+  //  B. OAuth: need APP_ID/CLIENT_ID + CERT_ID/CLIENT_SECRET + REFRESH_TOKEN
+  if (process.env.EBAY_AUTH_TOKEN && CLIENT_ID && CLIENT_SECRET) return true;
   return !!(CLIENT_ID && CLIENT_SECRET && REFRESH_TOKEN);
 }
 
@@ -130,29 +134,52 @@ const TRADING_BASE = ENV === 'production'
   : 'https://api.sandbox.ebay.com/ws/api.dll';
 
 async function tradingCall(callName, bodyInner) {
-  const token = await getAccessToken();
-  // IAF auth: token goes in X-EBAY-API-IAF-TOKEN header.
-  // Do NOT include <RequesterCredentials><eBayAuthToken> in the body — that's for
-  // legacy Auth'n'Auth tokens and conflicts with IAF, causing 401 errors.
-  const xml = `<?xml version="1.0" encoding="utf-8"?>
+  // Two auth options for Trading API:
+  //  A. EBAY_AUTH_TOKEN (Auth'n'Auth legacy token from User Tokens page) →
+  //     uses Dev/App/Cert headers + <RequesterCredentials><eBayAuthToken> in body.
+  //     Simpler, works without OAuth scope dance. Tokens last ~18 months.
+  //  B. OAuth IAF token via refresh-token flow → modern, uses X-EBAY-API-IAF-TOKEN header,
+  //     no <RequesterCredentials> in body. Requires `https://api.ebay.com/oauth/api_scope` granted.
+  const authToken = process.env.EBAY_AUTH_TOKEN;
+  const useAuthnAuth = !!authToken;
+
+  let headers;
+  let xml;
+
+  if (useAuthnAuth) {
+    headers = {
+      'Content-Type': 'text/xml',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1349',
+      'X-EBAY-API-CALL-NAME': callName,
+      'X-EBAY-API-SITEID': process.env.EBAY_SITE_ID || '3',
+      'X-EBAY-API-DEV-NAME': process.env.EBAY_DEV_ID || '',
+      'X-EBAY-API-APP-NAME': CLIENT_ID || '',
+      'X-EBAY-API-CERT-NAME': CLIENT_SECRET || '',
+    };
+    xml = `<?xml version="1.0" encoding="utf-8"?>
+<${callName}Request xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${authToken}</eBayAuthToken></RequesterCredentials>
+  ${bodyInner}
+</${callName}Request>`;
+  } else {
+    const token = await getAccessToken();
+    headers = {
+      'Content-Type': 'text/xml',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1349',
+      'X-EBAY-API-CALL-NAME': callName,
+      'X-EBAY-API-SITEID': process.env.EBAY_SITE_ID || '3',
+      'X-EBAY-API-IAF-TOKEN': token,
+    };
+    xml = `<?xml version="1.0" encoding="utf-8"?>
 <${callName}Request xmlns="urn:ebay:apis:eBLBaseComponents">
   ${bodyInner}
 </${callName}Request>`;
+  }
+
   try {
-    const r = await axios.post(TRADING_BASE, xml, {
-      headers: {
-        'Content-Type': 'text/xml',
-        'X-EBAY-API-COMPATIBILITY-LEVEL': '1349',
-        'X-EBAY-API-CALL-NAME': callName,
-        'X-EBAY-API-SITEID': process.env.EBAY_SITE_ID || '3', // 3 = UK
-        'X-EBAY-API-IAF-TOKEN': token,
-      },
-      timeout: 60000,
-    });
-    return r.data; // raw XML string
+    const r = await axios.post(TRADING_BASE, xml, { headers, timeout: 60000 });
+    return r.data;
   } catch (e) {
-    // Trading API returns errors as XML even with 200; or 401/500 with empty body.
-    // Surface whatever info we have.
     const status = e.response?.status;
     const body = e.response?.data;
     let detail = `Trading API ${callName} failed`;
