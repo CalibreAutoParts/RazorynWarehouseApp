@@ -2692,13 +2692,17 @@ function openStaffModal(id) {
    LISTING MIRROR — eBay → Shopify
    ========================================================== */
 let MirrorState = {
-  listings: [],         // pulled from eBay
-  selected: new Set(),  // itemIds
-  selectedImages: {},   // itemId -> Set of image URLs to use
-  customPrices: {},     // itemId -> Number (user-entered override)
-  pricingMode: 'percent', // 'percent' | 'manual'
-  percentDiscount: 0,   // % off eBay price (e.g. 10 = 10% cheaper than eBay)
-  productStatus: 'draft', // 'draft' | 'active'
+  listings: [],
+  selected: new Set(),
+  selectedImages: {},
+  customPrices: {},
+  titleOverrides: {},   // itemId -> string (when admin edits the title inline)
+  skuOverrides: {},     // itemId -> string
+  metafields: [],       // [{ namespace, key, value, type }] applied to all selected
+  filterText: '',       // for search box
+  pricingMode: 'percent',
+  percentDiscount: 0,
+  productStatus: 'draft',
 };
 
 function renderMirror() {
@@ -2744,6 +2748,21 @@ function renderMirror() {
                 </select>
               </div>
             </div>
+
+            <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+              <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Filter listings</div>
+              <input type="text" id="mr-filter" placeholder="Search by title, SKU, or item ID…" oninput="updateFilter(this.value)" style="width:100%">
+            </div>
+
+            <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">Common metafields (applied to all selected listings on mirror)</div>
+                <button class="btn btn-outline btn-sm" onclick="addMetafield()">+ Add metafield</button>
+              </div>
+              <div id="mr-metafields"></div>
+              <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">e.g. namespace=<code>custom</code>, key=<code>brand</code>, value=<code>Hyundai</code> — Shopify will store this as <code>custom.brand = "Hyundai"</code> on every mirrored product.</div>
+            </div>
+
             <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="btn btn-outline btn-sm" onclick="selectAll(true)">Select all listings</button>
               <button class="btn btn-outline btn-sm" onclick="selectAll(false)">Deselect all listings</button>
@@ -2782,6 +2801,7 @@ async function pullEbayListings() {
     el('mirror-empty').style.display = 'none';
     el('mirror-toolbar').style.display = 'block';
     paintMirrorList();
+    paintMetafields();
     const noPhotos = MirrorState.listings.filter(l => !l.pictureUrls.length).length;
     let msg = `Loaded ${MirrorState.listings.length} listings`;
     if (noPhotos) msg += ` (${noPhotos} have no photos on eBay)`;
@@ -2832,13 +2852,60 @@ function computeShopifyPrice(listing) {
   return Math.round((listing.priceEbay * (1 - pct / 100)) * 100) / 100;
 }
 
+function updateFilter(text) {
+  MirrorState.filterText = (text || '').toLowerCase().trim();
+  paintMirrorList();
+}
+
+function addMetafield() {
+  MirrorState.metafields.push({ namespace: 'custom', key: '', value: '', type: 'single_line_text_field' });
+  paintMetafields();
+}
+function removeMetafield(idx) {
+  MirrorState.metafields.splice(idx, 1);
+  paintMetafields();
+}
+function updateMetafield(idx, field, value) {
+  if (MirrorState.metafields[idx]) MirrorState.metafields[idx][field] = value;
+}
+function paintMetafields() {
+  const wrap = el('mr-metafields');
+  if (!wrap) return;
+  wrap.innerHTML = MirrorState.metafields.map((mf, i) => `
+    <div style="display:grid;grid-template-columns:130px 1fr 1.5fr 180px 36px;gap:6px;margin-bottom:6px;align-items:center">
+      <input value="${escapeAttr(mf.namespace)}" placeholder="namespace" oninput="updateMetafield(${i},'namespace',this.value)">
+      <input value="${escapeAttr(mf.key)}" placeholder="key (e.g. brand)" oninput="updateMetafield(${i},'key',this.value)">
+      <input value="${escapeAttr(mf.value)}" placeholder="value (e.g. Hyundai)" oninput="updateMetafield(${i},'value',this.value)">
+      <select onchange="updateMetafield(${i},'type',this.value)">
+        <option value="single_line_text_field" ${mf.type==='single_line_text_field'?'selected':''}>Text</option>
+        <option value="multi_line_text_field" ${mf.type==='multi_line_text_field'?'selected':''}>Multi-line text</option>
+        <option value="number_integer" ${mf.type==='number_integer'?'selected':''}>Integer</option>
+        <option value="number_decimal" ${mf.type==='number_decimal'?'selected':''}>Decimal</option>
+        <option value="boolean" ${mf.type==='boolean'?'selected':''}>Boolean</option>
+        <option value="url" ${mf.type==='url'?'selected':''}>URL</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" onclick="removeMetafield(${i})" style="color:var(--red)">×</button>
+    </div>
+  `).join('');
+}
+
 function paintMirrorList() {
   const list = el('mirror-list');
   if (!list) return;
   const manualMode = MirrorState.pricingMode === 'manual';
-  list.innerHTML = MirrorState.listings.map(l => {
+  const filter = MirrorState.filterText;
+  const filtered = filter
+    ? MirrorState.listings.filter(l =>
+        (l.title || '').toLowerCase().includes(filter) ||
+        (l.sku || '').toLowerCase().includes(filter) ||
+        (l.itemId || '').toString().includes(filter))
+    : MirrorState.listings;
+
+  list.innerHTML = filtered.map(l => {
     const sel = MirrorState.selected.has(l.itemId);
     const imgSet = MirrorState.selectedImages[l.itemId] || new Set();
+    const titleVal = MirrorState.titleOverrides[l.itemId] != null ? MirrorState.titleOverrides[l.itemId] : l.title;
+    const skuVal = MirrorState.skuOverrides[l.itemId] != null ? MirrorState.skuOverrides[l.itemId] : (l.sku || '');
     return `
       <div class="card" style="margin-bottom:10px;${sel ? '' : 'opacity:0.5'}" data-row="${l.itemId}">
         <div class="card-body">
@@ -2847,9 +2914,9 @@ function paintMirrorList() {
             <div style="flex:1;min-width:0">
               <div style="display:flex;justify-content:space-between;gap:14px;align-items:flex-start;margin-bottom:8px">
                 <div style="flex:1;min-width:0">
-                  <div style="font-weight:600;font-size:14px">${escapeHtml(l.title)}</div>
-                  <div style="display:flex;gap:14px;font-size:12px;color:var(--ink-soft);margin-top:4px;flex-wrap:wrap">
-                    <span>SKU: <strong style="font-family:ui-monospace,monospace;color:var(--ink)">${escapeHtml(l.sku || '— missing —')}</strong></span>
+                  <input type="text" value="${escapeAttr(titleVal)}" oninput="MirrorState.titleOverrides['${l.itemId}']=this.value" style="width:100%;font-weight:600;font-size:14px;border:none;background:transparent;padding:2px 0" title="Title (will apply to Shopify)">
+                  <div style="display:flex;gap:14px;font-size:12px;color:var(--ink-soft);margin-top:4px;flex-wrap:wrap;align-items:center">
+                    <span>SKU: <input type="text" value="${escapeAttr(skuVal)}" oninput="MirrorState.skuOverrides['${l.itemId}']=this.value" style="width:200px;padding:2px 6px;font-family:ui-monospace,monospace;font-size:12px" placeholder="(no SKU)"></span>
                     <span>Item: ${l.itemId}</span>
                     <span>eBay price: <strong style="color:var(--ink)">${gbp(l.priceEbay)}</strong></span>
                   </div>
@@ -2862,7 +2929,6 @@ function paintMirrorList() {
                   }
                 </div>
               </div>
-              ${l.sku ? '' : '<div style="padding:8px;background:var(--amber-light);color:var(--amber);border-radius:6px;font-size:12px;margin-bottom:8px">⚠ This eBay listing has no SKU. Add one on eBay before mirroring.</div>'}
               <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Photos to import (${imgSet.size} of ${l.pictureUrls.length} selected)</div>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
                 ${(l.imageMeta || l.pictureUrls.map(u=>({url:u}))).map((im, i) => {
@@ -2884,6 +2950,9 @@ function paintMirrorList() {
       </div>
     `;
   }).join('');
+  if (filter && filtered.length === 0) {
+    list.innerHTML = '<div class="empty"><div class="t">No listings match "' + escapeHtml(filter) + '"</div></div>';
+  }
   updateMirrorCounter();
 }
 
@@ -2925,17 +2994,19 @@ async function mirrorSelected() {
   const selected = MirrorState.listings.filter(l => MirrorState.selected.has(l.itemId));
   if (!selected.length) { toast('Nothing selected', 'warn'); return; }
 
-  const missingSku = selected.filter(l => !l.sku);
+  // Check SKU using overrides
+  const effectiveSku = (l) => MirrorState.skuOverrides[l.itemId] != null ? MirrorState.skuOverrides[l.itemId] : l.sku;
+  const missingSku = selected.filter(l => !effectiveSku(l));
   if (missingSku.length) {
     if (!confirm(`${missingSku.length} listing(s) have no SKU and will be skipped. Continue with the rest?`)) return;
   }
-  const valid = selected.filter(l => l.sku);
+  const valid = selected.filter(l => effectiveSku(l));
 
   // Check Shopify for conflicts
   toast('Checking Shopify for existing products…', 'info');
   let conflicts = [];
   try {
-    const r = await Api.post('/api/listings/check-conflicts', { skus: valid.map(l => l.sku) });
+    const r = await Api.post('/api/listings/check-conflicts', { skus: valid.map(l => effectiveSku(l)) });
     conflicts = r.conflicts || [];
   } catch (e) {
     toast('Conflict check failed: ' + e.message, 'error');
@@ -2952,14 +3023,15 @@ async function mirrorSelected() {
     );
   }
 
-  // Build payload
+  // Build payload — apply title/SKU overrides and common metafields
   const items = valid.map(l => ({
     itemId: l.itemId,
-    sku: l.sku,
-    title: l.title,
+    sku: MirrorState.skuOverrides[l.itemId] != null ? MirrorState.skuOverrides[l.itemId] : l.sku,
+    title: MirrorState.titleOverrides[l.itemId] != null ? MirrorState.titleOverrides[l.itemId] : l.title,
     price: computeShopifyPrice(l),
     imageUrls: Array.from(MirrorState.selectedImages[l.itemId] || []),
     status: MirrorState.productStatus,
+    metafields: MirrorState.metafields.filter(mf => mf.key && mf.value),
   }));
 
   toast(`Mirroring ${items.length} listings to Shopify…`, 'info');
