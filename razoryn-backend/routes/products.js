@@ -153,14 +153,39 @@ router.post('/:id/adjust-stock', requirePermission('inventory'), async (req, res
   res.json({ product: result });
 });
 
-// DELETE /api/products/:id  — soft delete (admin)
+// DELETE /api/products/:id  — soft delete by default (admin).
+// Pass ?hard=true&shopify=true to also delete from Shopify.
 router.delete('/:id', requireAdmin, async (req, res) => {
-  const { rows } = await query(
-    `UPDATE products SET active = false WHERE id = $1 RETURNING id`,
-    [req.params.id]
-  );
-  if (!rows[0]) return res.status(404).json({ error: 'not_found' });
-  await audit(req, 'delete_product', 'product', req.params.id);
+  const hard = req.query.hard === 'true';
+  const removeFromShopify = req.query.shopify === 'true';
+  const { rows: productRows } = await query(`SELECT * FROM products WHERE id = $1`, [req.params.id]);
+  const product = productRows[0];
+  if (!product) return res.status(404).json({ error: 'not_found' });
+
+  // Optionally delete from Shopify first
+  if (removeFromShopify && product.shopify_product_id) {
+    try {
+      const shopify = require('../services/shopify');
+      if (shopify.isConfigured()) {
+        const axios = require('axios');
+        // Use direct API call rather than adding a method just for this
+        await axios.delete(
+          `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${process.env.SHOPIFY_API_VERSION || '2025-01'}/products/${product.shopify_product_id}.json`,
+          { headers: { 'X-Shopify-Access-Token': await shopify.getAccessToken() } }
+        );
+      }
+    } catch (e) {
+      console.warn('[products] shopify delete failed:', e.message);
+      // Continue with local delete even if Shopify fails
+    }
+  }
+
+  if (hard) {
+    await query(`DELETE FROM products WHERE id = $1`, [req.params.id]);
+  } else {
+    await query(`UPDATE products SET active = false WHERE id = $1`, [req.params.id]);
+  }
+  await audit(req, hard ? 'hard_delete_product' : 'delete_product', 'product', req.params.id, { removeFromShopify });
   res.json({ ok: true });
 });
 
