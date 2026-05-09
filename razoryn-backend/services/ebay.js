@@ -251,7 +251,6 @@ async function getActiveListings() {
       const startPrice = extractOne(itemXml, 'StartPrice') || extractOne(itemXml, 'CurrentPrice') || '0';
       const buyItNow = extractOne(itemXml, 'BuyItNowPrice');
       const currency = (extractOne(itemXml, 'StartPrice') || '').match(/currencyID="([^"]+)"/);
-      // PictureDetails > PictureURL (multiple)
       const picBlock = extractOne(itemXml, 'PictureDetails') || '';
       const pictureUrls = extractAll(picBlock, 'PictureURL').map(decodeEntities);
       const galleryUrl = decodeEntities(extractOne(picBlock, 'GalleryURL') || '');
@@ -268,10 +267,33 @@ async function getActiveListings() {
       });
     }
 
-    // Pagination — stop if this page wasn't full
     const totalPages = parseInt(extractOne(xml, 'TotalNumberOfPages') || '1');
     if (page >= totalPages) break;
     page++;
+  }
+
+  // Step 2: GetMyeBaySelling only returns the GalleryURL (1 photo) and sometimes
+  // omits photos entirely. Enrich every listing with GetItem to get the full picture set.
+  // Concurrency-limited to avoid hammering eBay.
+  const concurrency = 6;
+  let enriched = 0;
+  for (let i = 0; i < all.length; i += concurrency) {
+    const batch = all.slice(i, i + concurrency);
+    await Promise.all(batch.map(async (l) => {
+      try {
+        const itemXml = await tradingCall('GetItem', `<ItemID>${l.itemId}</ItemID><IncludeItemSpecifics>false</IncludeItemSpecifics>`);
+        const picBlock = extractOne(itemXml, 'PictureDetails') || '';
+        const pictureUrls = extractAll(picBlock, 'PictureURL').map(decodeEntities);
+        const galleryUrl = decodeEntities(extractOne(picBlock, 'GalleryURL') || '');
+        const allPics = [...new Set([galleryUrl, ...pictureUrls].filter(Boolean))];
+        if (allPics.length) l.pictureUrls = allPics;
+      } catch (e) {
+        // Don't fail the whole pull if one item enrichment fails
+        console.warn(`[ebay] enrich ${l.itemId} failed: ${e.message}`);
+      }
+    }));
+    enriched += batch.length;
+    if (enriched % 60 === 0) console.log(`[ebay] enriched ${enriched}/${all.length}`);
   }
 
   // Auto-detect probable template images: any image URL appearing in 2+ listings
