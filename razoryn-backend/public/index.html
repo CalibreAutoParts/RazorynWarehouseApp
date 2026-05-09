@@ -2695,15 +2695,49 @@ let MirrorState = {
   listings: [],
   selected: new Set(),
   selectedImages: {},
-  customPrices: {},
-  titleOverrides: {},   // itemId -> string (when admin edits the title inline)
-  skuOverrides: {},     // itemId -> string
-  metafields: [],       // [{ namespace, key, value, type }] applied to all selected
-  filterText: '',       // for search box
+  customPrices: {},     // itemId -> Number (overrides computed price even in % mode)
+  titleOverrides: {},
+  skuOverrides: {},
+  metafields: [],
+  filterText: '',
+  statusFilter: 'all',  // 'all' | 'new' | 'mirrored'
   pricingMode: 'percent',
   percentDiscount: 0,
   productStatus: 'draft',
+  saveTimers: {},       // debounce timers per itemId
 };
+
+// Debounce-save an override to backend
+function scheduleSaveOverride(itemId) {
+  clearTimeout(MirrorState.saveTimers[itemId]);
+  MirrorState.saveTimers[itemId] = setTimeout(async () => {
+    try {
+      await Api.post('/api/listings/save-override', {
+        itemId,
+        overrideSku: MirrorState.skuOverrides[itemId] || null,
+        overrideTitle: MirrorState.titleOverrides[itemId] || null,
+        customPrice: MirrorState.customPrices[itemId] != null ? MirrorState.customPrices[itemId] : null,
+      });
+      // small visual indicator: badge on row
+      const row = document.querySelector(`[data-row="${itemId}"]`);
+      if (row) {
+        let saved = row.querySelector('.saved-indicator');
+        if (!saved) {
+          saved = document.createElement('span');
+          saved.className = 'saved-indicator';
+          saved.style.cssText = 'font-size:11px;color:var(--green);margin-left:8px;opacity:0;transition:opacity .2s';
+          saved.textContent = '✓ Saved';
+          const titleField = row.querySelector('input[type="text"]');
+          if (titleField && titleField.parentNode) titleField.parentNode.appendChild(saved);
+        }
+        saved.style.opacity = '1';
+        setTimeout(() => { if (saved) saved.style.opacity = '0'; }, 1500);
+      }
+    } catch (e) {
+      console.warn('save override failed', e);
+    }
+  }, 600);
+}
 
 function renderMirror() {
   el('content').innerHTML = `
@@ -2751,6 +2785,11 @@ function renderMirror() {
 
             <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
               <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Filter listings</div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                <button class="btn btn-outline btn-sm" onclick="setStatusFilter('all')" id="mr-status-all">All</button>
+                <button class="btn btn-outline btn-sm" onclick="setStatusFilter('new')" id="mr-status-new">New only</button>
+                <button class="btn btn-outline btn-sm" onclick="setStatusFilter('mirrored')" id="mr-status-mirrored">Already on Shopify</button>
+              </div>
               <input type="text" id="mr-filter" placeholder="Search by title, SKU, or item ID…" oninput="updateFilter(this.value)" style="width:100%">
             </div>
 
@@ -2793,9 +2832,14 @@ async function pullEbayListings() {
     MirrorState.selected = new Set(MirrorState.listings.map(l => l.itemId));
     MirrorState.selectedImages = {};
     MirrorState.customPrices = {};
-    // Default: select only the FIRST photo per listing (user preference).
-    // Skip auto-template-detection for default selection — user wants 1 photo each, simple.
+    MirrorState.titleOverrides = {};
+    MirrorState.skuOverrides = {};
+
+    // Seed in-memory overrides from server-side persisted data
     for (const l of MirrorState.listings) {
+      if (l.overrideSku != null) MirrorState.skuOverrides[l.itemId] = l.overrideSku;
+      if (l.overrideTitle != null) MirrorState.titleOverrides[l.itemId] = l.overrideTitle;
+      if (l.customPrice != null) MirrorState.customPrices[l.itemId] = l.customPrice;
       MirrorState.selectedImages[l.itemId] = new Set(l.pictureUrls.length ? [l.pictureUrls[0]] : []);
     }
     el('mirror-empty').style.display = 'none';
@@ -2803,8 +2847,10 @@ async function pullEbayListings() {
     paintMirrorList();
     paintMetafields();
     const noPhotos = MirrorState.listings.filter(l => !l.pictureUrls.length).length;
+    const onShopify = MirrorState.listings.filter(l => l.existsOnShopify).length;
     let msg = `Loaded ${MirrorState.listings.length} listings`;
-    if (noPhotos) msg += ` (${noPhotos} have no photos on eBay)`;
+    if (onShopify) msg += ` · ${onShopify} already on Shopify`;
+    if (noPhotos) msg += ` · ${noPhotos} no photos`;
     toast(msg, 'success');
   } catch (e) {
     toast('Failed: ' + (e.data?.message || e.message), 'error');
@@ -2843,13 +2889,49 @@ function repaintPrices() {
 }
 
 function computeShopifyPrice(listing) {
+  // Per-item custom price overrides everything (works in both pricing modes)
+  if (MirrorState.customPrices[listing.itemId] != null) {
+    return MirrorState.customPrices[listing.itemId];
+  }
   if (MirrorState.pricingMode === 'manual') {
-    return MirrorState.customPrices[listing.itemId] != null
-      ? MirrorState.customPrices[listing.itemId]
-      : listing.priceEbay;
+    return listing.priceEbay;
   }
   const pct = MirrorState.percentDiscount || 0;
   return Math.round((listing.priceEbay * (1 - pct / 100)) * 100) / 100;
+}
+function isPriceCustom(listing) {
+  return MirrorState.customPrices[listing.itemId] != null;
+}
+function setCustomPrice(itemId, value) {
+  const v = parseFloat(value);
+  if (isNaN(v)) {
+    delete MirrorState.customPrices[itemId];
+  } else {
+    MirrorState.customPrices[itemId] = Math.round(v * 100) / 100;
+  }
+  scheduleSaveOverride(itemId);
+  // Re-paint just this row's price area
+  const row = document.querySelector(`[data-row="${itemId}"]`);
+  if (row) {
+    const priceCell = row.querySelector('[data-price-cell]');
+    if (priceCell) priceCell.outerHTML = renderPriceCell(MirrorState.listings.find(l => l.itemId == itemId));
+  }
+}
+function clearCustomPrice(itemId) {
+  delete MirrorState.customPrices[itemId];
+  scheduleSaveOverride(itemId);
+  paintMirrorList();
+}
+function renderPriceCell(l) {
+  const custom = isPriceCustom(l);
+  const price = computeShopifyPrice(l);
+  return `<div data-price-cell style="text-align:right;flex-shrink:0">
+    <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Shopify price ${custom?'<span style="color:var(--red)">· custom</span>':''}</div>
+    <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end">
+      <input type="number" step="0.01" value="${price}" onchange="setCustomPrice('${l.itemId}',this.value)" style="width:110px;text-align:right;font-size:16px;font-weight:600">
+      ${custom ? `<button class="btn btn-ghost btn-sm" onclick="clearCustomPrice('${l.itemId}')" title="Reset to ${MirrorState.pricingMode === 'percent' ? 'discount %' : 'eBay price'}">↺</button>` : ''}
+    </div>
+  </div>`;
 }
 
 function updateFilter(text) {
@@ -2892,14 +2974,19 @@ function paintMetafields() {
 function paintMirrorList() {
   const list = el('mirror-list');
   if (!list) return;
-  const manualMode = MirrorState.pricingMode === 'manual';
   const filter = MirrorState.filterText;
-  const filtered = filter
-    ? MirrorState.listings.filter(l =>
-        (l.title || '').toLowerCase().includes(filter) ||
+  const statusFilter = MirrorState.statusFilter;
+  const filtered = MirrorState.listings.filter(l => {
+    if (filter) {
+      const matchText = (l.title || '').toLowerCase().includes(filter) ||
         (l.sku || '').toLowerCase().includes(filter) ||
-        (l.itemId || '').toString().includes(filter))
-    : MirrorState.listings;
+        (l.itemId || '').toString().includes(filter);
+      if (!matchText) return false;
+    }
+    if (statusFilter === 'new' && l.existsOnShopify) return false;
+    if (statusFilter === 'mirrored' && !l.existsOnShopify) return false;
+    return true;
+  });
 
   list.innerHTML = filtered.map(l => {
     const sel = MirrorState.selected.has(l.itemId);
@@ -2914,20 +3001,18 @@ function paintMirrorList() {
             <div style="flex:1;min-width:0">
               <div style="display:flex;justify-content:space-between;gap:14px;align-items:flex-start;margin-bottom:8px">
                 <div style="flex:1;min-width:0">
-                  <input type="text" value="${escapeAttr(titleVal)}" oninput="MirrorState.titleOverrides['${l.itemId}']=this.value" style="width:100%;font-weight:600;font-size:14px;border:none;background:transparent;padding:2px 0" title="Title (will apply to Shopify)">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                    ${l.existsOnShopify ? '<span class="pill green" style="font-size:10px"><span class="dot"></span>On Shopify</span>' : '<span class="pill blue" style="font-size:10px">New</span>'}
+                  </div>
+                  <input type="text" value="${escapeAttr(titleVal)}" oninput="MirrorState.titleOverrides['${l.itemId}']=this.value;scheduleSaveOverride('${l.itemId}')" style="width:100%;font-weight:600;font-size:14px;border:none;background:transparent;padding:2px 0">
                   <div style="display:flex;gap:14px;font-size:12px;color:var(--ink-soft);margin-top:4px;flex-wrap:wrap;align-items:center">
-                    <span>SKU: <input type="text" value="${escapeAttr(skuVal)}" oninput="MirrorState.skuOverrides['${l.itemId}']=this.value" style="width:200px;padding:2px 6px;font-family:ui-monospace,monospace;font-size:12px" placeholder="(no SKU)"></span>
+                    <span>SKU: <input type="text" value="${escapeAttr(skuVal)}" oninput="MirrorState.skuOverrides['${l.itemId}']=this.value;scheduleSaveOverride('${l.itemId}')" style="width:200px;padding:2px 6px;font-family:ui-monospace,monospace;font-size:12px" placeholder="(no SKU)"></span>
                     <span>Item: ${l.itemId}</span>
                     <span>eBay price: <strong style="color:var(--ink)">${gbp(l.priceEbay)}</strong></span>
+                    <span>Qty: <strong style="color:var(--ink)">${l.quantityAvailable != null ? l.quantityAvailable : '—'}</strong></span>
                   </div>
                 </div>
-                <div style="text-align:right;flex-shrink:0">
-                  <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Shopify price</div>
-                  ${manualMode
-                    ? `<input type="number" step="0.01" value="${computeShopifyPrice(l)}" onchange="MirrorState.customPrices['${l.itemId}']=parseFloat(this.value)||0" style="width:120px;text-align:right">`
-                    : `<div data-price-out style="font-size:18px;font-weight:700">${gbp(computeShopifyPrice(l))}</div>`
-                  }
-                </div>
+                ${renderPriceCell(l)}
               </div>
               <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Photos to import (${imgSet.size} of ${l.pictureUrls.length} selected)</div>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
@@ -2936,7 +3021,7 @@ function paintMirrorList() {
                   const checked = imgSet.has(url);
                   const tmpl = im.likelyTemplate;
                   return `
-                    <label style="position:relative;display:block;cursor:pointer" title="${tmpl ? 'Likely template image (appears in multiple listings)' : ''}">
+                    <label style="position:relative;display:block;cursor:pointer" title="${tmpl ? 'Likely template image' : ''}">
                       <input type="checkbox" ${checked?'checked':''} onchange="toggleImage('${l.itemId}','${escapeAttr(url)}',this.checked)" style="position:absolute;top:4px;left:4px;z-index:2">
                       <img src="${escapeAttr(url)}" style="width:80px;height:80px;object-fit:cover;border-radius:6px;border:2px solid ${checked?'var(--red)':'var(--line)'};${tmpl?'filter:grayscale(0.7)':''}" loading="lazy" referrerpolicy="no-referrer">
                       ${tmpl ? '<span style="position:absolute;bottom:2px;right:2px;background:var(--amber);color:white;font-size:9px;padding:1px 4px;border-radius:3px;font-weight:600">TMPL</span>' : ''}
@@ -2950,10 +3035,14 @@ function paintMirrorList() {
       </div>
     `;
   }).join('');
-  if (filter && filtered.length === 0) {
-    list.innerHTML = '<div class="empty"><div class="t">No listings match "' + escapeHtml(filter) + '"</div></div>';
+  if (!filtered.length) {
+    list.innerHTML = '<div class="empty"><div class="t">No listings match the current filter</div></div>';
   }
   updateMirrorCounter();
+}
+function setStatusFilter(v) {
+  MirrorState.statusFilter = v;
+  paintMirrorList();
 }
 
 function escapeHtml(s) { return String(s||'').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
@@ -3023,7 +3112,7 @@ async function mirrorSelected() {
     );
   }
 
-  // Build payload — apply title/SKU overrides and common metafields
+  // Build payload — apply title/SKU overrides, common metafields, and ship inventory qty from eBay
   const items = valid.map(l => ({
     itemId: l.itemId,
     sku: MirrorState.skuOverrides[l.itemId] != null ? MirrorState.skuOverrides[l.itemId] : l.sku,
@@ -3032,6 +3121,7 @@ async function mirrorSelected() {
     imageUrls: Array.from(MirrorState.selectedImages[l.itemId] || []),
     status: MirrorState.productStatus,
     metafields: MirrorState.metafields.filter(mf => mf.key && mf.value),
+    qty: l.quantityAvailable != null ? l.quantityAvailable : null,
   }));
 
   toast(`Mirroring ${items.length} listings to Shopify…`, 'info');
