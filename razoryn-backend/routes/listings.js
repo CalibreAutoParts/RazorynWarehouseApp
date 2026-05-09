@@ -1,11 +1,14 @@
 // routes/listings.js — eBay → Shopify listing mirror
 const express = require('express');
-const { requireAdmin } = require('../middleware/auth');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 const ebay = require('../services/ebay');
 const shopify = require('../services/shopify');
 
 const router = express.Router();
+
+// All listing endpoints require auth + admin
+router.use(requireAuth);
 
 // GET /api/listings/ebay-active — pulls all active eBay listings + auto-flags template images
 router.get('/ebay-active', requireAdmin, async (req, res) => {
