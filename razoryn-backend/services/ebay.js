@@ -31,32 +31,50 @@ let cachedToken = null;
 let tokenExpiresAt = 0;
 
 async function getAccessToken() {
-  if (!isConfigured()) throw new Error('ebay_not_configured');
+  if (!isConfigured()) {
+    const have = {
+      EBAY_APP_ID_or_CLIENT_ID: !!CLIENT_ID,
+      EBAY_CERT_ID_or_CLIENT_SECRET: !!CLIENT_SECRET,
+      EBAY_REFRESH_TOKEN: !!REFRESH_TOKEN,
+    };
+    throw new Error('ebay_not_configured. Have: ' + JSON.stringify(have));
+  }
   if (cachedToken && Date.now() < tokenExpiresAt - 60_000) return cachedToken;
 
   const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
 
-  const r = await axios.post(
-    `${BASE}/identity/v1/oauth2/token`,
-    new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: REFRESH_TOKEN,
-      scope: [
-        'https://api.ebay.com/oauth/api_scope/sell.inventory',
-        'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
-        'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
-      ].join(' '),
-    }),
-    {
-      headers: {
-        Authorization: `Basic ${creds}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-    }
-  );
-  cachedToken = r.data.access_token;
-  tokenExpiresAt = Date.now() + (r.data.expires_in * 1000);
-  return cachedToken;
+  try {
+    const r = await axios.post(
+      `${BASE}/identity/v1/oauth2/token`,
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: REFRESH_TOKEN,
+        scope: [
+          'https://api.ebay.com/oauth/api_scope/sell.inventory',
+          'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+          'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
+        ].join(' '),
+      }),
+      {
+        headers: {
+          Authorization: `Basic ${creds}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        timeout: 15000,
+      }
+    );
+    cachedToken = r.data.access_token;
+    tokenExpiresAt = Date.now() + (r.data.expires_in * 1000);
+    return cachedToken;
+  } catch (e) {
+    // Surface the actual eBay error body so we can diagnose
+    const body = e.response?.data;
+    const errCode = body?.error || 'unknown';
+    const errDesc = body?.error_description || e.message;
+    const detail = `eBay token refresh failed [${errCode}]: ${errDesc}`;
+    console.error('[ebay] ' + detail, body);
+    throw new Error(detail);
+  }
 }
 
 async function http(method, url, data) {
