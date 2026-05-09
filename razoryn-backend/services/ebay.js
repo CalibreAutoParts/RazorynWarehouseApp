@@ -3,12 +3,14 @@
 // Uses OAuth refresh-token flow to get a fresh access token, then calls
 // the Inventory and Fulfillment APIs.
 //
-// Two accounts are supported (matching the existing Calibre setup):
-//   - "em" Electric Motor Parts
-//   - "cl" Cappanel & Lamps
-//
-// For Razoryn we currently only have one or two accounts; this is wired
-// generically so adding more is just a config tweak.
+// Env vars supported (either naming convention works — eBay's dashboard uses
+// APP_ID/CERT_ID, the OAuth spec uses CLIENT_ID/CLIENT_SECRET; pick whichever):
+//   EBAY_CLIENT_ID    or  EBAY_APP_ID         — public app identifier
+//   EBAY_CLIENT_SECRET or EBAY_CERT_ID        — secret key
+//   EBAY_REFRESH_TOKEN                        — long-lived seller token (required)
+//   EBAY_DEV_ID                               — optional, only some Trading API calls need it
+//   EBAY_MARKETPLACE_ID                       — defaults to EBAY_GB
+//   EBAY_SITE_ID                              — defaults to 3 (UK) for Trading API
 const axios = require('axios');
 
 const ENV = process.env.EBAY_ENV || 'production';
@@ -16,8 +18,13 @@ const BASE = ENV === 'production'
   ? 'https://api.ebay.com'
   : 'https://api.sandbox.ebay.com';
 
+// Accept either naming pattern
+const CLIENT_ID = process.env.EBAY_CLIENT_ID || process.env.EBAY_APP_ID;
+const CLIENT_SECRET = process.env.EBAY_CLIENT_SECRET || process.env.EBAY_CERT_ID;
+const REFRESH_TOKEN = process.env.EBAY_REFRESH_TOKEN;
+
 function isConfigured() {
-  return !!(process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET && process.env.EBAY_REFRESH_TOKEN);
+  return !!(CLIENT_ID && CLIENT_SECRET && REFRESH_TOKEN);
 }
 
 let cachedToken = null;
@@ -27,15 +34,13 @@ async function getAccessToken() {
   if (!isConfigured()) throw new Error('ebay_not_configured');
   if (cachedToken && Date.now() < tokenExpiresAt - 60_000) return cachedToken;
 
-  const creds = Buffer.from(
-    `${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`
-  ).toString('base64');
+  const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
 
   const r = await axios.post(
     `${BASE}/identity/v1/oauth2/token`,
     new URLSearchParams({
       grant_type: 'refresh_token',
-      refresh_token: process.env.EBAY_REFRESH_TOKEN,
+      refresh_token: REFRESH_TOKEN,
       scope: [
         'https://api.ebay.com/oauth/api_scope/sell.inventory',
         'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
