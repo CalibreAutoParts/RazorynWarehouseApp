@@ -255,6 +255,11 @@ async function getActiveListings() {
 
       const title = decodeEntities(extractOne(itemXml, 'Title') || '');
       const sku = decodeEntities(extractOne(itemXml, 'SKU') || '');
+      // Quantity available = Quantity - QuantitySold
+      const quantityListed = parseInt(extractOne(itemXml, 'Quantity') || '1');
+      const sellingStatus = extractOne(itemXml, 'SellingStatus') || '';
+      const quantitySold = parseInt(extractOne(sellingStatus, 'QuantitySold') || '0');
+      const quantityAvailable = Math.max(0, quantityListed - quantitySold);
       const startPrice = extractOne(itemXml, 'StartPrice') || extractOne(itemXml, 'CurrentPrice') || '0';
       const buyItNow = extractOne(itemXml, 'BuyItNowPrice');
       const currency = (extractOne(itemXml, 'StartPrice') || '').match(/currencyID="([^"]+)"/);
@@ -269,6 +274,8 @@ async function getActiveListings() {
         title,
         priceEbay: parseFloat(buyItNow || startPrice) || 0,
         currency: currency ? currency[1] : 'GBP',
+        quantityAvailable,
+        quantitySold,
         pictureUrls: allPics,
         viewItemURL: decodeEntities(extractOne(itemXml, 'ViewItemURL') || ''),
       });

@@ -231,16 +231,16 @@ async function findProductBySku(sku) {
 
 // Create a new Shopify product with SKU, barcode (= sku), price, and image URLs.
 // imageUrls is an array of public image URLs Shopify will fetch and host.
-async function createProduct({ title, sku, price, imageUrls = [], status = 'draft', metafields = [] }) {
+async function createProduct({ title, sku, price, imageUrls = [], status = 'draft', metafields = [], qty = null }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const r = await shopifyRequest('post', '/products.json', {
     data: {
       product: {
         title,
-        status, // 'draft' | 'active'
+        status,
         variants: [{
           sku,
-          barcode: sku, // SKU = barcode for unified scanning
+          barcode: sku,
           price: price != null ? String(price) : undefined,
           inventory_management: 'shopify',
         }],
@@ -249,15 +249,17 @@ async function createProduct({ title, sku, price, imageUrls = [], status = 'draf
     },
   });
   const product = r.data.product;
-  // Apply metafields after creation
-  if (metafields.length) {
-    await applyMetafields(product.id, metafields);
-  }
+  // Post-create: publish to all sales channels (REST default only does Online Store, sometimes nothing)
+  await publishProductToAllChannels(product.id);
+  // Set inventory quantity at the warehouse location
+  if (qty != null) await setInitialInventory(product, qty);
+  // Apply metafields
+  if (metafields.length) await applyMetafields(product.id, metafields);
   return product;
 }
 
 // Update an existing product's title, price, and replace images.
-async function updateProduct(productId, { title, sku, price, imageUrls = [], status, metafields = [] }) {
+async function updateProduct(productId, { title, sku, price, imageUrls = [], status, metafields = [], qty = null }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const ex = await shopifyRequest('get', `/products/${productId}.json`);
   const existing = ex.data.product;
@@ -296,9 +298,11 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
     }
   }
 
-  if (metafields.length) {
-    await applyMetafields(productId, metafields);
-  }
+  if (metafields.length) await applyMetafields(productId, metafields);
+  // Re-publish in case sales channels were missed previously
+  await publishProductToAllChannels(productId);
+  // Update inventory quantity
+  if (qty != null) await setInitialInventory(existing, qty);
 
   return (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
 }
@@ -324,6 +328,96 @@ async function applyMetafields(productId, metafields) {
   }
 }
 
+// List all sales channels (publications) on this Shopify store
+let cachedPublications = null;
+async function getPublications() {
+  if (cachedPublications) return cachedPublications;
+  const r = await shopifyRequest('post', '/graphql.json', {
+    data: { query: `query { publications(first: 25) { edges { node { id name } } } }` },
+  });
+  cachedPublications = (r.data.data?.publications?.edges || []).map(e => e.node);
+  return cachedPublications;
+}
+
+// Publish a product to all sales channels. Required because REST product create
+// only publishes to "Online Store" by default (and sometimes nothing in newer stores).
+async function publishProductToAllChannels(productId) {
+  try {
+    const pubs = await getPublications();
+    if (!pubs.length) return;
+    const productGid = `gid://shopify/Product/${productId}`;
+    const mutation = `mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
+      publishablePublish(id: $id, input: $input) { userErrors { field message } }
+    }`;
+    await shopifyRequest('post', '/graphql.json', {
+      data: {
+        query: mutation,
+        variables: { id: productGid, input: pubs.map(p => ({ publicationId: p.id })) },
+      },
+    });
+  } catch (e) {
+    console.warn('[shopify] publish to channels failed:', e.message);
+  }
+}
+
+// Set the inventory quantity for a freshly-created product at the warehouse location.
+async function setInitialInventory(product, qty) {
+  if (!LOCATION_ID || qty == null) return;
+  const variant = product.variants && product.variants[0];
+  if (!variant || !variant.inventory_item_id) return;
+  // Connect inventory item to location first (no-op if already connected)
+  try {
+    await shopifyRequest('post', '/inventory_levels/connect.json', {
+      data: {
+        location_id: parseInt(LOCATION_ID),
+        inventory_item_id: parseInt(variant.inventory_item_id),
+      },
+    });
+  } catch (e) { /* already connected, ignore */ }
+  await shopifyRequest('post', '/inventory_levels/set.json', {
+    data: {
+      location_id: parseInt(LOCATION_ID),
+      inventory_item_id: parseInt(variant.inventory_item_id),
+      available: qty,
+    },
+  });
+}
+
+// Batch SKU lookup — given an array of SKUs, return which already exist on Shopify.
+// Uses Shopify's OR query syntax (max ~25 SKUs per request).
+async function findProductsBySkus(skus) {
+  if (!isConfigured() || !skus.length) return {};
+  const found = {};
+  const chunkSize = 25;
+  for (let i = 0; i < skus.length; i += chunkSize) {
+    const chunk = skus.slice(i, i + chunkSize);
+    const q = chunk.map(s => `sku:"${s.replace(/"/g, '\\"')}"`).join(' OR ');
+    try {
+      const query = `query($q: String!) {
+        productVariants(first: 250, query: $q) {
+          edges { node { sku product { id title } } }
+        }
+      }`;
+      const r = await shopifyRequest('post', '/graphql.json', {
+        data: { query, variables: { q } },
+      });
+      const edges = r.data.data?.productVariants?.edges || [];
+      for (const e of edges) {
+        const sku = e.node.sku;
+        if (sku && chunk.includes(sku)) {
+          found[sku] = {
+            product_id: e.node.product.id.split('/').pop(),
+            title: e.node.product.title,
+          };
+        }
+      }
+    } catch (e) {
+      console.warn('[shopify] batch SKU lookup failed:', e.message);
+    }
+  }
+  return found;
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
@@ -333,6 +427,9 @@ module.exports = {
   pushStockForProduct,
   iterateAllProductsAndVariants,
   findProductBySku,
+  findProductsBySkus,
   createProduct,
   updateProduct,
+  publishProductToAllChannels,
+  getPublications,
 };
