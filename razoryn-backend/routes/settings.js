@@ -37,6 +37,27 @@ router.patch('/', requireAdmin, async (req, res) => {
   res.json({ settings: rows[0] });
 });
 
+// POST /api/settings/clear-catalogue (admin) — deletes ALL products and locations.
+// Use before a Shopify import if the warehouse has stale seed/demo data and you
+// want to start clean. Does NOT touch users, schedule, KB, settings.
+router.post('/clear-catalogue', requireAdmin, async (req, res) => {
+  try {
+    // Delete in dependency order
+    await query(`DELETE FROM stock_movements`);
+    await query(`DELETE FROM stock_checks`);
+    await query(`DELETE FROM sale_items`);
+    await query(`DELETE FROM return_photos`);
+    await query(`DELETE FROM returns`);
+    await query(`DELETE FROM products`);
+    await query(`DELETE FROM locations`);
+    await audit(req, 'clear_catalogue', null, null, {});
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[clear-catalogue]', e);
+    res.status(500).json({ error: 'clear_failed', message: e.message });
+  }
+});
+
 // POST /api/settings/sync-now (admin) — manual sync trigger
 router.post('/sync-now', requireAdmin, async (req, res) => {
   try {

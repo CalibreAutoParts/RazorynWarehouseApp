@@ -161,32 +161,24 @@
     flex-shrink: 0;
   }
   .topbar .logo {
-    display: flex; align-items: center; gap: 12px;
+    display: flex; align-items: center; gap: 14px;
     font-weight: 800; font-size: 16px; letter-spacing: -0.02em;
   }
-  .topbar .logo .brand-wrap {
-    /* The PNG has white space — wrap it in a fixed-aspect container with the
-       brand logo positioned to fill, so it always reads as a brand mark. */
-    height: 40px;
-    width: 40px;
-    background: white;
-    border-radius: 8px;
-    overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
-  .topbar .logo .brand-wrap img {
-    width: 110%; height: auto; max-height: none;
+  .topbar .logo img.brand-logo {
+    width: auto;
+    height: 36px;          /* sized to fit ~220x50 area at native 4.47:1 ratio */
+    max-width: 220px;
     object-fit: contain;
+    display: block;
   }
-  [data-theme="dark"] .topbar .logo .brand-wrap {
-    box-shadow: 0 0 0 1px var(--line);
-  }
+  /* Use the dark-mode variant (light E-PARTS) when the app is in dark mode */
+  .topbar .logo img.brand-logo.light { display: block; }
+  .topbar .logo img.brand-logo.dark  { display: none; }
+  [data-theme="dark"] .topbar .logo img.brand-logo.light { display: none; }
+  [data-theme="dark"] .topbar .logo img.brand-logo.dark  { display: block; }
   .topbar .logo .sub {
     color: var(--ink-soft); font-weight: 500; font-size: 12px;
-    padding-left: 12px; border-left: 1px solid var(--line);
+    padding-left: 14px; border-left: 1px solid var(--line);
   }
   .topbar .spacer { flex: 1; }
   .menu-btn.icon-btn { display: none; width: 36px; height: 36px; border-radius: 8px; align-items: center; justify-content: center; }
@@ -547,7 +539,7 @@
 <div class="login-screen" id="login-screen">
   <div class="login-card">
     <div class="login-logo">
-      <div style="background:white;border-radius:12px;padding:20px;display:inline-block;margin-bottom:8px"><img src="/logo.png" alt="Razoryn e-Parts" style="width:200px;height:auto;display:block;"></div>
+      <img src="/logo-dark.png" alt="Razoryn e-Parts" style="width:240px;max-width:80%;height:auto;display:block;margin:0 auto 6px;">
       <div class="sub">Warehouse Hub</div>
     </div>
     <div class="login-tabs">
@@ -594,7 +586,8 @@
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
     <div class="logo">
-      <div class="brand-wrap"><img src="/logo.png" alt="Razoryn e-Parts"></div>
+      <img class="brand-logo light" src="/logo.png" alt="Razoryn e-Parts">
+      <img class="brand-logo dark" src="/logo-dark.png" alt="Razoryn e-Parts">
       <span class="sub">Warehouse Hub</span>
     </div>
     <div class="spacer"></div>
@@ -2977,6 +2970,7 @@ function renderSettings() {
             <button class="btn btn-primary" onclick="findShopifyLocations()">📍 Find my Location ID</button>
             <button class="btn btn-primary" onclick="importFromShopify()">⬇ Import all products</button>
             <button class="btn btn-outline" onclick="syncNow()">↻ Sync orders &amp; stock now</button>
+            <button class="btn btn-outline" onclick="clearCatalogue()" style="margin-left:auto;color:var(--red);border-color:var(--red)">🗑 Clear all products &amp; locations</button>
           </div>
           <div id="shopify-result" style="font-size:12px;color:var(--ink-soft)"></div>
         </div>
@@ -3029,6 +3023,22 @@ async function findShopifyLocations() {
     }
   } catch (e) {
     if (out) out.innerHTML = '<span style="color:var(--red)">Failed: ' + (e.data?.error || e.message) + '. Make sure SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_TOKEN are set in Railway.</span>';
+  }
+}
+
+async function clearCatalogue() {
+  if (!confirm('This will permanently delete ALL products, locations, sales, returns, and stock movements from the warehouse database.\n\nUsers, settings, schedule and key information will be kept.\n\nThis is intended to wipe demo/seed data before importing real Shopify data.\n\nContinue?')) return;
+  if (!confirm('Are you absolutely sure? This cannot be undone.')) return;
+  const out = el('shopify-result');
+  if (out) out.innerHTML = 'Clearing…';
+  try {
+    await Api.post('/api/settings/clear-catalogue');
+    await Store.refresh('products');
+    await Store.refresh('locations');
+    if (out) out.innerHTML = '<strong style="color:var(--green)">Catalogue cleared.</strong> You can now run Import all products to pull a fresh catalogue from Shopify.';
+    toast('Catalogue cleared', 'success');
+  } catch (e) {
+    if (out) out.innerHTML = '<span style="color:var(--red)">Failed: ' + (e.data?.message || e.message) + '</span>';
   }
 }
 
