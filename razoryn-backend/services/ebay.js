@@ -326,6 +326,36 @@ async function getActiveListings() {
   return all;
 }
 
+// ReviseItem — push a SKU and/or title change back to eBay.
+// Risks: revision counts toward eBay's per-listing limit; major changes may affect search ranking;
+// some listings can't be revised (e.g. with bids). Use sparingly, with explicit user confirm.
+async function reviseItem(itemId, { sku, title } = {}) {
+  if (!isConfigured()) throw new Error('ebay_not_configured');
+  if (!itemId) throw new Error('missing_item_id');
+  if (!sku && !title) return { skipped: true };
+
+  const fields = [`<ItemID>${itemId}</ItemID>`];
+  if (title) fields.push(`<Title>${escapeXml(title)}</Title>`);
+  if (sku) fields.push(`<SKU>${escapeXml(sku)}</SKU>`);
+  const body = `<Item>${fields.join('')}</Item>`;
+
+  const xml = await tradingCall('ReviseItem', body);
+  if (xml.includes('<Ack>Failure</Ack>')) {
+    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+    throw new Error('eBay ReviseItem error: ' + decodeEntities(err));
+  }
+  return { ok: true, itemId };
+}
+
+function escapeXml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
@@ -333,4 +363,5 @@ module.exports = {
   getRecentOrders,
   pushStockForProduct,
   getActiveListings,
+  reviseItem,
 };

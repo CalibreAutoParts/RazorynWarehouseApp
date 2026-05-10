@@ -231,35 +231,32 @@ async function findProductBySku(sku) {
 
 // Create a new Shopify product with SKU, barcode (= sku), price, and image URLs.
 // imageUrls is an array of public image URLs Shopify will fetch and host.
-async function createProduct({ title, sku, price, imageUrls = [], status = 'draft', metafields = [], qty = null }) {
+async function createProduct({ title, sku, price, imageUrls = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
-  const r = await shopifyRequest('post', '/products.json', {
-    data: {
-      product: {
-        title,
-        status,
-        variants: [{
-          sku,
-          barcode: sku,
-          price: price != null ? String(price) : undefined,
-          inventory_management: 'shopify',
-        }],
-        images: imageUrls.map(src => ({ src })),
-      },
-    },
-  });
+  const productPayload = {
+    title,
+    status,
+    variants: [{
+      sku,
+      barcode: sku,
+      price: price != null ? String(price) : undefined,
+      inventory_management: 'shopify',
+    }],
+    images: imageUrls.map(src => ({ src })),
+  };
+  if (tags) productPayload.tags = tags; // comma-separated string
+  if (templateSuffix) productPayload.template_suffix = templateSuffix; // e.g. "large-parts"
+
+  const r = await shopifyRequest('post', '/products.json', { data: { product: productPayload } });
   const product = r.data.product;
-  // Post-create: publish to all sales channels (REST default only does Online Store, sometimes nothing)
   await publishProductToAllChannels(product.id);
-  // Set inventory quantity at the warehouse location
   if (qty != null) await setInitialInventory(product, qty);
-  // Apply metafields
   if (metafields.length) await applyMetafields(product.id, metafields);
   return product;
 }
 
 // Update an existing product's title, price, and replace images.
-async function updateProduct(productId, { title, sku, price, imageUrls = [], status, metafields = [], qty = null }) {
+async function updateProduct(productId, { title, sku, price, imageUrls = [], status, metafields = [], qty = null, tags = null, templateSuffix = null }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const ex = await shopifyRequest('get', `/products/${productId}.json`);
   const existing = ex.data.product;
@@ -268,6 +265,8 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
   const patchData = { product: { id: productId } };
   if (title) patchData.product.title = title;
   if (status) patchData.product.status = status;
+  if (tags != null) patchData.product.tags = tags;
+  if (templateSuffix != null) patchData.product.template_suffix = templateSuffix;
   await shopifyRequest('put', `/products/${productId}.json`, { data: patchData });
 
   if (variant && (sku || price != null)) {
@@ -299,12 +298,57 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
   }
 
   if (metafields.length) await applyMetafields(productId, metafields);
-  // Re-publish in case sales channels were missed previously
   await publishProductToAllChannels(productId);
-  // Update inventory quantity
   if (qty != null) await setInitialInventory(existing, qty);
 
   return (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
+}
+
+// List delivery (shipping) profiles. Returns [{id, name}].
+let cachedProfiles = null;
+async function getDeliveryProfiles() {
+  if (cachedProfiles) return cachedProfiles;
+  try {
+    const r = await shopifyRequest('post', '/graphql.json', {
+      data: { query: `query { deliveryProfiles(first: 25) { edges { node { id name } } } }` },
+    });
+    cachedProfiles = (r.data.data?.deliveryProfiles?.edges || []).map(e => e.node);
+    return cachedProfiles;
+  } catch (e) {
+    console.warn('[shopify] getDeliveryProfiles failed:', e.message);
+    return [];
+  }
+}
+
+// Assign a product (all variants) to a non-default delivery profile.
+// Pass profileId as a Shopify GID like "gid://shopify/DeliveryProfile/12345".
+async function assignProductToDeliveryProfile(productId, profileId) {
+  if (!profileId) return;
+  try {
+    // Get all variant IDs of the product
+    const r = await shopifyRequest('get', `/products/${productId}.json`);
+    const variantGids = (r.data.product.variants || []).map(v => `gid://shopify/ProductVariant/${v.id}`);
+    if (!variantGids.length) return;
+
+    const mutation = `mutation deliveryProfileUpdate($id: ID!, $profile: DeliveryProfileInput!) {
+      deliveryProfileUpdate(id: $id, profile: $profile) {
+        userErrors { field message }
+      }
+    }`;
+    const mr = await shopifyRequest('post', '/graphql.json', {
+      data: {
+        query: mutation,
+        variables: {
+          id: profileId,
+          profile: { variantsToAssociate: variantGids },
+        },
+      },
+    });
+    const userErrors = mr.data.data?.deliveryProfileUpdate?.userErrors || [];
+    if (userErrors.length) console.warn('[shopify] profile assign userErrors:', JSON.stringify(userErrors));
+  } catch (e) {
+    console.warn('[shopify] assignProductToDeliveryProfile failed:', e.response?.data || e.message);
+  }
 }
 
 // Apply a list of metafields to a product. Each metafield: { namespace, key, value, type }.
@@ -332,31 +376,112 @@ async function applyMetafields(productId, metafields) {
 let cachedPublications = null;
 async function getPublications() {
   if (cachedPublications) return cachedPublications;
-  const r = await shopifyRequest('post', '/graphql.json', {
-    data: { query: `query { publications(first: 25) { edges { node { id name } } } }` },
-  });
-  cachedPublications = (r.data.data?.publications?.edges || []).map(e => e.node);
-  return cachedPublications;
+  try {
+    const r = await shopifyRequest('post', '/graphql.json', {
+      data: { query: `query { publications(first: 25) { edges { node { id name } } } }` },
+    });
+    if (r.data.errors) {
+      console.warn('[shopify] getPublications errors:', JSON.stringify(r.data.errors));
+      return [];
+    }
+    cachedPublications = (r.data.data?.publications?.edges || []).map(e => e.node);
+    return cachedPublications;
+  } catch (e) {
+    console.warn('[shopify] getPublications failed:', e.response?.data || e.message);
+    return [];
+  }
 }
 
-// Publish a product to all sales channels. Required because REST product create
-// only publishes to "Online Store" by default (and sometimes nothing in newer stores).
+// Publish a product to all sales channels.
 async function publishProductToAllChannels(productId) {
   try {
     const pubs = await getPublications();
-    if (!pubs.length) return;
+    if (!pubs.length) {
+      console.warn('[shopify] no publications found — token likely missing read_publications scope');
+      return;
+    }
     const productGid = `gid://shopify/Product/${productId}`;
     const mutation = `mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
-      publishablePublish(id: $id, input: $input) { userErrors { field message } }
+      publishablePublish(id: $id, input: $input) {
+        userErrors { field message }
+      }
     }`;
-    await shopifyRequest('post', '/graphql.json', {
+    const r = await shopifyRequest('post', '/graphql.json', {
       data: {
         query: mutation,
         variables: { id: productGid, input: pubs.map(p => ({ publicationId: p.id })) },
       },
     });
+    const userErrors = r.data.data?.publishablePublish?.userErrors || [];
+    if (userErrors.length) {
+      console.warn('[shopify] publish userErrors for product', productId, ':', JSON.stringify(userErrors));
+    }
+    if (r.data.errors) {
+      console.warn('[shopify] publish GraphQL errors for product', productId, ':', JSON.stringify(r.data.errors));
+    }
   } catch (e) {
-    console.warn('[shopify] publish to channels failed:', e.message);
+    console.warn('[shopify] publish to channels failed:', e.response?.data || e.message);
+  }
+}
+
+// Debug helper — used by /api/listings/debug-shopify
+async function debugShopifyAccess() {
+  const out = {
+    isConfigured: isConfigured(),
+    locationId: LOCATION_ID,
+    storeDomain: STORE,
+    apiVersion: VERSION,
+  };
+  try {
+    const pubs = await getPublications();
+    out.publications = pubs.map(p => ({ id: p.id, name: p.name }));
+    out.publicationCount = pubs.length;
+  } catch (e) {
+    out.publicationsError = e.message;
+  }
+  try {
+    const defs = await getMetafieldDefinitions();
+    out.metafieldDefinitions = defs.map(d => ({ namespace: d.namespace, key: d.key, name: d.name, type: d.type }));
+  } catch (e) {
+    out.metafieldDefError = e.message;
+  }
+  try {
+    const profiles = await getDeliveryProfiles();
+    out.deliveryProfiles = profiles.map(p => ({ id: p.id, name: p.name }));
+  } catch (e) {
+    out.deliveryProfilesError = e.message;
+  }
+  return out;
+}
+
+// Fetch metafield definitions for the PRODUCT ownerType — these are the ones
+// the user has defined on their store (Part Number, Position, Finish, etc.)
+let cachedMetafieldDefs = null;
+async function getMetafieldDefinitions() {
+  if (cachedMetafieldDefs) return cachedMetafieldDefs;
+  try {
+    const query = `query {
+      metafieldDefinitions(first: 50, ownerType: PRODUCT) {
+        edges { node { id namespace key name description type { name } } }
+      }
+    }`;
+    const r = await shopifyRequest('post', '/graphql.json', { data: { query } });
+    if (r.data.errors) {
+      console.warn('[shopify] metafield defs errors:', JSON.stringify(r.data.errors));
+      return [];
+    }
+    cachedMetafieldDefs = (r.data.data?.metafieldDefinitions?.edges || []).map(e => ({
+      id: e.node.id,
+      namespace: e.node.namespace,
+      key: e.node.key,
+      name: e.node.name,
+      description: e.node.description,
+      type: e.node.type?.name || 'single_line_text_field',
+    }));
+    return cachedMetafieldDefs;
+  } catch (e) {
+    console.warn('[shopify] getMetafieldDefinitions failed:', e.response?.data || e.message);
+    return [];
   }
 }
 
@@ -432,4 +557,8 @@ module.exports = {
   updateProduct,
   publishProductToAllChannels,
   getPublications,
+  getMetafieldDefinitions,
+  getDeliveryProfiles,
+  assignProductToDeliveryProfile,
+  debugShopifyAccess,
 };
