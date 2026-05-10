@@ -2723,17 +2723,65 @@ let MirrorState = {
   listings: [],
   selected: new Set(),
   selectedImages: {},
-  customPrices: {},     // itemId -> Number (overrides computed price even in % mode)
+  customPrices: {},
   titleOverrides: {},
   skuOverrides: {},
+  itemStatuses: {},        // itemId -> 'draft' | 'active' (per-item override)
   metafields: [],
+  perItemMetafields: {},
+  metafieldDefs: [],
+  deliveryProfiles: [],    // [{id, name}] from Shopify
+  expandedRows: new Set(),
   filterText: '',
-  statusFilter: 'all',  // 'all' | 'new' | 'mirrored'
+  statusFilter: 'all',
   pricingMode: 'percent',
   percentDiscount: 0,
-  productStatus: 'draft',
-  saveTimers: {},       // debounce timers per itemId
+  productStatus: 'draft',  // global default; itemStatuses can override per item
+  commonTags: '',          // comma-separated tags applied to all
+  commonShippingProfileId: '', // GID, '' = default
+  commonTemplateSuffix: '',    // '' = default product, 'large-parts' = large-parts template
+  hideTemplateImages: false,   // when true, TMPL images are removed from photos lists entirely
+  saveTimers: {},
 };
+
+// Token substitution helpers — values like "{{sku}} {{title}}" get filled per listing
+function substituteTokens(template, listing) {
+  if (!template) return template;
+  const sku = MirrorState.skuOverrides[listing.itemId] || listing.sku || '';
+  const title = MirrorState.titleOverrides[listing.itemId] || listing.title || '';
+  return String(template)
+    .replace(/\{\{\s*sku\s*\}\}/gi, sku)
+    .replace(/\{\{\s*title\s*\}\}/gi, title)
+    .replace(/\{\{\s*item_id\s*\}\}/gi, listing.itemId || '')
+    .replace(/\{\{\s*ebay_price\s*\}\}/gi, String(listing.priceEbay || ''))
+    .replace(/\{\{\s*qty\s*\}\}/gi, String(listing.quantityAvailable || 0));
+}
+
+// Get the metafields to send for a listing — common (with tokens substituted) + per-item overrides
+function metafieldsForListing(listing) {
+  const out = [];
+  // Common metafields (fixed or token-templated)
+  for (const mf of MirrorState.metafields) {
+    if (!mf.key) continue;
+    const value = substituteTokens(mf.value, listing);
+    if (!value) continue;
+    out.push({ namespace: mf.namespace || 'custom', key: mf.key, value, type: mf.type || 'single_line_text_field' });
+  }
+  // Per-item overrides — replace any matching common metafield
+  const perItem = MirrorState.perItemMetafields[listing.itemId] || {};
+  for (const [nsKey, val] of Object.entries(perItem)) {
+    if (val == null || val === '') continue;
+    const [namespace, key] = nsKey.split('.', 2);
+    // Find the type from definitions or default
+    const def = MirrorState.metafieldDefs.find(d => d.namespace === namespace && d.key === key);
+    const type = def ? def.type : 'single_line_text_field';
+    // Remove any common entry with same ns.key
+    const existingIdx = out.findIndex(o => o.namespace === namespace && o.key === key);
+    if (existingIdx >= 0) out.splice(existingIdx, 1);
+    out.push({ namespace, key, value: substituteTokens(val, listing), type });
+  }
+  return out;
+}
 
 // Debounce-save an override to backend
 function scheduleSaveOverride(itemId) {
@@ -2800,7 +2848,11 @@ function renderMirror() {
               </div>
               <div id="mr-percent-wrap">
                 <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">% Discount</div>
-                <input type="number" id="mr-percent" value="0" min="0" max="100" step="0.5" oninput="repaintPrices()" placeholder="e.g. 10 for 10% off">
+                <div style="display:flex;gap:6px">
+                  <input type="number" id="mr-percent" value="0" min="0" max="100" step="0.5" placeholder="e.g. 10 for 10% off" style="flex:1">
+                  <button class="btn btn-primary btn-sm" onclick="applyDiscount()">Apply</button>
+                </div>
+                <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Applied: <span id="mr-percent-applied" style="font-weight:600;color:var(--ink)">0%</span></div>
               </div>
               <div>
                 <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Status on Shopify</div>
@@ -2821,13 +2873,53 @@ function renderMirror() {
               <input type="text" id="mr-filter" placeholder="Search by title, SKU, or item ID…" oninput="updateFilter(this.value)" style="width:100%">
             </div>
 
+              <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Bulk settings (applied to all selected on mirror)</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px">
+                  <div>
+                    <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Tags (comma-separated, used for collections)</div>
+                    <input type="text" id="mr-tags" placeholder="e.g. body-panel, hyundai, primed" oninput="MirrorState.commonTags=this.value">
+                  </div>
+                  <div>
+                    <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Product template</div>
+                    <select id="mr-template" onchange="MirrorState.commonTemplateSuffix=this.value">
+                      <option value="">Default product</option>
+                      <option value="large-parts">large-parts</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Shipping profile</div>
+                    <select id="mr-shipping-profile" onchange="MirrorState.commonShippingProfileId=this.value">
+                      <option value="">Store default</option>
+                      <!-- populated dynamically from Shopify -->
+                    </select>
+                  </div>
+                  <div>
+                    <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Template image policy</div>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;padding:8px 0">
+                      <input type="checkbox" id="mr-hide-tmpl" onchange="toggleHideTemplates(this.checked)">
+                      <span>Hide TMPL images everywhere</span>
+                    </label>
+                  </div>
+                </div>
+                <div style="font-size:11px;color:var(--ink-soft)">Per-item edits (in each row) override these bulk values.</div>
+              </div>
+
             <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
                 <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">Common metafields (applied to all selected listings on mirror)</div>
-                <button class="btn btn-outline btn-sm" onclick="addMetafield()">+ Add metafield</button>
+                <div style="display:flex;gap:6px">
+                  <button class="btn btn-outline btn-sm" onclick="addSeoDescriptionTemplate()" title="Adds a metafield with a token-templated SEO description">+ SEO description template</button>
+                  <button class="btn btn-outline btn-sm" onclick="addMetafield()">+ Add metafield</button>
+                </div>
               </div>
               <div id="mr-metafields"></div>
-              <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">e.g. namespace=<code>custom</code>, key=<code>brand</code>, value=<code>Hyundai</code> — Shopify will store this as <code>custom.brand = "Hyundai"</code> on every mirrored product.</div>
+              <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">
+                Pick a metafield Shopify already knows (Part Number, Position, Finish, etc.) or add a custom one. Values can use tokens: <code>{{sku}}</code>, <code>{{title}}</code>, <code>{{ebay_price}}</code>, <code>{{qty}}</code>, <code>{{item_id}}</code> — substituted per listing on mirror. Per-listing edits (in each row's "Metafields" panel) take priority over these.
+              </div>
+              <div style="margin-top:6px">
+                <button class="btn btn-ghost btn-sm" onclick="runShopifyDiag()" style="font-size:11px;color:var(--ink-soft)">🔍 Diagnose Shopify (channels & metafields)</button>
+              </div>
             </div>
 
             <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -2854,6 +2946,15 @@ function renderMirror() {
 
 async function pullEbayListings() {
   toast('Pulling eBay listings + photos… ~1-2 min for big stores', 'info');
+  // Load metafield definitions and delivery profiles in parallel
+  Api.get('/api/listings/metafield-definitions').then(r => {
+    MirrorState.metafieldDefs = r.definitions || [];
+    paintMetafields();
+  }).catch(() => {});
+  Api.get('/api/listings/delivery-profiles').then(r => {
+    MirrorState.deliveryProfiles = r.profiles || [];
+    populateShippingProfileDropdown();
+  }).catch(() => {});
   try {
     const r = await Api.get('/api/listings/ebay-active');
     MirrorState.listings = r.listings || [];
@@ -2907,13 +3008,15 @@ function updatePricingMode() {
 }
 
 function repaintPrices() {
-  MirrorState.percentDiscount = parseFloat(el('mr-percent').value) || 0;
-  for (const l of MirrorState.listings) {
-    const row = document.querySelector(`[data-row="${l.itemId}"]`);
-    if (!row) continue;
-    const priceEl = row.querySelector('[data-price-out]');
-    if (priceEl) priceEl.textContent = gbp(computeShopifyPrice(l));
-  }
+  paintMirrorList();
+}
+function applyDiscount() {
+  const val = parseFloat(el('mr-percent').value) || 0;
+  MirrorState.percentDiscount = val;
+  const applied = el('mr-percent-applied');
+  if (applied) applied.textContent = val + '%';
+  paintMirrorList();
+  toast(`Applied ${val}% discount to all listings`, 'success');
 }
 
 function computeShopifyPrice(listing) {
@@ -2971,6 +3074,54 @@ function addMetafield() {
   MirrorState.metafields.push({ namespace: 'custom', key: '', value: '', type: 'single_line_text_field' });
   paintMetafields();
 }
+
+// Convenience: add a multi-line "SEO description" metafield with a sensible token template.
+// User can edit before mirroring. Picks an existing definition if "seo_description" exists.
+function addSeoDescriptionTemplate() {
+  const def = MirrorState.metafieldDefs.find(d =>
+    /seo.?description|description|meta.?description/i.test(d.key) ||
+    /seo.?description|description|meta.?description/i.test(d.name)
+  );
+  const namespace = def?.namespace || 'custom';
+  const key = def?.key || 'seo_description';
+  const type = def?.type || 'multi_line_text_field';
+  const value = '{{title}} · Part Number: {{sku}} · Quality aftermarket replacement, primed and ready for paint. Direct fit OEM-equivalent body panel.';
+  MirrorState.metafields.push({ namespace, key, value, type });
+  paintMetafields();
+  if (!def) toast('Tip: define an "seo_description" metafield in Shopify admin first, or change namespace/key above', 'info');
+}
+
+async function runShopifyDiag() {
+  toast('Running Shopify diagnostic…', 'info');
+  try {
+    const r = await Api.get('/api/listings/debug-shopify');
+    const lines = [];
+    lines.push(`Configured: ${r.isConfigured ? '✓' : '✗'}`);
+    lines.push(`Store: ${r.storeDomain || '(missing)'}`);
+    lines.push(`Location ID: ${r.locationId || '(missing — set SHOPIFY_LOCATION_ID env var)'}`);
+    lines.push('');
+    lines.push(`Sales channels (publications): ${r.publicationCount || 0}`);
+    if (r.publications && r.publications.length) {
+      for (const p of r.publications) lines.push(`  · ${p.name} (${p.id})`);
+    } else {
+      lines.push('  ✗ NONE — your Shopify custom app token is missing the read_publications scope.');
+      lines.push('  Fix: Shopify admin → Apps → custom app → Configuration → API access scopes →');
+      lines.push('       enable read_publications + write_publications, then reinstall the app.');
+    }
+    lines.push('');
+    lines.push(`Metafield definitions: ${(r.metafieldDefinitions || []).length}`);
+    if (r.metafieldDefinitions && r.metafieldDefinitions.length) {
+      for (const d of r.metafieldDefinitions) lines.push(`  · ${d.name} (${d.namespace}.${d.key}, type: ${d.type})`);
+    } else {
+      lines.push('  ✗ NONE — token may need read_metafield_definitions scope, or no definitions exist on the store.');
+    }
+    if (r.publicationsError) lines.push(`Pub error: ${r.publicationsError}`);
+    if (r.metafieldDefError) lines.push(`Metafield def error: ${r.metafieldDefError}`);
+    alert(lines.join('\n'));
+  } catch (e) {
+    toast('Diagnostic failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
 function removeMetafield(idx) {
   MirrorState.metafields.splice(idx, 1);
   paintMetafields();
@@ -2981,22 +3132,44 @@ function updateMetafield(idx, field, value) {
 function paintMetafields() {
   const wrap = el('mr-metafields');
   if (!wrap) return;
-  wrap.innerHTML = MirrorState.metafields.map((mf, i) => `
-    <div style="display:grid;grid-template-columns:130px 1fr 1.5fr 180px 36px;gap:6px;margin-bottom:6px;align-items:center">
-      <input value="${escapeAttr(mf.namespace)}" placeholder="namespace" oninput="updateMetafield(${i},'namespace',this.value)">
-      <input value="${escapeAttr(mf.key)}" placeholder="key (e.g. brand)" oninput="updateMetafield(${i},'key',this.value)">
-      <input value="${escapeAttr(mf.value)}" placeholder="value (e.g. Hyundai)" oninput="updateMetafield(${i},'value',this.value)">
-      <select onchange="updateMetafield(${i},'type',this.value)">
-        <option value="single_line_text_field" ${mf.type==='single_line_text_field'?'selected':''}>Text</option>
-        <option value="multi_line_text_field" ${mf.type==='multi_line_text_field'?'selected':''}>Multi-line text</option>
-        <option value="number_integer" ${mf.type==='number_integer'?'selected':''}>Integer</option>
-        <option value="number_decimal" ${mf.type==='number_decimal'?'selected':''}>Decimal</option>
-        <option value="boolean" ${mf.type==='boolean'?'selected':''}>Boolean</option>
-        <option value="url" ${mf.type==='url'?'selected':''}>URL</option>
-      </select>
+  const defs = MirrorState.metafieldDefs || [];
+  const defOptions = defs.length
+    ? `<option value="">— pick a defined metafield —</option>` +
+      defs.map(d => `<option value="${escapeAttr(d.namespace)}.${escapeAttr(d.key)}|${escapeAttr(d.type)}">${escapeHtml(d.name)} (${d.namespace}.${d.key})</option>`).join('') +
+      `<option value="__custom__|single_line_text_field">— Custom (type your own) —</option>`
+    : null;
+  wrap.innerHTML = MirrorState.metafields.map((mf, i) => {
+    const nsKey = `${mf.namespace}.${mf.key}`;
+    const matchingDef = defs.find(d => d.namespace === mf.namespace && d.key === mf.key);
+    const isCustom = mf.namespace && mf.key && !matchingDef;
+    return `
+    <div style="display:grid;grid-template-columns:280px 1fr 36px;gap:6px;margin-bottom:6px;align-items:center">
+      ${defOptions ? `
+        <select onchange="pickMetafieldDef(${i}, this.value)">
+          ${defOptions.replace(`value="${escapeAttr(nsKey)}|${escapeAttr(mf.type)}"`, `value="${escapeAttr(nsKey)}|${escapeAttr(mf.type)}" selected`).replace('value="__custom__|single_line_text_field"', `value="__custom__|single_line_text_field"${isCustom?' selected':''}`)}
+        </select>
+      ` : `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+          <input value="${escapeAttr(mf.namespace)}" placeholder="namespace" oninput="updateMetafield(${i},'namespace',this.value)">
+          <input value="${escapeAttr(mf.key)}" placeholder="key" oninput="updateMetafield(${i},'key',this.value)">
+        </div>
+      `}
+      <input value="${escapeAttr(mf.value)}" placeholder="value (use {{sku}}, {{title}} for tokens)" oninput="updateMetafield(${i},'value',this.value)">
       <button class="btn btn-ghost btn-sm" onclick="removeMetafield(${i})" style="color:var(--red)">×</button>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
+}
+
+function pickMetafieldDef(idx, value) {
+  if (!value) return;
+  if (value === '__custom__|single_line_text_field') {
+    MirrorState.metafields[idx] = { namespace: '', key: '', value: MirrorState.metafields[idx]?.value || '', type: 'single_line_text_field' };
+  } else {
+    const [nsKey, type] = value.split('|');
+    const [namespace, key] = nsKey.split('.', 2);
+    MirrorState.metafields[idx] = { namespace, key, value: MirrorState.metafields[idx]?.value || '', type };
+  }
+  paintMetafields();
 }
 
 function paintMirrorList() {
@@ -3029,8 +3202,13 @@ function paintMirrorList() {
             <div style="flex:1;min-width:0">
               <div style="display:flex;justify-content:space-between;gap:14px;align-items:flex-start;margin-bottom:8px">
                 <div style="flex:1;min-width:0">
-                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap">
                     ${l.existsOnShopify ? '<span class="pill green" style="font-size:10px"><span class="dot"></span>On Shopify</span>' : '<span class="pill blue" style="font-size:10px">New</span>'}
+                    <select onchange="setItemStatus('${l.itemId}',this.value)" style="font-size:11px;padding:2px 6px;height:auto;line-height:1.4" title="Status on Shopify">
+                      <option value="draft" ${(MirrorState.itemStatuses[l.itemId] || MirrorState.productStatus) === 'draft' ? 'selected' : ''}>Draft</option>
+                      <option value="active" ${(MirrorState.itemStatuses[l.itemId] || MirrorState.productStatus) === 'active' ? 'selected' : ''}>Active</option>
+                    </select>
+                    ${(MirrorState.skuOverrides[l.itemId] || MirrorState.titleOverrides[l.itemId]) ? `<button class="btn btn-ghost btn-sm" onclick="pushToEbay('${l.itemId}')" style="font-size:11px;color:var(--ink-soft)" title="Push edited SKU/title back to eBay (uses ReviseItem)">↑ Push to eBay</button>` : ''}
                   </div>
                   <input type="text" value="${escapeAttr(titleVal)}" oninput="MirrorState.titleOverrides['${l.itemId}']=this.value;scheduleSaveOverride('${l.itemId}')" style="width:100%;font-weight:600;font-size:14px;border:none;background:transparent;padding:2px 0">
                   <div style="display:flex;gap:14px;font-size:12px;color:var(--ink-soft);margin-top:4px;flex-wrap:wrap;align-items:center">
@@ -3057,6 +3235,7 @@ function paintMirrorList() {
                   `;
                 }).join('')}
               </div>
+              ${renderMetafieldPanel(l)}
             </div>
           </div>
         </div>
@@ -3068,9 +3247,183 @@ function paintMirrorList() {
   }
   updateMirrorCounter();
 }
+
+function renderMetafieldPanel(l) {
+  const expanded = MirrorState.expandedRows.has(l.itemId);
+  const defs = MirrorState.metafieldDefs || [];
+  const itemMfs = MirrorState.perItemMetafields[l.itemId] || {};
+  const computed = metafieldsForListing(l);
+  const computedMap = {};
+  for (const mf of computed) computedMap[`${mf.namespace}.${mf.key}`] = mf.value;
+
+  const filledCount = computed.length;
+  const button = `<button class="btn btn-ghost btn-sm" onclick="toggleMetafieldRow('${l.itemId}')" style="margin-top:10px;font-size:12px;color:var(--ink-soft)">
+    ${expanded ? '▾' : '▸'} Metafields ${filledCount ? `· <span style="color:var(--green);font-weight:600">${filledCount} filled</span>` : ''}
+  </button>`;
+
+  if (!expanded) return button;
+
+  if (!defs.length) {
+    return button + `<div style="background:var(--bg-soft);padding:12px;border-radius:6px;margin-top:8px;font-size:12px;color:var(--ink-soft)">No metafield definitions found on Shopify. Add metafield definitions in Shopify admin → Settings → Custom data → Products, then re-pull listings.</div>`;
+  }
+
+  const rows = defs.map(d => {
+    const nsKey = `${d.namespace}.${d.key}`;
+    const perItemVal = itemMfs[nsKey];
+    const computedVal = computedMap[nsKey] || '';
+    const displayVal = perItemVal != null ? perItemVal : computedVal;
+    const isOverride = perItemVal != null && perItemVal !== '';
+    return `
+      <div style="display:grid;grid-template-columns:180px 1fr 36px;gap:8px;align-items:center;margin-bottom:6px">
+        <div style="font-size:12px;color:var(--ink-soft)" title="${escapeAttr(d.namespace)}.${escapeAttr(d.key)}">${escapeHtml(d.name)}${isOverride?' <span style="color:var(--red)">·</span>':''}</div>
+        <input type="text" value="${escapeAttr(displayVal)}" placeholder="${escapeAttr(computedVal || '(empty — falls back to common metafield)')}" oninput="setItemMetafield('${l.itemId}','${escapeAttr(nsKey)}',this.value)" style="font-size:12px">
+        ${isOverride ? `<button class="btn btn-ghost btn-sm" onclick="clearItemMetafield('${l.itemId}','${escapeAttr(nsKey)}')" title="Reset to common metafield value" style="color:var(--ink-soft)">↺</button>` : '<div></div>'}
+      </div>
+    `;
+  }).join('');
+
+  // Quick-fill buttons that pre-populate based on listing data
+  const quickFill = `
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn btn-outline btn-sm" onclick="quickFillFromListing('${l.itemId}','sku')" title="Fill Part Number = SKU">Auto-fill Part Number from SKU</button>
+      <button class="btn btn-outline btn-sm" onclick="autoDetectSide('${l.itemId}')" title="Detect Left/Right from title">Auto-detect Side from title</button>
+    </div>
+  `;
+
+  return button + `
+    <div style="background:var(--bg-soft);padding:12px;border-radius:6px;margin-top:8px">
+      <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Metafields for this listing</div>
+      ${quickFill}
+      ${rows}
+    </div>
+  `;
+}
+
+function toggleMetafieldRow(itemId) {
+  if (MirrorState.expandedRows.has(itemId)) MirrorState.expandedRows.delete(itemId);
+  else MirrorState.expandedRows.add(itemId);
+  paintMirrorList();
+}
+function setItemMetafield(itemId, nsKey, value) {
+  if (!MirrorState.perItemMetafields[itemId]) MirrorState.perItemMetafields[itemId] = {};
+  if (value === '' || value == null) delete MirrorState.perItemMetafields[itemId][nsKey];
+  else MirrorState.perItemMetafields[itemId][nsKey] = value;
+  scheduleSaveOverride(itemId);
+}
+function clearItemMetafield(itemId, nsKey) {
+  if (MirrorState.perItemMetafields[itemId]) {
+    delete MirrorState.perItemMetafields[itemId][nsKey];
+    scheduleSaveOverride(itemId);
+    paintMirrorList();
+  }
+}
+function quickFillFromListing(itemId, source) {
+  const l = MirrorState.listings.find(x => x.itemId === itemId);
+  if (!l) return;
+  // Find a "Part Number" metafield definition
+  const def = MirrorState.metafieldDefs.find(d =>
+    /part.?number/i.test(d.name) || /part.?number/i.test(d.key)
+  );
+  if (!def) { toast('No "Part Number" metafield defined on Shopify', 'warn'); return; }
+  const sku = MirrorState.skuOverrides[itemId] || l.sku || '';
+  setItemMetafield(itemId, `${def.namespace}.${def.key}`, sku);
+  paintMirrorList();
+}
+function autoDetectSide(itemId) {
+  const l = MirrorState.listings.find(x => x.itemId === itemId);
+  if (!l) return;
+  const title = (MirrorState.titleOverrides[itemId] || l.title || '').toUpperCase();
+  let side = '';
+  if (/\bLEFT\b|\bN\/?S\b|\bNEARSIDE\b|\bLH\b/.test(title)) side = 'Left';
+  else if (/\bRIGHT\b|\bO\/?S\b|\bOFFSIDE\b|\bRH\b/.test(title)) side = 'Right';
+  else { toast('Could not detect Left/Right in title', 'warn'); return; }
+  // Find a "Position" or "Side" metafield
+  const def = MirrorState.metafieldDefs.find(d =>
+    /^position$/i.test(d.name) || /^side$/i.test(d.name) || /^position$/i.test(d.key) || /^side$/i.test(d.key)
+  );
+  if (!def) { toast('No "Position" or "Side" metafield defined on Shopify', 'warn'); return; }
+  setItemMetafield(itemId, `${def.namespace}.${def.key}`, side);
+  paintMirrorList();
+}
+function populateShippingProfileDropdown() {
+  const sel = el('mr-shipping-profile');
+  if (!sel) return;
+  const profiles = MirrorState.deliveryProfiles || [];
+  // Filter out the "All other products" / default profile (it's automatic)
+  const customProfiles = profiles.filter(p => !/all other products|store default|general profile/i.test(p.name));
+  sel.innerHTML = '<option value="">Store default (no override)</option>' +
+    customProfiles.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+}
+
 function setStatusFilter(v) {
   MirrorState.statusFilter = v;
   paintMirrorList();
+}
+
+function toggleHideTemplates(on) {
+  MirrorState.hideTemplateImages = !!on;
+  // Filter listings' picture lists: when hiding, remove TMPL urls; when re-showing, restore from imageMeta
+  for (const l of MirrorState.listings) {
+    if (!l._originalPictureUrls) l._originalPictureUrls = [...l.pictureUrls];
+    if (!l._originalImageMeta) l._originalImageMeta = l.imageMeta ? [...l.imageMeta] : null;
+    if (on) {
+      const meta = l._originalImageMeta || [];
+      l.pictureUrls = l._originalPictureUrls.filter((_, i) => !(meta[i]?.likelyTemplate));
+      l.imageMeta = meta.filter(m => !m.likelyTemplate);
+    } else {
+      l.pictureUrls = [...l._originalPictureUrls];
+      l.imageMeta = l._originalImageMeta ? [...l._originalImageMeta] : null;
+    }
+    // Reset selection to first photo of the (possibly filtered) list
+    MirrorState.selectedImages[l.itemId] = new Set(l.pictureUrls.length ? [l.pictureUrls[0]] : []);
+  }
+  paintMirrorList();
+  toast(on ? 'Template images hidden everywhere' : 'Template images visible again', 'success');
+}
+
+function setItemStatus(itemId, status) {
+  if (status === MirrorState.productStatus) delete MirrorState.itemStatuses[itemId];
+  else MirrorState.itemStatuses[itemId] = status;
+  paintMirrorList();
+}
+
+async function pushToEbay(itemId) {
+  const l = MirrorState.listings.find(x => x.itemId === itemId);
+  if (!l) return;
+  const newSku = MirrorState.skuOverrides[itemId];
+  const newTitle = MirrorState.titleOverrides[itemId];
+  if (!newSku && !newTitle) {
+    toast('No edits to push for this listing', 'warn');
+    return;
+  }
+  const changes = [];
+  if (newTitle && newTitle !== l.title) changes.push(`Title:\n  was: ${l.title}\n  new: ${newTitle}`);
+  if (newSku && newSku !== l.sku) changes.push(`SKU:\n  was: ${l.sku || '(none)'}\n  new: ${newSku}`);
+  if (!changes.length) {
+    toast('Edits match the eBay listing already — nothing to push', 'info');
+    return;
+  }
+  const ok = confirm(
+    `Push these changes to eBay?\n\n${changes.join('\n\n')}\n\n` +
+    `⚠ Each revision counts toward eBay's per-listing edit limit. Major title changes can affect search ranking and watcher notifications.`
+  );
+  if (!ok) return;
+  try {
+    await Api.post('/api/listings/push-to-ebay', {
+      itemId,
+      sku: newSku !== l.sku ? newSku : undefined,
+      title: newTitle !== l.title ? newTitle : undefined,
+    });
+    // Update the in-memory listing so it reflects what's now on eBay
+    if (newSku) l.sku = newSku;
+    if (newTitle) l.title = newTitle;
+    delete MirrorState.skuOverrides[itemId];
+    delete MirrorState.titleOverrides[itemId];
+    paintMirrorList();
+    toast('Pushed to eBay', 'success');
+  } catch (e) {
+    toast('Push failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 function escapeHtml(s) { return String(s||'').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
@@ -3140,16 +3493,19 @@ async function mirrorSelected() {
     );
   }
 
-  // Build payload — apply title/SKU overrides, common metafields, and ship inventory qty from eBay
+  // Build payload — apply overrides, per-item status, common tags/profile/template
   const items = valid.map(l => ({
     itemId: l.itemId,
     sku: MirrorState.skuOverrides[l.itemId] != null ? MirrorState.skuOverrides[l.itemId] : l.sku,
     title: MirrorState.titleOverrides[l.itemId] != null ? MirrorState.titleOverrides[l.itemId] : l.title,
     price: computeShopifyPrice(l),
     imageUrls: Array.from(MirrorState.selectedImages[l.itemId] || []),
-    status: MirrorState.productStatus,
-    metafields: MirrorState.metafields.filter(mf => mf.key && mf.value),
+    status: MirrorState.itemStatuses[l.itemId] || MirrorState.productStatus,
+    metafields: metafieldsForListing(l),
     qty: l.quantityAvailable != null ? l.quantityAvailable : null,
+    tags: MirrorState.commonTags || null,
+    templateSuffix: MirrorState.commonTemplateSuffix || null,
+    shippingProfileId: MirrorState.commonShippingProfileId || null,
   }));
 
   toast(`Mirroring ${items.length} listings to Shopify…`, 'info');
