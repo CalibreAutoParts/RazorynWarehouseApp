@@ -1458,6 +1458,7 @@ function channelPill(ch) {
    INVENTORY
    ========================================================== */
 function renderInventory() {
+  if (!State.invSelected) State.invSelected = new Set();
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
@@ -1479,10 +1480,19 @@ function renderInventory() {
         </select>
       </div>
 
+      <div id="inv-bulk-bar" style="display:none;padding:10px 14px;background:var(--bg-soft);border:1px solid var(--line);border-radius:8px;margin-bottom:10px;align-items:center;gap:10px;flex-wrap:wrap">
+        <span id="inv-bulk-count" style="font-weight:600">0 selected</span>
+        <span style="margin-left:auto"></span>
+        <button class="btn btn-outline btn-sm" onclick="invSelectAllVisible()">Select all visible</button>
+        <button class="btn btn-outline btn-sm" onclick="invClearSelection()">Clear selection</button>
+        <button class="btn btn-primary btn-sm admin-only" onclick="bulkDeleteSelected()" style="background:var(--red);border-color:var(--red)">🗑 Delete selected</button>
+      </div>
+
       <div class="card">
         <div class="table-wrap">
           <table class="table">
             <thead><tr>
+              <th style="width:32px"><input type="checkbox" id="inv-check-all" onchange="invToggleAll(this.checked)"></th>
               <th style="width:64px"></th>
               <th>Product</th><th>Part #</th><th>Location</th>
               <th class="num">Shopify</th><th class="num">eBay</th><th class="num">Total</th>
@@ -1508,8 +1518,10 @@ function renderInventory() {
       if (s === 'out' && tq !== 0) return false;
       return true;
     });
+    State._invFiltered = filtered;
     el('inv-tbody').innerHTML = filtered.map(p => `
       <tr>
+        <td><input type="checkbox" class="inv-row-check" data-pid="${p.id}" ${State.invSelected.has(p.id)?'checked':''} onchange="invToggleRow('${p.id}',this.checked)"></td>
         <td>
           ${p.imageUrl
             ? `<img src="${p.imageUrl}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:6px;background:var(--line-2)">`
@@ -1525,10 +1537,75 @@ function renderInventory() {
         <td class="num">${gbp(p.priceShopify)}</td>
         <td style="white-space:nowrap"><button class="btn btn-outline btn-sm" onclick="openProductModal('${p.id}')">Edit</button> <button class="btn btn-ghost btn-sm" onclick="deleteProduct('${p.id}','${(p.title||'').replace(/'/g,"\\'")}')" style="color:var(--red)" title="Delete product">🗑</button></td>
       </tr>
-    `).join('') || '<tr><td colspan="9"><div class="empty"><div class="t">No products match</div></div></td></tr>';
+    `).join('') || '<tr><td colspan="10"><div class="empty"><div class="t">No products match</div></div></td></tr>';
+    invUpdateBulkBar();
   }
   paint();
   ['inv-search','inv-brand','inv-stock'].forEach(id => el(id).addEventListener('input', paint));
+}
+
+function invToggleRow(id, on) {
+  if (on) State.invSelected.add(id);
+  else State.invSelected.delete(id);
+  invUpdateBulkBar();
+}
+function invToggleAll(on) {
+  const filtered = State._invFiltered || [];
+  for (const p of filtered) {
+    if (on) State.invSelected.add(p.id);
+    else State.invSelected.delete(p.id);
+  }
+  document.querySelectorAll('.inv-row-check').forEach(cb => { cb.checked = on; });
+  invUpdateBulkBar();
+}
+function invSelectAllVisible() { invToggleAll(true); el('inv-check-all').checked = true; }
+function invClearSelection() {
+  State.invSelected.clear();
+  document.querySelectorAll('.inv-row-check').forEach(cb => { cb.checked = false; });
+  el('inv-check-all').checked = false;
+  invUpdateBulkBar();
+}
+function invUpdateBulkBar() {
+  const n = State.invSelected.size;
+  const bar = el('inv-bulk-bar');
+  if (!bar) return;
+  bar.style.display = n > 0 ? 'flex' : 'none';
+  const count = el('inv-bulk-count');
+  if (count) count.textContent = `${n} selected`;
+}
+
+async function bulkDeleteSelected() {
+  const ids = Array.from(State.invSelected);
+  if (!ids.length) return;
+  const choice = prompt(
+    `Delete ${ids.length} product${ids.length>1?'s':''}?\n\n` +
+    `Type one of:\n` +
+    `  1 = remove from warehouse only (keep on Shopify)\n` +
+    `  2 = remove from BOTH warehouse AND Shopify\n` +
+    `  (anything else cancels)`
+  );
+  if (choice !== '1' && choice !== '2') return;
+  const removeFromShopify = choice === '2';
+  const ok = confirm(
+    removeFromShopify
+      ? `Confirm: PERMANENTLY delete ${ids.length} product${ids.length>1?'s':''} from BOTH warehouse and Shopify. This cannot be undone.`
+      : `Confirm: remove ${ids.length} product${ids.length>1?'s':''} from the warehouse only. Shopify untouched.`
+  );
+  if (!ok) return;
+  toast(`Deleting ${ids.length} products…`, 'info');
+  try {
+    const r = await Api.post('/api/products/bulk-delete', { ids, hard: true, shopify: removeFromShopify });
+    let msg = `Deleted ${r.deleted} from warehouse`;
+    if (removeFromShopify) msg += ` · ${r.shopifyDeleted} from Shopify`;
+    if (r.errors?.length) msg += ` · ${r.errors.length} errors`;
+    toast(msg, r.errors?.length ? 'warn' : 'success');
+    if (r.errors?.length) console.warn('Bulk delete errors:', r.errors);
+    State.invSelected.clear();
+    await Store.refresh('products');
+    renderInventory();
+  } catch (e) {
+    toast('Bulk delete failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 async function deleteProduct(id, title) {
