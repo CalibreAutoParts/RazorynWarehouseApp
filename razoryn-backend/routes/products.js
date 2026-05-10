@@ -153,6 +153,54 @@ router.post('/:id/adjust-stock', requirePermission('inventory'), async (req, res
   res.json({ product: result });
 });
 
+// POST /api/products/bulk-delete — delete multiple products at once.
+// Body: { ids: [..], hard: true|false, shopify: true|false }
+router.post('/bulk-delete', requireAdmin, async (req, res) => {
+  const ids = (req.body.ids || []).map(String);
+  const hard = !!req.body.hard;
+  const removeFromShopify = !!req.body.shopify;
+  if (!ids.length) return res.status(400).json({ error: 'no_ids' });
+
+  const results = { deleted: 0, shopifyDeleted: 0, errors: [] };
+
+  // Pre-fetch products so we have their Shopify IDs even if we hard-delete the rows
+  const { rows: products } = await query(
+    `SELECT id, shopify_product_id, sku FROM products WHERE id = ANY($1)`, [ids]
+  );
+
+  if (removeFromShopify) {
+    const shopify = require('../services/shopify');
+    if (shopify.isConfigured()) {
+      const axios = require('axios');
+      const token = await shopify.getAccessToken();
+      for (const p of products) {
+        if (!p.shopify_product_id) continue;
+        try {
+          await axios.delete(
+            `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${process.env.SHOPIFY_API_VERSION || '2025-01'}/products/${p.shopify_product_id}.json`,
+            { headers: { 'X-Shopify-Access-Token': token } }
+          );
+          results.shopifyDeleted++;
+        } catch (e) {
+          results.errors.push({ id: p.id, sku: p.sku, error: e.message });
+        }
+      }
+    }
+  }
+
+  // Delete from DB
+  if (hard) {
+    const r = await query(`DELETE FROM products WHERE id = ANY($1)`, [ids]);
+    results.deleted = r.rowCount || 0;
+  } else {
+    const r = await query(`UPDATE products SET active = false WHERE id = ANY($1)`, [ids]);
+    results.deleted = r.rowCount || 0;
+  }
+
+  await audit(req, hard ? 'bulk_hard_delete_product' : 'bulk_delete_product', 'product', null, results);
+  res.json({ ok: true, ...results });
+});
+
 // DELETE /api/products/:id  — soft delete by default (admin).
 // Pass ?hard=true&shopify=true to also delete from Shopify.
 router.delete('/:id', requireAdmin, async (req, res) => {

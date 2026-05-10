@@ -37,12 +37,11 @@ router.patch('/', requireAdmin, async (req, res) => {
   res.json({ settings: rows[0] });
 });
 
-// POST /api/settings/clear-catalogue (admin) — deletes ALL products and locations.
-// Use before a Shopify import if the warehouse has stale seed/demo data and you
-// want to start clean. Does NOT touch users, schedule, KB, settings.
+// POST /api/settings/clear-catalogue (admin) — deletes ALL products, locations,
+// mirror tracking, and per-listing overrides. Does NOT touch users, schedule,
+// KB, settings, audit log. Does NOT delete anything on Shopify or eBay.
 router.post('/clear-catalogue', requireAdmin, async (req, res) => {
   try {
-    // Delete in dependency order
     await query(`DELETE FROM stock_movements`);
     await query(`DELETE FROM stock_checks`);
     await query(`DELETE FROM sale_items`);
@@ -50,6 +49,9 @@ router.post('/clear-catalogue', requireAdmin, async (req, res) => {
     await query(`DELETE FROM returns`);
     await query(`DELETE FROM products`);
     await query(`DELETE FROM locations`);
+    // Also clear listing-mirror tracking so freshly mirrored listings appear as "New" again
+    try { await query(`DELETE FROM mirror_links`); } catch (e) {}
+    try { await query(`DELETE FROM ebay_listing_overrides`); } catch (e) {}
     await audit(req, 'clear_catalogue', null, null, {});
     res.json({ ok: true });
   } catch (e) {
