@@ -312,10 +312,17 @@ async function getDeliveryProfiles() {
     const r = await shopifyRequest('post', '/graphql.json', {
       data: { query: `query { deliveryProfiles(first: 25) { edges { node { id name } } } }` },
     });
+    if (r.data.errors) {
+      console.warn('[shopify] deliveryProfiles errors:', JSON.stringify(r.data.errors));
+      // Common cause: missing read_shipping scope on the custom app.
+      // Surface the issue so the caller (debug endpoint) can show it.
+      cachedProfiles = [];
+      return cachedProfiles;
+    }
     cachedProfiles = (r.data.data?.deliveryProfiles?.edges || []).map(e => e.node);
     return cachedProfiles;
   } catch (e) {
-    console.warn('[shopify] getDeliveryProfiles failed:', e.message);
+    console.warn('[shopify] getDeliveryProfiles failed:', e.response?.data || e.message);
     return [];
   }
 }
@@ -448,6 +455,10 @@ async function debugShopifyAccess() {
   try {
     const profiles = await getDeliveryProfiles();
     out.deliveryProfiles = profiles.map(p => ({ id: p.id, name: p.name }));
+    out.deliveryProfileCount = profiles.length;
+    if (!profiles.length) {
+      out.deliveryProfileHint = 'Empty result — your Shopify custom app token likely needs read_shipping scope. Shopify admin → Apps → custom app → Configuration → Admin API access scopes → enable read_shipping (and write_shipping if you want to assign products to profiles), then click Save and reinstall the app.';
+    }
   } catch (e) {
     out.deliveryProfilesError = e.message;
   }
