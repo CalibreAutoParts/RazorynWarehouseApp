@@ -2803,21 +2803,24 @@ let MirrorState = {
   customPrices: {},
   titleOverrides: {},
   skuOverrides: {},
-  itemStatuses: {},        // itemId -> 'draft' | 'active' (per-item override)
+  itemStatuses: {},
+  itemTags: {},                  // itemId -> tag string (overrides commonTags)
+  itemShippingProfileIds: {},    // itemId -> profile GID
+  itemTemplateSuffixes: {},      // itemId -> 'large-parts' | ''
   metafields: [],
   perItemMetafields: {},
   metafieldDefs: [],
-  deliveryProfiles: [],    // [{id, name}] from Shopify
+  deliveryProfiles: [],
   expandedRows: new Set(),
   filterText: '',
   statusFilter: 'all',
   pricingMode: 'percent',
   percentDiscount: 0,
-  productStatus: 'draft',  // global default; itemStatuses can override per item
-  commonTags: '',          // comma-separated tags applied to all
-  commonShippingProfileId: '', // GID, '' = default
-  commonTemplateSuffix: '',    // '' = default product, 'large-parts' = large-parts template
-  hideTemplateImages: false,   // when true, TMPL images are removed from photos lists entirely
+  productStatus: 'draft',
+  commonTags: '',
+  commonShippingProfileId: '',
+  commonTemplateSuffix: '',
+  hideTemplateImages: false,
   saveTimers: {},
 };
 
@@ -3192,8 +3195,17 @@ async function runShopifyDiag() {
     } else {
       lines.push('  ✗ NONE — token may need read_metafield_definitions scope, or no definitions exist on the store.');
     }
+    lines.push('');
+    lines.push(`Shipping profiles: ${(r.deliveryProfiles || []).length}`);
+    if (r.deliveryProfiles && r.deliveryProfiles.length) {
+      for (const p of r.deliveryProfiles) lines.push(`  · ${p.name}`);
+    } else {
+      lines.push('  ✗ NONE');
+      if (r.deliveryProfileHint) lines.push('  Hint: ' + r.deliveryProfileHint);
+    }
     if (r.publicationsError) lines.push(`Pub error: ${r.publicationsError}`);
     if (r.metafieldDefError) lines.push(`Metafield def error: ${r.metafieldDefError}`);
+    if (r.deliveryProfilesError) lines.push(`Profiles error: ${r.deliveryProfilesError}`);
     alert(lines.join('\n'));
   } catch (e) {
     toast('Diagnostic failed: ' + (e.data?.message || e.message), 'error');
@@ -3334,14 +3346,51 @@ function renderMetafieldPanel(l) {
   for (const mf of computed) computedMap[`${mf.namespace}.${mf.key}`] = mf.value;
 
   const filledCount = computed.length;
+  const itemTag = MirrorState.itemTags[l.itemId];
+  const itemProfile = MirrorState.itemShippingProfileIds[l.itemId];
+  const itemTemplate = MirrorState.itemTemplateSuffixes[l.itemId];
+  const overridesCount = (itemTag != null ? 1 : 0) + (itemProfile != null ? 1 : 0) + (itemTemplate != null ? 1 : 0);
+
   const button = `<button class="btn btn-ghost btn-sm" onclick="toggleMetafieldRow('${l.itemId}')" style="margin-top:10px;font-size:12px;color:var(--ink-soft)">
-    ${expanded ? '▾' : '▸'} Metafields ${filledCount ? `· <span style="color:var(--green);font-weight:600">${filledCount} filled</span>` : ''}
+    ${expanded ? '▾' : '▸'} Per-listing settings & metafields ${filledCount ? `· <span style="color:var(--green);font-weight:600">${filledCount} metafields</span>` : ''} ${overridesCount ? `· <span style="color:var(--red);font-weight:600">${overridesCount} overrides</span>` : ''}
   </button>`;
 
   if (!expanded) return button;
 
+  const profiles = MirrorState.deliveryProfiles || [];
+  const tagVal = itemTag != null ? itemTag : MirrorState.commonTags;
+  const profileVal = itemProfile != null ? itemProfile : MirrorState.commonShippingProfileId;
+  const templateVal = itemTemplate != null ? itemTemplate : MirrorState.commonTemplateSuffix;
+
+  const settingsBlock = `
+    <div style="background:var(--bg-soft);padding:12px;border-radius:6px;margin-top:8px;margin-bottom:8px">
+      <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Per-listing settings (override bulk values for this listing only)</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div>
+          <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Tags ${itemTag != null ? '<span style="color:var(--red)">·override</span>' : ''}</div>
+          <input type="text" value="${escapeAttr(tagVal)}" placeholder="${escapeAttr(MirrorState.commonTags || 'no tags')}" oninput="setItemTag('${l.itemId}',this.value)" style="font-size:12px">
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Product template ${itemTemplate != null ? '<span style="color:var(--red)">·override</span>' : ''}</div>
+          <select onchange="setItemTemplate('${l.itemId}',this.value)" style="font-size:12px">
+            <option value="" ${templateVal === '' ? 'selected' : ''}>Default product</option>
+            <option value="large-parts" ${templateVal === 'large-parts' ? 'selected' : ''}>large-parts</option>
+          </select>
+        </div>
+        <div style="grid-column:1 / -1">
+          <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Shipping profile ${itemProfile != null ? '<span style="color:var(--red)">·override</span>' : ''}</div>
+          <select onchange="setItemProfile('${l.itemId}',this.value)" style="font-size:12px;width:100%">
+            <option value="" ${profileVal === '' ? 'selected' : ''}>No override (use bulk setting or Shopify default)</option>
+            ${profiles.map(p => `<option value="${escapeAttr(p.id)}" ${profileVal === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      ${overridesCount ? `<button class="btn btn-ghost btn-sm" onclick="clearItemOverrides('${l.itemId}')" style="font-size:11px;margin-top:8px;color:var(--ink-soft)">↺ Clear all per-listing overrides</button>` : ''}
+    </div>
+  `;
+
   if (!defs.length) {
-    return button + `<div style="background:var(--bg-soft);padding:12px;border-radius:6px;margin-top:8px;font-size:12px;color:var(--ink-soft)">No metafield definitions found on Shopify. Add metafield definitions in Shopify admin → Settings → Custom data → Products, then re-pull listings.</div>`;
+    return button + settingsBlock + `<div style="background:var(--bg-soft);padding:12px;border-radius:6px;font-size:12px;color:var(--ink-soft)">No metafield definitions found on Shopify. Add them in Shopify admin → Settings → Custom data → Products, then re-pull.</div>`;
   }
 
   const rows = defs.map(d => {
@@ -3359,7 +3408,6 @@ function renderMetafieldPanel(l) {
     `;
   }).join('');
 
-  // Quick-fill buttons that pre-populate based on listing data
   const quickFill = `
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
       <button class="btn btn-outline btn-sm" onclick="quickFillFromListing('${l.itemId}','sku')" title="Fill Part Number = SKU">Auto-fill Part Number from SKU</button>
@@ -3367,13 +3415,36 @@ function renderMetafieldPanel(l) {
     </div>
   `;
 
-  return button + `
-    <div style="background:var(--bg-soft);padding:12px;border-radius:6px;margin-top:8px">
+  return button + settingsBlock + `
+    <div style="background:var(--bg-soft);padding:12px;border-radius:6px">
       <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Metafields for this listing</div>
       ${quickFill}
       ${rows}
     </div>
   `;
+}
+
+function setItemTag(itemId, value) {
+  if (value === MirrorState.commonTags) delete MirrorState.itemTags[itemId];
+  else MirrorState.itemTags[itemId] = value;
+  scheduleSaveOverride(itemId);
+}
+function setItemProfile(itemId, value) {
+  if (value === MirrorState.commonShippingProfileId) delete MirrorState.itemShippingProfileIds[itemId];
+  else MirrorState.itemShippingProfileIds[itemId] = value;
+  scheduleSaveOverride(itemId);
+}
+function setItemTemplate(itemId, value) {
+  if (value === MirrorState.commonTemplateSuffix) delete MirrorState.itemTemplateSuffixes[itemId];
+  else MirrorState.itemTemplateSuffixes[itemId] = value;
+  scheduleSaveOverride(itemId);
+}
+function clearItemOverrides(itemId) {
+  delete MirrorState.itemTags[itemId];
+  delete MirrorState.itemShippingProfileIds[itemId];
+  delete MirrorState.itemTemplateSuffixes[itemId];
+  scheduleSaveOverride(itemId);
+  paintMirrorList();
 }
 
 function toggleMetafieldRow(itemId) {
@@ -3426,10 +3497,14 @@ function populateShippingProfileDropdown() {
   const sel = el('mr-shipping-profile');
   if (!sel) return;
   const profiles = MirrorState.deliveryProfiles || [];
-  // Filter out the "All other products" / default profile (it's automatic)
-  const customProfiles = profiles.filter(p => !/all other products|store default|general profile/i.test(p.name));
-  sel.innerHTML = '<option value="">Store default (no override)</option>' +
-    customProfiles.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+  // Show every profile the API returns. The user can pick whichever they want.
+  // Label any profile whose name suggests it's the catch-all default.
+  sel.innerHTML = '<option value="">No override (uses Shopify default for the product)</option>' +
+    profiles.map(p => {
+      const isDefault = /all other products|store default|general profile/i.test(p.name);
+      const label = escapeHtml(p.name) + (isDefault ? ' (default)' : '');
+      return `<option value="${escapeAttr(p.id)}">${label}</option>`;
+    }).join('');
 }
 
 function setStatusFilter(v) {
@@ -3570,7 +3645,7 @@ async function mirrorSelected() {
     );
   }
 
-  // Build payload — apply overrides, per-item status, common tags/profile/template
+  // Build payload — per-item overrides fall back to common bulk values
   const items = valid.map(l => ({
     itemId: l.itemId,
     sku: MirrorState.skuOverrides[l.itemId] != null ? MirrorState.skuOverrides[l.itemId] : l.sku,
@@ -3580,9 +3655,9 @@ async function mirrorSelected() {
     status: MirrorState.itemStatuses[l.itemId] || MirrorState.productStatus,
     metafields: metafieldsForListing(l),
     qty: l.quantityAvailable != null ? l.quantityAvailable : null,
-    tags: MirrorState.commonTags || null,
-    templateSuffix: MirrorState.commonTemplateSuffix || null,
-    shippingProfileId: MirrorState.commonShippingProfileId || null,
+    tags: MirrorState.itemTags[l.itemId] != null ? MirrorState.itemTags[l.itemId] : (MirrorState.commonTags || null),
+    templateSuffix: MirrorState.itemTemplateSuffixes[l.itemId] != null ? MirrorState.itemTemplateSuffixes[l.itemId] : (MirrorState.commonTemplateSuffix || null),
+    shippingProfileId: MirrorState.itemShippingProfileIds[l.itemId] != null ? MirrorState.itemShippingProfileIds[l.itemId] : (MirrorState.commonShippingProfileId || null),
   }));
 
   toast(`Mirroring ${items.length} listings to Shopify…`, 'info');
