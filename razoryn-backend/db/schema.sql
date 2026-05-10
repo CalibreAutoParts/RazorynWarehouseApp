@@ -291,6 +291,17 @@ CREATE TABLE IF NOT EXISTS ebay_listing_overrides (
   updated_at    TIMESTAMPTZ DEFAULT now()
 );
 
+-- Stable link between an eBay listing and a Shopify product, regardless of SKU/title changes.
+-- Used to determine "already mirrored" status — survives renames and SKU edits.
+CREATE TABLE IF NOT EXISTS mirror_links (
+  ebay_item_id        TEXT PRIMARY KEY,
+  shopify_product_id  BIGINT NOT NULL,
+  last_mirrored_at    TIMESTAMPTZ DEFAULT now(),
+  last_synced_sku     TEXT,
+  last_synced_title   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mirror_links_shopify_id ON mirror_links(shopify_product_id);
+
 -- Triggers — auto-update updated_at
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
 BEGIN NEW.updated_at = now(); RETURN NEW; END;
