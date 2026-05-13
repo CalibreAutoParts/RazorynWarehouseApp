@@ -10,6 +10,19 @@ const router = express.Router();
 
 router.use(requireAuth);
 
+// GET /api/listings/debug-ebay-order?orderId=...
+// Dumps the raw Trading-API GetOrders XML for one order so we can see WHICH fields are
+// actually present (vs. what our extractor is finding). Strips eBay seller token from output.
+router.get('/debug-ebay-order', requireAdmin, async (req, res) => {
+  if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
+  try {
+    const xml = await ebay.dumpOrderXml(req.query.orderId, req.query.days || 7);
+    res.set('Content-Type', 'application/xml').send(xml);
+  } catch (e) {
+    res.status(500).json({ error: 'failed', message: e.message });
+  }
+});
+
 // POST /api/listings/hydrate-ebay-prices
 // Pull live eBay listings, then update products.price_ebay for any matching SKUs.
 // Useful when products were imported from Shopify but their eBay price is blank,

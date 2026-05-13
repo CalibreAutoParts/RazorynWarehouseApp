@@ -406,11 +406,18 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     return (sale.channel || '').replace(/_/g, ' ');
   })();
 
-  // Customer name: prefer shipping-address first line over raw eBay username
+  // Customer name on invoice: prefer the shipping-address first line (real name).
+  // Never use the eBay username on the customer-facing invoice — it's not their name.
+  // If we have no shipping address yet, show a friendly placeholder; staff still see
+  // the username in the Sales tab and order detail modal.
   let billedToName = sale.customer_name || 'Walk-in customer';
   if (sale.shipping_address) {
     const firstLine = String(sale.shipping_address).split('\n')[0].trim();
     if (firstLine) billedToName = firstLine;
+  } else if (isEbay) {
+    billedToName = 'eBay customer';
+  } else if (isShopify) {
+    billedToName = 'Online customer';
   }
 
   const isCashReceipt = mode === 'receipt' || (sale.payment_method === 'cash' && !isVatRegistered);
@@ -998,6 +1005,71 @@ router.delete('/:id', requireAdmin, async (req, res) => {
   if (result.error) return res.status(404).json(result);
   await audit(req, 'delete_sale', 'sale', req.params.id, result);
   res.json(result);
+});
+
+// POST /api/sales/backfill-ebay-addresses
+// For all eBay orders missing shipping_address, re-fetch detail from eBay GetOrders
+// (single-order detail) and populate the address + customer name. Also extracts
+// buyer email/phone if present in the new detail response.
+router.post('/backfill-ebay-addresses', requireAdmin, async (req, res) => {
+  const ebay = require('../services/ebay');
+  if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
+
+  const { rows } = await query(
+    `SELECT id, external_order_id, customer_name FROM sales
+     WHERE channel LIKE 'ebay%' AND external_order_id IS NOT NULL
+       AND (shipping_address IS NULL OR shipping_address = '')
+     ORDER BY occurred_at DESC LIMIT 100`
+  );
+
+  let updated = 0, noAddress = 0, failed = 0;
+  const errors = [];
+
+  for (const sale of rows) {
+    try {
+      const xml = await ebay.getOrderDetail(sale.external_order_id);
+      // Parse shipping address out of the per-order detail XML
+      const orderBlock = (xml.match(/<Order>[\s\S]*?<\/Order>/) || [])[0] || '';
+      const shipBlock = (orderBlock.match(/<ShippingAddress>([\s\S]*?)<\/ShippingAddress>/) || [])[1] || '';
+
+      const extract = (tag) => {
+        const m = shipBlock.match(new RegExp('<' + tag + '>([\\s\\S]*?)<\\/' + tag + '>'));
+        if (!m) return '';
+        return m[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").trim();
+      };
+      const name = extract('Name');
+      const street1 = extract('Street1');
+      const street2 = extract('Street2');
+      const city = extract('CityName');
+      const state = extract('StateOrProvince');
+      const postal = extract('PostalCode');
+      const country = extract('Country');
+      const phone = extract('Phone');
+
+      // Also try to extract buyer email (often in TransactionArray > Transaction > Buyer)
+      const emailM = orderBlock.match(/<Buyer>[\s\S]*?<Email>([^<]+)<\/Email>/);
+      const buyerEmail = emailM ? emailM[1].trim() : null;
+
+      const parts = [name, street1, street2, city, state, postal, country].filter(Boolean);
+      if (!parts.length) { noAddress++; continue; }
+
+      const address = parts.join('\n');
+      await query(
+        `UPDATE sales SET shipping_address = $1,
+                          customer_name = CASE WHEN $2 != '' THEN $2 ELSE customer_name END,
+                          customer_phone = COALESCE($3, customer_phone),
+                          customer_email = COALESCE($4, customer_email)
+         WHERE id = $5`,
+        [address, name || '', phone || null, buyerEmail && buyerEmail !== 'Invalid Request' ? buyerEmail : null, sale.id]
+      );
+      updated++;
+    } catch (e) {
+      failed++;
+      errors.push({ id: sale.id, orderId: sale.external_order_id, message: e.message });
+    }
+  }
+  await audit(req, 'backfill_ebay_addresses', null, null, { scanned: rows.length, updated, noAddress, failed });
+  res.json({ scanned: rows.length, updated, noAddress, failed, errors: errors.slice(0, 5) });
 });
 
 module.exports = router;

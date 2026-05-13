@@ -137,4 +137,85 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
   res.json({ return: result });
 });
 
+// POST /api/returns/sync-ebay
+// Scans the last 60 days of eBay orders for cancellations / refunds and creates Return
+// rows in our warehouse. Works with Auth'n'Auth Trading API (no Post-Order OAuth needed).
+//
+// What it picks up:
+//   - Orders with OrderStatus = Cancelled
+//   - Orders with RefundStatus (any) — partial or full refunds
+//   - Orders with CancelStatus other than 'NotApplicable'
+// Each unique eBay order → at most one Return row (skipped if already exists).
+router.post('/sync-ebay', requirePermission('returns'), async (req, res) => {
+  const ebay = require('../services/ebay');
+  if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
+
+  // Fetch raw GetOrders for the last `days`
+  const days = Math.min(180, parseInt(req.body.days || 60));
+  const sinceISO = new Date(Date.now() - days * 86400000).toISOString();
+
+  let xml;
+  try { xml = await ebay.dumpOrderXml(null, days); }
+  catch (e) { return res.status(500).json({ error: 'fetch_failed', message: e.message }); }
+
+  // Find all <Order> blocks and detect cancel / refund
+  const orderBlocks = xml.match(/<Order>[\s\S]*?<\/Order>/g) || [];
+  const candidates = [];
+  for (const block of orderBlocks) {
+    const orderId = ((block.match(/<OrderID>([^<]+)<\/OrderID>/) || [])[1] || '').trim();
+    const status = ((block.match(/<OrderStatus>([^<]+)<\/OrderStatus>/) || [])[1] || '').trim();
+    const cancelStatus = ((block.match(/<CancelStatus>([^<]+)<\/CancelStatus>/) || [])[1] || '').trim();
+    const refundStatus = ((block.match(/<RefundStatus>([^<]+)<\/RefundStatus>/) || [])[1] || '').trim();
+    const refundAmtM = block.match(/<RefundAmount[^>]*>([^<]+)<\/RefundAmount>/);
+    const refundAmount = refundAmtM ? parseFloat(refundAmtM[1]) : null;
+    const buyer = ((block.match(/<BuyerUserID>([^<]+)<\/BuyerUserID>/) || [])[1] || '').trim();
+    const total = parseFloat(((block.match(/<Total[^>]*>([^<]+)<\/Total>/) || [])[1] || '0'));
+
+    const isReturn = status === 'Cancelled'
+                   || refundStatus.length > 0
+                   || (cancelStatus && cancelStatus !== 'NotApplicable' && cancelStatus !== '');
+
+    if (!orderId || !isReturn) continue;
+    candidates.push({ orderId, status, cancelStatus, refundStatus, refundAmount, buyer, total });
+  }
+
+  let created = 0, alreadyExists = 0, noLocalSale = 0;
+  for (const c of candidates) {
+    // Find the matching sale in our DB
+    const sale = await query(
+      `SELECT id, channel FROM sales WHERE external_order_id = $1 LIMIT 1`,
+      [c.orderId]
+    );
+    if (!sale.rows[0]) { noLocalSale++; continue; }
+    // Already a return row for this sale?
+    const existing = await query(
+      `SELECT id FROM returns WHERE sale_id = $1 LIMIT 1`, [sale.rows[0].id]
+    );
+    if (existing.rows[0]) { alreadyExists++; continue; }
+    // First sale item (most eBay returns are single-line)
+    const item = await query(
+      `SELECT product_id, qty FROM sale_items WHERE sale_id = $1 ORDER BY id LIMIT 1`,
+      [sale.rows[0].id]
+    );
+    const productId = item.rows[0]?.product_id || null;
+    const qty = item.rows[0]?.qty || 1;
+
+    const reason = c.status === 'Cancelled' ? 'Cancelled on eBay'
+                 : c.refundStatus ? `Refunded on eBay (${c.refundStatus})`
+                 : c.cancelStatus ? `Cancel: ${c.cancelStatus}` : 'eBay return';
+
+    await query(
+      `INSERT INTO returns (sale_id, product_id, channel, qty, reason, resolution,
+                            refund_amount, status, notes, handled_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8,$9)`,
+      [sale.rows[0].id, productId, sale.rows[0].channel, qty, reason,
+       c.refundStatus ? 'refund' : 'pending',
+       c.refundAmount || c.total, `eBay order ${c.orderId} · buyer ${c.buyer}`, req.user.id]
+    );
+    created++;
+  }
+  await audit(req, 'sync_ebay_returns', null, null, { scanned: candidates.length, created, alreadyExists, noLocalSale });
+  res.json({ scanned: candidates.length, created, alreadyExists, noLocalSale });
+});
+
 module.exports = router;
