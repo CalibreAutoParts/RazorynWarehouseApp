@@ -291,6 +291,24 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS notif_unread_idx ON notifications (target_user_id, created_at DESC) WHERE read_at IS NULL;
 
+-- ---------- Staff notes (phone-team follow-ups) ----------
+-- Notes auto-expire on read (filtered to last 31 days) so the page stays uncluttered.
+-- An optional cron job permanently deletes anything older than 31 days.
+CREATE TABLE IF NOT EXISTS staff_notes (
+  id            SERIAL PRIMARY KEY,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body          TEXT NOT NULL,
+  customer_name  TEXT,
+  customer_phone TEXT,
+  customer_email TEXT,
+  follow_up_date DATE,                    -- optional reminder date
+  category       TEXT,                    -- 'call_back','quote','fitment_query','complaint','other'
+  done_at        TIMESTAMPTZ,             -- set when the user ticks the note as done
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS staff_notes_user_idx ON staff_notes (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS staff_notes_followup_idx ON staff_notes (follow_up_date) WHERE done_at IS NULL;
+
 -- ---------- How-to videos (feature 10) ----------
 CREATE TABLE IF NOT EXISTS videos (
   id          SERIAL PRIMARY KEY,
