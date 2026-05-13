@@ -237,6 +237,15 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'returns' AND column_name = 'last_synced_at') THEN
     ALTER TABLE returns ADD COLUMN last_synced_at TIMESTAMPTZ;
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'returns' AND column_name = 'item_title') THEN
+    ALTER TABLE returns ADD COLUMN item_title TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'returns' AND column_name = 'item_sku') THEN
+    ALTER TABLE returns ADD COLUMN item_sku TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'returns' AND column_name = 'external_order_id') THEN
+    ALTER TABLE returns ADD COLUMN external_order_id TEXT;
+  END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS returns_external_idx ON returns (external_return_id) WHERE external_return_id IS NOT NULL;
 
