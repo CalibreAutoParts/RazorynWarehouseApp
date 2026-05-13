@@ -167,6 +167,102 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
   res.json({ return: result });
 });
 
+// POST /api/returns/relink-unmatched
+// Re-runs the multi-strategy product matching (SKU fuzzy + title token + title similarity)
+// against all returns currently missing a product_id. Useful after fixing SKUs or
+// after the initial eBay sync left items unlinked.
+router.post('/relink-unmatched', requirePermission('returns'), async (req, res) => {
+  const sync = require('../services/sync');
+  const unlinked = await query(
+    `SELECT id, item_title, item_sku, sale_id, external_order_id
+     FROM returns WHERE product_id IS NULL ORDER BY id DESC LIMIT 500`
+  );
+  let linked = 0;
+  for (const r of unlinked.rows) {
+    let productId = null;
+    let chosenSku = r.item_sku;
+
+    // First: pull item info from the matched sale if available
+    if (r.sale_id) {
+      const item = await query(
+        `SELECT product_id, sku, title FROM sale_items WHERE sale_id = $1 ORDER BY id LIMIT 1`,
+        [r.sale_id]
+      );
+      if (item.rows[0]?.product_id) {
+        productId = item.rows[0].product_id;
+        chosenSku = chosenSku || item.rows[0].sku;
+      }
+    }
+    // Fall back to looking up the sale via external_order_id
+    if (!productId && r.external_order_id) {
+      const sale = await query(
+        `SELECT id FROM sales WHERE external_order_id = $1 LIMIT 1`,
+        [r.external_order_id]
+      );
+      if (sale.rows[0]) {
+        const item = await query(
+          `SELECT product_id, sku, title FROM sale_items WHERE sale_id = $1 ORDER BY id LIMIT 1`,
+          [sale.rows[0].id]
+        );
+        if (item.rows[0]?.product_id) {
+          productId = item.rows[0].product_id;
+          chosenSku = chosenSku || item.rows[0].sku;
+          await query(`UPDATE returns SET sale_id = $1 WHERE id = $2`, [sale.rows[0].id, r.id]);
+        }
+      }
+    }
+
+    // Fuzzy SKU
+    if (!productId && r.item_sku) {
+      try {
+        const m = await sync.resolveProductBySku(null, r.item_sku);
+        if (m) { productId = m.id; chosenSku = chosenSku || m.sku; }
+      } catch (e) { /* ignore */ }
+    }
+
+    // Title-token extraction
+    if (!productId && r.item_title) {
+      const tokens = String(r.item_title).match(/\b[A-Z0-9]{5,}(?:[-\/][A-Z0-9]{2,})*\b/gi) || [];
+      tokens.sort((a, b) => b.length - a.length);
+      for (const tok of tokens.slice(0, 5)) {
+        const norm = tok.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+        if (norm.length < 5) continue;
+        const p = await query(
+          `SELECT id, sku FROM products
+           WHERE REGEXP_REPLACE(UPPER(sku), '[^A-Z0-9]', '', 'g') = $1
+              OR REGEXP_REPLACE(UPPER(COALESCE(part_number,'')), '[^A-Z0-9]', '', 'g') = $1
+              OR REGEXP_REPLACE(UPPER(COALESCE(barcode,'')), '[^A-Z0-9]', '', 'g') = $1
+           LIMIT 1`, [norm]
+        );
+        if (p.rows[0]) { productId = p.rows[0].id; chosenSku = chosenSku || p.rows[0].sku; break; }
+      }
+    }
+
+    // Title-similarity
+    if (!productId && r.item_title && r.item_title.length > 15) {
+      const firstWords = r.item_title.split(/\s+/).slice(0, 3).join(' ');
+      const candidates = await query(
+        `SELECT id, sku FROM products WHERE title ILIKE $1 ORDER BY LENGTH(title) ASC LIMIT 1`,
+        ['%' + firstWords + '%']
+      );
+      if (candidates.rows[0]) {
+        productId = candidates.rows[0].id;
+        chosenSku = chosenSku || candidates.rows[0].sku;
+      }
+    }
+
+    if (productId) {
+      await query(
+        `UPDATE returns SET product_id = $1, item_sku = COALESCE(item_sku, $2) WHERE id = $3`,
+        [productId, chosenSku, r.id]
+      );
+      linked++;
+    }
+  }
+  await audit(req, 'relink_returns', null, null, { scanned: unlinked.rows.length, linked });
+  res.json({ scanned: unlinked.rows.length, linked });
+});
+
 // POST /api/returns/sync-ebay
 // Pull live return cases from eBay's Post-Order API and sync them to our Returns table.
 router.post('/sync-ebay', requirePermission('returns'), async (req, res) => {
@@ -226,6 +322,10 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
                        || dig(ret, 'order', 'legacyOrderId') || null;
 
     let saleId = null, productId = null, qty = itemQty, channel = 'ebay_em', sku = variationSku;
+    let resolvedTitle = itemTitle;
+    let resolvedSku = sku;
+
+    // Strategy 1: match by eBay order ID → local sale → product
     const candidateOrderIds = [orderId, legacyOrderId].filter(Boolean);
     for (const oid of candidateOrderIds) {
       const sale = await query(
@@ -236,20 +336,71 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
         saleId = sale.rows[0].id;
         channel = sale.rows[0].channel;
         const item = await query(
-          `SELECT product_id, qty, sku FROM sale_items WHERE sale_id = $1 ORDER BY id LIMIT 1`,
+          `SELECT product_id, qty, sku, title FROM sale_items WHERE sale_id = $1 ORDER BY id LIMIT 1`,
           [saleId]
         );
         productId = item.rows[0]?.product_id || null;
         qty = itemQty || item.rows[0]?.qty || 1;
-        sku = sku || item.rows[0]?.sku || null;
+        // Fill in missing item info from the sale's line item when Post-Order didn't include it
+        resolvedSku = resolvedSku || item.rows[0]?.sku || null;
+        resolvedTitle = resolvedTitle || item.rows[0]?.title || null;
         break;
       }
     }
     if (!saleId) noLocalSale++;
-    if (!productId && (sku || itemId)) {
-      for (const s of [sku, itemId].filter(Boolean)) {
-        const p = await query(`SELECT id FROM products WHERE sku = $1 OR barcode = $1 LIMIT 1`, [s]);
-        if (p.rows[0]) { productId = p.rows[0].id; break; }
+
+    // Strategy 2: aggressive SKU resolution via the same fuzzy matcher used for sales sync.
+    // Handles prefixed SKUs like "HYUNDAI I20 - 86551-Q0000" → matches "86551-Q0000",
+    // case differences, alphanumeric-only variants, and the part_number column.
+    if (!productId) {
+      const sync = require('../services/sync');
+      for (const candidate of [resolvedSku, sku, variationSku, itemId].filter(Boolean)) {
+        try {
+          const m = await sync.resolveProductBySku(null, candidate);
+          if (m) { productId = m.id; resolvedSku = resolvedSku || m.sku; break; }
+        } catch (e) { /* ignore */ }
+      }
+    }
+
+    // Strategy 3: extract a part-number-looking token from the title and search.
+    // eBay listing titles often embed the SKU at the end, e.g.
+    // "Hyundai Front Left Bumper Bracket 86551Q0000".
+    if (!productId && resolvedTitle) {
+      // Match common part-number formats: 5-12 alphanumerics with optional dashes
+      const tokens = String(resolvedTitle).match(/\b[A-Z0-9]{5,}(?:[-\/][A-Z0-9]{2,})*\b/gi) || [];
+      // Sort by length desc — longer tokens are more specific
+      tokens.sort((a, b) => b.length - a.length);
+      for (const tok of tokens.slice(0, 5)) {
+        const norm = tok.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+        if (norm.length < 5) continue;
+        const p = await query(
+          `SELECT id, sku FROM products
+           WHERE REGEXP_REPLACE(UPPER(sku), '[^A-Z0-9]', '', 'g') = $1
+              OR REGEXP_REPLACE(UPPER(COALESCE(part_number,'')), '[^A-Z0-9]', '', 'g') = $1
+              OR REGEXP_REPLACE(UPPER(COALESCE(barcode,'')), '[^A-Z0-9]', '', 'g') = $1
+           LIMIT 1`,
+          [norm]
+        );
+        if (p.rows[0]) { productId = p.rows[0].id; resolvedSku = resolvedSku || p.rows[0].sku; break; }
+      }
+    }
+
+    // Strategy 4: title-similarity match. If the eBay title closely matches a product
+    // title (e.g. "Hyundai Bayon 2021-2026 FRONT HEADLIGHT…" vs our "Hyundai Bayon
+    // 2021-2026 Front Headlight RH"), use it.
+    if (!productId && resolvedTitle && resolvedTitle.length > 15) {
+      // Pull a handful of candidate products by trigram-style overlap on the first 3 words
+      const firstWords = resolvedTitle.split(/\s+/).slice(0, 3).join(' ');
+      const candidates = await query(
+        `SELECT id, title, sku FROM products
+         WHERE title ILIKE $1
+         ORDER BY LENGTH(title) ASC
+         LIMIT 5`,
+        ['%' + firstWords + '%']
+      );
+      if (candidates.rows[0]) {
+        productId = candidates.rows[0].id;
+        resolvedSku = resolvedSku || candidates.rows[0].sku;
       }
     }
 
@@ -291,7 +442,7 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
                             last_synced_at = now()
          WHERE id = $12`,
         [ourStatus, state, respondBy, refundAmt, saleId, productId, buyerUser, reason,
-         itemTitle, sku, orderId || legacyOrderId, existing.rows[0].id]
+         resolvedTitle, resolvedSku, orderId || legacyOrderId, existing.rows[0].id]
       );
       updated++;
       // Notify on state change (open→closed, etc.) — but only meaningful transitions
@@ -301,7 +452,7 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
           `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
            VALUES ('return_state_change', $1, $2, $3, 'return', $4)`,
           [
-            `eBay return ${ourStatus === 'closed' ? 'closed' : 'updated'}: ${(itemTitle || returnId).slice(0, 60)}`,
+            `eBay return ${ourStatus === 'closed' ? 'closed' : 'updated'}: ${(resolvedTitle || returnId).slice(0, 60)}`,
             `Buyer ${buyerUser || 'unknown'} · case ${returnId} · was ${wasState}, now ${state}`,
             sevMap[ourStatus] || 'info',
             existing.rows[0].id,
@@ -319,7 +470,7 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
         [saleId, productId, channel, qty, reason, 'pending', refundAmt, ourStatus,
          `eBay return · order ${orderId || legacyOrderId || '?'}`, performedByUserId,
          returnId, state, respondBy, buyerUser,
-         itemTitle, sku, orderId || legacyOrderId]
+         resolvedTitle, resolvedSku, orderId || legacyOrderId]
       );
       created++;
       // Notify on every NEW return — staff need to see these immediately
@@ -327,7 +478,7 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
         `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
          VALUES ('return_opened', $1, $2, 'warn', 'return', $3)`,
         [
-          `New eBay return: ${(itemTitle || returnId).slice(0, 60)}`,
+          `New eBay return: ${(resolvedTitle || returnId).slice(0, 60)}`,
           `Buyer ${buyerUser || 'unknown'} · reason: ${reason}${respondBy ? ' · respond by ' + new Date(respondBy).toLocaleDateString('en-GB') : ''}`,
           inserted.rows[0].id,
         ]
