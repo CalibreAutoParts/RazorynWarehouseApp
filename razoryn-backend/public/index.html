@@ -1231,6 +1231,7 @@ function bindLogin() {
       State.user = user;
       pin = ''; renderDots();
       await Store.refreshAll();
+      try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (e) {}
       enterApp();
     } catch (e) {
       errEl.textContent = e.message === 'unauthorized' || e.status === 401
@@ -1255,6 +1256,7 @@ function bindLogin() {
       const user = await Api.auth.loginEmail(email, pwd);
       State.user = user;
       await Store.refreshAll();
+      try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (e) {}
       enterApp();
     } catch (e) {
       toast(e.status === 401 ? 'Invalid email or password' : 'Login failed', 'error');
@@ -2869,6 +2871,11 @@ function invoiceHtml(items, filter) {
    PHONE PRICING TOOL
    ========================================================== */
 function renderPricing() {
+  // Make sure the latest cash/bank/eBay percentages are loaded before quoting.
+  // Without this, the first time staff open this page the State.pricingConfig is
+  // undefined and quotePrice() falls back to its default (cash=10, bank=10)
+  // — making cash and bank prices look identical even though they differ in settings.
+  loadPricingConfig();
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
@@ -2904,7 +2911,13 @@ function renderPricing() {
 }
 function quotePrice(id) {
   const p = State.products.find(x => x.id == id);
-  const cfg = State.pricingConfig || { cashDiscountPct: State.settings.cashDiscount || 10, bankTransferPct: 10, ebayBuyerProtectionMarkup: 0, shopifyFreeDeliveryOver: 50 };
+  if (!State.pricingConfig) {
+    // Config not loaded yet — kick off the load and re-render once it arrives.
+    el('pt-detail').innerHTML = '<div style="padding:20px;text-align:center;color:var(--ink-soft)">Loading pricing config…</div>';
+    loadPricingConfig().then(() => quotePrice(id));
+    return;
+  }
+  const cfg = State.pricingConfig;
   // If price_ebay is missing (products imported from Shopify only), fall back to Shopify price
   // as the eBay basis. This way Cash / Bank / eBay quotes still compute reasonably until
   // eBay listings are mirrored back to populate price_ebay properly.
