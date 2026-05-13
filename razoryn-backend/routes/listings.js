@@ -10,6 +10,32 @@ const router = express.Router();
 
 router.use(requireAuth);
 
+// POST /api/listings/hydrate-ebay-prices
+// Pull live eBay listings, then update products.price_ebay for any matching SKUs.
+// Useful when products were imported from Shopify but their eBay price is blank,
+// causing phone-pricing quotes to show £0.
+router.post('/hydrate-ebay-prices', requireAdmin, async (req, res) => {
+  if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
+  try {
+    const listings = await ebay.getActiveListings();
+    let updated = 0, matched = 0, skipped = 0;
+    for (const l of listings) {
+      if (!l.sku) { skipped++; continue; }
+      const ebayPrice = l.priceEbay || 0;
+      const upd = await query(
+        `UPDATE products SET price_ebay = $1 WHERE sku = $2 AND $1::numeric > 0 RETURNING id`,
+        [ebayPrice, l.sku]
+      );
+      if (upd.rows.length > 0) { updated += upd.rows.length; matched++; }
+      else skipped++;
+    }
+    res.json({ ok: true, listingsFound: listings.length, productsMatched: matched, productsUpdated: updated, skipped });
+  } catch (e) {
+    console.error('[hydrate-ebay-prices]', e);
+    res.status(500).json({ error: 'hydrate_failed', message: e.message });
+  }
+});
+
 // Diagnostic
 router.get('/debug-shopify', requireAdmin, async (req, res) => {
   try {

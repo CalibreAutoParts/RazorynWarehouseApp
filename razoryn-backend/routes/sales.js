@@ -36,19 +36,25 @@ router.get('/', requirePermission('sales'), async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(200, parseInt(req.query.pageSize) || 50);
   const where = [], params = [];
-  if (channel) { params.push(channel); where.push(`channel = $${params.length}`); }
-  if (from)    { params.push(from); where.push(`occurred_at >= $${params.length}`); }
-  if (to)      { params.push(to); where.push(`occurred_at <= $${params.length}`); }
-  if (status)  { params.push(status); where.push(`status = $${params.length}`); }
+  if (channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
+  if (from)    { params.push(from); where.push(`s.occurred_at >= $${params.length}`); }
+  if (to)      { params.push(to); where.push(`s.occurred_at <= $${params.length}`); }
+  if (status)  { params.push(status); where.push(`s.status = $${params.length}`); }
   const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  // Join with sale_items so we can show a meaningful item label (first item title)
+  // and an item count, instead of generic "(multi-item sale)".
   const { rows } = await query(
-    `SELECT * FROM sales ${w} ORDER BY occurred_at DESC LIMIT ${pageSize} OFFSET ${(page-1)*pageSize}`,
+    `SELECT s.*,
+       (SELECT title FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_title,
+       (SELECT sku FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_sku,
+       (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS item_count
+     FROM sales s ${w} ORDER BY s.occurred_at DESC LIMIT ${pageSize} OFFSET ${(page-1)*pageSize}`,
     params
   );
-  const tot = await query(`SELECT COUNT(*)::int AS n FROM sales ${w}`, params);
+  const tot = await query(`SELECT COUNT(*)::int AS n FROM sales s ${w}`, params);
   const summary = await query(`
     SELECT channel, COUNT(*)::int AS count, COALESCE(SUM(total),0) AS revenue
-    FROM sales ${w} GROUP BY channel`, params);
+    FROM sales s ${w} GROUP BY channel`, params);
   res.json({ sales: rows, total: tot.rows[0].n, summary: summary.rows });
 });
 
@@ -105,6 +111,87 @@ router.get('/export.csv', requirePermission('sales'), async (req, res) => {
   res.set('Content-Type', 'text/csv; charset=utf-8');
   res.set('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(lines.join('\r\n'));
+});
+
+// GET /api/sales/export.xlsx?from=&to=
+// Multi-sheet Excel workbook with one sheet per channel: Shopify, eBay, Cash, Bank.
+// Used for accounting — each channel reconciles separately.
+router.get('/export.xlsx', requirePermission('sales'), async (req, res) => {
+  let XLSX;
+  try { XLSX = require('xlsx'); }
+  catch (e) {
+    return res.status(503).json({ error: 'xlsx_not_installed', message: 'Run `npm install` after pulling — adds xlsx dependency.' });
+  }
+  const { from, to } = req.query;
+  const baseWhere = [], baseParams = [];
+  if (from) { baseParams.push(from); baseWhere.push(`s.occurred_at >= $${baseParams.length}`); }
+  if (to)   { baseParams.push(to);   baseWhere.push(`s.occurred_at <= $${baseParams.length}`); }
+
+  const channels = [
+    { label: 'Shopify',       sheetName: 'Shopify',  match: ['shopify'] },
+    { label: 'eBay',          sheetName: 'eBay',     match: ['ebay_em', 'ebay_cl'] },
+    { label: 'Cash',          sheetName: 'Cash',     match: ['direct_cash'] },
+    { label: 'Bank transfer', sheetName: 'Bank',     match: ['direct_bank'] },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  const headers = [
+    'Date', 'Invoice / Reference', 'Channel Order ID', 'Customer', 'Customer Email',
+    'Item', 'SKU', 'Part Number', 'Qty', 'Unit Price', 'Line Total', 'Order Total', 'Payment Method',
+  ];
+
+  for (const ch of channels) {
+    const params = baseParams.slice();
+    const chPlaceholders = ch.match.map((_, i) => `$${params.length + i + 1}`).join(',');
+    params.push(...ch.match);
+    const where = baseWhere.concat(`s.channel IN (${chPlaceholders})`);
+    const w = `WHERE ${where.join(' AND ')}`;
+
+    const { rows } = await query(`
+      SELECT s.occurred_at, s.invoice_number, s.payment_reference, s.external_order_id,
+             s.customer_name, s.customer_email, s.total, s.payment_method,
+             si.title AS item_title, si.sku AS item_sku, si.qty, si.unit_price, si.line_total,
+             p.part_number AS part_number
+      FROM sales s
+      LEFT JOIN sale_items si ON si.sale_id = s.id
+      LEFT JOIN products p ON p.id = si.product_id
+      ${w}
+      ORDER BY s.occurred_at DESC, si.id`, params);
+
+    const data = [headers];
+    for (const r of rows) {
+      data.push([
+        r.occurred_at ? new Date(r.occurred_at) : '',
+        r.invoice_number || r.payment_reference || '',
+        r.external_order_id || '',
+        r.customer_name || '',
+        r.customer_email || '',
+        r.item_title || '',
+        r.item_sku || '',
+        r.part_number || '',
+        r.qty || 0,
+        Number(r.unit_price || 0),
+        Number(r.line_total || 0),
+        Number(r.total || 0),
+        r.payment_method || '',
+      ]);
+    }
+    if (data.length === 1) data.push(['(no sales in date range)']);
+
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    // Column widths
+    ws['!cols'] = [
+      { wch: 18 }, { wch: 22 }, { wch: 20 }, { wch: 22 }, { wch: 26 },
+      { wch: 42 }, { wch: 22 }, { wch: 18 }, { wch: 6 }, { wch: 10 }, { wch: 11 }, { wch: 12 }, { wch: 12 },
+    ];
+    XLSX.utils.book_append_sheet(wb, ws, ch.sheetName);
+  }
+
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const filename = `sales-${new Date().toISOString().slice(0,10)}.xlsx`;
+  res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.set('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(buf);
 });
 
 // GET /api/sales/:id
@@ -274,232 +361,258 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function renderInvoiceHtml({ sale, items, company, mode }) {
-  // mode: 'invoice' | 'estimate' | 'receipt' (receipt = cash, simplified)
+function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
+  // mode: 'invoice' | 'estimate' | 'receipt'
   const fmt = (n) => '£' + parseFloat(n || 0).toFixed(2);
   const date = sale.occurred_at ? new Date(sale.occurred_at) : new Date();
-  const datePretty = date.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
-  const timePretty = date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const datePretty = date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
   const isVatRegistered = !!company.vat_registered;
   const isCashReceipt = mode === 'receipt' || (sale.payment_method === 'cash' && !isVatRegistered);
+  const docTitle = mode === 'estimate' ? 'ESTIMATE' : isCashReceipt ? 'RECEIPT' : 'INVOICE';
+  const logoUrl = (baseUrl || '') + '/logo.png';
 
-  // Document title
-  const docTitle = mode === 'estimate' ? 'ESTIMATE'
-                 : isCashReceipt ? 'RECEIPT'
-                 : 'INVOICE';
+  // For VAT calc: when VAT registered, line totals are inclusive — derive net
+  const subtotalNet = isVatRegistered ? (parseFloat(sale.subtotal) / 1.2) : parseFloat(sale.subtotal);
+  const vatAmount = isVatRegistered ? (parseFloat(sale.subtotal) - subtotalNet) : 0;
 
-  // For cash sales when not VAT-registered, render minimal receipt
+  // ---------- Minimal cash receipt (for non-VAT cash sales) ----------
   if (isCashReceipt) {
     return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>${docTitle} ${sale.payment_reference || ''}</title>
+<html><head><meta charset="utf-8"><title>${docTitle} ${escapeHtml(sale.payment_reference || '')}</title>
 <style>
-  body{font-family:'Helvetica Neue',Arial,sans-serif;color:#111;max-width:480px;margin:30px auto;padding:0 24px;line-height:1.5}
-  .head{text-align:center;border-bottom:2px solid #c8202d;padding-bottom:14px;margin-bottom:18px}
-  .brand{font-size:22px;font-weight:800;letter-spacing:-.02em}
-  .brand span{color:#c8202d}
-  .doctitle{font-size:13px;color:#666;letter-spacing:.15em;margin-top:8px}
-  .meta{font-size:12px;color:#444;margin-bottom:14px;display:flex;justify-content:space-between}
-  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
-  th,td{padding:8px 4px;text-align:left;border-bottom:1px dashed #ddd}
-  th{font-size:10px;text-transform:uppercase;color:#888;letter-spacing:.06em}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Helvetica Neue',Arial,sans-serif;color:#111;max-width:420px;margin:24px auto;padding:0 20px;line-height:1.5;font-size:13px}
+  .head{text-align:center;padding-bottom:14px;border-bottom:1px dashed #999;margin-bottom:16px}
+  .logo{height:38px;margin-bottom:6px}
+  .doctype{font-size:12px;letter-spacing:.2em;color:#666;font-weight:600}
+  .ref{font-family:ui-monospace,monospace;font-size:12px;background:#f5f5f5;display:inline-block;padding:4px 10px;border-radius:3px;margin-top:8px}
+  .meta{margin-bottom:12px;color:#555}
+  table{width:100%;border-collapse:collapse;margin:10px 0}
+  th,td{padding:6px 0;text-align:left}
+  th{font-size:10px;text-transform:uppercase;color:#999;letter-spacing:.06em;border-bottom:1px solid #ddd}
+  td{border-bottom:1px dashed #eee}
   .num{text-align:right}
-  .total{font-size:18px;font-weight:700;border-top:1px solid #111;padding-top:8px;display:flex;justify-content:space-between;margin-top:10px}
-  .foot{margin-top:24px;font-size:11px;color:#888;text-align:center}
-  .ref{font-family:ui-monospace,monospace;background:#f5f5f5;padding:4px 8px;border-radius:4px;font-size:11px}
-  @media print { body { margin: 0; } }
+  .total{display:flex;justify-content:space-between;font-size:17px;font-weight:700;margin-top:10px;padding-top:10px;border-top:2px solid #111}
+  .foot{margin-top:18px;font-size:11px;color:#888;text-align:center;line-height:1.6}
+  .actions{margin:20px auto 0;text-align:center}
+  .btn{display:inline-block;padding:8px 18px;background:#c8202d;color:white;border-radius:4px;text-decoration:none;font-weight:600;font-size:12px;cursor:pointer;border:none}
+  @media print {.actions{display:none}}
 </style></head><body>
 <div class="head">
-  <div class="brand">Razoryn <span>e-Parts</span></div>
-  <div class="doctitle">${docTitle}</div>
+  <img src="${logoUrl}" alt="Razoryn" class="logo" onerror="this.style.display='none'">
+  <div class="doctype">${docTitle}</div>
+  <div class="ref">${escapeHtml(sale.payment_reference || '')}</div>
 </div>
 <div class="meta">
-  <div>
-    <div>${escapeHtml(datePretty)} · ${escapeHtml(timePretty)}</div>
-    ${sale.customer_name ? `<div>${escapeHtml(sale.customer_name)}</div>` : ''}
-  </div>
-  <div style="text-align:right">
-    <div class="ref">${escapeHtml(sale.payment_reference || sale.invoice_number || '')}</div>
-  </div>
+  ${escapeHtml(datePretty)} · ${escapeHtml(date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}
+  ${sale.customer_name ? `<br>Customer: ${escapeHtml(sale.customer_name)}` : ''}
 </div>
 <table>
-  <thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Price</th></tr></thead>
+  <thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Total</th></tr></thead>
   <tbody>
     ${items.map(i => `<tr>
-      <td>${escapeHtml(i.title)}<div style="font-size:10px;color:#888">${escapeHtml(i.sku)}</div></td>
+      <td>${escapeHtml(i.title)}<div style="font-size:10px;color:#999;margin-top:2px">${escapeHtml(i.sku)}</div></td>
       <td class="num">${i.qty}</td>
       <td class="num">${fmt(i.line_total)}</td>
     </tr>`).join('')}
   </tbody>
 </table>
-<div class="total"><span>Total paid</span><span>${fmt(sale.total)}</span></div>
+<div class="total"><span>TOTAL PAID</span><span>${fmt(sale.total)}</span></div>
 <div class="foot">
-  Thank you. No returns on cash sales without proof of purchase.<br>
-  Keep this receipt for your records.
+  Thank you. Cash sales — no returns without this receipt.<br>
+  Keep this slip for your records.
 </div>
-<script>window.print && setTimeout(() => window.print(), 200);</script>
+<div class="actions">
+  <button class="btn" onclick="window.print()">Print receipt</button>
+</div>
 </body></html>`;
   }
 
-  // Full invoice / estimate — Calibre + Hyundai inspired
+  // ---------- Full invoice / estimate (Hyundai-inspired layout) ----------
   return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>${docTitle} ${sale.invoice_number || sale.payment_reference || ''}</title>
+<html><head><meta charset="utf-8"><title>${docTitle} ${escapeHtml(sale.invoice_number || sale.payment_reference || '')}</title>
 <style>
-  body{font-family:'Helvetica Neue',Arial,sans-serif;color:#0f1115;max-width:820px;margin:30px auto;padding:0 24px;line-height:1.45;font-size:13px}
-  .row{display:flex;justify-content:space-between;gap:24px}
-  .head-wrap{padding-bottom:18px;border-bottom:3px solid #c8202d;margin-bottom:22px}
-  .brand-area .logo{font-size:28px;font-weight:800;letter-spacing:-.025em;line-height:1}
-  .brand-area .logo span{color:#c8202d}
-  .brand-area .sub{font-size:10px;color:#666;letter-spacing:.1em;text-transform:uppercase;margin-top:6px}
-  .head-meta{text-align:right}
-  .head-meta .doctype{font-size:22px;font-weight:800;letter-spacing:.04em;color:#0f1115}
-  .head-meta .docno{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#444;margin-top:4px}
-  .info-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;padding-bottom:18px;border-bottom:1px solid #e8eaee}
-  .info-block .label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#777;font-weight:600;margin-bottom:6px}
-  .info-block .val{font-size:13px;line-height:1.5}
-  .info-block .val strong{display:block;font-size:14px;margin-bottom:2px}
-  .order-fields{display:flex;flex-wrap:wrap;gap:14px 24px;margin-bottom:18px;font-size:12px;color:#555}
-  .order-fields div span{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#999;font-weight:600;margin-bottom:2px}
-  .order-fields div strong{color:#0f1115}
-  table.items{width:100%;border-collapse:collapse;margin:8px 0 20px}
-  table.items th{background:#f5f6f7;text-align:left;padding:10px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#555;border-top:1px solid #e0e2e6;border-bottom:1px solid #e0e2e6}
-  table.items td{padding:12px;border-bottom:1px solid #eef0f3;vertical-align:top}
-  table.items .num{text-align:right}
-  table.items .sku{font-family:ui-monospace,monospace;font-size:11px;color:#888;margin-top:2px}
-  .totals{margin-left:auto;width:300px;font-size:13px}
-  .totals .line{display:flex;justify-content:space-between;padding:5px 0}
-  .totals .grand{font-size:18px;font-weight:700;margin-top:6px;padding-top:10px;border-top:2px solid #0f1115}
-  .pay-block{margin-top:22px;padding:14px 16px;background:#fafbfc;border-left:3px solid #c8202d;font-size:12px;border-radius:0 6px 6px 0}
-  .pay-block strong{display:inline-block;min-width:130px}
-  .foot{margin-top:30px;padding-top:18px;border-top:1px solid #e0e2e6;font-size:10.5px;color:#777;line-height:1.6}
-  .foot .cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;margin-bottom:12px}
-  .foot .col strong{display:block;color:#444;text-transform:uppercase;font-size:9px;letter-spacing:.08em;margin-bottom:4px}
-  .terms{font-size:10px;color:#888;margin-top:14px;text-align:center}
-  .stamp-estimate{position:fixed;top:120px;right:60px;border:3px solid #b76b00;color:#b76b00;padding:6px 18px;font-weight:800;letter-spacing:.15em;transform:rotate(-8deg);opacity:.6;font-size:18px}
-  @media print { body { margin: 0; } @page { margin: 12mm; } }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Helvetica Neue',Arial,sans-serif;color:#0f1115;background:#fafafa;font-size:12px;line-height:1.45}
+  .page{max-width:840px;margin:24px auto;background:white;padding:42px 48px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+  /* Header */
+  .topbar{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:18px;border-bottom:3px solid #c8202d;margin-bottom:24px}
+  .topbar .left img{height:48px;display:block}
+  .topbar .left .sub{font-size:10px;color:#666;letter-spacing:.12em;text-transform:uppercase;margin-top:8px;font-weight:500}
+  .topbar .right{text-align:right}
+  .topbar .right .doctype{font-size:30px;font-weight:300;letter-spacing:.12em;color:#0f1115;line-height:1}
+  .topbar .right .num{font-family:ui-monospace,Menlo,monospace;font-size:13px;color:#c8202d;font-weight:600;margin-top:8px}
+  .topbar .right .order{font-size:10.5px;color:#777;margin-top:3px}
+  /* Address blocks (Hyundai-style 2-col) */
+  .addr-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:32px;padding:18px 0 20px;border-bottom:1px solid #e0e2e6;margin-bottom:18px}
+  .addr-block .lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#888;font-weight:600;margin-bottom:6px}
+  .addr-block .name{font-size:13px;font-weight:600;margin-bottom:2px;color:#0f1115}
+  .addr-block .lines{font-size:11.5px;color:#444;line-height:1.6}
+  /* Order details row (Hyundai's account no / order no / date strip) */
+  .detail-strip{display:grid;grid-template-columns:repeat(4, 1fr);gap:18px;padding:12px 14px;background:#f7f7f8;border:1px solid #ebedf0;border-radius:4px;margin-bottom:22px}
+  .detail-strip .item .l{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#888;font-weight:600;margin-bottom:3px}
+  .detail-strip .item .v{font-size:12px;color:#0f1115;font-weight:600}
+  /* Items table */
+  table.items{width:100%;border-collapse:collapse;margin-bottom:16px;font-size:12px}
+  table.items thead th{text-align:left;font-size:9.5px;text-transform:uppercase;letter-spacing:.08em;color:#666;font-weight:600;padding:9px 10px;border-top:1.5px solid #0f1115;border-bottom:1px solid #ccc;background:#fafafa}
+  table.items thead th.num{text-align:right}
+  table.items tbody td{padding:10px;border-bottom:1px solid #eef0f3;vertical-align:top}
+  table.items tbody td.num{text-align:right;font-variant-numeric:tabular-nums}
+  table.items .sku{font-family:ui-monospace,monospace;font-size:10.5px;color:#888;margin-top:2px}
+  /* Totals (Hyundai-style — boxed, right-aligned) */
+  .totals-wrap{display:flex;justify-content:flex-end;margin-bottom:24px}
+  .totals{width:340px;font-size:12px}
+  .totals .row{display:flex;justify-content:space-between;padding:5px 12px}
+  .totals .row.sep{border-top:1px solid #e0e2e6;margin-top:4px;padding-top:9px}
+  .totals .grand{background:#0f1115;color:white;padding:11px 14px;font-size:15px;font-weight:600;margin-top:6px;display:flex;justify-content:space-between;border-radius:2px}
+  /* Payment + bank */
+  .pay{padding:14px 16px;background:#fff8f8;border-left:3px solid #c8202d;font-size:12px;border-radius:0 4px 4px 0;margin-bottom:18px}
+  .pay .row{display:flex;gap:12px;margin-bottom:4px}
+  .pay .row .l{min-width:130px;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#777;font-weight:600;padding-top:1px}
+  .pay .row .v{font-weight:600}
+  /* Footer */
+  .foot{margin-top:24px;padding-top:16px;border-top:1px solid #e0e2e6;font-size:10px;color:#666;line-height:1.6}
+  .foot .cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;margin-bottom:12px}
+  .foot .col .h{display:block;color:#222;text-transform:uppercase;font-size:9px;letter-spacing:.1em;margin-bottom:5px;font-weight:600}
+  .terms{font-size:9.5px;color:#888;text-align:center;line-height:1.6;border-top:1px dashed #ddd;padding-top:10px}
+  /* Estimate stamp */
+  .stamp{position:absolute;top:160px;left:50%;transform:translateX(-50%) rotate(-12deg);border:4px solid #b76b00;color:#b76b00;padding:8px 32px;font-weight:800;letter-spacing:.2em;font-size:28px;opacity:.18;pointer-events:none}
+  /* Print actions */
+  .actions{display:flex;gap:10px;justify-content:center;margin:20px 0;flex-wrap:wrap}
+  .btn{display:inline-block;padding:9px 20px;background:#c8202d;color:white;border-radius:4px;text-decoration:none;font-weight:600;font-size:12px;cursor:pointer;border:none;font-family:inherit}
+  .btn.ghost{background:white;color:#0f1115;border:1px solid #ccc}
+  @media print {
+    body{background:white}
+    .page{box-shadow:none;margin:0;padding:24px 28px;max-width:none}
+    .actions{display:none}
+    @page{margin:10mm}
+  }
 </style></head><body>
 
-${mode === 'estimate' ? '<div class="stamp-estimate">ESTIMATE</div>' : ''}
-
-<div class="head-wrap row">
-  <div class="brand-area">
-    <div class="logo">Razoryn <span>e-Parts</span></div>
-    <div class="sub">Quality aftermarket vehicle parts</div>
-  </div>
-  <div class="head-meta">
-    <div class="doctype">${docTitle}</div>
-    <div class="docno">${escapeHtml(sale.invoice_number || sale.payment_reference || '—')}</div>
-  </div>
+<div class="actions">
+  <button class="btn" onclick="window.print()">🖨 Print / Save as PDF</button>
+  <a class="btn ghost" href="#" onclick="window.close();return false">Close</a>
 </div>
 
-<div class="info-grid">
-  <div class="info-block">
-    <div class="label">From</div>
-    <div class="val">
-      <strong>Razoryn e-Parts</strong>
-      ${escapeHtml(company.company_address || '')}<br>
-      ${company.company_phone ? `Tel: ${escapeHtml(company.company_phone)}<br>` : ''}
-      ${company.company_email ? `${escapeHtml(company.company_email)}<br>` : ''}
-      ${company.company_website ? `${escapeHtml(company.company_website)}<br>` : ''}
-      ${company.company_reg_no ? `Company No. ${escapeHtml(company.company_reg_no)}<br>` : ''}
-      ${isVatRegistered && company.vat_number ? `VAT No. ${escapeHtml(company.vat_number)}` : ''}
+<div class="page" style="position:relative">
+  ${mode === 'estimate' ? '<div class="stamp">ESTIMATE</div>' : ''}
+
+  <div class="topbar">
+    <div class="left">
+      <img src="${logoUrl}" alt="Razoryn e-Parts" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+      <div style="display:none;font-size:24px;font-weight:800;letter-spacing:-.02em">Razoryn <span style="color:#c8202d">e-Parts</span></div>
+      <div class="sub">Quality aftermarket vehicle parts</div>
+    </div>
+    <div class="right">
+      <div class="doctype">${docTitle}</div>
+      <div class="num">${escapeHtml(sale.invoice_number || sale.payment_reference || '—')}</div>
+      ${sale.order_number ? `<div class="order">Order: ${escapeHtml(sale.order_number)}</div>` : ''}
     </div>
   </div>
-  <div class="info-block">
-    <div class="label">Billed to</div>
-    <div class="val">
-      <strong>${escapeHtml(sale.customer_name || 'Cash customer')}</strong>
-      ${sale.shipping_address ? escapeHtml(sale.shipping_address).replace(/\n/g, '<br>') + '<br>' : ''}
-      ${sale.customer_phone ? `Tel: ${escapeHtml(sale.customer_phone)}<br>` : ''}
-      ${sale.customer_email ? escapeHtml(sale.customer_email) : ''}
-    </div>
-  </div>
-</div>
 
-<div class="order-fields">
-  <div><span>Date</span><strong>${escapeHtml(datePretty)}</strong></div>
-  <div><span>Time</span><strong>${escapeHtml(timePretty)}</strong></div>
-  ${sale.order_number ? `<div><span>Order No.</span><strong>${escapeHtml(sale.order_number)}</strong></div>` : ''}
-  ${sale.external_order_id ? `<div><span>Channel Order</span><strong>${escapeHtml(sale.external_order_id)}</strong></div>` : ''}
-  ${sale.vehicle_reg ? `<div><span>Reg No.</span><strong>${escapeHtml(sale.vehicle_reg)}</strong></div>` : ''}
-  <div><span>Channel</span><strong>${escapeHtml((sale.channel || '').replace('_', ' '))}</strong></div>
-  <div><span>Payment Ref.</span><strong>${escapeHtml(sale.payment_reference || '—')}</strong></div>
-</div>
-
-<table class="items">
-  <thead><tr>
-    <th>Description</th>
-    <th class="num" style="width:60px">Qty</th>
-    <th class="num" style="width:110px">Unit ${isVatRegistered ? '(excl. VAT)' : ''}</th>
-    <th class="num" style="width:110px">Total ${isVatRegistered ? '(excl. VAT)' : ''}</th>
-  </tr></thead>
-  <tbody>
-    ${items.map(i => {
-      const unitExcl = isVatRegistered ? (parseFloat(i.unit_price) / 1.2) : parseFloat(i.unit_price);
-      const lineExcl = isVatRegistered ? (parseFloat(i.line_total) / 1.2) : parseFloat(i.line_total);
-      return `<tr>
-        <td>
-          <div>${escapeHtml(i.title)}</div>
-          <div class="sku">${escapeHtml(i.sku)}</div>
-        </td>
-        <td class="num">${i.qty}</td>
-        <td class="num">${fmt(unitExcl)}</td>
-        <td class="num">${fmt(lineExcl)}</td>
-      </tr>`;
-    }).join('')}
-  </tbody>
-</table>
-
-<div class="totals">
-  ${isVatRegistered ? `
-    <div class="line"><span>Net total</span><span>${fmt(sale.subtotal)}</span></div>
-    <div class="line"><span>VAT (${company.vat_rate || 20}%)</span><span>${fmt(sale.vat)}</span></div>
-  ` : `
-    <div class="line"><span>Subtotal</span><span>${fmt(sale.subtotal)}</span></div>
-  `}
-  ${parseFloat(sale.shipping || 0) > 0 ? `<div class="line"><span>Shipping</span><span>${fmt(sale.shipping)}</span></div>` : ''}
-  <div class="line grand"><span>Total ${isVatRegistered ? '(incl. VAT)' : ''}</span><span>${fmt(sale.total)}</span></div>
-</div>
-
-<div class="pay-block">
-  <div><strong>Payment method:</strong> ${escapeHtml((sale.payment_method || '').toUpperCase()) || '—'}</div>
-  ${mode === 'estimate' ? `<div style="margin-top:6px;color:#b76b00"><strong>Note:</strong> This is an estimate. Prices valid for 14 days. Goods reserved on receipt of payment.</div>` : ''}
-  ${sale.payment_method === 'bank' && company.bank_account_name ? `
-    <div style="margin-top:8px;padding-top:8px;border-top:1px solid #eee">
-      <strong>Bank details:</strong><br>
-      <div style="margin-left:130px;margin-top:-18px">
-        ${escapeHtml(company.bank_account_name)}<br>
-        Sort code: ${escapeHtml(company.bank_sort_code || '—')} · Account: ${escapeHtml(company.bank_account_number || '—')}<br>
-        Reference: <strong>${escapeHtml(sale.payment_reference)}</strong>
+  <div class="addr-grid">
+    <div class="addr-block">
+      <div class="lbl">From</div>
+      <div class="name">Razoryn e-Parts</div>
+      <div class="lines">
+        ${escapeHtml(company.company_address || '')}<br>
+        ${company.company_phone ? 'Tel: ' + escapeHtml(company.company_phone) + '<br>' : ''}
+        ${company.company_email ? escapeHtml(company.company_email) + '<br>' : ''}
+        ${company.company_website ? escapeHtml(company.company_website) + '<br>' : ''}
+        ${company.company_reg_no ? 'Co. No. ' + escapeHtml(company.company_reg_no) : ''}
+        ${isVatRegistered && company.vat_number ? ' · VAT ' + escapeHtml(company.vat_number) : ''}
       </div>
     </div>
-  ` : ''}
+    <div class="addr-block">
+      <div class="lbl">${mode === 'estimate' ? 'Estimate for' : 'Billed / Delivered to'}</div>
+      <div class="name">${escapeHtml(sale.customer_name || 'Walk-in customer')}</div>
+      <div class="lines">
+        ${sale.shipping_address ? escapeHtml(sale.shipping_address).replace(/\n/g, '<br>') + '<br>' : '<em style="color:#aaa">No address on file</em><br>'}
+        ${sale.customer_phone ? 'Tel: ' + escapeHtml(sale.customer_phone) + '<br>' : ''}
+        ${sale.customer_email ? escapeHtml(sale.customer_email) : ''}
+      </div>
+    </div>
+  </div>
+
+  <div class="detail-strip">
+    <div class="item"><div class="l">Date</div><div class="v">${escapeHtml(datePretty)}</div></div>
+    <div class="item"><div class="l">Channel</div><div class="v">${escapeHtml((sale.channel || '').replace(/_/g, ' '))}</div></div>
+    ${sale.vehicle_reg ? `<div class="item"><div class="l">Vehicle Reg.</div><div class="v">${escapeHtml(sale.vehicle_reg)}</div></div>` : `<div class="item"><div class="l">Status</div><div class="v" style="text-transform:capitalize">${escapeHtml(sale.status || '—')}</div></div>`}
+    <div class="item"><div class="l">Payment</div><div class="v" style="text-transform:capitalize">${escapeHtml((sale.payment_method || '—').toUpperCase())}</div></div>
+  </div>
+
+  <table class="items">
+    <thead><tr>
+      <th>Description</th>
+      <th class="num" style="width:60px">Qty</th>
+      <th class="num" style="width:110px">Unit ${isVatRegistered ? 'Net' : ''}</th>
+      <th class="num" style="width:110px">Total ${isVatRegistered ? 'Net' : ''}</th>
+    </tr></thead>
+    <tbody>
+      ${items.map(i => {
+        const unitNet = isVatRegistered ? (parseFloat(i.unit_price) / 1.2) : parseFloat(i.unit_price);
+        const lineNet = isVatRegistered ? (parseFloat(i.line_total) / 1.2) : parseFloat(i.line_total);
+        return `<tr>
+          <td>${escapeHtml(i.title)}<div class="sku">${escapeHtml(i.sku || '')}</div></td>
+          <td class="num">${i.qty}</td>
+          <td class="num">${fmt(unitNet)}</td>
+          <td class="num">${fmt(lineNet)}</td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>
+
+  <div class="totals-wrap">
+    <div class="totals">
+      ${isVatRegistered ? `
+        <div class="row"><span>Subtotal (Net)</span><span>${fmt(subtotalNet)}</span></div>
+        <div class="row"><span>VAT (${company.vat_rate || 20}%)</span><span>${fmt(vatAmount)}</span></div>
+      ` : `
+        <div class="row"><span>Subtotal</span><span>${fmt(sale.subtotal)}</span></div>
+      `}
+      ${parseFloat(sale.shipping || 0) > 0 ? `<div class="row"><span>Shipping</span><span>${fmt(sale.shipping)}</span></div>` : ''}
+      <div class="grand"><span>TOTAL${isVatRegistered ? ' (incl. VAT)' : ''}</span><span>${fmt(sale.total)}</span></div>
+    </div>
+  </div>
+
+  <div class="pay">
+    <div class="row"><div class="l">Payment Method</div><div class="v" style="text-transform:capitalize">${escapeHtml((sale.payment_method || '—').toUpperCase())}</div></div>
+    ${mode === 'estimate' ? `<div class="row"><div class="l">Note</div><div class="v" style="color:#b76b00">Estimate valid 14 days. Goods reserved on receipt of payment.</div></div>` : ''}
+    ${sale.payment_method === 'bank' && company.bank_account_name ? `
+      <div class="row" style="margin-top:8px;padding-top:8px;border-top:1px solid #f0d4d8"><div class="l">Bank</div><div class="v" style="font-weight:400">
+        ${escapeHtml(company.bank_account_name)}<br>
+        Sort: ${escapeHtml(company.bank_sort_code || '—')} · Acc: ${escapeHtml(company.bank_account_number || '—')}<br>
+        Use reference: <strong>${escapeHtml(sale.payment_reference)}</strong>
+      </div></div>
+    ` : ''}
+  </div>
+
+  <div class="foot">
+    <div class="cols">
+      <div class="col">
+        <span class="h">Returns</span>
+        Within 30 days of purchase, in original packaging. 5% restocking fee applies. Return shipping at buyer's cost unless faulty.
+      </div>
+      <div class="col">
+        <span class="h">Fitment</span>
+        All parts checked for fitment before despatch. Refunded if part doesn't fit as advertised. Confirm OEM number before ordering.
+      </div>
+      <div class="col">
+        <span class="h">Contact</span>
+        ${company.company_email ? escapeHtml(company.company_email) + '<br>' : ''}
+        ${company.company_phone ? escapeHtml(company.company_phone) + '<br>' : ''}
+        ${company.company_website ? escapeHtml(company.company_website) : ''}
+      </div>
+    </div>
+    <div class="terms">
+      ${company.company_reg_no ? `Razoryn e-Parts is a trading name of Razoryn Ltd, Co. No. ${escapeHtml(company.company_reg_no)}, England & Wales. ` : ''}
+      ${isVatRegistered && company.vat_number ? `VAT No. ${escapeHtml(company.vat_number)}. ` : ''}
+      Full terms: ${company.company_website ? escapeHtml(company.company_website) + '/policies' : 'razoryn.co.uk/policies'}
+    </div>
+  </div>
 </div>
 
-<div class="foot">
-  <div class="cols">
-    <div class="col">
-      <strong>Returns</strong>
-      Within 30 days of purchase, in original packaging. 5% restocking fee applies. Return shipping at buyer's cost unless item faulty.
-    </div>
-    <div class="col">
-      <strong>Fitment guarantee</strong>
-      All parts checked for correct fitment before despatch. Refunded if part doesn't fit as advertised. Confirm OEM number before ordering.
-    </div>
-    <div class="col">
-      <strong>Contact</strong>
-      ${company.company_email ? escapeHtml(company.company_email) + '<br>' : ''}
-      ${company.company_phone ? escapeHtml(company.company_phone) + '<br>' : ''}
-      ${company.company_website ? escapeHtml(company.company_website) : ''}
-    </div>
-  </div>
-  <div class="terms">
-    ${company.company_reg_no ? `Razoryn e-Parts is a trading name of Razoryn Ltd, Company No. ${escapeHtml(company.company_reg_no)}, registered in England & Wales. ` : ''}
-    ${isVatRegistered && company.vat_number ? `VAT No. ${escapeHtml(company.vat_number)}.` : ''}
-    Full terms and conditions: ${company.company_website ? escapeHtml(company.company_website) + '/policies' : 'razoryn.co.uk/policies'}
-  </div>
-</div>
-<script>window.print && setTimeout(() => window.print(), 200);</script>
 </body></html>`;
 }
 
@@ -513,7 +626,8 @@ router.get('/:id/invoice.html', requirePermission('sales'), async (req, res) => 
   const mode = sale.is_estimate ? 'estimate'
              : (sale.payment_method === 'cash' && !company.vat_registered) ? 'receipt'
              : 'invoice';
-  res.set('Content-Type', 'text/html').send(renderInvoiceHtml({ sale, items, company, mode }));
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  res.set('Content-Type', 'text/html').send(renderInvoiceHtml({ sale, items, company, mode, baseUrl }));
 });
 
 // POST /api/sales/:id/email — email the invoice to the customer
@@ -529,7 +643,7 @@ router.post('/:id/email', requirePermission('sales'), async (req, res) => {
   const mode = sale.is_estimate ? 'estimate'
              : (sale.payment_method === 'cash' && !company.vat_registered) ? 'receipt'
              : 'invoice';
-  const html = renderInvoiceHtml({ sale, items, company, mode });
+  const html = renderInvoiceHtml({ sale, items, company, mode, baseUrl: `${req.protocol}://${req.get('host')}` });
   const docLabel = mode === 'estimate' ? 'Estimate' : mode === 'receipt' ? 'Receipt' : 'Invoice';
   const subject = `${docLabel} ${sale.invoice_number || sale.payment_reference || ''} — Razoryn e-Parts`;
 
