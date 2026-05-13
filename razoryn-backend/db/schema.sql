@@ -241,6 +241,22 @@ CREATE TABLE IF NOT EXISTS app_settings (
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Add bank_transfer_pct column for phone-pricing configuration
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'app_settings' AND column_name = 'bank_transfer_pct'
+  ) THEN
+    ALTER TABLE app_settings ADD COLUMN bank_transfer_pct NUMERIC(5,2) NOT NULL DEFAULT 10.00;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'app_settings' AND column_name = 'ebay_buyer_protection_markup'
+  ) THEN
+    ALTER TABLE app_settings ADD COLUMN ebay_buyer_protection_markup NUMERIC(5,2) NOT NULL DEFAULT 0.00;
+  END IF;
+END $$;
+
 -- ---------- Sync state (per-channel cursor) ----------
 CREATE TABLE IF NOT EXISTS sync_state (
   channel       TEXT PRIMARY KEY,           -- 'shopify' | 'ebay_em' | 'ebay_cl'
