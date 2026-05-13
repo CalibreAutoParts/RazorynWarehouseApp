@@ -123,6 +123,29 @@ if (cronExpr && cronExpr.trim()) {
   }
 }
 
+// Auto-pull eBay returns every 15 minutes (or per RETURNS_SYNC_CRON env var).
+// Creates notifications for new return cases and state changes — so staff don't have
+// to manually click "Pull from eBay" to discover new returns or status updates.
+const returnsCronExpr = (process.env.RETURNS_SYNC_CRON || '*/15 * * * *').trim();
+if (cron.validate(returnsCronExpr)) {
+  cron.schedule(returnsCronExpr, async () => {
+    try {
+      const { syncEbayReturnsCore } = require('./routes/returns');
+      if (typeof syncEbayReturnsCore !== 'function') return;
+      const result = await syncEbayReturnsCore({ days: 90 });
+      if (result.created || result.updated) {
+        console.log(`[cron returns] synced — ${result.created} new, ${result.updated} updated, ${result.notifications} notifications`);
+      }
+    } catch (e) {
+      // Don't spam the log if eBay isn't configured or the token lost scope
+      if (!/ebay_not_configured|post_order_api/.test(e.message)) {
+        console.error('[cron returns] failed:', e.message);
+      }
+    }
+  });
+  console.log(`[boot] returns auto-pull scheduled: ${returnsCronExpr}`);
+}
+
 // ---------- Start ----------
 app.listen(PORT, () => {
   console.log(`[boot] Razoryn warehouse listening on :${PORT}`);
