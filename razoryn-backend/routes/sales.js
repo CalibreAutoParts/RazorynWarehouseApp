@@ -1,7 +1,7 @@
 // routes/sales.js — sales, invoices, estimates, CSV exports, emails
 const express = require('express');
 const { query, withTx } = require('../db');
-const { requireAuth, requirePermission } = require('../middleware/auth');
+const { requireAuth, requireAdmin, requirePermission } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 
 const router = express.Router();
@@ -31,7 +31,7 @@ async function nextInvoiceNumber(client) {
 }
 
 // GET /api/sales?channel=&from=&to=&page=
-router.get('/', requirePermission('sales'), async (req, res) => {
+router.get('/', requireAdmin, async (req, res) => {
   const { channel, from, to, status } = req.query;
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(200, parseInt(req.query.pageSize) || 50);
@@ -59,7 +59,7 @@ router.get('/', requirePermission('sales'), async (req, res) => {
 });
 
 // GET /api/sales/export.csv?channel=&from=&to=
-router.get('/export.csv', requirePermission('sales'), async (req, res) => {
+router.get('/export.csv', requireAdmin, async (req, res) => {
   const { channel, from, to } = req.query;
   const where = [], params = [];
   if (channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
@@ -116,7 +116,7 @@ router.get('/export.csv', requirePermission('sales'), async (req, res) => {
 // GET /api/sales/export.xlsx?from=&to=
 // Multi-sheet Excel workbook with one sheet per channel: Shopify, eBay, Cash, Bank.
 // Used for accounting — each channel reconciles separately.
-router.get('/export.xlsx', requirePermission('sales'), async (req, res) => {
+router.get('/export.xlsx', requireAdmin, async (req, res) => {
   let XLSX;
   try { XLSX = require('xlsx'); }
   catch (e) {
@@ -195,7 +195,7 @@ router.get('/export.xlsx', requirePermission('sales'), async (req, res) => {
 });
 
 // GET /api/sales/:id
-router.get('/:id', requirePermission('sales'), async (req, res) => {
+router.get('/:id', requireAdmin, async (req, res) => {
   const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   const items = await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id]);
@@ -205,7 +205,7 @@ router.get('/:id', requirePermission('sales'), async (req, res) => {
 // POST /api/sales — record a manual sale or estimate.
 // Body: { channel, paymentMethod, isEstimate, customerName, customerPhone, customerEmail,
 //         shippingAddress, vehicleReg, orderNumber, items, shipping, notes }
-router.post('/', requirePermission('sales'), async (req, res) => {
+router.post('/', requireAdmin, async (req, res) => {
   const b = req.body || {};
   if (!CHANNELS.includes(b.channel)) return res.status(400).json({ error: 'invalid_channel' });
   if (!Array.isArray(b.items) || !b.items.length) return res.status(400).json({ error: 'items_required' });
@@ -226,21 +226,32 @@ router.post('/', requirePermission('sales'), async (req, res) => {
     let subtotal = 0;
     const itemsResolved = [];
     for (const it of b.items) {
-      const p = await c.query(
-        'SELECT id, sku, title, qty_on_hand FROM products WHERE id = $1 FOR UPDATE',
-        [it.productId]
-      );
-      if (!p.rows[0]) return { error: 'product_not_found', productId: it.productId };
-      // For non-estimates, validate stock
-      if (!isEstimate && p.rows[0].qty_on_hand < it.qty) {
-        return { error: 'insufficient_stock', productId: it.productId, available: p.rows[0].qty_on_hand };
+      if (it.productId) {
+        // Inventory-backed item
+        const p = await c.query(
+          'SELECT id, sku, title, qty_on_hand FROM products WHERE id = $1 FOR UPDATE',
+          [it.productId]
+        );
+        if (!p.rows[0]) return { error: 'product_not_found', productId: it.productId };
+        // For non-estimate paid sales, validate stock. Estimates don't touch stock at all.
+        if (!isEstimate && p.rows[0].qty_on_hand < it.qty) {
+          return { error: 'insufficient_stock', productId: it.productId, sku: p.rows[0].sku, available: p.rows[0].qty_on_hand };
+        }
+        const lineTotal = +(parseFloat(it.unitPrice) * parseInt(it.qty)).toFixed(2);
+        subtotal += lineTotal;
+        itemsResolved.push({
+          productId: p.rows[0].id, sku: p.rows[0].sku, title: p.rows[0].title,
+          qty: parseInt(it.qty), unitPrice: parseFloat(it.unitPrice), lineTotal,
+        });
+      } else {
+        // Custom item — no inventory link, no stock change
+        const lineTotal = +(parseFloat(it.unitPrice) * parseInt(it.qty)).toFixed(2);
+        subtotal += lineTotal;
+        itemsResolved.push({
+          productId: null, sku: 'CUSTOM', title: it.customTitle || 'Custom item',
+          qty: parseInt(it.qty), unitPrice: parseFloat(it.unitPrice), lineTotal,
+        });
       }
-      const lineTotal = parseFloat(it.unitPrice) * parseInt(it.qty);
-      subtotal += lineTotal;
-      itemsResolved.push({
-        productId: p.rows[0].id, sku: p.rows[0].sku, title: p.rows[0].title,
-        qty: parseInt(it.qty), unitPrice: parseFloat(it.unitPrice), lineTotal,
-      });
     }
 
     const vat = +(subtotal * vatRate).toFixed(2);
@@ -255,14 +266,14 @@ router.post('/', requirePermission('sales'), async (req, res) => {
       `INSERT INTO sales (channel, customer_name, customer_phone, customer_email,
                           subtotal, vat, shipping, total, status, invoice_number,
                           notes, recorded_by, payment_method, payment_reference,
-                          is_estimate, order_number, vehicle_reg, shipping_address)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
+                          is_estimate, order_number, vehicle_reg, vin_number, shipping_address)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
       [b.channel, b.customerName || null, b.customerPhone || null, b.customerEmail || null,
        subtotal, vat, shipping, total,
        isEstimate ? 'pending' : 'paid',
        invoiceNumber, b.notes || null, req.user.id,
        paymentMethod, paymentReference,
-       isEstimate, b.orderNumber || null, b.vehicleReg || null, b.shippingAddress || null]
+       isEstimate, b.orderNumber || null, b.vehicleReg || null, b.vinNumber || null, b.shippingAddress || null]
     );
 
     for (const it of itemsResolved) {
@@ -271,8 +282,8 @@ router.post('/', requirePermission('sales'), async (req, res) => {
          VALUES ($1,$2,$3,$4,$5,$6,$7)`,
         [sale.rows[0].id, it.productId, it.sku, it.title, it.qty, it.unitPrice, it.lineTotal]
       );
-      // Only decrement stock for confirmed sales, not estimates
-      if (!isEstimate) {
+      // Estimates NEVER touch stock. Paid sales decrement only inventory-backed items.
+      if (!isEstimate && it.productId) {
         await c.query(
           `UPDATE products SET qty_on_hand = qty_on_hand - $1 WHERE id = $2`,
           [it.qty, it.productId]
@@ -304,7 +315,7 @@ router.post('/', requirePermission('sales'), async (req, res) => {
 });
 
 // POST /api/sales/:id/convert-to-invoice — turn an estimate into a paid invoice
-router.post('/:id/convert-to-invoice', requirePermission('sales'), async (req, res) => {
+router.post('/:id/convert-to-invoice', requireAdmin, async (req, res) => {
   const paymentMethod = req.body.paymentMethod || 'cash';
   const result = await withTx(async (c) => {
     const s = await c.query(`SELECT * FROM sales WHERE id = $1 FOR UPDATE`, [req.params.id]);
@@ -533,9 +544,14 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
 
   <div class="topbar">
     <div class="left">
-      <img src="${logoUrl}" alt="Razoryn e-Parts" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
-      <div style="display:none;font-size:24px;font-weight:800;letter-spacing:-.02em">Razoryn <span style="color:#c8202d">e-Parts</span></div>
-      <div class="sub">Quality aftermarket vehicle parts</div>
+      ${mode !== 'estimate' ? `
+        <img src="${logoUrl}" alt="Razoryn e-Parts" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+        <div style="display:none;font-size:24px;font-weight:800;letter-spacing:-.02em">Razoryn <span style="color:#c8202d">e-Parts</span></div>
+        <div class="sub">Quality aftermarket vehicle parts</div>
+      ` : `
+        <div style="font-size:24px;font-weight:700;letter-spacing:-.01em;color:#333">Estimate</div>
+        <div class="sub" style="margin-top:6px">Quote · valid 14 days</div>
+      `}
     </div>
     <div class="right">
       <div class="doctype">${docTitle}</div>
@@ -545,6 +561,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   </div>
 
   <div class="addr-grid">
+    ${mode !== 'estimate' ? `
     <div class="addr-block">
       <div class="lbl">From</div>
       <div class="name">Razoryn e-Parts</div>
@@ -557,6 +574,15 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
         ${isVatRegistered && company.vat_number ? ' · VAT ' + escapeHtml(company.vat_number) : ''}
       </div>
     </div>
+    ` : `
+    <div class="addr-block">
+      <div class="lbl">Quote details</div>
+      <div class="lines" style="color:#555;font-size:11.5px">
+        This is an estimate only. Prices valid for 14 days from the date below.<br>
+        Goods reserved on receipt of payment.
+      </div>
+    </div>
+    `}
     <div class="addr-block">
       <div class="lbl">${mode === 'estimate' ? 'Estimate for' : 'Billed / Delivered to'}</div>
       <div class="name">${escapeHtml(billedToName)}</div>
@@ -573,7 +599,11 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   <div class="detail-strip">
     <div class="item"><div class="l">Date</div><div class="v">${escapeHtml(datePretty)}</div></div>
     <div class="item"><div class="l">Channel</div><div class="v">${escapeHtml(channelLabel)}</div></div>
-    ${sale.vehicle_reg ? `<div class="item"><div class="l">Vehicle Reg.</div><div class="v">${escapeHtml(sale.vehicle_reg)}</div></div>` : `<div class="item"><div class="l">Status</div><div class="v" style="text-transform:capitalize">${escapeHtml(sale.status || '—')}</div></div>`}
+    ${sale.vehicle_reg
+      ? `<div class="item"><div class="l">Vehicle Reg.</div><div class="v">${escapeHtml(sale.vehicle_reg)}</div></div>`
+      : sale.vin_number
+      ? `<div class="item"><div class="l">VIN</div><div class="v" style="font-family:ui-monospace,monospace;font-size:10.5px">${escapeHtml(sale.vin_number)}</div></div>`
+      : `<div class="item"><div class="l">Status</div><div class="v" style="text-transform:capitalize">${escapeHtml(sale.status || '—')}</div></div>`}
     <div class="item"><div class="l">Payment</div><div class="v">${escapeHtml(paymentLabel)}</div></div>
   </div>
 
@@ -611,18 +641,20 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     </div>
   </div>
 
+  ${(mode === 'estimate' || (sale.payment_method === 'bank' && company.bank_account_name)) ? `
   <div class="pay">
-    <div class="row"><div class="l">Payment Method</div><div class="v">${escapeHtml(paymentLabel)}</div></div>
     ${mode === 'estimate' ? `<div class="row"><div class="l">Note</div><div class="v" style="color:#b76b00">Estimate valid 14 days. Goods reserved on receipt of payment.</div></div>` : ''}
     ${sale.payment_method === 'bank' && company.bank_account_name ? `
-      <div class="row" style="margin-top:8px;padding-top:8px;border-top:1px solid #f0d4d8"><div class="l">Bank</div><div class="v" style="font-weight:400">
+      <div class="row"${mode === 'estimate' ? ' style="margin-top:8px;padding-top:8px;border-top:1px solid #f0d4d8"' : ''}><div class="l">Bank</div><div class="v" style="font-weight:400">
         ${escapeHtml(company.bank_account_name)}<br>
         Sort: ${escapeHtml(company.bank_sort_code || '—')} · Acc: ${escapeHtml(company.bank_account_number || '—')}<br>
         Use reference: <strong>${escapeHtml(sale.payment_reference)}</strong>
       </div></div>
     ` : ''}
   </div>
+  ` : ''}
 
+  ${mode !== 'estimate' ? `
   <div class="foot">
     <div class="cols">
       <div class="col">
@@ -646,13 +678,18 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
       Full terms: ${company.company_website ? escapeHtml(company.company_website) + '/policies' : 'razoryn.co.uk/policies'}
     </div>
   </div>
+  ` : `
+  <div style="margin-top:24px;padding-top:14px;border-top:1px solid #e0e2e6;font-size:11px;color:#666;text-align:center">
+    To confirm this estimate, contact us with reference <strong>${escapeHtml(sale.payment_reference || '—')}</strong>.
+  </div>
+  `}
 </div>
 
 </body></html>`;
 }
 
 // GET /api/sales/:id/invoice.html  — print-ready invoice (or estimate, or receipt)
-router.get('/:id/invoice.html', requirePermission('sales'), async (req, res) => {
+router.get('/:id/invoice.html', requireAdmin, async (req, res) => {
   const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
   if (!s.rows[0]) return res.status(404).send('Not found');
   const sale = s.rows[0];
@@ -666,7 +703,7 @@ router.get('/:id/invoice.html', requirePermission('sales'), async (req, res) => 
 });
 
 // POST /api/sales/:id/email — email the invoice to the customer
-router.post('/:id/email', requirePermission('sales'), async (req, res) => {
+router.post('/:id/email', requireAdmin, async (req, res) => {
   const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   const sale = s.rows[0];
@@ -711,7 +748,7 @@ router.post('/:id/email', requirePermission('sales'), async (req, res) => {
 // POST /api/sales/:id/items/:itemId/link-product
 // Manually attach a product to a sale_item line that didn't auto-match by SKU.
 // If decrementStock=true and the sale is paid, also decrements stock by that line's qty.
-router.post('/:id/items/:itemId/link-product', requirePermission('sales'), async (req, res) => {
+router.post('/:id/items/:itemId/link-product', requireAdmin, async (req, res) => {
   const { productId, decrementStock } = req.body || {};
   if (!productId) return res.status(400).json({ error: 'productId_required' });
 
@@ -748,7 +785,7 @@ router.post('/:id/items/:itemId/link-product', requirePermission('sales'), async
 // POST /api/sales/relink-unmatched  (admin)
 // Re-runs SKU resolution against all sale_items where product_id IS NULL,
 // using the same fuzzy matching as the live sync. Useful after fixing SKUs.
-router.post('/relink-unmatched', requirePermission('sales'), async (req, res) => {
+router.post('/relink-unmatched', requireAdmin, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'admin_only' });
   // Reuse the resolver from sync.js
   const sync = require('../services/sync');
@@ -765,6 +802,109 @@ router.post('/relink-unmatched', requirePermission('sales'), async (req, res) =>
   }
   await audit(req, 'relink_unmatched_sales', null, null, { scanned: unmatched.rows.length, linked });
   res.json({ ok: true, scanned: unmatched.rows.length, linked });
+});
+
+// PATCH /api/sales/:id — edit customer/notes/reg/VIN/order# on an existing sale.
+// Does NOT edit financials (subtotal/vat/total/items) — use line-item PATCH for that.
+router.patch('/:id', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const fields = {
+    customer_name: b.customerName,
+    customer_phone: b.customerPhone,
+    customer_email: b.customerEmail,
+    shipping_address: b.shippingAddress,
+    order_number: b.orderNumber,
+    vehicle_reg: b.vehicleReg,
+    vin_number: b.vinNumber,
+    notes: b.notes,
+  };
+  const updates = [], params = [];
+  for (const [col, val] of Object.entries(fields)) {
+    if (val === undefined) continue;
+    params.push(val === '' ? null : val);
+    updates.push(`${col} = $${params.length}`);
+  }
+  if (!updates.length) return res.json({ ok: true, message: 'no_changes' });
+  params.push(req.params.id);
+  const r = await query(`UPDATE sales SET ${updates.join(', ')} WHERE id = $${params.length} RETURNING *`, params);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  await audit(req, 'edit_sale', 'sale', req.params.id, fields);
+  res.json({ ok: true, sale: r.rows[0] });
+});
+
+// PATCH /api/sales/:id/items/:itemId — edit a line item (title, qty, unit_price)
+// Recalculates sale totals afterwards. Logs an audit entry capturing the old + new values.
+router.patch('/:id/items/:itemId', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const result = await withTx(async (c) => {
+    const existing = await c.query(
+      `SELECT si.*, s.vat AS sale_vat, s.subtotal AS sale_subtotal, s.shipping AS sale_shipping
+       FROM sale_items si JOIN sales s ON s.id = si.sale_id
+       WHERE si.id = $1 AND si.sale_id = $2 FOR UPDATE`,
+      [req.params.itemId, req.params.id]
+    );
+    if (!existing.rows[0]) return { error: 'item_not_found' };
+    const old = existing.rows[0];
+
+    const newTitle = b.title !== undefined ? (b.title || null) : old.title;
+    const newQty = b.qty !== undefined ? parseInt(b.qty) : old.qty;
+    const newUnitPrice = b.unitPrice !== undefined ? parseFloat(b.unitPrice) : parseFloat(old.unit_price);
+    const newLineTotal = +(newQty * newUnitPrice).toFixed(2);
+
+    await c.query(
+      `UPDATE sale_items SET title = $1, qty = $2, unit_price = $3, line_total = $4 WHERE id = $5`,
+      [newTitle, newQty, newUnitPrice, newLineTotal, req.params.itemId]
+    );
+
+    // Recompute sale totals from all line items
+    const tot = await c.query(`SELECT COALESCE(SUM(line_total),0) AS subtotal FROM sale_items WHERE sale_id = $1`, [req.params.id]);
+    const newSubtotal = parseFloat(tot.rows[0].subtotal);
+    // Keep the existing VAT proportion (if VAT was 0, keep 0; if it was 20% of old subtotal, keep 20%)
+    const oldSubtotal = parseFloat(old.sale_subtotal);
+    const vatRate = oldSubtotal > 0 ? (parseFloat(old.sale_vat) / oldSubtotal) : 0;
+    const newVat = +(newSubtotal * vatRate).toFixed(2);
+    const newTotal = +(newSubtotal + newVat + parseFloat(old.sale_shipping || 0)).toFixed(2);
+    await c.query(
+      `UPDATE sales SET subtotal = $1, vat = $2, total = $3 WHERE id = $4`,
+      [newSubtotal, newVat, newTotal, req.params.id]
+    );
+    return { ok: true, oldItem: old, newItem: { title: newTitle, qty: newQty, unit_price: newUnitPrice, line_total: newLineTotal } };
+  });
+  if (result.error) return res.status(404).json(result);
+  await audit(req, 'edit_sale_item', 'sale_item', req.params.itemId, { saleId: req.params.id, ...result.newItem });
+  res.json(result);
+});
+
+// DELETE /api/sales/:id — delete a sale/estimate/invoice (admin only).
+// If the sale was paid AND had product_id linked items, stock is RESTORED.
+// Use query param ?restoreStock=false to skip stock restore.
+router.delete('/:id', requireAdmin, async (req, res) => {
+  const restoreStock = req.query.restoreStock !== 'false';
+  const result = await withTx(async (c) => {
+    const s = await c.query(`SELECT * FROM sales WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    if (!s.rows[0]) return { error: 'not_found' };
+    const sale = s.rows[0];
+
+    if (restoreStock && !sale.is_estimate && sale.status === 'paid') {
+      const items = await c.query(`SELECT * FROM sale_items WHERE sale_id = $1`, [req.params.id]);
+      for (const it of items.rows) {
+        if (it.product_id) {
+          await c.query(`UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2`, [it.qty, it.product_id]);
+          await c.query(
+            `INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by)
+             VALUES ($1,$2,'sale_deleted_restore',$3,$4)`,
+            [it.product_id, it.qty, sale.id, req.user.id]
+          );
+        }
+      }
+    }
+    // sale_items cascades on sale delete
+    await c.query(`DELETE FROM sales WHERE id = $1`, [req.params.id]);
+    return { ok: true, deleted: sale.id, stockRestored: restoreStock && !sale.is_estimate && sale.status === 'paid' };
+  });
+  if (result.error) return res.status(404).json(result);
+  await audit(req, 'delete_sale', 'sale', req.params.id, result);
+  res.json(result);
 });
 
 module.exports = router;
