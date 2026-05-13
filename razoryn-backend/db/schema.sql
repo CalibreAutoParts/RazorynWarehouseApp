@@ -220,6 +220,26 @@ CREATE TABLE IF NOT EXISTS returns (
 );
 CREATE INDEX IF NOT EXISTS returns_status_idx ON returns (status, created_at DESC);
 
+-- Extended return tracking — eBay return-case integration
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'returns' AND column_name = 'external_return_id') THEN
+    ALTER TABLE returns ADD COLUMN external_return_id TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'returns' AND column_name = 'external_state') THEN
+    ALTER TABLE returns ADD COLUMN external_state TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'returns' AND column_name = 'respond_by') THEN
+    ALTER TABLE returns ADD COLUMN respond_by TIMESTAMPTZ;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'returns' AND column_name = 'buyer_username') THEN
+    ALTER TABLE returns ADD COLUMN buyer_username TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'returns' AND column_name = 'last_synced_at') THEN
+    ALTER TABLE returns ADD COLUMN last_synced_at TIMESTAMPTZ;
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS returns_external_idx ON returns (external_return_id) WHERE external_return_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS return_photos (
   id         SERIAL PRIMARY KEY,
   return_id  INTEGER NOT NULL REFERENCES returns(id) ON DELETE CASCADE,
