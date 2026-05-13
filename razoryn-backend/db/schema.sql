@@ -130,6 +130,62 @@ CREATE TABLE IF NOT EXISTS sales (
 CREATE INDEX IF NOT EXISTS sales_channel_idx ON sales (channel, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS sales_external_idx ON sales (external_order_id) WHERE external_order_id IS NOT NULL;
 
+-- Invoice-related columns added later. Migrated in place to preserve existing rows.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'payment_method') THEN
+    ALTER TABLE sales ADD COLUMN payment_method TEXT;  -- 'cash' | 'card' | 'bank' | 'shopify' | 'ebay'
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'payment_reference') THEN
+    ALTER TABLE sales ADD COLUMN payment_reference TEXT;  -- REP-{nanoid}-{C/B/S}
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'is_estimate') THEN
+    ALTER TABLE sales ADD COLUMN is_estimate BOOLEAN NOT NULL DEFAULT false;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'order_number') THEN
+    ALTER TABLE sales ADD COLUMN order_number TEXT;  -- customer-facing order reference
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'vehicle_reg') THEN
+    ALTER TABLE sales ADD COLUMN vehicle_reg TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'shipping_address') THEN
+    ALTER TABLE sales ADD COLUMN shipping_address TEXT;
+  END IF;
+END $$;
+
+-- Settings: VAT registration toggle + company details
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'vat_registered') THEN
+    ALTER TABLE app_settings ADD COLUMN vat_registered BOOLEAN NOT NULL DEFAULT false;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'vat_number') THEN
+    ALTER TABLE app_settings ADD COLUMN vat_number TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_address') THEN
+    ALTER TABLE app_settings ADD COLUMN company_address TEXT DEFAULT 'Unit 4 Shakespeare Industrial Estate, Watford';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_phone') THEN
+    ALTER TABLE app_settings ADD COLUMN company_phone TEXT DEFAULT '+44 7494589542';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_email') THEN
+    ALTER TABLE app_settings ADD COLUMN company_email TEXT DEFAULT 'eparts@razoryn.co.uk';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_website') THEN
+    ALTER TABLE app_settings ADD COLUMN company_website TEXT DEFAULT 'www.razoryn.co.uk';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_reg_no') THEN
+    ALTER TABLE app_settings ADD COLUMN company_reg_no TEXT DEFAULT '16466013';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'bank_account_name') THEN
+    ALTER TABLE app_settings ADD COLUMN bank_account_name TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'bank_sort_code') THEN
+    ALTER TABLE app_settings ADD COLUMN bank_sort_code TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'bank_account_number') THEN
+    ALTER TABLE app_settings ADD COLUMN bank_account_number TEXT;
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS sale_items (
   id          SERIAL PRIMARY KEY,
   sale_id     INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
