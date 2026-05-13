@@ -112,12 +112,96 @@ async function setInventoryQty(sku, qty) {
   await http('POST', '/sell/inventory/v1/bulk_update_price_quantity', body);
 }
 
-// Pull recent orders from the Fulfillment API
+// Pull recent orders. Tries Sell Fulfillment API first (modern OAuth), falls
+// back to Trading API GetOrders which works with the simpler Auth'n'Auth token.
 async function getRecentOrders(sinceISO) {
-  const filter = `creationdate:[${sinceISO}..]`;
-  const r = await http('GET',
-    `/sell/fulfillment/v1/order?filter=${encodeURIComponent(filter)}&limit=200`);
-  return r.data.orders || [];
+  // Try OAuth-based Sell Fulfillment API first
+  if (REFRESH_TOKEN && CLIENT_ID && CLIENT_SECRET) {
+    try {
+      const filter = `creationdate:[${sinceISO}..]`;
+      const r = await http('GET',
+        `/sell/fulfillment/v1/order?filter=${encodeURIComponent(filter)}&limit=200`);
+      const orders = r.data.orders || [];
+      // Normalise to a common shape (the Trading API path uses the same fields)
+      return orders.map(o => ({
+        orderId: o.orderId,
+        creationDate: o.creationDate,
+        buyer: o.buyer,
+        pricingSummary: o.pricingSummary,
+        lineItems: o.lineItems,
+      }));
+    } catch (e) {
+      console.warn('[ebay] Sell Fulfillment API failed, falling back to Trading API:', e.message);
+    }
+  }
+  // Trading API fallback — uses Auth'n'Auth token
+  return getRecentOrdersTrading(sinceISO);
+}
+
+// Trading API GetOrders — works with EBAY_AUTH_TOKEN (Auth'n'Auth)
+async function getRecentOrdersTrading(sinceISO) {
+  const sinceDate = new Date(sinceISO);
+  const fromDate = sinceDate.toISOString();
+  const toDate = new Date().toISOString();
+  const bodyInner = `
+    <CreateTimeFrom>${fromDate}</CreateTimeFrom>
+    <CreateTimeTo>${toDate}</CreateTimeTo>
+    <OrderStatus>All</OrderStatus>
+    <Pagination>
+      <EntriesPerPage>100</EntriesPerPage>
+      <PageNumber>1</PageNumber>
+    </Pagination>
+    <DetailLevel>ReturnAll</DetailLevel>`;
+
+  const xml = await tradingCall('GetOrders', bodyInner);
+  if (xml.includes('<Ack>Failure</Ack>')) {
+    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+    throw new Error('eBay GetOrders error: ' + decodeEntities(err));
+  }
+
+  const orderBlocks = extractAll(extractOne(xml, 'OrderArray') || '', 'Order');
+  const orders = [];
+  for (const oXml of orderBlocks) {
+    const orderId = extractOne(oXml, 'OrderID');
+    const creationDate = extractOne(oXml, 'CreatedTime');
+    const total = parseFloat(extractOne(oXml, 'Total') || '0');
+    const subtotal = parseFloat(extractOne(oXml, 'Subtotal') || '0');
+    const shippingCost = parseFloat(extractOne(extractOne(oXml, 'ShippingServiceSelected') || '', 'ShippingServiceCost') || '0');
+    const buyerUserId = extractOne(extractOne(oXml, 'BuyerUserID') || '', '') || decodeEntities(extractOne(oXml, 'BuyerUserID') || '');
+    const checkoutStatus = extractOne(extractOne(oXml, 'CheckoutStatus') || '', 'Status');
+
+    // Transactions (line items)
+    const txArray = extractOne(oXml, 'TransactionArray') || '';
+    const txBlocks = extractAll(txArray, 'Transaction');
+    const lineItems = txBlocks.map(tx => {
+      const item = extractOne(tx, 'Item') || '';
+      return {
+        lineItemId: extractOne(tx, 'TransactionID'),
+        sku: decodeEntities(extractOne(item, 'SKU') || ''),
+        title: decodeEntities(extractOne(item, 'Title') || ''),
+        quantity: parseInt(extractOne(tx, 'QuantityPurchased') || '1'),
+        lineItemCost: {
+          value: extractOne(tx, 'TransactionPrice') || '0',
+          currency: 'GBP',
+        },
+      };
+    });
+
+    orders.push({
+      orderId,
+      creationDate,
+      buyer: { username: decodeEntities(extractOne(oXml, 'BuyerUserID') || '') || null },
+      pricingSummary: {
+        priceSubtotal: { value: subtotal },
+        total: { value: total },
+        deliveryCost: { value: shippingCost },
+        tax: { value: 0 }, // eBay UK Trading API doesn't separate tax for marketplace-collected VAT
+      },
+      lineItems,
+      checkoutStatus,
+    });
+  }
+  return orders;
 }
 
 async function pushStockForProduct(product) {
