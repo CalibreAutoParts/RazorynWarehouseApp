@@ -147,6 +147,9 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'vehicle_reg') THEN
     ALTER TABLE sales ADD COLUMN vehicle_reg TEXT;
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'vin_number') THEN
+    ALTER TABLE sales ADD COLUMN vin_number TEXT;
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'shipping_address') THEN
     ALTER TABLE sales ADD COLUMN shipping_address TEXT;
   END IF;
