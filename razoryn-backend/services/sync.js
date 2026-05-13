@@ -11,6 +11,44 @@ const { query, withTx } = require('../db');
 const shopify = require('./shopify');
 const ebay = require('./ebay');
 
+// Try to find a warehouse product for an order's SKU.
+// Many sales channels send SKUs in slightly different formats. This helper
+// tries exact match first, then progressively looser matches:
+//   1. Exact (case-sensitive): "86551-Q0000"
+//   2. Exact (case-insensitive)
+//   3. Strip common prefixes like "HYUNDAI I20 - 86551-Q0000" → "86551-Q0000"
+//   4. Strip all non-alphanumeric: "86551Q0000" matches "86551-Q0000"
+//   5. Match by part_number column
+async function resolveProductBySku(client, sku) {
+  if (!sku) return null;
+  const q = client ? client.query.bind(client) : query;
+  // 1. exact
+  let r = await q(`SELECT id, sku FROM products WHERE sku = $1 LIMIT 1`, [sku]);
+  if (r.rows[0]) return r.rows[0];
+  // 2. case-insensitive
+  r = await q(`SELECT id, sku FROM products WHERE LOWER(sku) = LOWER($1) LIMIT 1`, [sku]);
+  if (r.rows[0]) return r.rows[0];
+  // 3. Strip everything before the last " - " or " : " (e.g. "HYUNDAI I20 - 86551-Q0000" → "86551-Q0000")
+  const tail = sku.split(/\s+-\s+|\s+:\s+/).pop().trim();
+  if (tail && tail !== sku) {
+    r = await q(`SELECT id, sku FROM products WHERE sku = $1 OR LOWER(sku) = LOWER($1) LIMIT 1`, [tail]);
+    if (r.rows[0]) return r.rows[0];
+  }
+  // 4. Normalise (strip all non-alphanumeric) and match
+  const norm = (s) => (s || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  const normalised = norm(sku);
+  const normalisedTail = norm(tail);
+  if (normalised || normalisedTail) {
+    r = await q(`SELECT id, sku FROM products WHERE REGEXP_REPLACE(UPPER(sku), '[^A-Z0-9]', '', 'g') IN ($1, $2) LIMIT 1`,
+      [normalised, normalisedTail]);
+    if (r.rows[0]) return r.rows[0];
+  }
+  // 5. Match by part_number column if it exists
+  r = await q(`SELECT id, sku FROM products WHERE part_number = $1 OR part_number = $2 LIMIT 1`, [sku, tail]);
+  if (r.rows[0]) return r.rows[0];
+  return null;
+}
+
 async function getCursor(channel) {
   const { rows } = await query('SELECT * FROM sync_state WHERE channel = $1', [channel]);
   return rows[0] || null;
@@ -83,24 +121,38 @@ async function pullShopify() {
       );
       const total = parseFloat(order.total_price || 0);
 
+      // Build shipping address string
+      const ship = order.shipping_address || order.billing_address;
+      const shipAddr = ship ? [
+        [ship.first_name, ship.last_name].filter(Boolean).join(' '),
+        ship.company, ship.address1, ship.address2,
+        ship.city, ship.province, ship.zip, ship.country,
+      ].filter(Boolean).join('\n') : null;
+
+      // Generate REP reference (Shopify orders are card or shopify-pay; mark as S)
+      const paymentRef = 'REP-' + Math.random().toString(36).slice(2,6).toUpperCase()
+                        + Math.random().toString(36).slice(2,6).toUpperCase() + '-S';
+
       const sale = await c.query(
-        `INSERT INTO sales (channel, external_order_id, customer_name, customer_email,
-                            subtotal, vat, shipping, total, status, occurred_at)
-         VALUES ('shopify',$1,$2,$3,$4,$5,$6,$7,'paid',$8) RETURNING id`,
+        `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
+                            subtotal, vat, shipping, total, status, occurred_at, shipping_address,
+                            payment_method, payment_reference, order_number)
+         VALUES ('shopify',$1,$2,$3,$4,$5,$6,$7,$8,'paid',$9,$10,$11,$12,$13) RETURNING id`,
         [
           String(order.id),
-          [order.customer?.first_name, order.customer?.last_name].filter(Boolean).join(' ') || null,
-          order.customer?.email || null,
+          [order.customer?.first_name, order.customer?.last_name].filter(Boolean).join(' ') || ship?.first_name + ' ' + ship?.last_name || null,
+          order.customer?.email || order.email || null,
+          order.customer?.phone || ship?.phone || null,
           subtotal, vat, shipping, total,
           order.created_at,
+          shipAddr,
+          'shopify', paymentRef, order.name || String(order.order_number || order.id),
         ]
       );
 
       for (const li of order.line_items || []) {
-        const p = await c.query(
-          `SELECT id FROM products WHERE sku = $1 LIMIT 1`, [li.sku]
-        );
-        const productId = p.rows[0]?.id || null;
+        const matched = await resolveProductBySku(c, li.sku);
+        const productId = matched?.id || null;
         await c.query(
           `INSERT INTO sale_items (sale_id, product_id, sku, title, qty, unit_price, line_total)
            VALUES ($1,$2,$3,$4,$5,$6,$7)`,
@@ -122,8 +174,8 @@ async function pullShopify() {
 
       // Fire low-stock notifs after the sale
       for (const li of order.line_items || []) {
-        const p = await c.query(`SELECT id FROM products WHERE sku = $1 LIMIT 1`, [li.sku]);
-        if (p.rows[0]) await recordLowStockIfNeeded(p.rows[0].id);
+        const matched = await resolveProductBySku(c, li.sku);
+        if (matched) await recordLowStockIfNeeded(matched.id);
       }
     });
     inserted++;
@@ -161,22 +213,29 @@ async function pullEbay() {
       const shipping = parseFloat(order.pricingSummary?.deliveryCost?.value || 0);
       const total = parseFloat(order.pricingSummary?.total?.value || 0);
 
+      const paymentRef = 'REP-' + Math.random().toString(36).slice(2,6).toUpperCase()
+                        + Math.random().toString(36).slice(2,6).toUpperCase() + '-E';
+
       const sale = await c.query(
-        `INSERT INTO sales (channel, external_order_id, customer_name, customer_email,
-                            subtotal, vat, shipping, total, status, occurred_at)
-         VALUES ('ebay_em',$1,$2,$3,$4,$5,$6,$7,'paid',$8) RETURNING id`,
+        `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
+                            subtotal, vat, shipping, total, status, occurred_at, shipping_address,
+                            payment_method, payment_reference, order_number)
+         VALUES ('ebay_em',$1,$2,$3,$4,$5,$6,$7,$8,'paid',$9,$10,$11,$12,$13) RETURNING id`,
         [
           order.orderId,
-          order.buyer?.username || null,
-          null,
+          order.buyer?.name || order.buyer?.username || null,
+          order.buyer?.email || null,
+          order.buyer?.phone || null,
           subtotal, vat, shipping, total,
           order.creationDate,
+          order.shippingAddress || null,
+          'ebay', paymentRef, order.orderId,
         ]
       );
 
       for (const li of order.lineItems || []) {
-        const p = await c.query(`SELECT id FROM products WHERE sku = $1 LIMIT 1`, [li.sku]);
-        const productId = p.rows[0]?.id || null;
+        const matched = await resolveProductBySku(c, li.sku);
+        const productId = matched?.id || null;
         const qty = li.quantity || 1;
         const unitPrice = parseFloat(li.lineItemCost?.value || 0) / qty;
         await c.query(
@@ -196,8 +255,8 @@ async function pullEbay() {
         }
       }
       for (const li of order.lineItems || []) {
-        const p = await c.query(`SELECT id FROM products WHERE sku = $1 LIMIT 1`, [li.sku]);
-        if (p.rows[0]) await recordLowStockIfNeeded(p.rows[0].id);
+        const matched = await resolveProductBySku(c, li.sku);
+        if (matched) await recordLowStockIfNeeded(matched.id);
       }
     });
     inserted++;
@@ -279,4 +338,5 @@ module.exports = {
   pushStockForSaleItems,
   pushAllStockToShopify,
   recordLowStockIfNeeded,
+  resolveProductBySku,
 };
