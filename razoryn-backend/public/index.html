@@ -860,15 +860,19 @@ function adaptSale(s) {
   };
   return {
     id: s.id,
-    productId: null,         // resolved per-line if needed
+    productId: null,
     sku: s.sku || '',
     title: s.title || s.notes || '(multi-item sale)',
     channel: channelMap[s.channel] || s.channel,
     amount: parseFloat(s.total),
     date: s.occurred_at,
     customer: s.customer_name || '—',
-    invoice: s.invoice_number || (s.external_order_id ? '#' + s.external_order_id : '—'),
+    customerEmail: s.customer_email || '',
+    invoice: s.invoice_number || s.payment_reference || (s.external_order_id ? '#' + s.external_order_id : '—'),
     apiChannel: s.channel,
+    isEstimate: !!s.is_estimate,
+    paymentMethod: s.payment_method,
+    paymentReference: s.payment_reference,
   };
 }
 function adaptReturn(r) {
@@ -2196,10 +2200,10 @@ function renderSales() {
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
-        <div><h1>Sales</h1><div class="desc">Unified sales across all channels</div></div>
+        <div><h1>Sales</h1><div class="desc">Unified sales across all channels · per-channel CSV for accounting</div></div>
         <div class="actions">
-          <button class="btn btn-primary admin-only" onclick="openManualSale()">+ New manual order</button>
-          <button class="btn btn-outline" onclick="openPhoneQuoteSale()">📞 New phone-quote sale</button>
+          <button class="btn btn-primary admin-only" onclick="openManualSale()">+ New sale / estimate</button>
+          <button class="btn btn-outline" onclick="exportSalesCsv()">⬇ Export CSV</button>
           <button class="btn btn-outline" onclick="syncNow()">↻ Pull latest</button>
         </div>
       </div>
@@ -2260,7 +2264,11 @@ function renderSales() {
         <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
         <td>${s.customer}</td>
         <td class="num"><strong>${gbp(s.amount)}</strong></td>
-        <td><button class="btn btn-ghost btn-sm" onclick="printSingleInvoice('${s.id}')">🖨 Invoice</button></td>
+        <td>
+          <button class="btn btn-ghost btn-sm" onclick="printSingleInvoice('${s.id}')" title="Print invoice">🖨</button>
+          <button class="btn btn-ghost btn-sm" onclick="emailSingleInvoice('${s.id}')" title="Email invoice to customer">✉</button>
+          ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Convert to paid invoice" style="color:var(--green)">✓ Pay</button>` : ''}
+        </td>
       </tr>
     `).join('') : '<tr><td colspan="8"><div class="empty"><div class="t">No sales</div></div></td></tr>';
     salesUpdateBulkBar();
@@ -2306,6 +2314,59 @@ function printSingleInvoice(id) {
   const w = window.open(url, '_blank');
   if (!w) toast('Pop-up blocked. Allow pop-ups to print invoices.', 'error');
 }
+
+async function emailSingleInvoice(id) {
+  const sale = State.sales.find(s => s.id == id);
+  const defaultEmail = sale?.customerEmail || '';
+  const to = prompt('Send invoice to which email?', defaultEmail);
+  if (!to) return;
+  try {
+    const r = await Api.post('/api/sales/' + id + '/email', { to });
+    toast('Email sent to ' + to, 'success');
+  } catch (e) {
+    if (e.data?.error === 'email_not_configured') {
+      alert('Email sending not configured.\n\n' + e.data.message);
+    } else {
+      toast('Email failed: ' + (e.data?.message || e.message), 'error');
+    }
+  }
+}
+
+async function convertEstimateToInvoice(id) {
+  const paymentMethod = prompt('Payment received via — type one of:\ncash, bank, card', 'cash');
+  if (!paymentMethod || !['cash','bank','card'].includes(paymentMethod.toLowerCase())) return;
+  try {
+    const r = await Api.post('/api/sales/' + id + '/convert-to-invoice', { paymentMethod: paymentMethod.toLowerCase() });
+    toast('Converted to paid invoice — opening…', 'success');
+    await Store.refresh('sales');
+    await Store.refresh('products');
+    renderSales();
+    setTimeout(() => window.open('/api/sales/' + id + '/invoice.html', '_blank'), 200);
+  } catch (e) {
+    if (e.data?.error === 'insufficient_stock') toast('Cannot convert: insufficient stock for ' + e.data.sku, 'error');
+    else toast('Convert failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+function exportSalesCsv() {
+  const active = document.querySelector('[data-sf].active');
+  const filter = active?.dataset.sf || 'all';
+  // Frontend uses 'shopify' | 'ebay' | 'cash' | 'bank', but the backend column is more granular.
+  // For 'ebay' filter, we want both 'ebay_em' and 'ebay_cl'. For 'cash' → 'direct_cash', 'bank' → 'direct_bank'.
+  const channelMap = { shopify: 'shopify', cash: 'direct_cash', bank: 'direct_bank' };
+  let qs = '';
+  if (filter !== 'all' && filter !== 'ebay') {
+    qs = '?channel=' + encodeURIComponent(channelMap[filter] || filter);
+  } else if (filter === 'ebay') {
+    qs = '?channel=ebay_em'; // For now CSV only handles one channel at a time; eBay = ebay_em
+  }
+  // Trigger download by opening in new tab — server returns content-disposition: attachment
+  const a = document.createElement('a');
+  a.href = '/api/sales/export.csv' + qs;
+  a.download = 'sales.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  toast('Generating CSV…', 'info');
+}
 async function printSelectedInvoices() {
   const ids = Array.from(State.salesSelected);
   if (!ids.length) return;
@@ -2325,34 +2386,48 @@ async function printSelectedInvoices() {
 function openManualSale() {
   if (!State.products.length) { toast('No products in inventory yet', 'warn'); return; }
   modal({
-    title: 'New manual order',
+    title: 'New manual order / estimate',
     body: `
-      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:10px">Records an in-person or phone sale. Stock is decremented automatically and pushed to Shopify and eBay.</div>
-      <div class="field"><label>Payment channel</label>
-        <select id="ms-channel">
-          <option value="direct_cash">Cash (in person)</option>
-          <option value="direct_bank">Bank transfer (trade)</option>
-        </select>
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:10px">Records an in-person, phone, or quoted sale. Stock decrements on payment.</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field"><label>Document type</label>
+          <select id="ms-doctype">
+            <option value="invoice">Paid invoice (decrements stock)</option>
+            <option value="estimate">Estimate / quote only (no stock change)</option>
+          </select>
+        </div>
+        <div class="field"><label>Payment method</label>
+          <select id="ms-payment">
+            <option value="cash">Cash (in person) — REP-…-C</option>
+            <option value="bank">Bank transfer — REP-…-B</option>
+            <option value="card">Card (Stripe) — REP-…-S</option>
+          </select>
+        </div>
+        <div class="field"><label>Customer name</label><input id="ms-cust"></div>
+        <div class="field"><label>Customer phone</label><input id="ms-phone"></div>
+        <div class="field" style="grid-column:1/-1"><label>Customer email (for emailing the invoice)</label><input id="ms-email" type="email" placeholder="customer@example.com"></div>
+        <div class="field" style="grid-column:1/-1"><label>Shipping / billing address (optional)</label><textarea id="ms-address" rows="2" placeholder="123 Example Road&#10;Town, Postcode"></textarea></div>
+        <div class="field"><label>Order No. (optional)</label><input id="ms-ordernum" placeholder="e.g. CAP1234"></div>
+        <div class="field"><label>Vehicle Reg. (optional)</label><input id="ms-reg" placeholder="e.g. AB12 CDE"></div>
       </div>
-      <div class="field"><label>Customer name (optional)</label><input id="ms-cust"></div>
-      <div class="field"><label>Customer phone (optional)</label><input id="ms-phone"></div>
-      <div class="field"><label>Customer email (optional)</label><input id="ms-email"></div>
       <div style="border-top:1px solid var(--line);margin:14px 0;padding-top:10px">
         <div style="font-weight:600;font-size:13px;margin-bottom:8px">Line items</div>
         <div id="ms-items"></div>
         <button class="btn btn-outline btn-sm" onclick="manualSaleAddRow()">+ Add line item</button>
       </div>
-      <div class="field"><label>Shipping (£)</label><input type="number" id="ms-shipping" min="0" step="0.01" value="0"></div>
-      <div class="field"><label>Notes (optional)</label><textarea id="ms-notes" rows="2"></textarea></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field"><label>Shipping (£)</label><input type="number" id="ms-shipping" min="0" step="0.01" value="0"></div>
+        <div class="field"><label>Notes</label><input id="ms-notes" placeholder="(optional)"></div>
+      </div>
       <div id="ms-summary" style="background:var(--bg-soft);padding:10px;border-radius:6px;margin-top:10px;font-size:13px"></div>
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
-      { label: 'Record sale & generate invoice', primary: true, onClick: submitManualSale },
+      { label: 'Record & open document', primary: true, onClick: submitManualSale },
     ],
   });
   manualSaleAddRow();
-  el('ms-channel').addEventListener('change', () => {
+  el('ms-payment').addEventListener('change', () => {
     document.querySelectorAll('#ms-items > div').forEach(manualSalePrefillPrice);
     manualSaleRecalc();
   });
@@ -2392,14 +2467,16 @@ function manualSalePrefillPrice(row) {
   if (!opt || !opt.value) return;
   const product = State.products.find(p => p.id == opt.value);
   if (!product) return;
-  const channel = el('ms-channel')?.value;
+  const payment = el('ms-payment')?.value || 'cash';
   const cfg = State.pricingConfig || {};
   const ebayPrice = product.priceEbay || product.priceShopify || 0;
   let suggested = product.priceShopify || 0;
-  if (channel === 'direct_cash' && cfg.cashDiscountPct != null) {
+  if (payment === 'cash' && cfg.cashDiscountPct != null) {
     suggested = +(ebayPrice * (1 - cfg.cashDiscountPct / 100)).toFixed(2);
-  } else if (channel === 'direct_bank' && cfg.bankTransferPct != null) {
+  } else if (payment === 'bank' && cfg.bankTransferPct != null) {
     suggested = +(ebayPrice * (1 - cfg.bankTransferPct / 100)).toFixed(2);
+  } else if (payment === 'card') {
+    suggested = product.priceShopify || 0; // card = shopify price (no discount)
   }
   if (suggested > 0) row.querySelector('.ms-price').value = suggested;
 }
@@ -2413,14 +2490,17 @@ function manualSaleRecalc() {
     subtotal += qty * price;
   }
   const shipping = parseFloat(el('ms-shipping')?.value || 0);
-  const vatRate = (State.pricingConfig?.vatRate ?? 20) / 100;
+  const cfg = State.pricingConfig || {};
+  // Only apply VAT if VAT-registered; line-item prices are entered tax-inclusive
+  const vatRegistered = !!cfg.vatRegistered;
+  const vatRate = vatRegistered ? (cfg.vatRate || 20) / 100 : 0;
   const vat = +(subtotal * vatRate).toFixed(2);
   const total = +(subtotal + vat + shipping).toFixed(2);
   const sum = el('ms-summary');
   if (sum) {
     sum.innerHTML = `
       <div style="display:flex;justify-content:space-between"><span>Subtotal</span><strong>${gbp(subtotal)}</strong></div>
-      <div style="display:flex;justify-content:space-between"><span>VAT (${(vatRate*100).toFixed(0)}%)</span><strong>${gbp(vat)}</strong></div>
+      ${vatRegistered ? `<div style="display:flex;justify-content:space-between"><span>VAT (${(vatRate*100).toFixed(0)}%)</span><strong>${gbp(vat)}</strong></div>` : '<div style="font-size:11px;color:var(--ink-soft)">(Not VAT-registered — no VAT charged)</div>'}
       <div style="display:flex;justify-content:space-between"><span>Shipping</span><strong>${gbp(shipping)}</strong></div>
       <div style="display:flex;justify-content:space-between;border-top:1px solid var(--line);margin-top:6px;padding-top:6px;font-size:15px"><span>Total</span><strong>${gbp(total)}</strong></div>
     `;
@@ -2428,7 +2508,11 @@ function manualSaleRecalc() {
 }
 
 async function submitManualSale() {
-  const channel = el('ms-channel').value;
+  const paymentMethod = el('ms-payment').value;
+  const isEstimate = el('ms-doctype').value === 'estimate';
+  // Channel must be one of the manual channels — pick bank for non-cash payments
+  const channel = paymentMethod === 'cash' ? 'direct_cash' : 'direct_bank';
+
   const rows = document.querySelectorAll('#ms-items > div');
   const items = [];
   for (const r of rows) {
@@ -2441,9 +2525,14 @@ async function submitManualSale() {
   if (!items.length) { toast('Add at least one line item', 'warn'); return; }
   const payload = {
     channel,
+    paymentMethod,
+    isEstimate,
     customerName: el('ms-cust').value || null,
     customerPhone: el('ms-phone').value || null,
     customerEmail: el('ms-email').value || null,
+    shippingAddress: el('ms-address').value || null,
+    orderNumber: el('ms-ordernum').value || null,
+    vehicleReg: el('ms-reg').value || null,
     items,
     shipping: parseFloat(el('ms-shipping').value) || 0,
     notes: el('ms-notes').value || null,
@@ -2451,17 +2540,17 @@ async function submitManualSale() {
   try {
     const r = await Api.post('/api/sales', payload);
     closeModal();
-    toast('Sale recorded — opening invoice…', 'success');
+    toast(isEstimate ? 'Estimate saved' : 'Sale recorded — opening document…', 'success');
     await Store.refresh('sales');
     await Store.refresh('products');
     renderSales();
-    // Open the freshly created invoice
+    // Open the freshly created document
     setTimeout(() => {
       const w = window.open('/api/sales/' + r.sale.id + '/invoice.html', '_blank');
-      if (!w) toast('Pop-up blocked — invoice is in Sales tab', 'warn');
+      if (!w) toast('Pop-up blocked — find document in Sales tab', 'warn');
     }, 200);
   } catch (e) {
-    toast('Sale failed: ' + (e.data?.message || e.message), 'error');
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 
@@ -3319,6 +3408,7 @@ function renderMirror() {
               </div>
               <div style="margin-top:6px">
                 <button class="btn btn-ghost btn-sm" onclick="runShopifyDiag()" style="font-size:11px;color:var(--ink-soft)">🔍 Diagnose Shopify (channels & metafields)</button>
+                <button class="btn btn-ghost btn-sm" onclick="checkSkuMatches()" style="font-size:11px;color:var(--ink-soft)">🔗 Verify SKU sync (eBay ↔ Shopify)</button>
               </div>
             </div>
 
@@ -3489,6 +3579,37 @@ function addSeoDescriptionTemplate() {
   MirrorState.metafields.push({ namespace, key, value, type });
   paintMetafields();
   if (!def) toast('Tip: define an "seo_description" metafield in Shopify admin first, or change namespace/key above', 'info');
+}
+
+async function checkSkuMatches() {
+  toast('Comparing SKUs — this may take 1-2 minutes…', 'info');
+  try {
+    const r = await Api.get('/api/listings/sku-mismatches');
+    const lines = [];
+    lines.push(`Checked ${r.checked} mirrored listings.`);
+    lines.push(`Mismatches found: ${r.mismatchCount}`);
+    lines.push('');
+    if (r.mismatchCount === 0) {
+      lines.push('✓ All SKUs match between eBay and Shopify.');
+    } else {
+      lines.push('Mismatches:');
+      for (const m of r.mismatches.slice(0, 30)) {
+        if (m.status === 'sku_mismatch') {
+          lines.push(`  eBay ${m.ebayItemId}: eBay="${m.ebaySku}" vs Shopify="${m.shopifySku}"`);
+        } else if (m.status === 'ebay_listing_missing') {
+          lines.push(`  eBay ${m.ebayItemId}: not active anymore (Shopify SKU "${m.shopifySku}")`);
+        } else {
+          lines.push(`  eBay ${m.ebayItemId}: Shopify product deleted (was "${m.lastSyncedSku}")`);
+        }
+      }
+      if (r.mismatches.length > 30) lines.push(`  …and ${r.mismatches.length - 30} more.`);
+      lines.push('');
+      lines.push('Fix: in each mismatched row, edit the SKU and click "↑ Push to eBay".');
+    }
+    alert(lines.join('\n'));
+  } catch (e) {
+    toast('Check failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 async function runShopifyDiag() {
@@ -4029,23 +4150,20 @@ function renderSettings() {
       </div>
 
       <div class="card" style="margin-bottom:16px">
-        <div class="card-head"><h3>Phone pricing rules</h3><div class="card-desc">Used to generate quotes when staff are on the phone. Changes apply immediately to Phone Pricing tab and manual sales.</div></div>
+        <div class="card-head"><h3>Phone pricing rules</h3><div class="card-desc">Drives quotes on the Phone Pricing tab and unit prices for manual sales.</div></div>
         <div class="card-body">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
             <div class="field">
-              <label>Cash on collection — % off eBay listed price</label>
-              <input type="number" id="set-cash" min="0" max="50" step="0.5" placeholder="e.g. 10 → cash price = eBay × 0.90">
-              <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Used for in-person cash sales. Best price.</div>
+              <label>Cash on collection — % off eBay price</label>
+              <input type="number" id="set-cash" min="0" max="50" step="0.5" placeholder="e.g. 10">
             </div>
             <div class="field">
-              <label>Bank transfer (trade) — % off eBay listed price</label>
+              <label>Bank transfer (trade) — % off eBay price</label>
               <input type="number" id="set-bank" min="0" max="50" step="0.5" placeholder="e.g. 10">
-              <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">For invoiced trade sales. Often same as cash.</div>
             </div>
             <div class="field">
               <label>eBay buyer-protection markup (%)</label>
               <input type="number" id="set-ebaymarkup" min="0" max="30" step="0.5" placeholder="0">
-              <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Added on top of eBay listing price for buyers who want eBay's buyer protection (vs cash).</div>
             </div>
             <div class="field">
               <label>Shopify free-delivery threshold (£)</label>
@@ -4055,13 +4173,51 @@ function renderSettings() {
               <label>Default low-stock threshold</label>
               <input type="number" id="set-thresh" value="${State.settings.lowStockDefault}">
             </div>
+          </div>
+          <div style="margin-top:14px">
+            <button class="btn btn-primary" onclick="savePricingConfig()">Save phone pricing</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Company & invoice details</h3><div class="card-desc">Shown on every invoice, estimate, and receipt.</div></div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div class="field" style="grid-column:1/-1">
+              <label>Company address</label>
+              <textarea id="set-address" rows="2" placeholder="Unit 4 Shakespeare Industrial Estate, Watford"></textarea>
+            </div>
+            <div class="field"><label>Phone</label><input id="set-phone" placeholder="+44 7494589542"></div>
+            <div class="field"><label>Email</label><input id="set-email" placeholder="eparts@razoryn.co.uk"></div>
+            <div class="field"><label>Website</label><input id="set-website" placeholder="www.razoryn.co.uk"></div>
+            <div class="field"><label>Company Reg. No.</label><input id="set-regno" placeholder="16466013"></div>
+          </div>
+          <div style="margin-top:14px;padding:14px;background:var(--bg-soft);border-radius:8px">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+              <label class="switch"><input type="checkbox" id="set-vatreg"><span></span></label>
+              <div>
+                <div style="font-weight:600">VAT registered</div>
+                <div style="font-size:12px;color:var(--ink-soft)">Toggle on once HMRC issues your VAT number. Invoices will then show net+VAT breakdown and include your VAT number.</div>
+              </div>
+            </div>
+            <div class="field" id="set-vatnum-wrap" style="display:none">
+              <label>VAT Number</label><input id="set-vatnum" placeholder="GB123456789">
+            </div>
             <div class="field">
-              <label>VAT rate (%)</label>
-              <input type="number" id="set-vat" min="0" max="30" step="0.5" placeholder="20">
+              <label>VAT Rate (%)</label><input type="number" id="set-vat" min="0" max="30" step="0.5" placeholder="20">
+            </div>
+          </div>
+          <div style="margin-top:14px;padding:14px;background:var(--bg-soft);border-radius:8px">
+            <div style="font-weight:600;margin-bottom:8px">Bank details (shown on bank-transfer invoices)</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <div class="field" style="grid-column:1/-1"><label>Account name</label><input id="set-bankname"></div>
+              <div class="field"><label>Sort code</label><input id="set-banksort" placeholder="00-00-00"></div>
+              <div class="field"><label>Account number</label><input id="set-bankacc" placeholder="12345678"></div>
             </div>
           </div>
           <div style="margin-top:14px">
-            <button class="btn btn-primary" onclick="savePricingConfig()">Save phone pricing rules</button>
+            <button class="btn btn-primary" onclick="savePricingConfig()">Save company details</button>
           </div>
         </div>
       </div>
@@ -4071,7 +4227,7 @@ function renderSettings() {
         <div class="card-body">
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
             <label style="font-size:13px">Re-pull orders from the last <input type="number" id="resync-days" value="30" min="1" max="365" style="width:80px;display:inline-block"> days</label>
-            <select id="resync-channel" class="select" style="width:auto">
+            <select id="resync-channel" style="width:auto">
               <option value="all">All channels</option>
               <option value="shopify">Shopify only</option>
               <option value="ebay">eBay only</option>
@@ -4163,29 +4319,62 @@ async function saveSettings() {
 async function loadPricingConfig() {
   try {
     const r = await Api.get('/api/settings/pricing-config');
-    if (el('set-cash')) el('set-cash').value = r.cashDiscountPct;
-    if (el('set-bank')) el('set-bank').value = r.bankTransferPct;
-    if (el('set-ebaymarkup')) el('set-ebaymarkup').value = r.ebayBuyerProtectionMarkup;
-    if (el('set-freedelivery')) el('set-freedelivery').value = r.shopifyFreeDeliveryOver;
-    if (el('set-vat')) el('set-vat').value = r.vatRate;
+    const setVal = (id, v) => { const e = el(id); if (e) e.value = v; };
+    const setChk = (id, v) => { const e = el(id); if (e) e.checked = !!v; };
+    setVal('set-cash', r.cashDiscountPct);
+    setVal('set-bank', r.bankTransferPct);
+    setVal('set-ebaymarkup', r.ebayBuyerProtectionMarkup);
+    setVal('set-freedelivery', r.shopifyFreeDeliveryOver);
+    setVal('set-vat', r.vatRate);
+    setChk('set-vatreg', r.vatRegistered);
+    setVal('set-vatnum', r.vatNumber);
+    setVal('set-address', r.companyAddress);
+    setVal('set-phone', r.companyPhone);
+    setVal('set-email', r.companyEmail);
+    setVal('set-website', r.companyWebsite);
+    setVal('set-regno', r.companyRegNo);
+    setVal('set-bankname', r.bankAccountName);
+    setVal('set-banksort', r.bankSortCode);
+    setVal('set-bankacc', r.bankAccountNumber);
+    // Show VAT number field if VAT-registered
+    const vatNumWrap = el('set-vatnum-wrap');
+    if (vatNumWrap) vatNumWrap.style.display = r.vatRegistered ? '' : 'none';
+    const vatReg = el('set-vatreg');
+    if (vatReg && vatNumWrap) {
+      vatReg.addEventListener('change', () => { vatNumWrap.style.display = vatReg.checked ? '' : 'none'; });
+    }
     State.pricingConfig = r;
   } catch (e) { console.warn('loadPricingConfig:', e); }
 }
 
 async function savePricingConfig() {
+  const getNum = (id) => { const e = el(id); return e && e.value !== '' ? parseFloat(e.value) : undefined; };
+  const getStr = (id) => { const e = el(id); return e ? e.value : undefined; };
+  const payload = {
+    cashDiscountPct: getNum('set-cash'),
+    bankTransferPct: getNum('set-bank'),
+    ebayBuyerProtectionMarkup: getNum('set-ebaymarkup'),
+    shopifyFreeDeliveryOver: getNum('set-freedelivery'),
+    vatRate: getNum('set-vat'),
+    vatRegistered: el('set-vatreg') ? el('set-vatreg').checked : undefined,
+    vatNumber: getStr('set-vatnum'),
+    companyAddress: getStr('set-address'),
+    companyPhone: getStr('set-phone'),
+    companyEmail: getStr('set-email'),
+    companyWebsite: getStr('set-website'),
+    companyRegNo: getStr('set-regno'),
+    bankAccountName: getStr('set-bankname'),
+    bankSortCode: getStr('set-banksort'),
+    bankAccountNumber: getStr('set-bankacc'),
+  };
+  // Strip undefined
+  for (const k of Object.keys(payload)) if (payload[k] === undefined) delete payload[k];
   try {
-    await Api.post('/api/settings/pricing-config', {
-      cashDiscountPct: parseFloat(el('set-cash').value),
-      bankTransferPct: parseFloat(el('set-bank').value),
-      ebayBuyerProtectionMarkup: parseFloat(el('set-ebaymarkup').value),
-      shopifyFreeDeliveryOver: parseFloat(el('set-freedelivery').value),
-      vatRate: parseFloat(el('set-vat').value),
-    });
-    // Also save the low-stock threshold via the old endpoint
+    await Api.post('/api/settings/pricing-config', payload);
     if (el('set-thresh')) {
       try { await Api.patch('/api/settings', { lowStockDefault: parseInt(el('set-thresh').value) }); } catch (e) {}
     }
-    toast('Phone pricing rules saved', 'success');
+    toast('Saved', 'success');
     await loadPricingConfig();
   } catch (e) {
     toast('Save failed: ' + (e.data?.message || e.message), 'error');
