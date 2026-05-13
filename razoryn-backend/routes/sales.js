@@ -367,10 +367,43 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   const date = sale.occurred_at ? new Date(sale.occurred_at) : new Date();
   const datePretty = date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
+  // Friendly payment label that falls back to channel when method is blank (legacy sales)
+  const paymentLabel = (() => {
+    const pm = sale.payment_method;
+    if (pm === 'shopify') return 'Shopify Payment';
+    if (pm === 'ebay')    return 'eBay Payment';
+    if (pm === 'cash')    return 'Cash';
+    if (pm === 'bank')    return 'Bank Transfer';
+    if (pm === 'card')    return 'Card (Stripe)';
+    if (sale.channel === 'shopify') return 'Shopify Payment';
+    if ((sale.channel || '').startsWith('ebay')) return 'eBay Payment';
+    if (sale.channel === 'direct_cash') return 'Cash';
+    if (sale.channel === 'direct_bank') return 'Bank Transfer';
+    return '—';
+  })();
+  // Friendly channel label: Store / eBay / Cash / Bank
+  const channelLabel = (() => {
+    if (sale.channel === 'shopify') return 'Store';
+    if ((sale.channel || '').startsWith('ebay')) return 'eBay';
+    if (sale.channel === 'direct_cash') return 'Cash sale';
+    if (sale.channel === 'direct_bank') return 'Bank transfer';
+    return (sale.channel || '').replace(/_/g, ' ');
+  })();
+
   const isVatRegistered = !!company.vat_registered;
   const isCashReceipt = mode === 'receipt' || (sale.payment_method === 'cash' && !isVatRegistered);
   const docTitle = mode === 'estimate' ? 'ESTIMATE' : isCashReceipt ? 'RECEIPT' : 'INVOICE';
   const logoUrl = (baseUrl || '') + '/logo.png';
+
+  // ----- #5 — Use the shipping name from the address rather than eBay username on invoices -----
+  // The first line of shipping_address is the buyer's real name.
+  // sale.customer_name on eBay sales is the eBay username — useful for staff but not for the
+  // customer-facing invoice. Prefer the shipping-address name when available.
+  let billedToName = sale.customer_name || 'Walk-in customer';
+  if (sale.shipping_address) {
+    const firstLine = String(sale.shipping_address).split('\n')[0].trim();
+    if (firstLine) billedToName = firstLine;
+  }
 
   // For VAT calc: when VAT registered, line totals are inclusive — derive net
   const subtotalNet = isVatRegistered ? (parseFloat(sale.subtotal) / 1.2) : parseFloat(sale.subtotal);
@@ -526,9 +559,11 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     </div>
     <div class="addr-block">
       <div class="lbl">${mode === 'estimate' ? 'Estimate for' : 'Billed / Delivered to'}</div>
-      <div class="name">${escapeHtml(sale.customer_name || 'Walk-in customer')}</div>
+      <div class="name">${escapeHtml(billedToName)}</div>
       <div class="lines">
-        ${sale.shipping_address ? escapeHtml(sale.shipping_address).replace(/\n/g, '<br>') + '<br>' : '<em style="color:#aaa">No address on file</em><br>'}
+        ${sale.shipping_address
+          ? escapeHtml(sale.shipping_address).split('\n').slice(1).map(escapeHtml).join('<br>') + '<br>'
+          : '<em style="color:#aaa">No address on file</em><br>'}
         ${sale.customer_phone ? 'Tel: ' + escapeHtml(sale.customer_phone) + '<br>' : ''}
         ${sale.customer_email ? escapeHtml(sale.customer_email) : ''}
       </div>
@@ -537,9 +572,9 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
 
   <div class="detail-strip">
     <div class="item"><div class="l">Date</div><div class="v">${escapeHtml(datePretty)}</div></div>
-    <div class="item"><div class="l">Channel</div><div class="v">${escapeHtml((sale.channel || '').replace(/_/g, ' '))}</div></div>
+    <div class="item"><div class="l">Channel</div><div class="v">${escapeHtml(channelLabel)}</div></div>
     ${sale.vehicle_reg ? `<div class="item"><div class="l">Vehicle Reg.</div><div class="v">${escapeHtml(sale.vehicle_reg)}</div></div>` : `<div class="item"><div class="l">Status</div><div class="v" style="text-transform:capitalize">${escapeHtml(sale.status || '—')}</div></div>`}
-    <div class="item"><div class="l">Payment</div><div class="v" style="text-transform:capitalize">${escapeHtml((sale.payment_method || '—').toUpperCase())}</div></div>
+    <div class="item"><div class="l">Payment</div><div class="v">${escapeHtml(paymentLabel)}</div></div>
   </div>
 
   <table class="items">
@@ -577,7 +612,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   </div>
 
   <div class="pay">
-    <div class="row"><div class="l">Payment Method</div><div class="v" style="text-transform:capitalize">${escapeHtml((sale.payment_method || '—').toUpperCase())}</div></div>
+    <div class="row"><div class="l">Payment Method</div><div class="v">${escapeHtml(paymentLabel)}</div></div>
     ${mode === 'estimate' ? `<div class="row"><div class="l">Note</div><div class="v" style="color:#b76b00">Estimate valid 14 days. Goods reserved on receipt of payment.</div></div>` : ''}
     ${sale.payment_method === 'bank' && company.bank_account_name ? `
       <div class="row" style="margin-top:8px;padding-top:8px;border-top:1px solid #f0d4d8"><div class="l">Bank</div><div class="v" style="font-weight:400">
@@ -671,6 +706,65 @@ router.post('/:id/email', requirePermission('sales'), async (req, res) => {
     console.error('[email_invoice]', e.response?.data || e.message);
     res.status(500).json({ error: 'email_failed', message: e.response?.data?.message || e.message });
   }
+});
+
+// POST /api/sales/:id/items/:itemId/link-product
+// Manually attach a product to a sale_item line that didn't auto-match by SKU.
+// If decrementStock=true and the sale is paid, also decrements stock by that line's qty.
+router.post('/:id/items/:itemId/link-product', requirePermission('sales'), async (req, res) => {
+  const { productId, decrementStock } = req.body || {};
+  if (!productId) return res.status(400).json({ error: 'productId_required' });
+
+  const result = await withTx(async (c) => {
+    const li = await c.query(
+      `SELECT si.*, s.status FROM sale_items si JOIN sales s ON s.id = si.sale_id
+       WHERE si.id = $1 AND si.sale_id = $2 FOR UPDATE`,
+      [req.params.itemId, req.params.id]
+    );
+    if (!li.rows[0]) return { error: 'item_not_found' };
+    const alreadyLinked = li.rows[0].product_id != null;
+    await c.query(`UPDATE sale_items SET product_id = $1 WHERE id = $2`, [productId, req.params.itemId]);
+
+    // Optionally decrement stock now (only if it wasn't already linked + this is a paid sale)
+    if (decrementStock && !alreadyLinked && li.rows[0].status === 'paid') {
+      const p = await c.query(`SELECT qty_on_hand FROM products WHERE id = $1 FOR UPDATE`, [productId]);
+      if (!p.rows[0]) return { error: 'product_not_found' };
+      await c.query(`UPDATE products SET qty_on_hand = qty_on_hand - $1 WHERE id = $2`,
+        [li.rows[0].qty, productId]);
+      await c.query(
+        `INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by)
+         VALUES ($1,$2,'retroactive_link',$3,$4)`,
+        [productId, -li.rows[0].qty, req.params.id, req.user.id]
+      );
+    }
+    return { ok: true, linked: { itemId: req.params.itemId, productId, decremented: !!decrementStock && !alreadyLinked }};
+  });
+
+  if (result.error) return res.status(409).json(result);
+  await audit(req, 'link_sale_item_product', 'sale_item', req.params.itemId, { productId });
+  res.json(result);
+});
+
+// POST /api/sales/relink-unmatched  (admin)
+// Re-runs SKU resolution against all sale_items where product_id IS NULL,
+// using the same fuzzy matching as the live sync. Useful after fixing SKUs.
+router.post('/relink-unmatched', requirePermission('sales'), async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'admin_only' });
+  // Reuse the resolver from sync.js
+  const sync = require('../services/sync');
+  const unmatched = await query(
+    `SELECT id, sale_id, sku, qty FROM sale_items WHERE product_id IS NULL ORDER BY id DESC LIMIT 500`
+  );
+  let linked = 0;
+  for (const li of unmatched.rows) {
+    const m = await sync.resolveProductBySku(null, li.sku);
+    if (m) {
+      await query(`UPDATE sale_items SET product_id = $1 WHERE id = $2`, [m.id, li.id]);
+      linked++;
+    }
+  }
+  await audit(req, 'relink_unmatched_sales', null, null, { scanned: unmatched.rows.length, linked });
+  res.json({ ok: true, scanned: unmatched.rows.length, linked });
 });
 
 module.exports = router;
