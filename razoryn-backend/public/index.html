@@ -905,6 +905,11 @@ function adaptReturn(r) {
     notes: r.notes,
     photos: [],
     date: r.created_at,
+    respondBy: r.respond_by || null,
+    externalState: r.external_state || null,
+    externalReturnId: r.external_return_id || null,
+    buyerUsername: r.buyer_username || null,
+    externalOrderId: r.external_order_id || null,
   };
 }
 function adaptTask(t) {
@@ -2124,31 +2129,55 @@ function renderReturns() {
 function filterReturns(f) {
   document.querySelectorAll('[data-rfilter]').forEach(b => b.classList.toggle('active', b.dataset.rfilter === f));
   const items = f === 'all' ? State.returns : State.returns.filter(r => r.status === f);
-  el('ret-list').innerHTML = items.length ? items.map(r => `
-    <div class="card" style="margin-bottom:12px">
+  el('ret-list').innerHTML = items.length ? items.map(r => {
+    // Deadline badge — for eBay returns the seller has a response window.
+    // eBay's standard buyer-protection requires response within 3 business days.
+    let deadlineBadge = '';
+    if (r.respondBy) {
+      const ms = new Date(r.respondBy).getTime() - Date.now();
+      const hoursLeft = ms / (1000 * 60 * 60);
+      const daysLeft = Math.floor(hoursLeft / 24);
+      const colour = hoursLeft < 0 ? 'red' : hoursLeft < 24 ? 'red' : hoursLeft < 48 ? 'amber' : 'blue';
+      const label = hoursLeft < 0
+        ? `⚠ Overdue by ${Math.abs(Math.floor(hoursLeft / 24)) || Math.abs(Math.floor(hoursLeft))}h`
+        : hoursLeft < 24
+        ? `⏰ Reply within ${Math.max(1, Math.floor(hoursLeft))}h`
+        : `⏰ ${daysLeft}d to reply`;
+      deadlineBadge = `<span class="pill ${colour}" style="font-weight:600">${label}</span>`;
+    }
+    const statusPill = r.status === 'open' ? 'amber'
+                     : r.status === 'received' ? 'blue'
+                     : r.status === 'processed' ? 'green'
+                     : r.status === 'closed' ? '' : 'amber';
+    return `
+    <div class="card" style="margin-bottom:12px;${r.respondBy && new Date(r.respondBy) < new Date() ? 'border-left:3px solid var(--red)' : ''}">
       <div class="card-body" style="padding:14px">
         <div style="display:flex;align-items:flex-start;gap:12px">
           <div style="flex:1">
-            <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
               ${channelPill(r.channel)}
-              <span class="pill ${r.status==='pending'?'amber':r.status==='received'?'blue':'green'}">${r.status}</span>
+              <span class="pill ${statusPill}">${r.status}</span>
+              ${deadlineBadge}
               <span style="font-size:12px;color:var(--ink-soft)">${fmtDate(r.date)}</span>
             </div>
-            <div style="font-weight:600">${r.title}</div>
-            <div style="color:var(--ink-soft);font-size:12px">${r.sku} · ${r.customer}</div>
-            <div style="margin-top:6px;font-size:13px"><strong>Reason:</strong> ${r.reason}</div>
+            <div style="font-weight:600">${r.title || '(item not linked)'}</div>
+            <div style="color:var(--ink-soft);font-size:12px">${r.sku || '—'}${r.buyerUsername ? ' · buyer <strong style="color:var(--ink)">' + r.buyerUsername + '</strong>' : ''}${r.externalOrderId ? ' · eBay order <span style="font-family:ui-monospace,monospace;font-size:11px">' + r.externalOrderId + '</span>' : ''}</div>
+            <div style="margin-top:6px;font-size:13px"><strong>Reason:</strong> ${r.reason || '—'}</div>
+            ${r.externalState ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">eBay state: ${r.externalState}</div>` : ''}
+            ${r.refundAmount > 0 ? `<div style="font-size:12px;margin-top:2px"><strong>Refund:</strong> ${gbp(r.refundAmount)}</div>` : ''}
             ${r.notes ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:4px">${r.notes}</div>`:''}
             ${r.photos && r.photos.length ? `<div class="return-photos">${r.photos.map(p=>`<img src="${p}">`).join('')}</div>` : ''}
           </div>
           <div style="display:flex;flex-direction:column;gap:6px">
-            ${r.status==='pending' ? `<button class="btn btn-outline btn-sm" onclick="advanceReturn('${r.id}','received')">Mark received</button>`:''}
-            ${r.status==='received' ? `<button class="btn btn-outline btn-sm" onclick="advanceReturn('${r.id}','resolved')">Mark resolved</button>`:''}
-            <button class="btn btn-ghost btn-sm" onclick="addReturnPhoto('${r.id}')">+ Add photo</button>
+            ${r.externalReturnId ? `<a class="btn btn-outline btn-sm" href="https://www.ebay.co.uk/sh/ord/details?mode=RT&srn=${r.externalReturnId}" target="_blank" style="text-decoration:none">Open on eBay →</a>` : ''}
+            ${r.status==='open' ? `<button class="btn btn-outline btn-sm" onclick="advanceReturn('${r.id}','received')">Mark received</button>`:''}
+            ${r.status==='received' ? `<button class="btn btn-outline btn-sm" onclick="advanceReturn('${r.id}','processed')">Mark processed</button>`:''}
+            <button class="btn btn-ghost btn-sm" onclick="addReturnPhoto('${r.id}')">+ Photo</button>
           </div>
         </div>
       </div>
     </div>
-  `).join('') : '<div class="empty"><div class="t">No returns in this view</div></div>';
+  `}).join('') : '<div class="empty"><div class="t">No returns in this view</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Click "↩️ Pull from eBay" above to sync from eBay.</div></div>';
 }
 function openReturnModal() {
   modal({
@@ -2403,7 +2432,14 @@ async function openSaleDetail(id) {
       <div style="border-top:1px solid var(--line);padding-top:12px;margin-bottom:14px">
         <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600;margin-bottom:6px">Customer</div>
         <div style="font-size:13px;font-weight:600">${escape(s.customer_name || 'Walk-in customer')}</div>
-        ${s.shipping_address ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:4px;white-space:pre-line">${escape(s.shipping_address)}</div>` : '<div style="font-size:12px;color:var(--ink-soft);font-style:italic;margin-top:4px">No delivery address on file</div>'}
+        ${(() => {
+          const raw = s.shipping_address || '';
+          const lines = raw.split('\n').map(l => l.trim())
+            .filter(l => l && !/^ebay[a-z0-9]{4,}$/i.test(l) && !/^(GB|UK|GBR|United Kingdom)$/i.test(l));
+          return lines.length
+            ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:4px;white-space:pre-line">${escape(lines.join('\n'))}</div>`
+            : '<div style="font-size:12px;color:var(--ink-soft);font-style:italic;margin-top:4px">No delivery address on file</div>';
+        })()}
         ${s.customer_phone ? `<div style="font-size:12px;margin-top:4px">📞 ${escape(s.customer_phone)}</div>` : ''}
         ${s.customer_email ? `<div style="font-size:12px;margin-top:2px">✉ ${escape(s.customer_email)}</div>` : ''}
       </div>
