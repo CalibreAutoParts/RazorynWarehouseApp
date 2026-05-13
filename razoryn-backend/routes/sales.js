@@ -21,7 +21,8 @@ function genReference(paymentMethod) {
 async function nextInvoiceNumber(client) {
   const today = new Date();
   const datePart = today.toISOString().slice(0, 10).replace(/-/g, '');
-  const seq = await (client || query)(
+  const runQuery = client ? client.query.bind(client) : query;
+  const seq = await runQuery(
     `SELECT COALESCE(MAX(SUBSTRING(invoice_number FROM '\\d+$')::int), 0) + 1 AS next
      FROM sales WHERE invoice_number LIKE $1`,
     [`RZN-${datePart}-%`]
@@ -374,11 +375,16 @@ function escapeHtml(s) {
 
 function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   // mode: 'invoice' | 'estimate' | 'receipt'
-  const fmt = (n) => '£' + parseFloat(n || 0).toFixed(2);
+  const fmt = (n) => '\u00A3' + parseFloat(n || 0).toFixed(2);
   const date = sale.occurred_at ? new Date(sale.occurred_at) : new Date();
   const datePretty = date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
-  // Friendly payment label that falls back to channel when method is blank (legacy sales)
+  // Channel + payment labels
+  const isVatRegistered = !!company.vat_registered;
+  const isEbay = (sale.channel || '').startsWith('ebay');
+  const isShopify = sale.channel === 'shopify';
+  const isDirect = sale.channel === 'direct_cash' || sale.channel === 'direct_bank';
+
   const paymentLabel = (() => {
     const pm = sale.payment_method;
     if (pm === 'shopify') return 'Shopify Payment';
@@ -386,71 +392,182 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     if (pm === 'cash')    return 'Cash';
     if (pm === 'bank')    return 'Bank Transfer';
     if (pm === 'card')    return 'Card (Stripe)';
-    if (sale.channel === 'shopify') return 'Shopify Payment';
-    if ((sale.channel || '').startsWith('ebay')) return 'eBay Payment';
+    if (isShopify) return 'Shopify Payment';
+    if (isEbay) return 'eBay Payment';
     if (sale.channel === 'direct_cash') return 'Cash';
     if (sale.channel === 'direct_bank') return 'Bank Transfer';
-    return '—';
+    return '\u2014';
   })();
-  // Friendly channel label: Store / eBay / Cash / Bank
   const channelLabel = (() => {
-    if (sale.channel === 'shopify') return 'Store';
-    if ((sale.channel || '').startsWith('ebay')) return 'eBay';
+    if (isShopify) return 'Store';
+    if (isEbay) return 'eBay';
     if (sale.channel === 'direct_cash') return 'Cash sale';
     if (sale.channel === 'direct_bank') return 'Bank transfer';
     return (sale.channel || '').replace(/_/g, ' ');
   })();
 
-  const isVatRegistered = !!company.vat_registered;
-  const isCashReceipt = mode === 'receipt' || (sale.payment_method === 'cash' && !isVatRegistered);
-  const docTitle = mode === 'estimate' ? 'ESTIMATE' : isCashReceipt ? 'RECEIPT' : 'INVOICE';
-  const logoUrl = (baseUrl || '') + '/logo.png';
-
-  // ----- #5 — Use the shipping name from the address rather than eBay username on invoices -----
-  // The first line of shipping_address is the buyer's real name.
-  // sale.customer_name on eBay sales is the eBay username — useful for staff but not for the
-  // customer-facing invoice. Prefer the shipping-address name when available.
+  // Customer name: prefer shipping-address first line over raw eBay username
   let billedToName = sale.customer_name || 'Walk-in customer';
   if (sale.shipping_address) {
     const firstLine = String(sale.shipping_address).split('\n')[0].trim();
     if (firstLine) billedToName = firstLine;
   }
 
-  // For VAT calc: when VAT registered, line totals are inclusive — derive net
-  const subtotalNet = isVatRegistered ? (parseFloat(sale.subtotal) / 1.2) : parseFloat(sale.subtotal);
-  const vatAmount = isVatRegistered ? (parseFloat(sale.subtotal) - subtotalNet) : 0;
+  const isCashReceipt = mode === 'receipt' || (sale.payment_method === 'cash' && !isVatRegistered);
+  const docTitle = mode === 'estimate' ? 'ESTIMATE' : isCashReceipt ? 'RECEIPT' : 'INVOICE';
 
-  // ---------- Minimal cash receipt (for non-VAT cash sales) ----------
+  // Print suppression: empty <title> + @page CSS removes URL/timestamp headers in most browsers.
+  // (Browsers still show some headers if user hasn't disabled them in print settings; the user
+  // must uncheck "Headers and footers" once in their printer settings.)
+  const printCSS = `
+    @page { margin: 12mm; size: A4; }
+    @media print {
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .no-print { display: none !important; }
+    }
+  `;
+
+  // Returns / fitment policy varies per channel
+  const returnsPolicy = isEbay
+    ? "Returns handled via eBay within 30 days. Open a return request through your eBay account; we'll respond within 48 hours."
+    : isShopify
+    ? "30-day returns from delivery, in original packaging. Open a return request via your account at razoryn.co.uk. 5% restocking fee applies."
+    : "Within 30 days of purchase, in original packaging. 5% restocking fee applies. Return shipping at buyer's cost unless faulty.";
+
+  const fitmentPolicy = (isEbay || isShopify)
+    ? "Customer confirmed fitment before ordering by matching the part number, OEM reference and listing photos. We supply the exact item shown in the listing."
+    : "All parts checked for fitment before despatch. Refunded if part doesn't fit as advertised. Confirm OEM number before ordering.";
+
+  // ----- ESTIMATE: minimal layout, no logo, no business details -----
+  if (mode === 'estimate') {
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title></title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  ${printCSS}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Inter','Helvetica Neue',Arial,sans-serif;color:#111;background:#fafafa;font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .actions{display:flex;gap:10px;justify-content:center;margin:20px 0;flex-wrap:wrap}
+  .btn{display:inline-block;padding:9px 20px;background:#111;color:white;border-radius:4px;text-decoration:none;font-weight:500;font-size:12px;cursor:pointer;border:none;font-family:inherit}
+  .btn.ghost{background:white;color:#111;border:1px solid #ccc}
+  .page{max-width:680px;margin:24px auto;background:white;padding:48px 56px;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+  .head{display:flex;justify-content:space-between;align-items:flex-end;padding-bottom:18px;border-bottom:1px solid #ddd;margin-bottom:28px}
+  .head h1{font-size:24px;font-weight:600;letter-spacing:.04em;color:#111}
+  .head .ref{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#888;margin-top:4px}
+  .head .right{text-align:right;font-size:11px;color:#888}
+  .head .right strong{display:block;color:#111;font-size:13px;font-weight:500;margin-top:2px}
+  .customer-block{margin-bottom:24px}
+  .customer-block .label{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#888;font-weight:500;margin-bottom:4px}
+  .customer-block .name{font-size:14px;font-weight:500}
+  .customer-block .addr{font-size:12px;color:#555;margin-top:2px;white-space:pre-line}
+  table{width:100%;border-collapse:collapse;margin:8px 0 20px;font-size:13px}
+  table thead th{text-align:left;padding:10px 0;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#888;font-weight:500;border-bottom:1px solid #ddd}
+  table thead th.num{text-align:right}
+  table tbody td{padding:12px 0;border-bottom:1px solid #f0f0f0;vertical-align:top}
+  table tbody td.num{text-align:right;font-variant-numeric:tabular-nums}
+  table .sku{font-family:ui-monospace,monospace;font-size:10.5px;color:#999;margin-top:2px}
+  .totals{margin-left:auto;width:280px;font-size:13px;margin-top:8px}
+  .totals .row{display:flex;justify-content:space-between;padding:5px 0}
+  .totals .grand{font-weight:600;font-size:16px;padding-top:10px;margin-top:6px;border-top:1px solid #111}
+  .estimate-notice{margin-top:32px;padding:14px 0;border-top:1px solid #ddd;text-align:center;font-size:11px;color:#888;line-height:1.7}
+  .estimate-notice strong{color:#111;font-weight:500}
+</style></head><body>
+<div class="actions no-print">
+  <button class="btn" onclick="window.print()">Print / Save as PDF</button>
+  <a class="btn ghost" href="#" onclick="window.close();return false">Close</a>
+</div>
+<div class="page">
+  <div class="head">
+    <div>
+      <h1>ESTIMATE</h1>
+      <div class="ref">${escapeHtml(sale.payment_reference || '\u2014')}</div>
+    </div>
+    <div class="right">
+      Issued<strong>${escapeHtml(datePretty)}</strong>
+    </div>
+  </div>
+
+  <div class="customer-block">
+    <div class="label">For</div>
+    <div class="name">${escapeHtml(billedToName)}</div>
+    ${sale.shipping_address ? `<div class="addr">${escapeHtml(sale.shipping_address).split('\n').slice(1).join('\n')}</div>` : ''}
+    ${sale.customer_phone ? `<div class="addr">${escapeHtml(sale.customer_phone)}</div>` : ''}
+    ${sale.customer_email ? `<div class="addr">${escapeHtml(sale.customer_email)}</div>` : ''}
+  </div>
+
+  ${(sale.vehicle_reg || sale.vin_number) ? `
+  <div class="customer-block">
+    <div class="label">Vehicle</div>
+    ${sale.vehicle_reg ? `<div class="name">${escapeHtml(sale.vehicle_reg)}</div>` : ''}
+    ${sale.vin_number ? `<div class="addr" style="font-family:ui-monospace,monospace">VIN: ${escapeHtml(sale.vin_number)}</div>` : ''}
+  </div>` : ''}
+
+  <table>
+    <thead><tr>
+      <th>Item</th>
+      <th class="num" style="width:60px">Qty</th>
+      <th class="num" style="width:90px">Unit</th>
+      <th class="num" style="width:100px">Total</th>
+    </tr></thead>
+    <tbody>
+      ${items.map(i => `<tr>
+        <td>${escapeHtml(i.title)}<div class="sku">${escapeHtml(i.sku || '')}</div></td>
+        <td class="num">${i.qty}</td>
+        <td class="num">${fmt(i.unit_price)}</td>
+        <td class="num">${fmt(i.line_total)}</td>
+      </tr>`).join('')}
+    </tbody>
+  </table>
+
+  <div class="totals">
+    <div class="row"><span style="color:#888">Subtotal</span><span>${fmt(sale.subtotal)}</span></div>
+    ${parseFloat(sale.shipping || 0) > 0 ? `<div class="row"><span style="color:#888">Shipping</span><span>${fmt(sale.shipping)}</span></div>` : ''}
+    <div class="row grand"><span>Total</span><span>${fmt(sale.total)}</span></div>
+  </div>
+
+  <div class="estimate-notice">
+    This is an <strong>estimate</strong>, not a tax invoice. Prices valid for 14 days from the date above.<br>
+    To confirm, quote reference <strong>${escapeHtml(sale.payment_reference || '')}</strong>.
+  </div>
+</div>
+</body></html>`;
+  }
+
+  // ----- CASH RECEIPT: very compact, no company details / no VAT info (per brief) -----
   if (isCashReceipt) {
     return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>${docTitle} ${escapeHtml(sale.payment_reference || '')}</title>
+<html><head><meta charset="utf-8"><title></title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
+  ${printCSS}
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:'Helvetica Neue',Arial,sans-serif;color:#111;max-width:420px;margin:24px auto;padding:0 20px;line-height:1.5;font-size:13px}
-  .head{text-align:center;padding-bottom:14px;border-bottom:1px dashed #999;margin-bottom:16px}
-  .logo{height:38px;margin-bottom:6px}
-  .doctype{font-size:12px;letter-spacing:.2em;color:#666;font-weight:600}
-  .ref{font-family:ui-monospace,monospace;font-size:12px;background:#f5f5f5;display:inline-block;padding:4px 10px;border-radius:3px;margin-top:8px}
-  .meta{margin-bottom:12px;color:#555}
+  body{font-family:'Inter','Helvetica Neue',Arial,sans-serif;color:#111;max-width:420px;margin:24px auto;padding:0 24px;line-height:1.5;font-size:13px;-webkit-font-smoothing:antialiased}
+  .head{text-align:center;padding-bottom:14px;border-bottom:1px solid #ddd;margin-bottom:18px}
+  .doctype{font-size:14px;letter-spacing:.18em;color:#888;font-weight:500}
+  .ref{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#111;margin-top:6px}
+  .meta{margin-bottom:14px;color:#555;font-size:12px;text-align:center}
   table{width:100%;border-collapse:collapse;margin:10px 0}
-  th,td{padding:6px 0;text-align:left}
-  th{font-size:10px;text-transform:uppercase;color:#999;letter-spacing:.06em;border-bottom:1px solid #ddd}
-  td{border-bottom:1px dashed #eee}
+  th,td{padding:8px 0;text-align:left;font-size:12px}
+  th{font-size:10px;text-transform:uppercase;color:#888;letter-spacing:.08em;font-weight:500;border-bottom:1px solid #ddd}
+  td{border-bottom:1px solid #f0f0f0}
   .num{text-align:right}
-  .total{display:flex;justify-content:space-between;font-size:17px;font-weight:700;margin-top:10px;padding-top:10px;border-top:2px solid #111}
-  .foot{margin-top:18px;font-size:11px;color:#888;text-align:center;line-height:1.6}
+  .total{display:flex;justify-content:space-between;font-size:16px;font-weight:600;margin-top:12px;padding-top:12px;border-top:1px solid #111}
+  .foot{margin-top:24px;font-size:11px;color:#888;text-align:center;line-height:1.7}
   .actions{margin:20px auto 0;text-align:center}
-  .btn{display:inline-block;padding:8px 18px;background:#c8202d;color:white;border-radius:4px;text-decoration:none;font-weight:600;font-size:12px;cursor:pointer;border:none}
+  .btn{display:inline-block;padding:8px 18px;background:#111;color:white;border-radius:4px;font-weight:500;font-size:12px;cursor:pointer;border:none;font-family:inherit}
   @media print {.actions{display:none}}
 </style></head><body>
 <div class="head">
-  <img src="${logoUrl}" alt="Razoryn" class="logo" onerror="this.style.display='none'">
-  <div class="doctype">${docTitle}</div>
+  <div class="doctype">RECEIPT</div>
   <div class="ref">${escapeHtml(sale.payment_reference || '')}</div>
 </div>
 <div class="meta">
-  ${escapeHtml(datePretty)} · ${escapeHtml(date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}
-  ${sale.customer_name ? `<br>Customer: ${escapeHtml(sale.customer_name)}` : ''}
+  ${escapeHtml(datePretty)} \u00B7 ${escapeHtml(date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}
+  ${sale.customer_name ? `<br>${escapeHtml(sale.customer_name)}` : ''}
 </div>
 <table>
   <thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Total</th></tr></thead>
@@ -462,134 +579,116 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     </tr>`).join('')}
   </tbody>
 </table>
-<div class="total"><span>TOTAL PAID</span><span>${fmt(sale.total)}</span></div>
-<div class="foot">
-  Thank you. Cash sales — no returns without this receipt.<br>
-  Keep this slip for your records.
-</div>
-<div class="actions">
-  <button class="btn" onclick="window.print()">Print receipt</button>
-</div>
+<div class="total"><span>Total paid</span><span>${fmt(sale.total)}</span></div>
+<div class="foot">Cash sale. No returns without this receipt.</div>
+<div class="actions"><button class="btn" onclick="window.print()">Print</button></div>
 </body></html>`;
   }
 
-  // ---------- Full invoice / estimate (Hyundai-inspired layout) ----------
+  // ----- FULL INVOICE -----
+  const logoUrl = (baseUrl || '') + '/logo.png';
+  const subtotalNet = isVatRegistered ? (parseFloat(sale.subtotal) / 1.2) : parseFloat(sale.subtotal);
+  const vatAmount = isVatRegistered ? (parseFloat(sale.subtotal) - subtotalNet) : 0;
+
   return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>${docTitle} ${escapeHtml(sale.invoice_number || sale.payment_reference || '')}</title>
+<html><head><meta charset="utf-8"><title></title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
+  ${printCSS}
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:'Helvetica Neue',Arial,sans-serif;color:#0f1115;background:#fafafa;font-size:12px;line-height:1.45}
-  .page{max-width:840px;margin:24px auto;background:white;padding:42px 48px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
-  /* Header */
-  .topbar{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:18px;border-bottom:3px solid #c8202d;margin-bottom:24px}
-  .topbar .left img{height:48px;display:block}
-  .topbar .left .sub{font-size:10px;color:#666;letter-spacing:.12em;text-transform:uppercase;margin-top:8px;font-weight:500}
-  .topbar .right{text-align:right}
-  .topbar .right .doctype{font-size:30px;font-weight:300;letter-spacing:.12em;color:#0f1115;line-height:1}
-  .topbar .right .num{font-family:ui-monospace,Menlo,monospace;font-size:13px;color:#c8202d;font-weight:600;margin-top:8px}
-  .topbar .right .order{font-size:10.5px;color:#777;margin-top:3px}
-  /* Address blocks (Hyundai-style 2-col) */
-  .addr-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:32px;padding:18px 0 20px;border-bottom:1px solid #e0e2e6;margin-bottom:18px}
-  .addr-block .lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#888;font-weight:600;margin-bottom:6px}
-  .addr-block .name{font-size:13px;font-weight:600;margin-bottom:2px;color:#0f1115}
-  .addr-block .lines{font-size:11.5px;color:#444;line-height:1.6}
-  /* Order details row (Hyundai's account no / order no / date strip) */
-  .detail-strip{display:grid;grid-template-columns:repeat(4, 1fr);gap:18px;padding:12px 14px;background:#f7f7f8;border:1px solid #ebedf0;border-radius:4px;margin-bottom:22px}
-  .detail-strip .item .l{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#888;font-weight:600;margin-bottom:3px}
-  .detail-strip .item .v{font-size:12px;color:#0f1115;font-weight:600}
-  /* Items table */
-  table.items{width:100%;border-collapse:collapse;margin-bottom:16px;font-size:12px}
-  table.items thead th{text-align:left;font-size:9.5px;text-transform:uppercase;letter-spacing:.08em;color:#666;font-weight:600;padding:9px 10px;border-top:1.5px solid #0f1115;border-bottom:1px solid #ccc;background:#fafafa}
-  table.items thead th.num{text-align:right}
-  table.items tbody td{padding:10px;border-bottom:1px solid #eef0f3;vertical-align:top}
-  table.items tbody td.num{text-align:right;font-variant-numeric:tabular-nums}
-  table.items .sku{font-family:ui-monospace,monospace;font-size:10.5px;color:#888;margin-top:2px}
-  /* Totals (Hyundai-style — boxed, right-aligned) */
-  .totals-wrap{display:flex;justify-content:flex-end;margin-bottom:24px}
-  .totals{width:340px;font-size:12px}
-  .totals .row{display:flex;justify-content:space-between;padding:5px 12px}
-  .totals .row.sep{border-top:1px solid #e0e2e6;margin-top:4px;padding-top:9px}
-  .totals .grand{background:#0f1115;color:white;padding:11px 14px;font-size:15px;font-weight:600;margin-top:6px;display:flex;justify-content:space-between;border-radius:2px}
-  /* Payment + bank */
-  .pay{padding:14px 16px;background:#fff8f8;border-left:3px solid #c8202d;font-size:12px;border-radius:0 4px 4px 0;margin-bottom:18px}
-  .pay .row{display:flex;gap:12px;margin-bottom:4px}
-  .pay .row .l{min-width:130px;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#777;font-weight:600;padding-top:1px}
-  .pay .row .v{font-weight:600}
-  /* Footer */
-  .foot{margin-top:24px;padding-top:16px;border-top:1px solid #e0e2e6;font-size:10px;color:#666;line-height:1.6}
-  .foot .cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;margin-bottom:12px}
-  .foot .col .h{display:block;color:#222;text-transform:uppercase;font-size:9px;letter-spacing:.1em;margin-bottom:5px;font-weight:600}
-  .terms{font-size:9.5px;color:#888;text-align:center;line-height:1.6;border-top:1px dashed #ddd;padding-top:10px}
-  /* Estimate stamp */
-  .stamp{position:absolute;top:160px;left:50%;transform:translateX(-50%) rotate(-12deg);border:4px solid #b76b00;color:#b76b00;padding:8px 32px;font-weight:800;letter-spacing:.2em;font-size:28px;opacity:.18;pointer-events:none}
-  /* Print actions */
+  body{font-family:'Inter','Helvetica Neue',Arial,sans-serif;color:#111;background:#fafafa;font-size:12.5px;line-height:1.55;-webkit-font-smoothing:antialiased;letter-spacing:-.005em}
   .actions{display:flex;gap:10px;justify-content:center;margin:20px 0;flex-wrap:wrap}
-  .btn{display:inline-block;padding:9px 20px;background:#c8202d;color:white;border-radius:4px;text-decoration:none;font-weight:600;font-size:12px;cursor:pointer;border:none;font-family:inherit}
-  .btn.ghost{background:white;color:#0f1115;border:1px solid #ccc}
-  @media print {
-    body{background:white}
-    .page{box-shadow:none;margin:0;padding:24px 28px;max-width:none}
-    .actions{display:none}
-    @page{margin:10mm}
-  }
+  .btn{display:inline-block;padding:9px 20px;background:#111;color:white;border-radius:4px;text-decoration:none;font-weight:500;font-size:12px;cursor:pointer;border:none;font-family:inherit}
+  .btn.ghost{background:white;color:#111;border:1px solid #ccc}
+  .page{max-width:780px;margin:24px auto;background:white;padding:48px 56px;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+
+  /* Header — Hyundai-inspired: logo top-left, doctype top-right */
+  .top{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:24px;border-bottom:1.5px solid #111;margin-bottom:28px}
+  .top .left img.logo{height:42px;display:block}
+  .top .left .tagline{font-size:10px;color:#888;letter-spacing:.1em;text-transform:uppercase;margin-top:8px;font-weight:500}
+  .top .right{text-align:right}
+  .top .right .doctype{font-size:26px;font-weight:600;letter-spacing:.04em;color:#111;line-height:1}
+  .top .right .ref{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:#888;margin-top:8px}
+  .top .right .order{font-size:11px;color:#666;margin-top:3px}
+
+  /* Address grid */
+  .addr-grid{display:grid;grid-template-columns:1fr 1fr;gap:36px;padding-bottom:24px;border-bottom:1px solid #eee;margin-bottom:20px}
+  .addr-block .lbl{font-size:9.5px;text-transform:uppercase;letter-spacing:.12em;color:#999;font-weight:500;margin-bottom:8px}
+  .addr-block .name{font-size:14px;font-weight:600;margin-bottom:4px;color:#111}
+  .addr-block .lines{font-size:12px;color:#555;line-height:1.7}
+
+  /* Detail strip */
+  .detail-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;padding:14px 18px;background:#fafafa;border:1px solid #eee;border-radius:4px;margin-bottom:24px}
+  .detail-strip .item .l{font-size:9.5px;text-transform:uppercase;letter-spacing:.1em;color:#999;font-weight:500;margin-bottom:4px}
+  .detail-strip .item .v{font-size:12.5px;color:#111;font-weight:500}
+
+  /* Items */
+  table.items{width:100%;border-collapse:collapse;margin-bottom:20px;font-size:12.5px}
+  table.items thead th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#888;font-weight:500;padding:10px 12px;border-top:1px solid #111;border-bottom:1px solid #ddd}
+  table.items thead th.num{text-align:right}
+  table.items tbody td{padding:14px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top}
+  table.items tbody td.num{text-align:right;font-variant-numeric:tabular-nums}
+  table.items .sku{font-family:ui-monospace,monospace;font-size:10.5px;color:#999;margin-top:3px}
+
+  /* Totals */
+  .totals-wrap{display:flex;justify-content:flex-end;margin-bottom:24px}
+  .totals{width:300px;font-size:12.5px}
+  .totals .row{display:flex;justify-content:space-between;padding:5px 14px;color:#555}
+  .totals .grand{background:#111;color:white;padding:13px 16px;font-size:15px;font-weight:600;margin-top:6px;display:flex;justify-content:space-between;border-radius:3px;letter-spacing:.01em}
+
+  /* Bank details box (only on bank-transfer invoices) */
+  .pay{padding:14px 18px;background:#fafafa;border-left:2px solid #111;font-size:12px;border-radius:0 4px 4px 0;margin-bottom:20px}
+  .pay .row{display:flex;gap:14px;margin-bottom:6px}
+  .pay .row .l{min-width:110px;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#888;font-weight:500;padding-top:1px}
+  .pay .row .v{font-weight:500;color:#111}
+
+  /* Footer */
+  .foot{margin-top:30px;padding-top:18px;border-top:1px solid #eee;font-size:10.5px;color:#666;line-height:1.7}
+  .foot .cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;margin-bottom:14px}
+  .foot .col .h{display:block;color:#111;text-transform:uppercase;font-size:9.5px;letter-spacing:.1em;margin-bottom:5px;font-weight:500}
+  .terms{font-size:10px;color:#999;text-align:center;line-height:1.7;border-top:1px solid #f0f0f0;padding-top:12px}
 </style></head><body>
 
-<div class="actions">
-  <button class="btn" onclick="window.print()">🖨 Print / Save as PDF</button>
+<div class="actions no-print">
+  <button class="btn" onclick="window.print()">Print / Save as PDF</button>
   <a class="btn ghost" href="#" onclick="window.close();return false">Close</a>
 </div>
 
-<div class="page" style="position:relative">
-  ${mode === 'estimate' ? '<div class="stamp">ESTIMATE</div>' : ''}
-
-  <div class="topbar">
+<div class="page">
+  <div class="top">
     <div class="left">
-      ${mode !== 'estimate' ? `
-        <img src="${logoUrl}" alt="Razoryn e-Parts" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
-        <div style="display:none;font-size:24px;font-weight:800;letter-spacing:-.02em">Razoryn <span style="color:#c8202d">e-Parts</span></div>
-        <div class="sub">Quality aftermarket vehicle parts</div>
-      ` : `
-        <div style="font-size:24px;font-weight:700;letter-spacing:-.01em;color:#333">Estimate</div>
-        <div class="sub" style="margin-top:6px">Quote · valid 14 days</div>
-      `}
+      <img class="logo" src="${logoUrl}" alt="Razoryn e-Parts" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+      <div style="display:none;font-size:22px;font-weight:700;letter-spacing:-.02em">Razoryn <span style="color:#c8202d">e-Parts</span></div>
+      <div class="tagline">Quality aftermarket vehicle parts</div>
     </div>
     <div class="right">
       <div class="doctype">${docTitle}</div>
-      <div class="num">${escapeHtml(sale.invoice_number || sale.payment_reference || '—')}</div>
-      ${sale.order_number ? `<div class="order">Order: ${escapeHtml(sale.order_number)}</div>` : ''}
+      <div class="ref">${escapeHtml(sale.invoice_number || sale.payment_reference || '\u2014')}</div>
     </div>
   </div>
 
   <div class="addr-grid">
-    ${mode !== 'estimate' ? `
     <div class="addr-block">
       <div class="lbl">From</div>
       <div class="name">Razoryn e-Parts</div>
       <div class="lines">
-        ${escapeHtml(company.company_address || '')}<br>
+        ${escapeHtml(company.company_address || '').replace(/\n/g, '<br>')}<br>
         ${company.company_phone ? 'Tel: ' + escapeHtml(company.company_phone) + '<br>' : ''}
         ${company.company_email ? escapeHtml(company.company_email) + '<br>' : ''}
         ${company.company_website ? escapeHtml(company.company_website) + '<br>' : ''}
-        ${company.company_reg_no ? 'Co. No. ' + escapeHtml(company.company_reg_no) : ''}
-        ${isVatRegistered && company.vat_number ? ' · VAT ' + escapeHtml(company.vat_number) : ''}
+        ${company.company_reg_no ? 'Company Reg Number: ' + escapeHtml(company.company_reg_no) + '<br>' : ''}
+        ${isVatRegistered && company.vat_number ? 'VAT Number: ' + escapeHtml(company.vat_number) : ''}
       </div>
     </div>
-    ` : `
     <div class="addr-block">
-      <div class="lbl">Quote details</div>
-      <div class="lines" style="color:#555;font-size:11.5px">
-        This is an estimate only. Prices valid for 14 days from the date below.<br>
-        Goods reserved on receipt of payment.
-      </div>
-    </div>
-    `}
-    <div class="addr-block">
-      <div class="lbl">${mode === 'estimate' ? 'Estimate for' : 'Billed / Delivered to'}</div>
+      <div class="lbl">Billed / Delivered to</div>
       <div class="name">${escapeHtml(billedToName)}</div>
       <div class="lines">
         ${sale.shipping_address
-          ? escapeHtml(sale.shipping_address).split('\n').slice(1).map(escapeHtml).join('<br>') + '<br>'
-          : '<em style="color:#aaa">No address on file</em><br>'}
+          ? escapeHtml(sale.shipping_address).split('\n').slice(1).join('<br>') + '<br>'
+          : '<em style="color:#bbb">No address on file</em><br>'}
         ${sale.customer_phone ? 'Tel: ' + escapeHtml(sale.customer_phone) + '<br>' : ''}
         ${sale.customer_email ? escapeHtml(sale.customer_email) : ''}
       </div>
@@ -599,13 +698,16 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   <div class="detail-strip">
     <div class="item"><div class="l">Date</div><div class="v">${escapeHtml(datePretty)}</div></div>
     <div class="item"><div class="l">Channel</div><div class="v">${escapeHtml(channelLabel)}</div></div>
-    ${sale.vehicle_reg
-      ? `<div class="item"><div class="l">Vehicle Reg.</div><div class="v">${escapeHtml(sale.vehicle_reg)}</div></div>`
-      : sale.vin_number
-      ? `<div class="item"><div class="l">VIN</div><div class="v" style="font-family:ui-monospace,monospace;font-size:10.5px">${escapeHtml(sale.vin_number)}</div></div>`
-      : `<div class="item"><div class="l">Status</div><div class="v" style="text-transform:capitalize">${escapeHtml(sale.status || '—')}</div></div>`}
+    ${sale.order_number ? `<div class="item"><div class="l">Order No.</div><div class="v" style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(sale.order_number)}</div></div>` : sale.vehicle_reg ? `<div class="item"><div class="l">Vehicle Reg.</div><div class="v">${escapeHtml(sale.vehicle_reg)}</div></div>` : sale.vin_number ? `<div class="item"><div class="l">VIN</div><div class="v" style="font-family:ui-monospace,monospace;font-size:10px">${escapeHtml(sale.vin_number)}</div></div>` : `<div class="item"><div class="l">Status</div><div class="v" style="text-transform:capitalize">${escapeHtml(sale.status || 'paid')}</div></div>`}
     <div class="item"><div class="l">Payment</div><div class="v">${escapeHtml(paymentLabel)}</div></div>
   </div>
+
+  ${(sale.vehicle_reg || sale.vin_number) && sale.order_number ? `
+  <div class="detail-strip" style="grid-template-columns:1fr 1fr;margin-top:-16px">
+    ${sale.vehicle_reg ? `<div class="item"><div class="l">Vehicle Reg.</div><div class="v">${escapeHtml(sale.vehicle_reg)}</div></div>` : ''}
+    ${sale.vin_number ? `<div class="item"><div class="l">VIN</div><div class="v" style="font-family:ui-monospace,monospace;font-size:10px">${escapeHtml(sale.vin_number)}</div></div>` : ''}
+  </div>
+  ` : ''}
 
   <table class="items">
     <thead><tr>
@@ -641,29 +743,25 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     </div>
   </div>
 
-  ${(mode === 'estimate' || (sale.payment_method === 'bank' && company.bank_account_name)) ? `
+  ${(sale.payment_method === 'bank' && company.bank_account_name) ? `
   <div class="pay">
-    ${mode === 'estimate' ? `<div class="row"><div class="l">Note</div><div class="v" style="color:#b76b00">Estimate valid 14 days. Goods reserved on receipt of payment.</div></div>` : ''}
-    ${sale.payment_method === 'bank' && company.bank_account_name ? `
-      <div class="row"${mode === 'estimate' ? ' style="margin-top:8px;padding-top:8px;border-top:1px solid #f0d4d8"' : ''}><div class="l">Bank</div><div class="v" style="font-weight:400">
-        ${escapeHtml(company.bank_account_name)}<br>
-        Sort: ${escapeHtml(company.bank_sort_code || '—')} · Acc: ${escapeHtml(company.bank_account_number || '—')}<br>
-        Use reference: <strong>${escapeHtml(sale.payment_reference)}</strong>
-      </div></div>
-    ` : ''}
+    <div class="row"><div class="l">Bank</div><div class="v" style="font-weight:400">
+      ${escapeHtml(company.bank_account_name)}<br>
+      Sort code: ${escapeHtml(company.bank_sort_code || '\u2014')} \u00B7 Account: ${escapeHtml(company.bank_account_number || '\u2014')}<br>
+      Use reference: <strong>${escapeHtml(sale.payment_reference)}</strong>
+    </div></div>
   </div>
   ` : ''}
 
-  ${mode !== 'estimate' ? `
   <div class="foot">
     <div class="cols">
       <div class="col">
         <span class="h">Returns</span>
-        Within 30 days of purchase, in original packaging. 5% restocking fee applies. Return shipping at buyer's cost unless faulty.
+        ${returnsPolicy}
       </div>
       <div class="col">
         <span class="h">Fitment</span>
-        All parts checked for fitment before despatch. Refunded if part doesn't fit as advertised. Confirm OEM number before ordering.
+        ${fitmentPolicy}
       </div>
       <div class="col">
         <span class="h">Contact</span>
@@ -673,16 +771,11 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
       </div>
     </div>
     <div class="terms">
-      ${company.company_reg_no ? `Razoryn e-Parts is a trading name of Razoryn Ltd, Co. No. ${escapeHtml(company.company_reg_no)}, England & Wales. ` : ''}
-      ${isVatRegistered && company.vat_number ? `VAT No. ${escapeHtml(company.vat_number)}. ` : ''}
+      ${company.company_reg_no ? `Razoryn e-Parts is a trading name of Razoryn Ltd, Company Reg Number ${escapeHtml(company.company_reg_no)}, registered in England & Wales.` : ''}
+      ${isVatRegistered && company.vat_number ? ` VAT Number: ${escapeHtml(company.vat_number)}.` : ''}
       Full terms: ${company.company_website ? escapeHtml(company.company_website) + '/policies' : 'razoryn.co.uk/policies'}
     </div>
   </div>
-  ` : `
-  <div style="margin-top:24px;padding-top:14px;border-top:1px solid #e0e2e6;font-size:11px;color:#666;text-align:center">
-    To confirm this estimate, contact us with reference <strong>${escapeHtml(sale.payment_reference || '—')}</strong>.
-  </div>
-  `}
 </div>
 
 </body></html>`;
