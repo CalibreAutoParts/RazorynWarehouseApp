@@ -39,7 +39,7 @@ router.get('/', requirePermission('returns'), async (req, res) => {
   const params = [`${parseInt(days)} days`];
   if (status) { params.push(status); where.push(`r.status = $${params.length}`); }
   const { rows } = await query(`
-    SELECT r.*, p.sku, p.title, s.invoice_number,
+    SELECT r.*, p.sku, p.title, s.invoice_number, s.external_order_id,
            u.name AS handled_by_name,
            (SELECT COUNT(*)::int FROM return_photos WHERE return_id = r.id) AS photo_count
     FROM returns r
@@ -47,7 +47,10 @@ router.get('/', requirePermission('returns'), async (req, res) => {
     LEFT JOIN sales s ON s.id = r.sale_id
     LEFT JOIN users u ON u.id = r.handled_by
     WHERE ${where.join(' AND ')}
-    ORDER BY r.created_at DESC
+    ORDER BY
+      CASE WHEN r.respond_by IS NOT NULL AND r.status = 'open' THEN 0 ELSE 1 END,
+      r.respond_by NULLS LAST,
+      r.created_at DESC
   `, params);
   res.json({ returns: rows });
 });
@@ -138,84 +141,108 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
 });
 
 // POST /api/returns/sync-ebay
-// Scans the last 60 days of eBay orders for cancellations / refunds and creates Return
-// rows in our warehouse. Works with Auth'n'Auth Trading API (no Post-Order OAuth needed).
-//
-// What it picks up:
-//   - Orders with OrderStatus = Cancelled
-//   - Orders with RefundStatus (any) — partial or full refunds
-//   - Orders with CancelStatus other than 'NotApplicable'
-// Each unique eBay order → at most one Return row (skipped if already exists).
+// Pull live return cases from eBay's Post-Order API and sync them to our Returns table.
+// Each eBay return → one returns row (matched by external_return_id).
+// Captures: case ID, buyer, item, reason, respond-by deadline, refund amount, state.
 router.post('/sync-ebay', requirePermission('returns'), async (req, res) => {
   const ebay = require('../services/ebay');
   if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
 
-  // Fetch raw GetOrders for the last `days`
-  const days = Math.min(180, parseInt(req.body.days || 60));
-  const sinceISO = new Date(Date.now() - days * 86400000).toISOString();
+  const days = Math.min(180, parseInt(req.body.days || 90));
 
-  let xml;
-  try { xml = await ebay.dumpOrderXml(null, days); }
-  catch (e) { return res.status(500).json({ error: 'fetch_failed', message: e.message }); }
-
-  // Find all <Order> blocks and detect cancel / refund
-  const orderBlocks = xml.match(/<Order>[\s\S]*?<\/Order>/g) || [];
-  const candidates = [];
-  for (const block of orderBlocks) {
-    const orderId = ((block.match(/<OrderID>([^<]+)<\/OrderID>/) || [])[1] || '').trim();
-    const status = ((block.match(/<OrderStatus>([^<]+)<\/OrderStatus>/) || [])[1] || '').trim();
-    const cancelStatus = ((block.match(/<CancelStatus>([^<]+)<\/CancelStatus>/) || [])[1] || '').trim();
-    const refundStatus = ((block.match(/<RefundStatus>([^<]+)<\/RefundStatus>/) || [])[1] || '').trim();
-    const refundAmtM = block.match(/<RefundAmount[^>]*>([^<]+)<\/RefundAmount>/);
-    const refundAmount = refundAmtM ? parseFloat(refundAmtM[1]) : null;
-    const buyer = ((block.match(/<BuyerUserID>([^<]+)<\/BuyerUserID>/) || [])[1] || '').trim();
-    const total = parseFloat(((block.match(/<Total[^>]*>([^<]+)<\/Total>/) || [])[1] || '0'));
-
-    const isReturn = status === 'Cancelled'
-                   || refundStatus.length > 0
-                   || (cancelStatus && cancelStatus !== 'NotApplicable' && cancelStatus !== '');
-
-    if (!orderId || !isReturn) continue;
-    candidates.push({ orderId, status, cancelStatus, refundStatus, refundAmount, buyer, total });
+  let data;
+  try {
+    data = await ebay.getAllRecentReturns(days);
+  } catch (e) {
+    // If the Post-Order API rejects our token, surface the actionable error
+    if (e.status === 401 || e.status === 403) {
+      return res.status(503).json({
+        error: 'post_order_api_unavailable',
+        message: 'eBay Post-Order Returns API requires the OAuth scope `sell.post-order` to be granted to your application. '
+               + 'In your eBay developer dashboard, regenerate the User Token with this scope checked, '
+               + 'then update EBAY_AUTH_TOKEN in Railway and try again.',
+        ebayDetail: e.detail,
+      });
+    }
+    return res.status(500).json({ error: 'fetch_failed', message: e.message });
   }
 
-  let created = 0, alreadyExists = 0, noLocalSale = 0;
-  for (const c of candidates) {
-    // Find the matching sale in our DB
-    const sale = await query(
-      `SELECT id, channel FROM sales WHERE external_order_id = $1 LIMIT 1`,
-      [c.orderId]
-    );
-    if (!sale.rows[0]) { noLocalSale++; continue; }
-    // Already a return row for this sale?
-    const existing = await query(
-      `SELECT id FROM returns WHERE sale_id = $1 LIMIT 1`, [sale.rows[0].id]
-    );
-    if (existing.rows[0]) { alreadyExists++; continue; }
-    // First sale item (most eBay returns are single-line)
-    const item = await query(
-      `SELECT product_id, qty FROM sale_items WHERE sale_id = $1 ORDER BY id LIMIT 1`,
-      [sale.rows[0].id]
-    );
-    const productId = item.rows[0]?.product_id || null;
-    const qty = item.rows[0]?.qty || 1;
+  // Post-Order returns shape: { members: [...returns], total: N }
+  const returns = data.members || data.returns || [];
+  let created = 0, updated = 0, noLocalSale = 0;
 
-    const reason = c.status === 'Cancelled' ? 'Cancelled on eBay'
-                 : c.refundStatus ? `Refunded on eBay (${c.refundStatus})`
-                 : c.cancelStatus ? `Cancel: ${c.cancelStatus}` : 'eBay return';
+  for (const ret of returns) {
+    const returnId = ret.returnId || ret.itemId || null;
+    if (!returnId) continue;
 
-    await query(
-      `INSERT INTO returns (sale_id, product_id, channel, qty, reason, resolution,
-                            refund_amount, status, notes, handled_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8,$9)`,
-      [sale.rows[0].id, productId, sale.rows[0].channel, qty, reason,
-       c.refundStatus ? 'refund' : 'pending',
-       c.refundAmount || c.total, `eBay order ${c.orderId} · buyer ${c.buyer}`, req.user.id]
-    );
-    created++;
+    // Find matching sale by eBay order ID
+    const orderId = ret.orderId || ret.transactionId || null;
+    let saleId = null, productId = null, qty = 1, channel = 'ebay_em';
+    if (orderId) {
+      const sale = await query(
+        `SELECT id, channel FROM sales WHERE external_order_id = $1 LIMIT 1`,
+        [orderId]
+      );
+      if (sale.rows[0]) {
+        saleId = sale.rows[0].id;
+        channel = sale.rows[0].channel;
+        const item = await query(
+          `SELECT product_id, qty FROM sale_items WHERE sale_id = $1 ORDER BY id LIMIT 1`,
+          [saleId]
+        );
+        productId = item.rows[0]?.product_id || null;
+        qty = ret.itemQty || item.rows[0]?.qty || 1;
+      } else {
+        noLocalSale++;
+      }
+    }
+
+    // Reason — eBay uses a code like NOT_AS_DESCRIBED, BUYER_REMORSE, etc.
+    const reason = ret.reason || ret.returnReason || 'Return requested';
+    const state = ret.state || ret.returnState || 'open';
+    const respondBy = ret.sellerResponseDueDate || ret.respondByDate || null;
+    const buyerUser = ret.buyerLoginName || ret.buyer?.username || null;
+    const refundAmt = ret.totalRefundAmount?.value || ret.refundAmount?.value || null;
+
+    // Map eBay state to our status
+    const statusMap = {
+      'OPEN': 'open',
+      'AWAITING_SELLER_RESPONSE': 'open',
+      'AWAITING_BUYER_SHIPMENT': 'open',
+      'SHIPPED_IN_TRANSIT': 'open',
+      'DELIVERED': 'received',
+      'CLOSED': 'closed',
+      'CLOSED_REFUNDED': 'processed',
+      'CLOSED_DENIED': 'closed',
+    };
+    const ourStatus = statusMap[state] || 'open';
+
+    // Upsert by external_return_id
+    const existing = await query(`SELECT id FROM returns WHERE external_return_id = $1 LIMIT 1`, [returnId]);
+    if (existing.rows[0]) {
+      await query(
+        `UPDATE returns SET status = $1, external_state = $2, respond_by = $3,
+                            refund_amount = COALESCE($4, refund_amount),
+                            last_synced_at = now()
+         WHERE id = $5`,
+        [ourStatus, state, respondBy, refundAmt, existing.rows[0].id]
+      );
+      updated++;
+    } else {
+      await query(
+        `INSERT INTO returns (sale_id, product_id, channel, qty, reason, resolution,
+                              refund_amount, status, notes, handled_by,
+                              external_return_id, external_state, respond_by, buyer_username, last_synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())`,
+        [saleId, productId, channel, qty, reason, 'pending', refundAmt, ourStatus,
+         `eBay return · order ${orderId || '?'}`, req.user.id,
+         returnId, state, respondBy, buyerUser]
+      );
+      created++;
+    }
   }
-  await audit(req, 'sync_ebay_returns', null, null, { scanned: candidates.length, created, alreadyExists, noLocalSale });
-  res.json({ scanned: candidates.length, created, alreadyExists, noLocalSale });
+  await audit(req, 'sync_ebay_returns', null, null, { fetched: returns.length, created, updated, noLocalSale });
+  res.json({ fetched: returns.length, created, updated, noLocalSale });
 });
 
 module.exports = router;
