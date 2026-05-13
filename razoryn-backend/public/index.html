@@ -686,6 +686,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
           Key Information
         </button>
+        <button class="nav-item" data-page="notes">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+          Notes &amp; Follow-ups
+        </button>
         <button class="nav-item alert" data-page="notifications">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
           Notifications
@@ -1413,7 +1417,7 @@ function routeTo(page) {
     locations: renderLocations, returns: renderReturns, sales: renderSales,
     pricing: renderPricing, schedule: renderSchedule, videos: renderVideos,
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror,
-    labels: renderLabels
+    labels: renderLabels, notes: renderNotes
   };
   (pages[page] || renderDashboard)();
   document.getElementById('content').scrollTo(0, 0);
@@ -1792,11 +1796,9 @@ function openProductModal(id) {
           priceShopify: +el('m-pshop').value, priceEbay: +el('m-peby').value,
         };
         try {
+          let newProduct = null;
           if (id) {
             await Api.patch('/api/products/' + id, payload);
-            // Stock changes should go through stock-checks or the adjust-stock endpoint
-            // so they leave an audit trail. Editing the qty fields here syncs current
-            // qty if it was changed.
             const newQty = +el('m-qshop').value;
             if (newQty !== p.qtyOnHand) {
               await Api.post('/api/products/' + id + '/adjust-stock', {
@@ -1804,13 +1806,20 @@ function openProductModal(id) {
               });
             }
           } else {
-            await Api.post('/api/products', { ...payload, qtyOnHand: +el('m-qshop').value });
+            const created = await Api.post('/api/products', { ...payload, qtyOnHand: +el('m-qshop').value });
+            newProduct = created.product || created;
           }
           await Store.refresh('products');
           closeModal();
           toast('Saved · stock will sync to Shopify + eBay', 'success');
           renderInventory();
           refreshNavCounts();
+          // For brand-new products, prompt to print labels. Use the freshly-refreshed
+          // State.products to find the saved row (which has the canonical id).
+          if (!id && newProduct?.id) {
+            const fresh = State.products.find(x => x.id === newProduct.id) || newProduct;
+            setTimeout(() => promptPrintLabels(fresh, 'new_product'), 300);
+          }
         } catch (e) {
           toast('Save failed: ' + e.message, 'error');
         }
@@ -1980,6 +1989,11 @@ function adjustStock(id, action) {
             toast(`Updated ${p.sku} → ${newQ} (${reason})`, 'success');
             if (updated) showProductScanCard(updated);
             refreshNavCounts();
+            // Prompt to print labels — useful after a stock count, especially for items
+            // whose stock just went up (received a new batch).
+            if (updated && delta > 0) {
+              setTimeout(() => promptPrintLabels(updated, 'stock_added', delta), 300);
+            }
           } catch (e) { toast('Failed: ' + e.message, 'error'); }
         }},
         { label: 'Cancel', onClick: closeModal }
@@ -2145,7 +2159,7 @@ function renderLabels() {
 
       <div class="card" style="margin-bottom:14px">
         <div class="card-body" style="padding:14px">
-          <div style="display:grid;grid-template-columns:1fr 240px;gap:14px;align-items:end">
+          <div style="display:grid;grid-template-columns:1fr 220px 130px;gap:14px;align-items:end">
             <div class="field" style="margin:0">
               <label>Add product (search by SKU, title, part #)</label>
               <input id="lab-search" placeholder="Start typing…" autocomplete="off">
@@ -2153,15 +2167,23 @@ function renderLabels() {
             </div>
             <div class="field" style="margin:0">
               <label>Label size</label>
-              <select id="lab-size">
+              <select id="lab-size" onchange="paintLabelsList()">
                 <option value="50x25">Small 50×25 mm (2:1 landscape)</option>
                 <option value="25x50">Tall 25×50 mm (1:2 portrait)</option>
-                <option value="100x150" selected>Large 100×150 mm (4×6 inch)</option>
+                <option value="100x150" selected>Large 4×6 inch (100×150 mm)</option>
+              </select>
+            </div>
+            <div class="field" style="margin:0" id="lab-orient-wrap">
+              <label>Orientation</label>
+              <select id="lab-orient">
+                <option value="landscape" selected>Landscape</option>
+                <option value="portrait">Portrait</option>
               </select>
             </div>
           </div>
-          <div style="margin-top:10px;font-size:11px;color:var(--ink-soft)">
-            All sizes are designed for thermal label printers (Zebra, Brother QL, Dymo). Print with browser scaling = 100% for 1:1 size.
+          <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-ghost btn-sm" onclick="labelsMatchAllStock()" title="Set every label's qty equal to its current on-hand stock">⚖️ Match all qtys to stock</button>
+            <span style="font-size:11px;color:var(--ink-soft);margin-left:auto">All sizes designed for thermal printers (Zebra, Brother QL, Dymo). Print at 100% scaling for 1:1 size.</span>
           </div>
         </div>
       </div>
@@ -2237,10 +2259,92 @@ function labelsAddFromStockCheck() {
   toast(`Added ${recent.length} item${recent.length === 1 ? '' : 's'} from stock-check`, 'success');
 }
 
+function promptPrintLabels(product, reason, qtyHint) {
+  if (!product) return;
+  const stockQty = totalQty(product);
+  const suggestedQty = qtyHint || stockQty || 1;
+  const headline = reason === 'new_product'
+    ? `Print labels for ${product.sku}?`
+    : reason === 'stock_added'
+    ? `Print ${qtyHint || stockQty} barcode label${(qtyHint || stockQty) === 1 ? '' : 's'} for new stock?`
+    : `Print labels for ${product.sku}?`;
+  const desc = reason === 'new_product'
+    ? 'Quickly print barcode labels for the new product. You can pick size and quantity on the next screen.'
+    : `${qtyHint || 'New'} stock added for ${product.title}. Want to print barcode labels to stick on the items?`;
+  modal({
+    title: headline,
+    body: `
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:14px">${desc}</div>
+      <div class="field">
+        <label>How many labels?</label>
+        <input id="ppl-qty" type="number" min="1" value="${suggestedQty}" autofocus>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Current on-hand stock: ${stockQty}</div>
+      </div>
+      <div class="field">
+        <label>Size</label>
+        <select id="ppl-size">
+          <option value="100x150">Large 4×6 inch (recommended)</option>
+          <option value="50x25">Small 50×25 mm</option>
+          <option value="25x50">Tall 25×50 mm</option>
+        </select>
+      </div>
+    `,
+    actions: [
+      { label: 'Skip', onClick: closeModal },
+      { label: '🏷 Print labels', primary: true, onClick: () => {
+        const qty = +el('ppl-qty').value || 1;
+        const size = el('ppl-size').value;
+        // Queue the product and route to Labels
+        State.labels = State.labels || [];
+        const existing = State.labels.find(l => l.productId === product.id);
+        if (existing) existing.qty += qty;
+        else State.labels.push({
+          productId: product.id, sku: product.sku, title: product.title,
+          barcode: product.barcode || product.sku, partNumber: product.partNumber || product.sku, qty,
+        });
+        closeModal();
+        routeTo('labels');
+        // After the Labels page renders, set the size selector
+        setTimeout(() => {
+          const sel = el('lab-size');
+          if (sel) { sel.value = size; sel.dispatchEvent(new Event('change')); }
+        }, 100);
+      }},
+    ],
+  });
+}
+
+function labelsMatchStock(idx) {
+  const label = State.labels[idx];
+  if (!label) return;
+  const p = State.products.find(x => x.id === label.productId);
+  if (!p) { toast('Product not found', 'warn'); return; }
+  const qty = totalQty(p);
+  if (qty < 1) { toast(`${p.sku} has no stock`, 'warn'); return; }
+  State.labels[idx].qty = qty;
+  paintLabelsList();
+  toast(`${p.sku} → ${qty} labels`, 'success');
+}
+
+function labelsMatchAllStock() {
+  if (!State.labels?.length) return;
+  let total = 0;
+  for (const l of State.labels) {
+    const p = State.products.find(x => x.id === l.productId);
+    if (p) { l.qty = Math.max(1, totalQty(p)); total += l.qty; }
+  }
+  paintLabelsList();
+  toast(`Matched ${State.labels.length} item${State.labels.length === 1 ? '' : 's'} to stock — ${total} labels`, 'success');
+}
+
 function paintLabelsList() {
   const list = el('lab-list');
   if (!list) return;
   const items = State.labels || [];
+  // Toggle orientation selector visibility — only meaningful for 4x6
+  const sizeEl = el('lab-size');
+  const orientWrap = el('lab-orient-wrap');
+  if (sizeEl && orientWrap) orientWrap.style.display = sizeEl.value === '100x150' ? '' : 'none';
   if (!items.length) {
     list.innerHTML = '<div class="empty"><div class="t">No labels queued</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Search above to add products to the print queue.</div></div>';
     return;
@@ -2251,21 +2355,25 @@ function paintLabelsList() {
       <div class="card-head"><h3>Queue (${items.length} item${items.length === 1 ? '' : 's'} · ${total} label${total === 1 ? '' : 's'})</h3></div>
       <div style="overflow-x:auto">
         <table class="table">
-          <thead><tr><th style="width:50%">Item</th><th>SKU</th><th>Barcode</th><th class="num">Qty</th><th></th></tr></thead>
+          <thead><tr><th style="width:45%">Item</th><th>SKU</th><th>In stock</th><th class="num">Qty</th><th></th></tr></thead>
           <tbody>
-            ${items.map((it, i) => `
+            ${items.map((it, i) => {
+              const p = State.products.find(x => x.id === it.productId);
+              const stockQty = p ? totalQty(p) : '?';
+              return `
               <tr>
                 <td><div style="font-weight:500">${escapeHtml(it.title)}</div></td>
                 <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(it.sku)}</td>
-                <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(it.barcode || '—')}</td>
+                <td><span class="pill ${stockQty>0?'green':'red'}" style="font-size:10px">${stockQty}</span></td>
                 <td class="num" style="white-space:nowrap">
                   <button class="btn btn-ghost btn-sm" onclick="labelsQty(${i},-1)">−</button>
-                  <strong style="margin:0 6px">${it.qty}</strong>
+                  <strong style="margin:0 6px;display:inline-block;min-width:24px;text-align:center">${it.qty}</strong>
                   <button class="btn btn-ghost btn-sm" onclick="labelsQty(${i},1)">+</button>
+                  <button class="btn btn-ghost btn-sm" onclick="labelsMatchStock(${i})" title="Set qty = current stock on hand" style="margin-left:6px">⚖️ Match</button>
                 </td>
                 <td><button class="btn btn-ghost btn-sm" onclick="labelsRemove(${i})" style="color:var(--red)">🗑</button></td>
               </tr>
-            `).join('')}
+            `}).join('')}
           </tbody>
         </table>
       </div>
@@ -2277,68 +2385,184 @@ function labelsPrint() {
   const items = State.labels || [];
   if (!items.length) { toast('Add at least one product first', 'warn'); return; }
   const size = el('lab-size').value;
-  const sizes = {
-    '50x25':  { w: 50, h: 25, name: '50×25 mm', barW: 1.5, barH: 30, fontTitle: 6.5, fontSku: 6, fontBar: 7 },
-    '25x50':  { w: 25, h: 50, name: '25×50 mm', barW: 1.2, barH: 50, fontTitle: 6,   fontSku: 5.5, fontBar: 6, portrait: true },
-    '100x150':{ w: 100,h: 150,name: '100×150 mm (4×6)', barW: 2.5, barH: 90, fontTitle: 12, fontSku: 10, fontBar: 12 },
-  };
-  const s = sizes[size];
-  // Expand by qty so each label prints `qty` times
+  // For 4x6 the user can choose landscape (default) or portrait.
+  // Other sizes have fixed orientation (50x25 is always landscape, 25x50 is always portrait).
+  const orient = size === '100x150' ? (el('lab-orient').value || 'landscape') : (size === '25x50' ? 'portrait' : 'landscape');
+
+  // Build size config — for 4x6 we swap w/h based on orientation.
+  let s;
+  if (size === '50x25') {
+    s = { w: 50, h: 25, name: '50×25 mm', barW: 1.5, barH: 28, fontTitle: 7, fontSku: 6.5, fontBar: 7, layout: 'small' };
+  } else if (size === '25x50') {
+    s = { w: 25, h: 50, name: '25×50 mm', barW: 1.2, barH: 55, fontTitle: 6, fontSku: 5.5, fontBar: 6, layout: 'tall' };
+  } else {
+    // 4×6 inch = 101.6×152.4 mm. Use exact 4x6 inch dimensions for thermal printers.
+    if (orient === 'landscape') {
+      s = { w: 152.4, h: 101.6, name: '4×6 inch (landscape)', barW: 3.5, barH: 110, fontTitle: 22, fontSku: 16, fontBar: 13, layout: 'large-landscape', logoSize: '34mm' };
+    } else {
+      s = { w: 101.6, h: 152.4, name: '4×6 inch (portrait)', barW: 3, barH: 130, fontTitle: 20, fontSku: 15, fontBar: 12, layout: 'large-portrait', logoSize: '28mm' };
+    }
+  }
+
+  // Expand by qty
   const expanded = [];
   for (const it of items) for (let i = 0; i < (it.qty || 1); i++) expanded.push(it);
 
-  // Build a print window
   const w = window.open('', '_blank', 'width=900,height=700');
   if (!w) { toast('Pop-up blocked. Allow pop-ups for this site.', 'error'); return; }
 
-  // Pre-generate barcodes server-side (in JS) using JsBarcode rendered to SVG strings
-  const labelHtml = expanded.map((it, idx) => {
-    const code = it.barcode || it.sku || it.partNumber || '';
-    // We'll render barcodes via JsBarcode after the doc loads — emit a placeholder
-    return `
-      <div class="label">
-        ${s.portrait ? `
+  // Logo source — served from /logo.png. If it fails, fallback text "RAZORYN".
+  const logoUrl = window.location.origin + '/logo.png';
+
+  // Per-layout label HTML
+  let labelTemplate;
+  if (s.layout === 'large-landscape') {
+    // 4×6 landscape: logo top-left + tagline | title big-bold | SKU | barcode wide at bottom
+    labelTemplate = (it, idx) => `
+      <div class="label large-landscape">
+        <div class="header">
+          <img src="${logoUrl}" class="logo" alt="Razoryn" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+          <div class="logo-text" style="display:none">RAZORYN <span style="color:#c8202d">e-Parts</span></div>
+          <div class="tagline">Quality aftermarket vehicle parts · razoryn.co.uk</div>
+        </div>
+        <div class="body">
           <div class="title">${escapeHtml(it.title)}</div>
           <div class="sku">${escapeHtml(it.partNumber || it.sku)}</div>
-          <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(code)}"></svg>
-        ` : `
+        </div>
+        <div class="barcode-wrap">
+          <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
+        </div>
+      </div>`;
+  } else if (s.layout === 'large-portrait') {
+    // 4×6 portrait: logo top, title centred middle, big barcode bottom
+    labelTemplate = (it, idx) => `
+      <div class="label large-portrait">
+        <div class="header">
+          <img src="${logoUrl}" class="logo" alt="Razoryn" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+          <div class="logo-text" style="display:none">RAZORYN <span style="color:#c8202d">e-Parts</span></div>
+        </div>
+        <div class="body">
           <div class="title">${escapeHtml(it.title)}</div>
           <div class="sku">${escapeHtml(it.partNumber || it.sku)}</div>
-          <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(code)}"></svg>
-        `}
-      </div>
-    `;
-  }).join('');
+        </div>
+        <div class="barcode-wrap">
+          <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
+        </div>
+        <div class="footer">razoryn.co.uk</div>
+      </div>`;
+  } else if (s.layout === 'tall') {
+    // 25×50 portrait small thermal — minimal layout
+    labelTemplate = (it, idx) => `
+      <div class="label tall">
+        <div class="title">${escapeHtml(it.title)}</div>
+        <div class="sku">${escapeHtml(it.partNumber || it.sku)}</div>
+        <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
+      </div>`;
+  } else {
+    // 50×25 small landscape thermal — minimal
+    labelTemplate = (it, idx) => `
+      <div class="label small">
+        <div class="title">${escapeHtml(it.title)}</div>
+        <div class="sku">${escapeHtml(it.partNumber || it.sku)}</div>
+        <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
+      </div>`;
+  }
+
+  const labelHtml = expanded.map(labelTemplate).join('');
 
   w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title></title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>
 <style>
   @page { size: ${s.w}mm ${s.h}mm; margin: 0; }
-  @media print { body { -webkit-print-color-adjust: exact; margin: 0; } .label { page-break-after: always; } .label:last-child { page-break-after: auto; } .actions { display: none; } }
+  @media print {
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; margin: 0; background: white; }
+    .label { page-break-after: always; margin: 0 !important; border: none !important; box-shadow: none !important; }
+    .label:last-child { page-break-after: auto; }
+    .actions { display: none; }
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 0; font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif; background: #f0f0f0; }
-  .actions { padding: 12px; text-align: center; background: white; border-bottom: 1px solid #ddd; position: sticky; top: 0; z-index: 10; }
+  body { margin: 0; padding: 0; font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif; background: #ddd; }
+  .actions { padding: 12px; text-align: center; background: white; border-bottom: 1px solid #ccc; position: sticky; top: 0; z-index: 10; }
   .actions button { padding: 8px 18px; background: #111; color: white; border: none; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; margin: 0 4px; }
   .actions button.ghost { background: white; color: #111; border: 1px solid #ccc; }
   .actions .info { display: inline-block; margin-right: 12px; font-size: 12px; color: #666; vertical-align: middle; }
   .label {
     width: ${s.w}mm; height: ${s.h}mm;
-    padding: 2mm; display: flex; flex-direction: column; justify-content: space-between;
-    background: white; margin: 6px auto; border: 1px solid #ddd; overflow: hidden;
-    page-break-inside: avoid;
+    background: white; margin: 10px auto; box-shadow: 0 1px 4px rgba(0,0,0,.15);
+    overflow: hidden; page-break-inside: avoid;
+    display: flex; flex-direction: column;
   }
-  @media print { .label { margin: 0; border: none; } }
-  .label .title {
-    font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.15;
-    overflow: hidden; display: -webkit-box; -webkit-line-clamp: ${s.portrait ? 4 : 2}; -webkit-box-orient: vertical;
-    text-align: ${s.portrait ? 'center' : 'left'};
+
+  /* ============ SMALL 50×25 mm thermal ============ */
+  .label.small { padding: 2mm; justify-content: space-between; }
+  .label.small .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.15;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .label.small .sku { font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace; color: #444; margin-top: 0.5mm; }
+  .label.small .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 0.5mm; }
+
+  /* ============ TALL 25×50 mm thermal ============ */
+  .label.tall { padding: 2mm; justify-content: space-between; text-align: center; }
+  .label.tall .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.15;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; }
+  .label.tall .sku { font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace; color: #444; margin-top: 1mm; }
+  .label.tall .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 1mm; }
+
+  /* ============ LARGE 4×6 landscape — logo top, title middle, barcode bottom ============ */
+  .label.large-landscape { padding: 8mm 10mm; }
+  .label.large-landscape .header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding-bottom: 4mm; border-bottom: 2px solid #c8202d;
   }
-  .label .sku {
+  .label.large-landscape .logo { height: 18mm; max-width: 60mm; object-fit: contain; }
+  .label.large-landscape .logo-text { font-size: 22pt; font-weight: 800; letter-spacing: -0.02em; line-height: 1; }
+  .label.large-landscape .tagline {
+    font-size: 9pt; color: #555; text-align: right; max-width: 70mm; padding-top: 4mm;
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .label.large-landscape .body {
+    flex: 1; padding: 6mm 0 4mm; display: flex; flex-direction: column; justify-content: center;
+  }
+  .label.large-landscape .title {
+    font-size: ${s.fontTitle}pt; font-weight: 700; line-height: 1.15; color: #111;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  }
+  .label.large-landscape .sku {
     font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace;
-    color: #444; margin-top: 1mm;
-    text-align: ${s.portrait ? 'center' : 'left'};
+    font-weight: 600; color: #c8202d; margin-top: 3mm;
+    padding: 2mm 4mm; background: #fff0f1; border-radius: 2mm; display: inline-block;
+    align-self: flex-start;
   }
-  .label .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 1mm; }
+  .label.large-landscape .barcode-wrap {
+    border-top: 1px solid #ddd; padding-top: 4mm; margin-top: auto;
+  }
+  .label.large-landscape .bc { width: 100%; height: ${s.barH}px; display: block; }
+
+  /* ============ LARGE 4×6 portrait — logo top, big title, barcode below ============ */
+  .label.large-portrait { padding: 6mm 7mm; text-align: center; }
+  .label.large-portrait .header {
+    padding-bottom: 4mm; border-bottom: 2px solid #c8202d; margin-bottom: 5mm;
+  }
+  .label.large-portrait .logo { height: 16mm; max-width: 70mm; object-fit: contain; }
+  .label.large-portrait .logo-text { font-size: 20pt; font-weight: 800; letter-spacing: -0.02em; }
+  .label.large-portrait .body { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 4mm 0; }
+  .label.large-portrait .title {
+    font-size: ${s.fontTitle}pt; font-weight: 700; line-height: 1.15;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+  }
+  .label.large-portrait .sku {
+    font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace;
+    font-weight: 600; color: #c8202d; margin-top: 4mm;
+    padding: 2mm 4mm; background: #fff0f1; border-radius: 2mm; display: inline-block;
+  }
+  .label.large-portrait .barcode-wrap { padding-top: 4mm; }
+  .label.large-portrait .bc { width: 100%; height: ${s.barH}px; display: block; }
+  .label.large-portrait .footer {
+    font-size: 8pt; color: #888; padding-top: 3mm;
+    border-top: 1px solid #ddd; margin-top: 4mm; letter-spacing: 0.05em;
+  }
 </style></head><body>
 <div class="actions">
   <span class="info">${expanded.length} label${expanded.length === 1 ? '' : 's'} · ${s.name}</span>
@@ -2357,10 +2581,10 @@ ${labelHtml}
           fontSize: ${s.fontBar},
           margin: 0,
           displayValue: true,
-          textMargin: 1,
+          textMargin: 2,
         });
       } catch (e) {
-        el.innerHTML = '<text x="0" y="20" font-size="10" fill="red">Invalid code: ' + el.dataset.code + '</text>';
+        el.innerHTML = '<text x="0" y="20" font-size="10" fill="red">Invalid: ' + el.dataset.code + '</text>';
       }
     });
   }
@@ -3579,6 +3803,217 @@ function openVideoModal() {
 /* ==========================================================
    KNOWLEDGE BASE
    ========================================================== */
+/* ==========================================================
+   NOTES — Phone-team follow-ups / customer call notes
+   Each user sees their own notes by default. Admins see everyone's.
+   Notes auto-expire after 31 days (filtered server-side + nightly cron deletes).
+   ========================================================== */
+function renderNotes() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Notes &amp; Follow-ups</h1><div class="desc">Capture customer calls, quotes, follow-ups. Notes auto-expire after 31 days.</div></div>
+        <div class="actions">
+          <button class="btn btn-primary" onclick="openNoteModal()">+ New note</button>
+        </div>
+      </div>
+
+      <div class="grid-4" id="notes-stats" style="margin-bottom:14px"></div>
+
+      <div class="seg" style="margin-bottom:14px" id="notes-filter">
+        <button class="active" data-nf="open">Open follow-ups</button>
+        <button data-nf="done">Completed</button>
+        <button data-nf="all">All</button>
+      </div>
+      <div id="notes-scope-wrap" style="margin-bottom:14px;display:none">
+        <div class="seg">
+          <button class="active" data-nscope="mine" onclick="setNotesScope('mine')">My notes</button>
+          <button data-nscope="all" onclick="setNotesScope('all')">Everyone's notes (admin)</button>
+        </div>
+      </div>
+
+      <div id="notes-list"></div>
+    </div>
+  `;
+  if (!State.notesFilter) State.notesFilter = 'open';
+  if (!State.notesScope) State.notesScope = State.user?.role === 'admin' ? 'all' : 'mine';
+  if (State.user?.role === 'admin') el('notes-scope-wrap').style.display = '';
+  document.querySelectorAll('[data-nf]').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('[data-nf]').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    State.notesFilter = b.dataset.nf;
+    loadNotes();
+  }));
+  loadNotes();
+}
+
+function setNotesScope(scope) {
+  document.querySelectorAll('[data-nscope]').forEach(b => b.classList.toggle('active', b.dataset.nscope === scope));
+  State.notesScope = scope;
+  loadNotes();
+}
+
+async function loadNotes() {
+  try {
+    const r = await Api.get(`/api/notes?scope=${State.notesScope || 'mine'}&status=${State.notesFilter || 'all'}`);
+    State.notes = r.notes;
+    paintNotesStats();
+    paintNotesList();
+  } catch (e) {
+    el('notes-list').innerHTML = `<div class="empty"><div class="t">Failed to load: ${escapeHtml(e.message)}</div></div>`;
+  }
+}
+
+function fmtNoteDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yy = d.getFullYear();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mn = String(d.getMinutes()).padStart(2, '0');
+  return `${dd}/${mm}/${yy} ${hh}:${mn}`;
+}
+
+function fmtNoteDateOnly(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+}
+
+function paintNotesStats() {
+  const all = State.notes || [];
+  const open = all.filter(n => !n.done_at).length;
+  const overdue = all.filter(n => !n.done_at && n.follow_up_date && new Date(n.follow_up_date) < new Date()).length;
+  const today = all.filter(n => {
+    if (n.done_at || !n.follow_up_date) return false;
+    const fu = new Date(n.follow_up_date);
+    const now = new Date();
+    return fu.getDate() === now.getDate() && fu.getMonth() === now.getMonth() && fu.getFullYear() === now.getFullYear();
+  }).length;
+  const done = all.filter(n => n.done_at).length;
+  el('notes-stats').innerHTML = `
+    <div class="stat"><div class="label">Open</div><div class="value">${open}</div><div class="delta">${overdue ? overdue + ' overdue' : 'On track'}</div></div>
+    <div class="stat"><div class="label">Due today</div><div class="value">${today}</div><div class="delta">Action needed</div></div>
+    <div class="stat"><div class="label">Completed</div><div class="value">${done}</div><div class="delta">Last 31 days</div></div>
+    <div class="stat"><div class="label">Total this month</div><div class="value">${all.length}</div><div class="delta">Auto-clears after 31d</div></div>
+  `;
+}
+
+function paintNotesList() {
+  const list = el('notes-list');
+  const items = State.notes || [];
+  if (!items.length) {
+    list.innerHTML = '<div class="empty"><div class="t">No notes</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Click "+ New note" to log a customer call or follow-up.</div></div>';
+    return;
+  }
+  const showAuthor = State.notesScope === 'all';
+  list.innerHTML = items.map(n => {
+    const overdue = !n.done_at && n.follow_up_date && new Date(n.follow_up_date) < new Date();
+    const categoryLabel = ({
+      call_back: '📞 Call back',
+      quote: '💷 Quote',
+      fitment_query: '🔧 Fitment query',
+      complaint: '⚠️ Complaint',
+      other: '📝 Other',
+    })[n.category] || (n.category ? `📝 ${n.category}` : '');
+    return `
+      <div class="card" style="margin-bottom:10px;${overdue ? 'border-left:3px solid var(--red)' : n.done_at ? 'opacity:.6' : ''}">
+        <div class="card-body" style="padding:14px">
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <input type="checkbox" ${n.done_at ? 'checked' : ''} onchange="toggleNoteDone(${n.id}, this.checked)" style="margin-top:3px;cursor:pointer;width:18px;height:18px">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+                ${categoryLabel ? `<span class="pill" style="font-size:10px">${categoryLabel}</span>` : ''}
+                ${n.follow_up_date ? `<span class="pill ${overdue ? 'red' : 'amber'}" style="font-size:10px;font-weight:600">📅 Follow up ${fmtNoteDateOnly(n.follow_up_date)}</span>` : ''}
+                ${n.done_at ? `<span class="pill green" style="font-size:10px">✓ Done ${fmtNoteDateOnly(n.done_at)}</span>` : ''}
+                <span style="font-size:11px;color:var(--ink-soft);margin-left:auto">${fmtNoteDate(n.created_at)}${showAuthor && n.author_name ? ' · by ' + escapeHtml(n.author_name) : ''}</span>
+              </div>
+              ${(n.customer_name || n.customer_phone || n.customer_email) ? `
+                <div style="font-size:13px;font-weight:600;margin-bottom:4px">
+                  ${n.customer_name ? escapeHtml(n.customer_name) : ''}
+                  ${n.customer_phone ? ` <a href="tel:${escapeAttr(n.customer_phone)}" style="font-weight:400;color:var(--red);font-size:12px">${escapeHtml(n.customer_phone)}</a>` : ''}
+                  ${n.customer_email ? ` <a href="mailto:${escapeAttr(n.customer_email)}" style="font-weight:400;color:var(--ink-soft);font-size:12px">${escapeHtml(n.customer_email)}</a>` : ''}
+                </div>` : ''}
+              <div style="white-space:pre-wrap;font-size:13px;line-height:1.5${n.done_at ? ';text-decoration:line-through;color:var(--ink-soft)' : ''}">${escapeHtml(n.body)}</div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+              <button class="btn btn-ghost btn-sm" onclick="openNoteModal(${n.id})" title="Edit">✏️</button>
+              <button class="btn btn-ghost btn-sm" onclick="deleteNote(${n.id})" title="Delete" style="color:var(--red)">🗑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function openNoteModal(id) {
+  const existing = id ? (State.notes || []).find(n => n.id == id) : null;
+  modal({
+    title: existing ? 'Edit note' : 'New note',
+    body: `
+      <div class="field"><label>Note / details</label><textarea id="n-body" rows="4" placeholder="What did the customer say? What needs to happen next?" autofocus>${existing ? escapeHtml(existing.body) : ''}</textarea></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field"><label>Customer name</label><input id="n-name" value="${existing ? escapeAttr(existing.customer_name || '') : ''}"></div>
+        <div class="field"><label>Customer phone</label><input id="n-phone" type="tel" value="${existing ? escapeAttr(existing.customer_phone || '') : ''}"></div>
+        <div class="field" style="grid-column:1/-1"><label>Customer email</label><input id="n-email" type="email" value="${existing ? escapeAttr(existing.customer_email || '') : ''}"></div>
+        <div class="field"><label>Category</label>
+          <select id="n-category">
+            <option value="">— none —</option>
+            <option value="call_back" ${existing?.category === 'call_back' ? 'selected' : ''}>📞 Call back</option>
+            <option value="quote" ${existing?.category === 'quote' ? 'selected' : ''}>💷 Quote</option>
+            <option value="fitment_query" ${existing?.category === 'fitment_query' ? 'selected' : ''}>🔧 Fitment query</option>
+            <option value="complaint" ${existing?.category === 'complaint' ? 'selected' : ''}>⚠️ Complaint</option>
+            <option value="other" ${existing?.category === 'other' ? 'selected' : ''}>📝 Other</option>
+          </select>
+        </div>
+        <div class="field"><label>Follow-up date</label><input id="n-followup" type="date" value="${existing?.follow_up_date ? existing.follow_up_date.slice(0,10) : ''}"></div>
+      </div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: existing ? 'Save changes' : 'Save note', primary: true, onClick: () => submitNote(id) },
+    ],
+  });
+}
+
+async function submitNote(id) {
+  const body = el('n-body').value.trim();
+  if (!body) { toast('Note can\'t be empty', 'warn'); return; }
+  const payload = {
+    body,
+    customerName: el('n-name').value || null,
+    customerPhone: el('n-phone').value || null,
+    customerEmail: el('n-email').value || null,
+    category: el('n-category').value || null,
+    followUpDate: el('n-followup').value || null,
+  };
+  try {
+    if (id) await Api.patch('/api/notes/' + id, payload);
+    else await Api.post('/api/notes', payload);
+    closeModal();
+    toast(id ? 'Note updated' : 'Note saved', 'success');
+    await loadNotes();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+async function toggleNoteDone(id, done) {
+  try {
+    await Api.patch('/api/notes/' + id, { done });
+    await loadNotes();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+async function deleteNote(id) {
+  if (!confirm('Delete this note? This cannot be undone.')) return;
+  try {
+    await Api.delete('/api/notes/' + id);
+    await loadNotes();
+    toast('Note deleted', 'success');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
 function renderKB() {
   const isAdmin = State.user.role === 'admin';
   const canSensitive = isAdmin || State.user.perms?.kbSensitive;
