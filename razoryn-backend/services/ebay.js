@@ -151,7 +151,8 @@ async function getRecentOrdersTrading(sinceISO) {
       <EntriesPerPage>100</EntriesPerPage>
       <PageNumber>1</PageNumber>
     </Pagination>
-    <DetailLevel>ReturnAll</DetailLevel>`;
+    <DetailLevel>ReturnAll</DetailLevel>
+    <IncludeFinalValueFee>true</IncludeFinalValueFee>`;
 
   const xml = await tradingCall('GetOrders', bodyInner);
   if (xml.includes('<Ack>Failure</Ack>')) {
@@ -167,8 +168,24 @@ async function getRecentOrdersTrading(sinceISO) {
     const total = parseFloat(extractOne(oXml, 'Total') || '0');
     const subtotal = parseFloat(extractOne(oXml, 'Subtotal') || '0');
     const shippingCost = parseFloat(extractOne(extractOne(oXml, 'ShippingServiceSelected') || '', 'ShippingServiceCost') || '0');
-    const buyerUserId = extractOne(extractOne(oXml, 'BuyerUserID') || '', '') || decodeEntities(extractOne(oXml, 'BuyerUserID') || '');
+    const buyerUserId = decodeEntities(extractOne(oXml, 'BuyerUserID') || '');
     const checkoutStatus = extractOne(extractOne(oXml, 'CheckoutStatus') || '', 'Status');
+
+    // Shipping address — Trading API puts it under ShippingAddress
+    const shipBlock = extractOne(oXml, 'ShippingAddress') || '';
+    const shipParts = [
+      decodeEntities(extractOne(shipBlock, 'Name') || ''),
+      decodeEntities(extractOne(shipBlock, 'Street1') || ''),
+      decodeEntities(extractOne(shipBlock, 'Street2') || ''),
+      decodeEntities(extractOne(shipBlock, 'CityName') || ''),
+      decodeEntities(extractOne(shipBlock, 'StateOrProvince') || ''),
+      decodeEntities(extractOne(shipBlock, 'PostalCode') || ''),
+      decodeEntities(extractOne(shipBlock, 'Country') || ''),
+    ].filter(Boolean);
+    const shippingAddress = shipParts.length ? shipParts.join('\n') : null;
+    const buyerName = decodeEntities(extractOne(shipBlock, 'Name') || '') || buyerUserId || null;
+    const buyerEmail = decodeEntities(extractOne(oXml, 'Email') || '') || null;
+    const buyerPhone = decodeEntities(extractOne(shipBlock, 'Phone') || '') || null;
 
     // Transactions (line items)
     const txArray = extractOne(oXml, 'TransactionArray') || '';
@@ -190,12 +207,13 @@ async function getRecentOrdersTrading(sinceISO) {
     orders.push({
       orderId,
       creationDate,
-      buyer: { username: decodeEntities(extractOne(oXml, 'BuyerUserID') || '') || null },
+      buyer: { username: buyerUserId || null, name: buyerName, email: buyerEmail, phone: buyerPhone },
+      shippingAddress,
       pricingSummary: {
         priceSubtotal: { value: subtotal },
         total: { value: total },
         deliveryCost: { value: shippingCost },
-        tax: { value: 0 }, // eBay UK Trading API doesn't separate tax for marketplace-collected VAT
+        tax: { value: 0 },
       },
       lineItems,
       checkoutStatus,
@@ -440,11 +458,43 @@ function escapeXml(s) {
     .replace(/'/g, '&apos;');
 }
 
+// Single-order detail via Trading-API GetOrders with a specific OrderID filter.
+// Often returns more detail than the bulk listing — especially shipping address.
+async function getOrderDetail(orderId) {
+  const bodyInner = `
+    <OrderIDArray><OrderID>${orderId}</OrderID></OrderIDArray>
+    <DetailLevel>ReturnAll</DetailLevel>
+    <IncludeFinalValueFee>true</IncludeFinalValueFee>`;
+  const xml = await tradingCall('GetOrders', bodyInner);
+  return xml;
+}
+
+// Returns raw XML for debugging — sanitises auth token from output.
+async function dumpOrderXml(orderId, days) {
+  let xml;
+  if (orderId) {
+    xml = await getOrderDetail(orderId);
+  } else {
+    const sinceISO = new Date(Date.now() - (parseInt(days || 7) * 86400000)).toISOString();
+    const bodyInner = `
+      <CreateTimeFrom>${sinceISO}</CreateTimeFrom>
+      <CreateTimeTo>${new Date().toISOString()}</CreateTimeTo>
+      <OrderStatus>All</OrderStatus>
+      <Pagination><EntriesPerPage>3</EntriesPerPage><PageNumber>1</PageNumber></Pagination>
+      <DetailLevel>ReturnAll</DetailLevel>`;
+    xml = await tradingCall('GetOrders', bodyInner);
+  }
+  // Mask the auth token from output before returning
+  return xml.replace(/<eBayAuthToken>[^<]*<\/eBayAuthToken>/g, '<eBayAuthToken>***REDACTED***</eBayAuthToken>');
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
   setInventoryQty,
   getRecentOrders,
+  getOrderDetail,
+  dumpOrderXml,
   pushStockForProduct,
   getActiveListings,
   reviseItem,
