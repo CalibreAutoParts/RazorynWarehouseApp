@@ -71,6 +71,61 @@ router.post('/sync-now', requireAdmin, async (req, res) => {
   }
 });
 
+// POST /api/settings/reset-sync-cursor (admin)
+// Rewind the sync cursor so the next sync pulls older orders.
+// Body: { channel: 'shopify' | 'ebay' | 'all', days: number (default 30) }
+router.post('/reset-sync-cursor', requireAdmin, async (req, res) => {
+  const channel = req.body.channel || 'all';
+  const days = parseInt(req.body.days || 30);
+  const newCursor = new Date(Date.now() - days * 86400000);
+  try {
+    if (channel === 'all') {
+      await query(`UPDATE sync_state SET last_synced_at = $1 WHERE channel IN ('shopify','ebay')`, [newCursor]);
+    } else {
+      await query(`UPDATE sync_state SET last_synced_at = $1 WHERE channel = $2`, [newCursor, channel]);
+    }
+    await audit(req, 'reset_sync_cursor', null, null, { channel, days });
+    res.json({ ok: true, channel, since: newCursor });
+  } catch (e) {
+    res.status(500).json({ error: 'reset_failed', message: e.message });
+  }
+});
+
+// GET /api/settings/pricing-config — current phone-pricing percentages
+router.get('/pricing-config', async (req, res) => {
+  const { rows } = await query(`SELECT cash_discount_pct, bank_transfer_pct, free_delivery_threshold, ebay_buyer_protection_markup, vat_rate FROM app_settings WHERE id = 1`);
+  const r = rows[0] || {};
+  res.json({
+    cashDiscountPct: parseFloat(r.cash_discount_pct ?? 10),
+    bankTransferPct: parseFloat(r.bank_transfer_pct ?? 10),
+    shopifyFreeDeliveryOver: parseFloat(r.free_delivery_threshold ?? 50),
+    ebayBuyerProtectionMarkup: parseFloat(r.ebay_buyer_protection_markup ?? 0),
+    vatRate: parseFloat(r.vat_rate ?? 20),
+  });
+});
+
+// POST /api/settings/pricing-config — update phone-pricing percentages
+router.post('/pricing-config', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  try {
+    // Ensure row exists
+    await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+    const updates = [];
+    const params = [];
+    if (b.cashDiscountPct != null) { params.push(parseFloat(b.cashDiscountPct)); updates.push(`cash_discount_pct = $${params.length}`); }
+    if (b.bankTransferPct != null) { params.push(parseFloat(b.bankTransferPct)); updates.push(`bank_transfer_pct = $${params.length}`); }
+    if (b.shopifyFreeDeliveryOver != null) { params.push(parseFloat(b.shopifyFreeDeliveryOver)); updates.push(`free_delivery_threshold = $${params.length}`); }
+    if (b.ebayBuyerProtectionMarkup != null) { params.push(parseFloat(b.ebayBuyerProtectionMarkup)); updates.push(`ebay_buyer_protection_markup = $${params.length}`); }
+    if (b.vatRate != null) { params.push(parseFloat(b.vatRate)); updates.push(`vat_rate = $${params.length}`); }
+    if (!updates.length) return res.json({ ok: true, message: 'no_changes' });
+    await query(`UPDATE app_settings SET ${updates.join(', ')}, updated_at = now() WHERE id = 1`, params);
+    await audit(req, 'update_pricing_config', null, null, b);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'update_failed', message: e.message });
+  }
+});
+
 // POST /api/settings/import-shopify (admin) — pull all products from Shopify into the warehouse DB.
 // Upsert by shopify_variant_id (so re-running it is safe and updates titles/prices/images).
 router.post('/import-shopify', requireAdmin, async (req, res) => {
