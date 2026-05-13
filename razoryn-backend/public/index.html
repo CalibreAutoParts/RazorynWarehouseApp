@@ -1540,7 +1540,7 @@ function totalQty(p) { return p.qtyShopify; /* eBay & Shopify share the same phy
 
 function channelPill(ch) {
   const map = {
-    shopify: ['green', 'Shopify'],
+    shopify: ['green', 'Store'],
     ebay: ['blue', 'eBay'],
     cash: ['amber', 'Cash'],
     bank: ['amber', 'Bank']
@@ -2217,6 +2217,7 @@ function renderSales() {
         <div><h1>Sales</h1><div class="desc">Unified sales across all channels · click a row for details</div></div>
         <div class="actions">
           <button class="btn btn-primary admin-only" onclick="openManualSale()">+ New sale / estimate</button>
+          <button class="btn btn-outline admin-only" onclick="relinkUnmatchedSales()" title="Try to match unlinked orders to products by SKU again">🔗 Re-link unmatched</button>
           <button class="btn btn-outline" onclick="exportSalesXlsx()" title="Excel workbook with one sheet per channel">⬇ Excel (per-channel)</button>
           <button class="btn btn-outline" onclick="exportSalesCsv()" title="Single CSV — current filter only">CSV</button>
           <button class="btn btn-outline" onclick="syncNow()">↻ Pull latest</button>
@@ -2227,7 +2228,7 @@ function renderSales() {
 
       <div class="seg" style="margin-bottom:14px" id="sales-filter">
         <button class="active" data-sf="all">All channels</button>
-        <button data-sf="shopify">Shopify</button>
+        <button data-sf="shopify">Store</button>
         <button data-sf="ebay">eBay</button>
         <button data-sf="cash">Cash</button>
         <button data-sf="bank">Bank</button>
@@ -2262,7 +2263,7 @@ function renderSales() {
     const totalDirect = State.sales.filter(s=>s.channel==='cash'||s.channel==='bank').reduce((a,b)=>a+b.amount,0);
     el('sales-stats').innerHTML = `
       <div class="stat"><div class="label">Total revenue</div><div class="value">${gbp(State.sales.reduce((a,b)=>a+b.amount,0))}</div><div class="delta">${State.sales.length} sales</div></div>
-      <div class="stat"><div class="label">Shopify</div><div class="value">${gbp(totalShop)}</div><div class="delta">${State.sales.filter(s=>s.channel==='shopify').length} orders</div></div>
+      <div class="stat"><div class="label">Store</div><div class="value">${gbp(totalShop)}</div><div class="delta">${State.sales.filter(s=>s.channel==='shopify').length} orders</div></div>
       <div class="stat"><div class="label">eBay</div><div class="value">${gbp(totalEby)}</div><div class="delta">${State.sales.filter(s=>s.channel==='ebay').length} orders</div></div>
       <div class="stat"><div class="label">Direct (cash + bank)</div><div class="value">${gbp(totalDirect)}</div><div class="delta">${State.sales.filter(s=>s.channel==='cash'||s.channel==='bank').length} orders</div></div>
     `;
@@ -2340,6 +2341,20 @@ async function openSaleDetail(id) {
   const fmt = (n) => '£' + parseFloat(n || 0).toFixed(2);
   const channelLabel = (s.channel || '').replace(/_/g, ' ');
   const escape = (v) => v == null ? '' : String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const paymentLabel = (() => {
+    const pm = s.payment_method;
+    if (pm === 'shopify') return 'Shopify Payment';
+    if (pm === 'ebay') return 'eBay Payment';
+    if (pm === 'cash') return 'Cash';
+    if (pm === 'bank') return 'Bank Transfer';
+    if (pm === 'card') return 'Card (Stripe)';
+    // Fallback for old rows where payment_method was never set
+    if (s.channel === 'shopify') return 'Shopify Payment';
+    if (s.channel === 'ebay_em' || s.channel === 'ebay_cl') return 'eBay Payment';
+    if (s.channel === 'direct_cash') return 'Cash';
+    if (s.channel === 'direct_bank') return 'Bank Transfer';
+    return '—';
+  })();
   const dateStr = s.occurred_at ? new Date(s.occurred_at).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' }) : '—';
   modal({
     title: (s.is_estimate ? 'Estimate' : 'Order') + ' #' + (s.invoice_number || s.payment_reference || s.external_order_id || s.id),
@@ -2352,7 +2367,7 @@ async function openSaleDetail(id) {
         </div>
         <div>
           <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600">Payment</div>
-          <div style="font-size:13px;margin-top:4px;text-transform:capitalize">${escape((s.payment_method || '—').toUpperCase())}</div>
+          <div style="font-size:13px;margin-top:4px">${escape(paymentLabel)}</div>
           <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escape(s.payment_reference || '')}</div>
         </div>
         ${s.external_order_id ? `<div><div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600">Channel order ID</div><div style="font-size:13px;margin-top:4px;font-family:ui-monospace,monospace">${escape(s.external_order_id)}</div></div>` : ''}
@@ -2369,12 +2384,20 @@ async function openSaleDetail(id) {
       </div>
 
       <div style="border-top:1px solid var(--line);padding-top:12px">
-        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600;margin-bottom:8px">Items (${items.length})</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600">Items (${items.length})</div>
+          ${items.some(i => !i.product_id) ? '<span style="font-size:10px;color:var(--amber);font-weight:600">⚠ Some items not linked to a product</span>' : ''}
+        </div>
         ${items.map(i => `
           <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px dashed var(--line);font-size:13px">
             <div style="flex:1">
               <div style="font-weight:500">${escape(i.title)}</div>
               <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escape(i.sku)}</div>
+              ${!i.product_id ? `
+                <div style="margin-top:6px;display:flex;gap:6px;align-items:center">
+                  <span style="font-size:10px;color:var(--amber)">Not linked to a warehouse product.</span>
+                  <button class="btn btn-ghost btn-sm" onclick="openLinkProduct(${s.id}, ${i.id}, '${escape(i.sku).replace(/'/g, "\\'")}', ${s.status === 'paid' ? 'true' : 'false'})" style="font-size:11px;color:var(--red)">🔗 Link to product</button>
+                </div>` : `<div style="font-size:10px;color:var(--green);margin-top:2px">✓ Linked · stock ${s.status === 'paid' ? 'decremented' : 'pending'}</div>`}
             </div>
             <div style="text-align:right;min-width:140px">
               <div>${i.qty} × ${fmt(i.unit_price)}</div>
@@ -4510,6 +4533,121 @@ async function resetSyncCursor() {
     await syncNow();
   } catch (e) {
     toast('Reset failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+async function openLinkProduct(saleId, itemId, sku, decrementStockEligible) {
+  // Suggest products that look similar to the SKU
+  const tail = sku.split(/\s+-\s+|\s+:\s+/).pop().trim();
+  const products = State.products || [];
+  const tailUpper = tail.toUpperCase();
+  const skuUpper = sku.toUpperCase();
+  const norm = (s) => (s || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  const normTail = norm(tail);
+  const ranked = products.map(p => {
+    const ps = (p.sku || '').toUpperCase();
+    const pn = norm(p.sku);
+    let score = 0;
+    if (ps === skuUpper) score += 100;
+    if (ps === tailUpper) score += 90;
+    if (pn === normTail && normTail) score += 80;
+    if (ps.includes(tailUpper) && tailUpper) score += 50;
+    if (tailUpper.includes(ps) && ps.length > 4) score += 40;
+    return { ...p, _score: score };
+  }).filter(p => p._score > 0).sort((a,b) => b._score - a._score).slice(0, 8);
+
+  modal({
+    title: 'Link order item to a warehouse product',
+    body: `
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:14px">
+        Order SKU: <strong style="font-family:ui-monospace,monospace;color:var(--ink)">${sku}</strong><br>
+        Pick the warehouse product that matches.
+      </div>
+      ${ranked.length ? `
+        <div style="margin-bottom:10px;font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.06em;font-weight:600">Suggested matches</div>
+        <div style="max-height:200px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;margin-bottom:14px">
+          ${ranked.map(p => `
+            <label style="display:flex;gap:10px;padding:10px;border-bottom:1px solid var(--line);cursor:pointer;align-items:center">
+              <input type="radio" name="lp-pick" value="${p.id}" style="margin:0">
+              <div style="flex:1">
+                <div style="font-size:13px;font-weight:500">${p.title}</div>
+                <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${p.sku} · ${totalQty(p)} in stock</div>
+              </div>
+            </label>
+          `).join('')}
+        </div>
+      ` : '<div style="padding:10px;background:var(--amber-light);color:var(--amber);border-radius:6px;font-size:12px;margin-bottom:14px">No close matches found. Search below.</div>'}
+      <div class="field">
+        <label>Or search all products</label>
+        <input id="lp-search" placeholder="Type SKU, title or part number…" autocomplete="off">
+        <div id="lp-results" style="max-height:180px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;margin-top:6px;display:none"></div>
+      </div>
+      ${decrementStockEligible ? `
+        <label style="display:flex;align-items:flex-start;gap:8px;padding:10px;background:var(--bg-soft);border-radius:6px;font-size:12px;margin-top:10px;cursor:pointer">
+          <input type="checkbox" id="lp-decrement" checked style="margin-top:2px">
+          <div>
+            <strong>Decrement stock now</strong><br>
+            <span style="color:var(--ink-soft)">Order is paid but stock wasn't decremented because the SKU didn't match. Tick to decrement now.</span>
+          </div>
+        </label>
+      ` : ''}
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Link product', primary: true, onClick: async () => {
+        const picked = document.querySelector('input[name=lp-pick]:checked')?.value
+                    || document.querySelector('input[name=lp-result]:checked')?.value;
+        if (!picked) { toast('Pick a product first', 'warn'); return; }
+        const decrement = el('lp-decrement')?.checked || false;
+        try {
+          await Api.post(`/api/sales/${saleId}/items/${itemId}/link-product`, {
+            productId: picked, decrementStock: decrement,
+          });
+          toast('Linked successfully' + (decrement ? ' · stock decremented' : ''), 'success');
+          closeModal();
+          await Store.refresh('sales');
+          await Store.refresh('products');
+          openSaleDetail(saleId);
+        } catch (e) {
+          toast('Link failed: ' + (e.data?.message || e.message), 'error');
+        }
+      }},
+    ],
+  });
+
+  const search = el('lp-search');
+  const results = el('lp-results');
+  if (search) {
+    search.addEventListener('input', () => {
+      const q = search.value.trim().toLowerCase();
+      if (!q || q.length < 2) { results.style.display = 'none'; return; }
+      const matches = products.filter(p =>
+        (p.sku || '').toLowerCase().includes(q) ||
+        (p.title || '').toLowerCase().includes(q) ||
+        (p.partNumber || '').toLowerCase().includes(q)
+      ).slice(0, 10);
+      if (!matches.length) { results.innerHTML = '<div style="padding:10px;font-size:12px;color:var(--ink-soft)">No matches</div>'; results.style.display = 'block'; return; }
+      results.innerHTML = matches.map(p => `
+        <label style="display:flex;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line);cursor:pointer;align-items:center">
+          <input type="radio" name="lp-result" value="${p.id}" style="margin:0" onchange="document.querySelectorAll('input[name=lp-pick]').forEach(r => r.checked = false)">
+          <div style="flex:1"><div style="font-size:12px;font-weight:500">${p.title}</div><div style="font-size:10px;color:var(--ink-soft);font-family:ui-monospace,monospace">${p.sku} · ${totalQty(p)} in stock</div></div>
+        </label>
+      `).join('');
+      results.style.display = 'block';
+    });
+  }
+}
+
+async function relinkUnmatchedSales() {
+  if (!confirm('Re-scan all unlinked sale items and try to match them to warehouse products using fuzzy SKU matching. Stock is NOT decremented for old orders — review each in the detail modal afterwards. Continue?')) return;
+  toast('Re-scanning…', 'info');
+  try {
+    const r = await Api.post('/api/sales/relink-unmatched');
+    toast(`Scanned ${r.scanned} unlinked items, ${r.linked} newly linked.`, 'success', 5000);
+    await Store.refresh('sales');
+    if (State.page === 'sales' && typeof renderSales === 'function') renderSales();
+  } catch (e) {
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 
