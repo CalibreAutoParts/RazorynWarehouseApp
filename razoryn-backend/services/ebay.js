@@ -173,14 +173,21 @@ async function getRecentOrdersTrading(sinceISO) {
 
     // Shipping address — Trading API puts it under ShippingAddress
     const shipBlock = extractOne(oXml, 'ShippingAddress') || '';
+    let street2Raw = decodeEntities(extractOne(shipBlock, 'Street2') || '');
+    // eBay sometimes injects an anonymized buyer-email proxy (e.g. "ebayerm7qr9") in Street2.
+    // Strip it before it ends up on invoices.
+    if (/^ebay[a-z0-9]{4,}$/i.test(street2Raw)) street2Raw = '';
+    let countryRaw = decodeEntities(extractOne(shipBlock, 'Country') || '');
+    // Strip GB / UK / United Kingdom — redundant for UK customers and prints poorly.
+    if (countryRaw === 'GB' || countryRaw === 'UK' || countryRaw === 'GBR' || countryRaw === 'United Kingdom') countryRaw = '';
     const shipParts = [
       decodeEntities(extractOne(shipBlock, 'Name') || ''),
       decodeEntities(extractOne(shipBlock, 'Street1') || ''),
-      decodeEntities(extractOne(shipBlock, 'Street2') || ''),
+      street2Raw,
       decodeEntities(extractOne(shipBlock, 'CityName') || ''),
       decodeEntities(extractOne(shipBlock, 'StateOrProvince') || ''),
       decodeEntities(extractOne(shipBlock, 'PostalCode') || ''),
-      decodeEntities(extractOne(shipBlock, 'Country') || ''),
+      countryRaw,
     ].filter(Boolean);
     const shippingAddress = shipParts.length ? shipParts.join('\n') : null;
     const buyerName = decodeEntities(extractOne(shipBlock, 'Name') || '') || buyerUserId || null;
@@ -458,6 +465,89 @@ function escapeXml(s) {
     .replace(/'/g, '&apos;');
 }
 
+// ----- eBay Returns (Post-Order API) -----
+// The Trading API does NOT expose return cases. They live in the Post-Order Returns API.
+// Even with Auth'n'Auth, the Post-Order API accepts the legacy token via
+// "Authorization: TOKEN <auth-token>" — no OAuth dance needed for read-only.
+async function getOpenReturns() {
+  const authToken = process.env.EBAY_AUTH_TOKEN;
+  if (!authToken) throw new Error('EBAY_AUTH_TOKEN required for returns API');
+  const axios = require('axios');
+  const marketplace = process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
+  // Filter: get open returns from the last 90 days
+  const url = 'https://api.ebay.com/post-order/v2/return/search'
+            + '?filter=role:{SELLER},sellerInquiryStage:{INQUIRY_PROCESSING},returnCountFilter:{ALL_RETURNS}'
+            + '&limit=50';
+  try {
+    const r = await axios.get(url, {
+      headers: {
+        'Authorization': `TOKEN ${authToken}`,
+        'Accept': 'application/json',
+        'X-EBAY-C-MARKETPLACE-ID': marketplace,
+        'Content-Type': 'application/json',
+      },
+      timeout: 30000,
+    });
+    return r.data;
+  } catch (e) {
+    // If Post-Order fails (e.g. needs OAuth) fall back to GetUserCases via Trading
+    if (e.response?.status === 401 || e.response?.status === 403) {
+      console.warn('[ebay returns] Post-Order needs OAuth; falling back to GetUserCases');
+      return getUserCasesViaTrading();
+    }
+    throw e;
+  }
+}
+
+// Same as above but with broader filter — used for "show all returns" view
+async function getAllRecentReturns(days = 90) {
+  const authToken = process.env.EBAY_AUTH_TOKEN;
+  if (!authToken) throw new Error('EBAY_AUTH_TOKEN required for returns API');
+  const axios = require('axios');
+  const marketplace = process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
+  // Wider filter: any return where I'm the seller, created in the last N days
+  const fromDate = new Date(Date.now() - days * 86400000).toISOString();
+  const url = 'https://api.ebay.com/post-order/v2/return/search'
+            + `?filter=role:{SELLER},creation_date:[${fromDate}..]&limit=100`;
+  try {
+    const r = await axios.get(url, {
+      headers: {
+        'Authorization': `TOKEN ${authToken}`,
+        'Accept': 'application/json',
+        'X-EBAY-C-MARKETPLACE-ID': marketplace,
+        'Content-Type': 'application/json',
+      },
+      timeout: 30000,
+    });
+    return r.data;
+  } catch (e) {
+    if (e.response) {
+      const data = typeof e.response.data === 'string' ? e.response.data.slice(0, 300) : JSON.stringify(e.response.data).slice(0, 300);
+      const err = new Error(`Post-Order API ${e.response.status}: ${data}`);
+      err.status = e.response.status;
+      err.detail = e.response.data;
+      throw err;
+    }
+    throw e;
+  }
+}
+
+// Fallback: Trading API GetUserCases for buyer-opened cases (item not received, dispute, etc.)
+async function getUserCasesViaTrading() {
+  const bodyInner = `
+    <CaseStatusFilter>OpenedCases</CaseStatusFilter>
+    <CaseTypeFilter>RequestReturn</CaseTypeFilter>
+    <ItemFilter><DateFilter>LastThirtyDays</DateFilter></ItemFilter>
+    <DetailLevel>ReturnAll</DetailLevel>`;
+  try {
+    const xml = await tradingCall('GetUserCases', bodyInner);
+    return { source: 'trading_getusercases', xml };
+  } catch (e) {
+    console.warn('[ebay returns] GetUserCases failed:', e.message);
+    return { source: 'unavailable', error: e.message };
+  }
+}
+
 // Single-order detail via Trading-API GetOrders with a specific OrderID filter.
 // Often returns more detail than the bulk listing — especially shipping address.
 async function getOrderDetail(orderId) {
@@ -495,6 +585,8 @@ module.exports = {
   getRecentOrders,
   getOrderDetail,
   dumpOrderXml,
+  getOpenReturns,
+  getAllRecentReturns,
   pushStockForProduct,
   getActiveListings,
   reviseItem,
