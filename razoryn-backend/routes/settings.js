@@ -91,9 +91,9 @@ router.post('/reset-sync-cursor', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/settings/pricing-config — current phone-pricing percentages
+// GET /api/settings/pricing-config — current phone-pricing percentages + company details
 router.get('/pricing-config', async (req, res) => {
-  const { rows } = await query(`SELECT cash_discount_pct, bank_transfer_pct, free_delivery_threshold, ebay_buyer_protection_markup, vat_rate FROM app_settings WHERE id = 1`);
+  const { rows } = await query(`SELECT * FROM app_settings WHERE id = 1`);
   const r = rows[0] || {};
   res.json({
     cashDiscountPct: parseFloat(r.cash_discount_pct ?? 10),
@@ -101,25 +101,54 @@ router.get('/pricing-config', async (req, res) => {
     shopifyFreeDeliveryOver: parseFloat(r.free_delivery_threshold ?? 50),
     ebayBuyerProtectionMarkup: parseFloat(r.ebay_buyer_protection_markup ?? 0),
     vatRate: parseFloat(r.vat_rate ?? 20),
+    vatRegistered: !!r.vat_registered,
+    vatNumber: r.vat_number || '',
+    companyAddress: r.company_address || '',
+    companyPhone: r.company_phone || '',
+    companyEmail: r.company_email || '',
+    companyWebsite: r.company_website || '',
+    companyRegNo: r.company_reg_no || '',
+    bankAccountName: r.bank_account_name || '',
+    bankSortCode: r.bank_sort_code || '',
+    bankAccountNumber: r.bank_account_number || '',
   });
 });
 
-// POST /api/settings/pricing-config — update phone-pricing percentages
+// POST /api/settings/pricing-config — update phone-pricing + company config
 router.post('/pricing-config', requireAdmin, async (req, res) => {
   const b = req.body || {};
   try {
-    // Ensure row exists
     await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
-    const updates = [];
-    const params = [];
-    if (b.cashDiscountPct != null) { params.push(parseFloat(b.cashDiscountPct)); updates.push(`cash_discount_pct = $${params.length}`); }
-    if (b.bankTransferPct != null) { params.push(parseFloat(b.bankTransferPct)); updates.push(`bank_transfer_pct = $${params.length}`); }
-    if (b.shopifyFreeDeliveryOver != null) { params.push(parseFloat(b.shopifyFreeDeliveryOver)); updates.push(`free_delivery_threshold = $${params.length}`); }
-    if (b.ebayBuyerProtectionMarkup != null) { params.push(parseFloat(b.ebayBuyerProtectionMarkup)); updates.push(`ebay_buyer_protection_markup = $${params.length}`); }
-    if (b.vatRate != null) { params.push(parseFloat(b.vatRate)); updates.push(`vat_rate = $${params.length}`); }
+    const fieldMap = {
+      cashDiscountPct: 'cash_discount_pct',
+      bankTransferPct: 'bank_transfer_pct',
+      shopifyFreeDeliveryOver: 'free_delivery_threshold',
+      ebayBuyerProtectionMarkup: 'ebay_buyer_protection_markup',
+      vatRate: 'vat_rate',
+      vatRegistered: 'vat_registered',
+      vatNumber: 'vat_number',
+      companyAddress: 'company_address',
+      companyPhone: 'company_phone',
+      companyEmail: 'company_email',
+      companyWebsite: 'company_website',
+      companyRegNo: 'company_reg_no',
+      bankAccountName: 'bank_account_name',
+      bankSortCode: 'bank_sort_code',
+      bankAccountNumber: 'bank_account_number',
+    };
+    const updates = [], params = [];
+    for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
+      if (b[bodyKey] === undefined) continue;
+      let val = b[bodyKey];
+      if (['cash_discount_pct','bank_transfer_pct','free_delivery_threshold','ebay_buyer_protection_markup','vat_rate'].includes(dbCol)) {
+        val = parseFloat(val);
+      }
+      params.push(val);
+      updates.push(`${dbCol} = $${params.length}`);
+    }
     if (!updates.length) return res.json({ ok: true, message: 'no_changes' });
     await query(`UPDATE app_settings SET ${updates.join(', ')}, updated_at = now() WHERE id = 1`, params);
-    await audit(req, 'update_pricing_config', null, null, b);
+    await audit(req, 'update_pricing_config', null, null, Object.keys(b));
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: 'update_failed', message: e.message });

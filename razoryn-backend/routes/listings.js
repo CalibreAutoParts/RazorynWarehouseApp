@@ -20,6 +20,75 @@ router.get('/debug-shopify', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/listings/sku-mismatches — compare eBay listing SKUs against Shopify SKUs
+// via mirror_links. Returns any rows where eBay and Shopify disagree on SKU.
+router.get('/sku-mismatches', requireAdmin, async (req, res) => {
+  if (!ebay.isConfigured() || !shopify.isConfigured()) {
+    return res.status(400).json({ error: 'not_configured' });
+  }
+  try {
+    const links = await query(
+      `SELECT ebay_item_id, shopify_product_id, last_synced_sku FROM mirror_links`
+    );
+    if (!links.rows.length) return res.json({ checked: 0, mismatches: [] });
+
+    // 1) Pull live eBay SKUs (only for our mirrored items)
+    const ebayListings = await ebay.getActiveListings();
+    const ebaySkuByItemId = {};
+    for (const l of ebayListings) ebaySkuByItemId[l.itemId] = l.sku || '';
+
+    // 2) Pull Shopify products by ID
+    const productIds = links.rows.map(r => String(r.shopify_product_id));
+    const shopifySkuByProductId = {};
+    // Fetch in batches via REST
+    const axios = require('axios');
+    const token = await shopify.getAccessToken();
+    const VERSION = process.env.SHOPIFY_API_VERSION || '2025-01';
+    for (const pid of productIds) {
+      try {
+        const r = await axios.get(
+          `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${VERSION}/products/${pid}.json`,
+          { headers: { 'X-Shopify-Access-Token': token } }
+        );
+        const variant = r.data.product?.variants?.[0];
+        shopifySkuByProductId[pid] = variant?.sku || '';
+      } catch (e) {
+        shopifySkuByProductId[pid] = null; // 404 / deleted
+      }
+    }
+
+    // 3) Compare
+    const mismatches = [];
+    for (const link of links.rows) {
+      const ebaySku = ebaySkuByItemId[link.ebay_item_id];
+      const shopifySku = shopifySkuByProductId[String(link.shopify_product_id)];
+      const onEbay = ebaySku !== undefined;
+      const onShopify = shopifySku !== null;
+      if (!onEbay || !onShopify || ebaySku !== shopifySku) {
+        mismatches.push({
+          ebayItemId: link.ebay_item_id,
+          shopifyProductId: link.shopify_product_id,
+          ebaySku: onEbay ? ebaySku : null,
+          shopifySku,
+          lastSyncedSku: link.last_synced_sku,
+          status: !onEbay ? 'ebay_listing_missing'
+                : !onShopify ? 'shopify_product_missing'
+                : 'sku_mismatch',
+        });
+      }
+    }
+
+    res.json({
+      checked: links.rows.length,
+      mismatches,
+      mismatchCount: mismatches.length,
+    });
+  } catch (e) {
+    console.error('[listings/sku-mismatches]', e);
+    res.status(500).json({ error: 'check_failed', message: e.message });
+  }
+});
+
 // Metafield definitions
 router.get('/metafield-definitions', requireAdmin, async (req, res) => {
   try {
