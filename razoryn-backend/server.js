@@ -72,6 +72,7 @@ app.use('/api/staff',        require('./routes/staff'));
 app.use('/api/pricing',      require('./routes/pricing'));
 app.use('/api/settings',     require('./routes/settings'));
 app.use('/api/listings',     require('./routes/listings'));
+app.use('/api/notes',        require('./routes/notes'));
 
 // ---------- Static: PWA ----------
 app.use(express.static(path.join(__dirname, 'public'), {
@@ -145,6 +146,19 @@ if (cron.validate(returnsCronExpr)) {
   });
   console.log(`[boot] returns auto-pull scheduled: ${returnsCronExpr}`);
 }
+
+// Nightly cleanup: permanently delete staff_notes older than 31 days.
+// Notes are already filtered out of the GET response after 31 days, but this
+// keeps the table from growing unbounded.
+cron.schedule('15 3 * * *', async () => {
+  try {
+    const { query } = require('./db');
+    const r = await query(`DELETE FROM staff_notes WHERE created_at < now() - INTERVAL '31 days'`);
+    if (r.rowCount) console.log(`[cron notes] cleaned ${r.rowCount} expired notes`);
+  } catch (e) {
+    console.error('[cron notes] cleanup failed:', e.message);
+  }
+});
 
 // ---------- Start ----------
 app.listen(PORT, () => {
