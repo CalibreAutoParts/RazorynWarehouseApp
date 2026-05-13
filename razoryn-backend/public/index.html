@@ -661,7 +661,7 @@
           Returns
           <span class="ct" id="nav-ret-count">0</span>
         </button>
-        <button class="nav-item" data-page="sales">
+        <button class="nav-item admin-only" data-page="sales">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           Sales
         </button>
@@ -1440,12 +1440,21 @@ function renderDashboard() {
       </div>
 
       <div class="grid-4" style="margin-bottom:20px">
+        ${State.user?.role === 'admin' ? `
         <div class="stat stat-clickable" onclick="routeTo('sales')" role="button" tabindex="0">
           <div class="icon-wrap"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
           <div class="label">Today's revenue</div>
           <div class="value">${gbp(todayRev)}</div>
           <div class="delta">${todaySales.length} sales</div>
         </div>
+        ` : `
+        <div class="stat stat-clickable" onclick="routeTo('inventory')" role="button" tabindex="0">
+          <div class="icon-wrap"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6v6H9z"/></svg></div>
+          <div class="label">Orders to despatch</div>
+          <div class="value">${todaySales.length}</div>
+          <div class="delta">Today's orders</div>
+        </div>
+        `}
         <div class="stat stat-clickable" onclick="routeTo('inventory')" role="button" tabindex="0">
           <div class="icon-wrap"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></div>
           <div class="label">Units in stock</div>
@@ -1504,6 +1513,7 @@ function renderDashboard() {
         </div>
       </div>
 
+      ${State.user?.role === 'admin' ? `
       <div style="height:16px"></div>
 
       <div class="card">
@@ -1528,6 +1538,7 @@ function renderDashboard() {
           </table>
         </div>
       </div>
+      ` : ''}
     </div>
   `;
 }
@@ -2232,6 +2243,7 @@ function renderSales() {
         <button data-sf="ebay">eBay</button>
         <button data-sf="cash">Cash</button>
         <button data-sf="bank">Bank</button>
+        <button data-sf="estimates">Estimates</button>
       </div>
 
       <div id="sales-bulk-bar" style="display:none;padding:10px 14px;background:var(--bg-soft);border:1px solid var(--line);border-radius:8px;margin-bottom:10px;align-items:center;gap:10px;flex-wrap:wrap">
@@ -2256,20 +2268,28 @@ function renderSales() {
     </div>
   `;
 
+  function applyFilter(filter) {
+    if (filter === 'estimates') return State.sales.filter(s => s.isEstimate);
+    if (filter === 'all') return State.sales.filter(s => !s.isEstimate);
+    return State.sales.filter(s => s.channel === filter && !s.isEstimate);
+  }
+
   function paintStats(filter='all') {
-    const subset = filter==='all' ? State.sales : State.sales.filter(s => s.channel === filter);
-    const totalShop = State.sales.filter(s=>s.channel==='shopify').reduce((a,b)=>a+b.amount,0);
-    const totalEby = State.sales.filter(s=>s.channel==='ebay').reduce((a,b)=>a+b.amount,0);
-    const totalDirect = State.sales.filter(s=>s.channel==='cash'||s.channel==='bank').reduce((a,b)=>a+b.amount,0);
+    const subset = applyFilter(filter);
+    const allPaid = State.sales.filter(s => !s.isEstimate);
+    const totalShop = allPaid.filter(s=>s.channel==='shopify').reduce((a,b)=>a+b.amount,0);
+    const totalEby = allPaid.filter(s=>s.channel==='ebay').reduce((a,b)=>a+b.amount,0);
+    const totalDirect = allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').reduce((a,b)=>a+b.amount,0);
+    const estimatesCount = State.sales.filter(s => s.isEstimate).length;
     el('sales-stats').innerHTML = `
-      <div class="stat"><div class="label">Total revenue</div><div class="value">${gbp(State.sales.reduce((a,b)=>a+b.amount,0))}</div><div class="delta">${State.sales.length} sales</div></div>
-      <div class="stat"><div class="label">Store</div><div class="value">${gbp(totalShop)}</div><div class="delta">${State.sales.filter(s=>s.channel==='shopify').length} orders</div></div>
-      <div class="stat"><div class="label">eBay</div><div class="value">${gbp(totalEby)}</div><div class="delta">${State.sales.filter(s=>s.channel==='ebay').length} orders</div></div>
-      <div class="stat"><div class="label">Direct (cash + bank)</div><div class="value">${gbp(totalDirect)}</div><div class="delta">${State.sales.filter(s=>s.channel==='cash'||s.channel==='bank').length} orders</div></div>
+      <div class="stat"><div class="label">Total revenue</div><div class="value">${gbp(allPaid.reduce((a,b)=>a+b.amount,0))}</div><div class="delta">${allPaid.length} sales</div></div>
+      <div class="stat"><div class="label">Store</div><div class="value">${gbp(totalShop)}</div><div class="delta">${allPaid.filter(s=>s.channel==='shopify').length} orders</div></div>
+      <div class="stat"><div class="label">eBay</div><div class="value">${gbp(totalEby)}</div><div class="delta">${allPaid.filter(s=>s.channel==='ebay').length} orders</div></div>
+      <div class="stat"><div class="label">${filter === 'estimates' ? 'Estimates' : 'Direct (cash + bank)'}</div><div class="value">${filter === 'estimates' ? estimatesCount : gbp(totalDirect)}</div><div class="delta">${filter === 'estimates' ? 'open quotes' : allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').length + ' orders'}</div></div>
     `;
   }
   function paintTable(filter='all') {
-    const subset = filter==='all' ? State.sales : State.sales.filter(s => s.channel === filter);
+    const subset = applyFilter(filter);
     State._salesFiltered = subset;
     el('sales-tbody').innerHTML = subset.length ? subset.map(s => `
       <tr style="cursor:pointer" onclick="if(!event.target.closest('button,input,a'))openSaleDetail('${s.id}')">
@@ -2281,12 +2301,14 @@ function renderSales() {
         <td>${s.customer}</td>
         <td class="num"><strong>${gbp(s.amount)}</strong></td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
-          <button class="btn btn-ghost btn-sm" onclick="printSingleInvoice('${s.id}')" title="Open invoice in new tab to print or save as PDF">🖨 Print</button>
-          <button class="btn btn-ghost btn-sm" onclick="emailSingleInvoice('${s.id}')" title="Email this invoice to the customer">✉ Email</button>
-          ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Mark as paid → decrements stock, generates paid invoice" style="color:var(--green)">✓ Mark paid</button>` : ''}
+          <button class="btn btn-ghost btn-sm" onclick="printSingleInvoice('${s.id}')" title="Open invoice in new tab to print or save as PDF">🖨</button>
+          <button class="btn btn-ghost btn-sm" onclick="emailSingleInvoice('${s.id}')" title="Email this invoice to the customer">✉</button>
+          <button class="btn btn-ghost btn-sm" onclick="openEditSale('${s.id}')" title="Edit customer / reg / VIN / notes">✏️</button>
+          ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Mark as paid → decrements stock, generates paid invoice" style="color:var(--green)">✓ Pay</button>` : ''}
+          <button class="btn btn-ghost btn-sm" onclick="deleteSale('${s.id}', ${s.isEstimate})" title="Delete this ${s.isEstimate ? 'estimate' : 'invoice'} ${!s.isEstimate ? '(restores stock)' : ''}" style="color:var(--red)">🗑</button>
         </td>
       </tr>
-    `).join('') : '<tr><td colspan="8"><div class="empty"><div class="t">No sales</div></div></td></tr>';
+    `).join('') : '<tr><td colspan="8"><div class="empty"><div class="t">No ' + (filter === 'estimates' ? 'estimates' : 'sales') + '</div></div></td></tr>';
     salesUpdateBulkBar();
   }
   paintStats(); paintTable();
@@ -2532,6 +2554,7 @@ function openManualSale() {
         <div class="field" style="grid-column:1/-1"><label>Shipping / billing address (optional)</label><textarea id="ms-address" rows="2" placeholder="123 Example Road&#10;Town, Postcode"></textarea></div>
         <div class="field"><label>Order No. (optional)</label><input id="ms-ordernum" placeholder="e.g. CAP1234"></div>
         <div class="field"><label>Vehicle Reg. (optional)</label><input id="ms-reg" placeholder="e.g. AB12 CDE"></div>
+        <div class="field" style="grid-column:1/-1"><label>VIN (optional)</label><input id="ms-vin" placeholder="17 chars, e.g. WAUZZZ8K9CA123456" style="font-family:ui-monospace,monospace;font-size:12px"></div>
       </div>
       <div style="border-top:1px solid var(--line);margin:14px 0;padding-top:10px">
         <div style="font-weight:600;font-size:13px;margin-bottom:8px">Line items</div>
@@ -2551,7 +2574,7 @@ function openManualSale() {
   });
   manualSaleAddRow();
   el('ms-payment').addEventListener('change', () => {
-    document.querySelectorAll('#ms-items > div').forEach(manualSalePrefillPrice);
+    document.querySelectorAll('#ms-items > [data-idx]').forEach(manualSalePrefillPrice);
     manualSaleRecalc();
   });
   el('ms-shipping').addEventListener('input', manualSaleRecalc);
@@ -2561,51 +2584,115 @@ function manualSaleAddRow() {
   const wrap = el('ms-items');
   if (!wrap) return;
   const idx = wrap.children.length;
+  const rowId = 'ms-row-' + idx + '-' + Date.now();
   const row = document.createElement('div');
-  row.style.cssText = 'display:grid;grid-template-columns:1fr 80px 110px 36px;gap:6px;margin-bottom:6px;align-items:center';
+  row.style.cssText = 'border:1px solid var(--line);border-radius:6px;padding:8px;margin-bottom:8px;position:relative';
   row.dataset.idx = idx;
+  row.dataset.productId = '';
+  row.dataset.productSku = '';
   row.innerHTML = `
-    <select class="ms-prod" onchange="manualSaleRecalc()">
-      <option value="">— pick product —</option>
-      ${State.products.map(p => `<option value="${p.id}" data-price="${p.priceShopify || 0}" data-qty="${totalQty(p)}">${p.title} · ${p.sku} (${totalQty(p)} in stock)</option>`).join('')}
-    </select>
-    <input type="number" class="ms-qty" value="1" min="1" step="1" onchange="manualSaleRecalc()">
-    <input type="number" class="ms-price" placeholder="Unit £" step="0.01" min="0" onchange="manualSaleRecalc()">
-    <button class="btn btn-ghost btn-sm" onclick="this.parentElement.remove();manualSaleRecalc()">×</button>
+    <div style="display:grid;grid-template-columns:1fr 80px 110px 36px;gap:6px;align-items:center">
+      <div style="position:relative">
+        <input class="ms-search" placeholder="Search product by SKU / title / part #…" autocomplete="off">
+        <div class="ms-suggest" style="position:absolute;top:100%;left:0;right:0;background:var(--white);border:1px solid var(--line);border-radius:6px;max-height:200px;overflow-y:auto;z-index:10;display:none;margin-top:2px;box-shadow:var(--shadow)"></div>
+        <div class="ms-picked" style="display:none;font-size:11px;color:var(--green);margin-top:3px"></div>
+      </div>
+      <input type="number" class="ms-qty" value="1" min="1" step="1">
+      <input type="number" class="ms-price" placeholder="Unit £" step="0.01" min="0">
+      <button class="btn btn-ghost btn-sm" onclick="this.closest('[data-idx]').remove();manualSaleRecalc()">×</button>
+    </div>
+    <div class="ms-custom-toggle" style="margin-top:6px;font-size:11px">
+      <a href="#" onclick="manualSaleToggleCustom(this);return false" style="color:var(--ink-soft)">+ Custom item (no stock change)</a>
+    </div>
+    <div class="ms-custom-fields" style="display:none;margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">
+      <input class="ms-custom-title" placeholder="Custom item description (e.g. 'Postage', 'Labour')" style="width:100%;font-size:12px">
+      <div style="font-size:10px;color:var(--ink-soft);margin-top:4px">Use this for items not in inventory (services, postage, etc.)</div>
+    </div>
   `;
   wrap.appendChild(row);
-  // Pre-fill unit price from the selected product when chosen
-  row.querySelector('.ms-prod').addEventListener('change', (e) => {
-    const opt = e.target.selectedOptions[0];
-    const priceInput = row.querySelector('.ms-price');
-    if (opt && opt.dataset.price && !priceInput.value) priceInput.value = opt.dataset.price;
-    // For trade channel, suggest bank price (% off eBay)
-    manualSalePrefillPrice(row);
-    manualSaleRecalc();
+
+  const searchInput = row.querySelector('.ms-search');
+  const suggest = row.querySelector('.ms-suggest');
+  const picked = row.querySelector('.ms-picked');
+  const qtyInput = row.querySelector('.ms-qty');
+  const priceInput = row.querySelector('.ms-price');
+  qtyInput.addEventListener('change', manualSaleRecalc);
+  priceInput.addEventListener('change', manualSaleRecalc);
+
+  // Live search
+  searchInput.addEventListener('input', () => {
+    const q = searchInput.value.trim().toLowerCase();
+    if (!q || q.length < 2) { suggest.style.display = 'none'; return; }
+    const matches = (State.products || []).filter(p =>
+      (p.sku || '').toLowerCase().includes(q) ||
+      (p.title || '').toLowerCase().includes(q) ||
+      (p.partNumber || '').toLowerCase().includes(q)
+    ).slice(0, 12);
+    if (!matches.length) {
+      suggest.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--ink-soft)">No matches — use "Custom item" below for non-inventory items</div>';
+      suggest.style.display = 'block'; return;
+    }
+    suggest.innerHTML = matches.map(p => `
+      <div class="ms-option" data-pid="${p.id}" data-sku="${p.sku || ''}" data-shopify="${p.priceShopify || 0}" data-ebay="${p.priceEbay || 0}" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line)">
+        <div style="font-size:12px;font-weight:500">${p.title}</div>
+        <div style="font-size:10px;color:var(--ink-soft);font-family:ui-monospace,monospace">${p.sku} · ${totalQty(p)} in stock</div>
+      </div>
+    `).join('');
+    suggest.style.display = 'block';
+    suggest.querySelectorAll('.ms-option').forEach(opt => {
+      opt.addEventListener('mouseenter', () => opt.style.background = 'var(--bg-soft)');
+      opt.addEventListener('mouseleave', () => opt.style.background = '');
+      opt.addEventListener('click', () => {
+        row.dataset.productId = opt.dataset.pid;
+        row.dataset.productSku = opt.dataset.sku;
+        row.dataset.priceShopify = opt.dataset.shopify;
+        row.dataset.priceEbay = opt.dataset.ebay;
+        searchInput.value = opt.querySelector('div').textContent;
+        suggest.style.display = 'none';
+        picked.style.display = 'block';
+        picked.textContent = '✓ Selected: ' + opt.dataset.sku;
+        manualSalePrefillPrice(row);
+        manualSaleRecalc();
+      });
+    });
+  });
+
+  // Click outside to close suggestions
+  document.addEventListener('click', (e) => {
+    if (!row.contains(e.target)) suggest.style.display = 'none';
   });
 }
 
+function manualSaleToggleCustom(link) {
+  const row = link.closest('[data-idx]');
+  const fields = row.querySelector('.ms-custom-fields');
+  const isOpen = fields.style.display === 'block';
+  fields.style.display = isOpen ? 'none' : 'block';
+  link.textContent = isOpen ? '+ Custom item (no stock change)' : '− Hide custom item';
+  // Mark this row as custom (no product link)
+  row.dataset.isCustom = isOpen ? '' : 'true';
+}
+
 function manualSalePrefillPrice(row) {
-  const opt = row.querySelector('.ms-prod').selectedOptions[0];
-  if (!opt || !opt.value) return;
-  const product = State.products.find(p => p.id == opt.value);
-  if (!product) return;
+  if (!row.dataset.productId) return;
   const payment = el('ms-payment')?.value || 'cash';
   const cfg = State.pricingConfig || {};
-  const ebayPrice = product.priceEbay || product.priceShopify || 0;
-  let suggested = product.priceShopify || 0;
+  const shopifyP = parseFloat(row.dataset.priceShopify || 0);
+  const ebayP = parseFloat(row.dataset.priceEbay || 0);
+  const ebayBasis = ebayP > 0 ? ebayP : shopifyP;
+  let suggested = shopifyP;
   if (payment === 'cash' && cfg.cashDiscountPct != null) {
-    suggested = +(ebayPrice * (1 - cfg.cashDiscountPct / 100)).toFixed(2);
+    suggested = +(ebayBasis * (1 - cfg.cashDiscountPct / 100)).toFixed(2);
   } else if (payment === 'bank' && cfg.bankTransferPct != null) {
-    suggested = +(ebayPrice * (1 - cfg.bankTransferPct / 100)).toFixed(2);
+    suggested = +(ebayBasis * (1 - cfg.bankTransferPct / 100)).toFixed(2);
   } else if (payment === 'card') {
-    suggested = product.priceShopify || 0; // card = shopify price (no discount)
+    suggested = shopifyP;
   }
   if (suggested > 0) row.querySelector('.ms-price').value = suggested;
 }
 
 function manualSaleRecalc() {
-  const rows = document.querySelectorAll('#ms-items > div');
+  const rows = document.querySelectorAll('#ms-items > [data-idx]');
   let subtotal = 0;
   for (const r of rows) {
     const qty = parseFloat(r.querySelector('.ms-qty').value) || 0;
@@ -2633,19 +2720,27 @@ function manualSaleRecalc() {
 async function submitManualSale() {
   const paymentMethod = el('ms-payment').value;
   const isEstimate = el('ms-doctype').value === 'estimate';
-  // Channel must be one of the manual channels — pick bank for non-cash payments
   const channel = paymentMethod === 'cash' ? 'direct_cash' : 'direct_bank';
 
-  const rows = document.querySelectorAll('#ms-items > div');
+  const rows = document.querySelectorAll('#ms-items > [data-idx]');
   const items = [];
   for (const r of rows) {
-    const productId = r.querySelector('.ms-prod').value;
     const qty = parseInt(r.querySelector('.ms-qty').value);
     const unitPrice = parseFloat(r.querySelector('.ms-price').value);
-    if (!productId || !qty || !unitPrice) continue;
-    items.push({ productId, qty, unitPrice });
+    if (!qty || !unitPrice) continue;
+    const productId = r.dataset.productId;
+    if (productId) {
+      items.push({ productId, qty, unitPrice });
+    } else {
+      // Custom item — no product link
+      const customTitle = r.querySelector('.ms-custom-title')?.value
+                       || r.querySelector('.ms-search').value
+                       || 'Custom item';
+      items.push({ qty, unitPrice, customTitle });
+    }
   }
-  if (!items.length) { toast('Add at least one line item', 'warn'); return; }
+  if (!items.length) { toast('Add at least one line item with qty + price', 'warn'); return; }
+
   const payload = {
     channel,
     paymentMethod,
@@ -2656,6 +2751,7 @@ async function submitManualSale() {
     shippingAddress: el('ms-address').value || null,
     orderNumber: el('ms-ordernum').value || null,
     vehicleReg: el('ms-reg').value || null,
+    vinNumber: el('ms-vin')?.value || null,
     items,
     shipping: parseFloat(el('ms-shipping').value) || 0,
     notes: el('ms-notes').value || null,
@@ -2667,7 +2763,6 @@ async function submitManualSale() {
     await Store.refresh('sales');
     await Store.refresh('products');
     renderSales();
-    // Open the freshly created document
     setTimeout(() => {
       const w = window.open('/api/sales/' + r.sale.id + '/invoice.html', '_blank');
       if (!w) toast('Pop-up blocked — find document in Sales tab', 'warn');
@@ -4536,8 +4631,112 @@ async function resetSyncCursor() {
   }
 }
 
+async function openEditSale(id) {
+  let data;
+  try { data = await Api.get('/api/sales/' + id); }
+  catch (e) { toast('Failed to load: ' + e.message, 'error'); return; }
+  const s = data.sale;
+  const items = data.items || [];
+  const escape = (v) => v == null ? '' : String(v).replace(/"/g, '&quot;');
+  modal({
+    title: 'Edit ' + (s.is_estimate ? 'estimate' : 'order') + ' ' + (s.invoice_number || s.payment_reference || ''),
+    body: `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field"><label>Customer name</label><input id="es-name" value="${escape(s.customer_name)}"></div>
+        <div class="field"><label>Customer phone</label><input id="es-phone" value="${escape(s.customer_phone)}"></div>
+        <div class="field" style="grid-column:1/-1"><label>Customer email</label><input id="es-email" type="email" value="${escape(s.customer_email)}"></div>
+        <div class="field" style="grid-column:1/-1"><label>Shipping / billing address</label><textarea id="es-address" rows="3">${escape(s.shipping_address)}</textarea></div>
+        <div class="field"><label>Order No.</label><input id="es-ordernum" value="${escape(s.order_number)}"></div>
+        <div class="field"><label>Vehicle Reg.</label><input id="es-reg" placeholder="e.g. AB12 CDE" value="${escape(s.vehicle_reg)}"></div>
+        <div class="field" style="grid-column:1/-1"><label>VIN number (optional)</label><input id="es-vin" placeholder="17 chars, e.g. WAUZZZ8K9CA123456" value="${escape(s.vin_number)}" style="font-family:ui-monospace,monospace;font-size:12px"></div>
+        <div class="field" style="grid-column:1/-1"><label>Notes</label><textarea id="es-notes" rows="2">${escape(s.notes)}</textarea></div>
+      </div>
+      <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
+        <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);margin-bottom:8px">Line items — click any field to edit price, qty or title (for discounts / partial refunds)</div>
+        <div id="es-items">
+          ${items.map(i => `
+            <div style="display:grid;grid-template-columns:1fr 70px 90px 90px 30px;gap:6px;margin-bottom:6px;align-items:center" data-itemid="${i.id}">
+              <input class="es-it-title" value="${escape(i.title)}" placeholder="Title">
+              <input class="es-it-qty" type="number" min="0" step="1" value="${i.qty}">
+              <input class="es-it-price" type="number" min="0" step="0.01" value="${parseFloat(i.unit_price).toFixed(2)}">
+              <div class="es-it-total" style="text-align:right;font-weight:600;font-size:13px">£${parseFloat(i.line_total).toFixed(2)}</div>
+              <div></div>
+            </div>
+          `).join('')}
+        </div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Editing line items recalculates the order total. VAT proportion is preserved.</div>
+      </div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Save changes', primary: true, onClick: () => submitEditSale(id) },
+    ],
+  });
+  // Live-recalc line totals as the user types
+  document.querySelectorAll('#es-items > div').forEach(row => {
+    const recalc = () => {
+      const q = parseFloat(row.querySelector('.es-it-qty').value) || 0;
+      const p = parseFloat(row.querySelector('.es-it-price').value) || 0;
+      row.querySelector('.es-it-total').textContent = '£' + (q * p).toFixed(2);
+    };
+    row.querySelector('.es-it-qty').addEventListener('input', recalc);
+    row.querySelector('.es-it-price').addEventListener('input', recalc);
+  });
+}
+
+async function submitEditSale(id) {
+  try {
+    // Save sale-level fields first
+    await Api.patch('/api/sales/' + id, {
+      customerName: el('es-name').value || null,
+      customerPhone: el('es-phone').value || null,
+      customerEmail: el('es-email').value || null,
+      shippingAddress: el('es-address').value || null,
+      orderNumber: el('es-ordernum').value || null,
+      vehicleReg: el('es-reg').value || null,
+      vinNumber: el('es-vin').value || null,
+      notes: el('es-notes').value || null,
+    });
+    // Then any per-line edits
+    const rows = document.querySelectorAll('#es-items > div');
+    for (const row of rows) {
+      const itemId = row.dataset.itemid;
+      const payload = {
+        title: row.querySelector('.es-it-title').value,
+        qty: parseInt(row.querySelector('.es-it-qty').value),
+        unitPrice: parseFloat(row.querySelector('.es-it-price').value),
+      };
+      await Api.patch(`/api/sales/${id}/items/${itemId}`, payload);
+    }
+    closeModal();
+    toast('Saved', 'success');
+    await Store.refresh('sales');
+    if (typeof renderSales === 'function' && State.page === 'sales') renderSales();
+  } catch (e) {
+    toast('Save failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+async function deleteSale(id, isEstimate) {
+  const label = isEstimate ? 'estimate' : 'invoice';
+  let restoreStock = false;
+  if (!isEstimate) {
+    restoreStock = confirm('Restore stock for this order? Click OK to add the items back to inventory, or Cancel to delete without changing stock.');
+  }
+  if (!confirm(`Permanently delete this ${label}? This cannot be undone.`)) return;
+  try {
+    const url = '/api/sales/' + id + (restoreStock ? '' : '?restoreStock=false');
+    await Api.delete(url);
+    toast(`${label[0].toUpperCase() + label.slice(1)} deleted${restoreStock ? ' · stock restored' : ''}`, 'success');
+    await Store.refresh('sales');
+    await Store.refresh('products');
+    if (typeof renderSales === 'function' && State.page === 'sales') renderSales();
+  } catch (e) {
+    toast('Delete failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
 async function openLinkProduct(saleId, itemId, sku, decrementStockEligible) {
-  // Suggest products that look similar to the SKU
   const tail = sku.split(/\s+-\s+|\s+:\s+/).pop().trim();
   const products = State.products || [];
   const tailUpper = tail.toUpperCase();
