@@ -894,8 +894,8 @@ function adaptReturn(r) {
     id: r.id,
     saleId: r.sale_id,
     productId: r.product_id,
-    sku: r.sku,
-    title: r.title,
+    sku: r.sku || r.item_sku,
+    title: r.title || r.item_title,
     channel: r.channel,
     qty: r.qty,
     reason: r.reason,
@@ -903,6 +903,7 @@ function adaptReturn(r) {
     refundAmount: parseFloat(r.refund_amount || 0),
     status: r.status,
     notes: r.notes,
+    photoCount: r.photo_count || 0,
     photos: [],
     date: r.created_at,
     respondBy: r.respond_by || null,
@@ -910,6 +911,10 @@ function adaptReturn(r) {
     externalReturnId: r.external_return_id || null,
     buyerUsername: r.buyer_username || null,
     externalOrderId: r.external_order_id || null,
+    invoiceNumber: r.invoice_number || null,
+    handledByName: r.handled_by_name || null,
+    closedAt: r.closed_at || null,
+    lastSyncedAt: r.last_synced_at || null,
   };
 }
 function adaptTask(t) {
@@ -2111,75 +2116,251 @@ function renderReturns() {
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
-        <div><h1>Returns</h1><div class="desc">Live returns from Shopify and eBay, plus walk-in returns</div></div>
+        <div><h1>Returns</h1><div class="desc">Auto-synced from eBay every 15 min. New cases &amp; state changes appear in 🔔 notifications. Click any card for details.</div></div>
         <div class="actions">
-          <button class="btn btn-outline" onclick="syncEbayReturns()" title="Scan eBay for refunds and cancellations from the last 60 days">↩️ Pull from eBay</button>
+          <button class="btn btn-outline" onclick="syncEbayReturns()" title="Pull return cases from eBay right now">↩️ Pull from eBay</button>
           <button class="btn btn-primary" onclick="openReturnModal()">+ Log return</button>
         </div>
       </div>
+      <div id="ret-stats" class="grid-4" style="margin-bottom:14px"></div>
       <div class="seg" style="margin-bottom:14px">
-        <button class="active" data-rfilter="all" onclick="filterReturns('all')">All</button>
-        <button data-rfilter="pending" onclick="filterReturns('pending')">Pending</button>
-        <button data-rfilter="received" onclick="filterReturns('received')">Received</button>
-        <button data-rfilter="resolved" onclick="filterReturns('resolved')">Resolved</button>
+        <button class="active" data-rfilter="open">Open</button>
+        <button data-rfilter="received">Received</button>
+        <button data-rfilter="processed">Processed</button>
+        <button data-rfilter="closed">Closed</button>
+        <button data-rfilter="all">All</button>
       </div>
       <div id="ret-list"></div>
     </div>
   `;
-  filterReturns('all');
+  document.querySelectorAll('[data-rfilter]').forEach(b => b.addEventListener('click', () => filterReturns(b.dataset.rfilter)));
+  filterReturns('open');
 }
+
+function paintReturnStats() {
+  const counts = State.returns.reduce((acc, r) => { acc[r.status] = (acc[r.status]||0) + 1; return acc; }, {});
+  const overdue = State.returns.filter(r => r.status === 'open' && r.respondBy && new Date(r.respondBy) < new Date()).length;
+  const dueSoon = State.returns.filter(r => {
+    if (r.status !== 'open' || !r.respondBy) return false;
+    const h = (new Date(r.respondBy) - new Date()) / 3600000;
+    return h >= 0 && h < 48;
+  }).length;
+  el('ret-stats').innerHTML = `
+    <div class="stat"><div class="label">Open cases</div><div class="value">${counts.open || 0}</div><div class="delta">${overdue ? overdue + ' overdue' : 'On track'}</div></div>
+    <div class="stat"><div class="label">Due within 48h</div><div class="value">${dueSoon}</div><div class="delta">Action soon</div></div>
+    <div class="stat"><div class="label">Received</div><div class="value">${counts.received || 0}</div><div class="delta">Awaiting decision</div></div>
+    <div class="stat"><div class="label">Closed (30d)</div><div class="value">${(counts.closed || 0) + (counts.processed || 0)}</div><div class="delta">Resolved</div></div>
+  `;
+}
+
+function deadlineBadge(respondBy) {
+  if (!respondBy) return '';
+  const ms = new Date(respondBy).getTime() - Date.now();
+  const hours = ms / 3600000;
+  const days = Math.floor(hours / 24);
+  if (hours < 0) {
+    const overH = Math.abs(Math.floor(hours));
+    const label = overH >= 24 ? `${Math.floor(overH/24)}d overdue` : `${overH}h overdue`;
+    return `<span class="pill red" style="font-weight:600">⚠ ${label}</span>`;
+  }
+  if (hours < 24) return `<span class="pill red" style="font-weight:600">⏰ ${Math.max(1, Math.floor(hours))}h to reply</span>`;
+  if (hours < 48) return `<span class="pill amber" style="font-weight:600">⏰ ${days}d to reply</span>`;
+  return `<span class="pill blue">⏰ ${days}d to reply</span>`;
+}
+
 function filterReturns(f) {
   document.querySelectorAll('[data-rfilter]').forEach(b => b.classList.toggle('active', b.dataset.rfilter === f));
+  paintReturnStats();
   const items = f === 'all' ? State.returns : State.returns.filter(r => r.status === f);
-  el('ret-list').innerHTML = items.length ? items.map(r => {
-    // Deadline badge — for eBay returns the seller has a response window.
-    // eBay's standard buyer-protection requires response within 3 business days.
-    let deadlineBadge = '';
-    if (r.respondBy) {
-      const ms = new Date(r.respondBy).getTime() - Date.now();
-      const hoursLeft = ms / (1000 * 60 * 60);
-      const daysLeft = Math.floor(hoursLeft / 24);
-      const colour = hoursLeft < 0 ? 'red' : hoursLeft < 24 ? 'red' : hoursLeft < 48 ? 'amber' : 'blue';
-      const label = hoursLeft < 0
-        ? `⚠ Overdue by ${Math.abs(Math.floor(hoursLeft / 24)) || Math.abs(Math.floor(hoursLeft))}h`
-        : hoursLeft < 24
-        ? `⏰ Reply within ${Math.max(1, Math.floor(hoursLeft))}h`
-        : `⏰ ${daysLeft}d to reply`;
-      deadlineBadge = `<span class="pill ${colour}" style="font-weight:600">${label}</span>`;
-    }
-    const statusPill = r.status === 'open' ? 'amber'
-                     : r.status === 'received' ? 'blue'
-                     : r.status === 'processed' ? 'green'
-                     : r.status === 'closed' ? '' : 'amber';
+  if (!items.length) {
+    el('ret-list').innerHTML = `<div class="empty"><div class="t">No ${f === 'all' ? '' : f + ' '}returns</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">${f === 'open' ? 'Hit "↩️ Pull from eBay" to refresh.' : ''}</div></div>`;
+    return;
+  }
+  const statusPill = (s) => s === 'open' ? 'amber' : s === 'received' ? 'blue' : s === 'processed' ? 'green' : '';
+  const statusLabel = (s) => s === 'open' ? 'Open' : s === 'received' ? 'Received' : s === 'processed' ? 'Processed' : 'Closed';
+
+  el('ret-list').innerHTML = items.map(r => {
+    const overdue = r.respondBy && r.status === 'open' && new Date(r.respondBy) < new Date();
+    const itemLabel = r.title || '(item not linked)';
+    const skuLabel = r.sku ? ` · <span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(r.sku)}</span>` : '';
     return `
-    <div class="card" style="margin-bottom:12px;${r.respondBy && new Date(r.respondBy) < new Date() ? 'border-left:3px solid var(--red)' : ''}">
+    <div class="card return-card" style="margin-bottom:10px;cursor:pointer;${overdue ? 'border-left:3px solid var(--red)' : ''}" onclick="openReturnDetail(${r.id})">
       <div class="card-body" style="padding:14px">
         <div style="display:flex;align-items:flex-start;gap:12px">
-          <div style="flex:1">
-            <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
               ${channelPill(r.channel)}
-              <span class="pill ${statusPill}">${r.status}</span>
-              ${deadlineBadge}
-              <span style="font-size:12px;color:var(--ink-soft)">${fmtDate(r.date)}</span>
+              <span class="pill ${statusPill(r.status)}">${statusLabel(r.status)}</span>
+              ${deadlineBadge(r.respondBy)}
+              ${r.photoCount ? `<span class="pill" style="background:var(--bg-soft);color:var(--ink-soft)">📷 ${r.photoCount}</span>` : ''}
+              <span style="font-size:11px;color:var(--ink-soft);margin-left:auto">${fmtDate(r.date)}</span>
             </div>
-            <div style="font-weight:600">${r.title || '(item not linked)'}</div>
-            <div style="color:var(--ink-soft);font-size:12px">${r.sku || '—'}${r.buyerUsername ? ' · buyer <strong style="color:var(--ink)">' + r.buyerUsername + '</strong>' : ''}${r.externalOrderId ? ' · eBay order <span style="font-family:ui-monospace,monospace;font-size:11px">' + r.externalOrderId + '</span>' : ''}</div>
-            <div style="margin-top:6px;font-size:13px"><strong>Reason:</strong> ${r.reason || '—'}</div>
-            ${r.externalState ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">eBay state: ${r.externalState}</div>` : ''}
+            <div style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(itemLabel)}</div>
+            <div style="color:var(--ink-soft);font-size:12px;margin-top:2px">
+              ${skuLabel ? skuLabel : ''}
+              ${r.buyerUsername ? ` ${skuLabel ? '·' : ''} buyer <strong style="color:var(--ink)">${escapeHtml(r.buyerUsername)}</strong>` : ''}
+              ${r.externalOrderId ? ` · order <span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(r.externalOrderId)}</span>` : ''}
+            </div>
+            <div style="margin-top:6px;font-size:13px"><strong>Reason:</strong> ${escapeHtml(r.reason || '—')}</div>
             ${r.refundAmount > 0 ? `<div style="font-size:12px;margin-top:2px"><strong>Refund:</strong> ${gbp(r.refundAmount)}</div>` : ''}
-            ${r.notes ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:4px">${r.notes}</div>`:''}
-            ${r.photos && r.photos.length ? `<div class="return-photos">${r.photos.map(p=>`<img src="${p}">`).join('')}</div>` : ''}
           </div>
-          <div style="display:flex;flex-direction:column;gap:6px">
-            ${r.externalReturnId ? `<a class="btn btn-outline btn-sm" href="https://www.ebay.co.uk/sh/ord/details?mode=RT&srn=${r.externalReturnId}" target="_blank" style="text-decoration:none">Open on eBay →</a>` : ''}
-            ${r.status==='open' ? `<button class="btn btn-outline btn-sm" onclick="advanceReturn('${r.id}','received')">Mark received</button>`:''}
-            ${r.status==='received' ? `<button class="btn btn-outline btn-sm" onclick="advanceReturn('${r.id}','processed')">Mark processed</button>`:''}
-            <button class="btn btn-ghost btn-sm" onclick="addReturnPhoto('${r.id}')">+ Photo</button>
+          <div style="display:flex;flex-direction:column;gap:5px;flex-shrink:0">
+            ${r.externalReturnId ? `<a class="btn btn-ghost btn-sm" href="https://www.ebay.co.uk/sh/ord/details?mode=RT&srn=${r.externalReturnId}" target="_blank" onclick="event.stopPropagation()" style="text-decoration:none;font-size:11px">Open on eBay →</a>` : ''}
           </div>
         </div>
       </div>
     </div>
-  `}).join('') : '<div class="empty"><div class="t">No returns in this view</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Click "↩️ Pull from eBay" above to sync from eBay.</div></div>';
+  `}).join('');
+}
+
+async function openReturnDetail(id) {
+  const r = State.returns.find(x => x.id == id);
+  if (!r) return;
+  // Fetch the latest detail including photos
+  let detail = null;
+  try { detail = await Api.get('/api/returns/' + id); } catch (e) { /* fall back to State */ }
+  const photos = detail?.photos || [];
+
+  const statusLabel = (s) => s === 'open' ? 'Open' : s === 'received' ? 'Received' : s === 'processed' ? 'Processed' : 'Closed';
+  const statusPill = (s) => s === 'open' ? 'amber' : s === 'received' ? 'blue' : s === 'processed' ? 'green' : '';
+
+  modal({
+    title: r.title ? `Return: ${r.title.slice(0, 60)}` : 'Return details',
+    body: `
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+        ${channelPill(r.channel)}
+        <span class="pill ${statusPill(r.status)}">${statusLabel(r.status)}</span>
+        ${deadlineBadge(r.respondBy)}
+        ${r.externalState ? `<span class="pill" style="background:var(--bg-soft);color:var(--ink-soft);font-size:10px">eBay: ${r.externalState}</span>` : ''}
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;font-size:12.5px">
+        ${r.buyerUsername ? `<div><div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600">Buyer</div><div style="font-weight:500">${escapeHtml(r.buyerUsername)}</div></div>` : ''}
+        ${r.externalOrderId ? `<div><div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600">eBay Order</div><div style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(r.externalOrderId)}</div></div>` : ''}
+        ${r.externalReturnId ? `<div><div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600">eBay Return ID</div><div style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(r.externalReturnId)}</div></div>` : ''}
+        ${r.invoiceNumber ? `<div><div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600">Invoice</div><div style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(r.invoiceNumber)}</div></div>` : ''}
+        <div><div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600">Qty</div><div>${r.qty}</div></div>
+        ${r.refundAmount > 0 ? `<div><div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600">Refund</div><div style="font-weight:600">${gbp(r.refundAmount)}</div></div>` : ''}
+        ${r.respondBy ? `<div style="grid-column:1/-1"><div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600">Respond by</div><div>${new Date(r.respondBy).toLocaleString('en-GB', {dateStyle:'medium', timeStyle:'short'})}</div></div>` : ''}
+      </div>
+
+      <div style="border-top:1px solid var(--line);padding-top:12px;margin-bottom:14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600;margin-bottom:4px">Item</div>
+        <div style="font-weight:500;font-size:13px">${escapeHtml(r.title || '(item not linked)')}</div>
+        ${r.sku ? `<div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escapeHtml(r.sku)}</div>` : ''}
+      </div>
+
+      <div style="border-top:1px solid var(--line);padding-top:12px;margin-bottom:14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600;margin-bottom:4px">Buyer reason</div>
+        <div style="font-size:13px">${escapeHtml(r.reason || '—')}</div>
+      </div>
+
+      <div style="border-top:1px solid var(--line);padding-top:12px;margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600">Internal notes</div>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('rd-notes').focus()" style="font-size:11px">✏️ Edit</button>
+        </div>
+        <textarea id="rd-notes" rows="3" style="width:100%;font-size:13px" placeholder="Add internal notes — anything that helps staff handle this return…">${escapeHtml(r.notes || '')}</textarea>
+      </div>
+
+      <div style="border-top:1px solid var(--line);padding-top:12px;margin-bottom:14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600;margin-bottom:6px">Photos${photos.length ? ' (' + photos.length + ')' : ''}</div>
+        <div id="rd-photos" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          ${photos.length ? photos.map(p => `<a href="/uploads/returns/${p.photo_path.split('/').pop()}" target="_blank"><img src="/uploads/returns/${p.photo_path.split('/').pop()}" style="width:80px;height:80px;object-fit:cover;border-radius:6px;border:1px solid var(--line)"></a>`).join('') : '<div style="font-size:12px;color:var(--ink-soft);font-style:italic">No photos yet</div>'}
+        </div>
+        <label class="btn btn-outline btn-sm" style="cursor:pointer">
+          📷 Add photo
+          <input type="file" accept="image/*" capture="environment" multiple style="display:none" onchange="uploadReturnPhotos(${r.id}, this.files)">
+        </label>
+      </div>
+
+      <div style="border-top:1px solid var(--line);padding-top:12px;margin-bottom:14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600;margin-bottom:6px">Resolution &amp; stock outcome</div>
+        <select id="rd-resolution" style="width:100%" onchange="updateResolutionHint()">
+          <option value="pending" ${r.resolution === 'pending' || !r.resolution ? 'selected' : ''}>Pending — awaiting decision</option>
+          <option value="restock" ${r.resolution === 'restock' ? 'selected' : ''}>✅ Returned in original condition → restock</option>
+          <option value="relist_used" ${r.resolution === 'relist_used' ? 'selected' : ''}>♻️ Damaged/altered → relist as used or damaged stock</option>
+          <option value="dispose" ${r.resolution === 'dispose' ? 'selected' : ''}>🗑️ Damaged beyond repair → scrap (no stock change)</option>
+          <option value="refund" ${r.resolution === 'refund' ? 'selected' : ''}>💸 Refund only — item kept by buyer (no stock change)</option>
+          <option value="replacement" ${r.resolution === 'replacement' ? 'selected' : ''}>📦 Replacement sent (no stock change)</option>
+        </select>
+        <div id="rd-resolution-hint" style="font-size:11px;color:var(--ink-soft);margin-top:6px;line-height:1.5"></div>
+      </div>
+    `,
+    actions: [
+      { label: 'Close', onClick: closeModal },
+      ...(r.status === 'open' ? [{ label: 'Mark received', onClick: () => advanceReturn(r.id, 'received', true) }] : []),
+      ...(r.status === 'received' ? [{ label: 'Mark processed', onClick: () => advanceReturn(r.id, 'processed', true) }] : []),
+      { label: 'Save', primary: true, onClick: () => saveReturnDetail(r.id) },
+    ],
+  });
+  // Initialise the resolution hint after the modal renders
+  setTimeout(updateResolutionHint, 0);
+}
+
+async function saveReturnDetail(id) {
+  const notes = el('rd-notes')?.value || '';
+  const resolution = el('rd-resolution')?.value || 'pending';
+  try {
+    await Api.patch('/api/returns/' + id, { notes, resolution });
+    toast('Saved', 'success');
+    closeModal();
+    await Store.refresh('returns');
+    if (State.page === 'returns') {
+      const active = document.querySelector('[data-rfilter].active')?.dataset.rfilter || 'open';
+      filterReturns(active);
+    }
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+function updateResolutionHint() {
+  const sel = el('rd-resolution');
+  const hint = el('rd-resolution-hint');
+  if (!sel || !hint) return;
+  const messages = {
+    restock: '✓ When you mark this return <strong>Processed</strong>, the item qty will be added back to your warehouse stock automatically.',
+    relist_used: 'No stock change. Create a new listing for the used/damaged item manually on eBay/Shopify with the appropriate condition (Used, Refurbished, For Parts).',
+    dispose: 'No stock change. Item is treated as scrap. Logged in the return record only.',
+    refund: 'No stock change. Buyer keeps the item — typically used for low-value items where return shipping costs more than the item.',
+    replacement: 'No stock change. A separate replacement order will need to be created if not already done.',
+    pending: 'Awaiting your decision. Make a choice before marking Processed.',
+  };
+  hint.innerHTML = messages[sel.value] || '';
+}
+
+async function advanceReturn(id, status, saveFirst) {
+  try {
+    if (saveFirst) {
+      const notes = el('rd-notes')?.value;
+      const resolution = el('rd-resolution')?.value;
+      await Api.patch('/api/returns/' + id, { status, notes, resolution });
+    } else {
+      await Api.patch('/api/returns/' + id, { status });
+    }
+    toast(`Marked ${status}`, 'success');
+    closeModal();
+    await Store.refresh('returns');
+    if (State.page === 'returns') {
+      const active = document.querySelector('[data-rfilter].active')?.dataset.rfilter || 'open';
+      filterReturns(active);
+    }
+  } catch (e) { toast('Update failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+async function uploadReturnPhotos(id, files) {
+  if (!files || !files.length) return;
+  toast(`Uploading ${files.length} photo${files.length > 1 ? 's' : ''}…`, 'info');
+  try {
+    for (const f of files) {
+      const fd = new FormData();
+      fd.append('photo', f);
+      const r = await fetch('/api/returns/' + id + '/photos', { method: 'POST', body: fd, credentials: 'include' });
+      if (!r.ok) throw new Error(`Upload failed (${r.status})`);
+    }
+    toast(`Uploaded ${files.length} photo${files.length > 1 ? 's' : ''}`, 'success');
+    await Store.refresh('returns');
+    openReturnDetail(id); // reopen with the new photos visible
+  } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
 }
 function openReturnModal() {
   modal({
@@ -2224,31 +2405,6 @@ function openReturnModal() {
       { label: 'Cancel', onClick: closeModal }
     ]
   });
-}
-async function advanceReturn(id, status) {
-  // Map legacy status terms to API
-  const statusMap = { pending: 'open', received: 'received', processed: 'processed', closed: 'closed' };
-  try {
-    await Api.patch('/api/returns/' + id, { status: statusMap[status] || status });
-    await Store.refresh('returns');
-    toast('Return marked ' + status, 'success');
-    renderReturns(); refreshNavCounts();
-  } catch (e) { toast('Failed: ' + e.message, 'error'); }
-}
-function addReturnPhoto(id) {
-  const i = document.createElement('input');
-  i.type = 'file'; i.accept = 'image/*'; i.capture = 'environment';
-  i.onchange = async () => {
-    try {
-      const fd = new FormData();
-      fd.append('photo', i.files[0]);
-      await Api.postForm('/api/returns/' + id + '/photos', fd);
-      await Store.refresh('returns');
-      toast('Photo added', 'success');
-      renderReturns();
-    } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
-  };
-  i.click();
 }
 
 /* ==========================================================
@@ -4931,20 +5087,29 @@ async function backfillEbayAddresses() {
 }
 
 async function syncEbayReturns() {
-  if (!confirm('Scan recent eBay orders for cancellations and refunds, and create Return rows for any found. Continue?')) return;
   toast('Scanning eBay…', 'info', 4000);
   try {
-    const r = await Api.post('/api/returns/sync-ebay', { days: 60 });
+    const r = await Api.post('/api/returns/sync-ebay', { days: 90 });
     const lines = [];
-    lines.push(`Found ${r.scanned} cancelled/refunded eBay orders.`);
-    lines.push(`✓ ${r.created} new return${r.created === 1 ? '' : 's'} created`);
-    if (r.alreadyExists) lines.push(`• ${r.alreadyExists} already tracked`);
-    if (r.noLocalSale) lines.push(`• ${r.noLocalSale} couldn't be matched (not in our DB)`);
+    lines.push(`Fetched ${r.fetched} return${r.fetched === 1 ? '' : 's'} from eBay.`);
+    if (r.created) lines.push(`✓ ${r.created} new`);
+    if (r.updated) lines.push(`↻ ${r.updated} updated`);
+    if (r.notifications) lines.push(`🔔 ${r.notifications} notification${r.notifications === 1 ? '' : 's'}`);
+    if (r.noLocalSale) lines.push(`• ${r.noLocalSale} unmatched (not in our DB)`);
+    if (!r.created && !r.updated) lines.push('Everything up to date.');
     toast(lines.join('\n'), 'success', 7000);
     await Store.refresh('returns');
-    if (State.page === 'returns' && typeof renderReturns === 'function') renderReturns();
+    await Store.refresh('notifications');
+    if (State.page === 'returns') {
+      const active = document.querySelector('[data-rfilter].active')?.dataset.rfilter || 'open';
+      filterReturns(active);
+    }
   } catch (e) {
-    toast('Failed: ' + (e.data?.message || e.message), 'error');
+    if (e.data?.error === 'post_order_api_unavailable') {
+      toast(e.data.message, 'error', 10000);
+    } else {
+      toast('Failed: ' + (e.data?.message || e.message), 'error');
+    }
   }
 }
 
