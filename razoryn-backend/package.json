@@ -25,6 +25,7 @@
     "dotenv": "^16.4.7",
     "cors": "^2.8.5",
     "express-rate-limit": "^7.4.1",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "xlsx": "^0.18.5"
   }
 }
