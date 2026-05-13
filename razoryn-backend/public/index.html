@@ -852,27 +852,41 @@ function adaptProduct(p) {
   };
 }
 function adaptSale(s) {
-  // API channel values: shopify | ebay_em | ebay_cl | direct_cash | direct_bank
-  // Legacy UI uses:    shopify | ebay | cash | bank
   const channelMap = {
     shopify: 'shopify', ebay_em: 'ebay', ebay_cl: 'ebay',
     direct_cash: 'cash', direct_bank: 'bank',
   };
+  // Compose a meaningful item label.
+  // Single-item sales → just the title. Multi-item → "Title +N more"
+  const itemCount = s.item_count || 0;
+  const firstTitle = s.first_item_title;
+  const itemLabel = firstTitle
+    ? (itemCount > 1 ? `${firstTitle} +${itemCount - 1} more` : firstTitle)
+    : (s.notes || '(no items)');
   return {
     id: s.id,
     productId: null,
-    sku: s.sku || '',
-    title: s.title || s.notes || '(multi-item sale)',
+    sku: s.first_item_sku || s.sku || '',
+    title: itemLabel,
+    itemCount,
     channel: channelMap[s.channel] || s.channel,
     amount: parseFloat(s.total),
     date: s.occurred_at,
     customer: s.customer_name || '—',
     customerEmail: s.customer_email || '',
+    customerPhone: s.customer_phone || '',
+    shippingAddress: s.shipping_address || '',
+    orderNumber: s.order_number || '',
+    externalOrderId: s.external_order_id || '',
     invoice: s.invoice_number || s.payment_reference || (s.external_order_id ? '#' + s.external_order_id : '—'),
     apiChannel: s.channel,
     isEstimate: !!s.is_estimate,
     paymentMethod: s.payment_method,
     paymentReference: s.payment_reference,
+    status: s.status,
+    subtotal: parseFloat(s.subtotal || 0),
+    vat: parseFloat(s.vat || 0),
+    shipping: parseFloat(s.shipping || 0),
   };
 }
 function adaptReturn(r) {
@@ -2200,10 +2214,11 @@ function renderSales() {
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
-        <div><h1>Sales</h1><div class="desc">Unified sales across all channels · per-channel CSV for accounting</div></div>
+        <div><h1>Sales</h1><div class="desc">Unified sales across all channels · click a row for details</div></div>
         <div class="actions">
           <button class="btn btn-primary admin-only" onclick="openManualSale()">+ New sale / estimate</button>
-          <button class="btn btn-outline" onclick="exportSalesCsv()">⬇ Export CSV</button>
+          <button class="btn btn-outline" onclick="exportSalesXlsx()" title="Excel workbook with one sheet per channel">⬇ Excel (per-channel)</button>
+          <button class="btn btn-outline" onclick="exportSalesCsv()" title="Single CSV — current filter only">CSV</button>
           <button class="btn btn-outline" onclick="syncNow()">↻ Pull latest</button>
         </div>
       </div>
@@ -2256,18 +2271,18 @@ function renderSales() {
     const subset = filter==='all' ? State.sales : State.sales.filter(s => s.channel === filter);
     State._salesFiltered = subset;
     el('sales-tbody').innerHTML = subset.length ? subset.map(s => `
-      <tr>
-        <td><input type="checkbox" class="sale-row-check" data-sid="${s.id}" ${State.salesSelected.has(s.id)?'checked':''} onchange="salesToggleRow('${s.id}',this.checked)"></td>
+      <tr style="cursor:pointer" onclick="if(!event.target.closest('button,input,a'))openSaleDetail('${s.id}')">
+        <td onclick="event.stopPropagation()"><input type="checkbox" class="sale-row-check" data-sid="${s.id}" ${State.salesSelected.has(s.id)?'checked':''} onchange="salesToggleRow('${s.id}',this.checked)"></td>
         <td>${fmtDate(s.date)}</td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${s.invoice||'—'}</td>
-        <td>${channelPill(s.channel)}</td>
+        <td>${channelPill(s.channel)}${s.isEstimate ? ' <span class="pill amber" style="font-size:10px;margin-left:4px">ESTIMATE</span>' : ''}</td>
         <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
         <td>${s.customer}</td>
         <td class="num"><strong>${gbp(s.amount)}</strong></td>
-        <td>
-          <button class="btn btn-ghost btn-sm" onclick="printSingleInvoice('${s.id}')" title="Print invoice">🖨</button>
-          <button class="btn btn-ghost btn-sm" onclick="emailSingleInvoice('${s.id}')" title="Email invoice to customer">✉</button>
-          ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Convert to paid invoice" style="color:var(--green)">✓ Pay</button>` : ''}
+        <td onclick="event.stopPropagation()" style="white-space:nowrap">
+          <button class="btn btn-ghost btn-sm" onclick="printSingleInvoice('${s.id}')" title="Open invoice in new tab to print or save as PDF">🖨 Print</button>
+          <button class="btn btn-ghost btn-sm" onclick="emailSingleInvoice('${s.id}')" title="Email this invoice to the customer">✉ Email</button>
+          ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Mark as paid → decrements stock, generates paid invoice" style="color:var(--green)">✓ Mark paid</button>` : ''}
         </td>
       </tr>
     `).join('') : '<tr><td colspan="8"><div class="empty"><div class="t">No sales</div></div></td></tr>';
@@ -2315,6 +2330,76 @@ function printSingleInvoice(id) {
   if (!w) toast('Pop-up blocked. Allow pop-ups to print invoices.', 'error');
 }
 
+async function openSaleDetail(id) {
+  let data;
+  try {
+    data = await Api.get('/api/sales/' + id);
+  } catch (e) { toast('Failed to load: ' + e.message, 'error'); return; }
+  const s = data.sale;
+  const items = data.items || [];
+  const fmt = (n) => '£' + parseFloat(n || 0).toFixed(2);
+  const channelLabel = (s.channel || '').replace(/_/g, ' ');
+  const escape = (v) => v == null ? '' : String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const dateStr = s.occurred_at ? new Date(s.occurred_at).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' }) : '—';
+  modal({
+    title: (s.is_estimate ? 'Estimate' : 'Order') + ' #' + (s.invoice_number || s.payment_reference || s.external_order_id || s.id),
+    body: `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+        <div>
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600">Date & channel</div>
+          <div style="font-size:13px;margin-top:4px">${dateStr}</div>
+          <div style="font-size:12px;color:var(--ink-soft);text-transform:capitalize">${escape(channelLabel)} ${s.is_estimate ? '· <span style="color:var(--amber);font-weight:600">ESTIMATE</span>' : '· ' + escape(s.status || 'paid')}</div>
+        </div>
+        <div>
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600">Payment</div>
+          <div style="font-size:13px;margin-top:4px;text-transform:capitalize">${escape((s.payment_method || '—').toUpperCase())}</div>
+          <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escape(s.payment_reference || '')}</div>
+        </div>
+        ${s.external_order_id ? `<div><div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600">Channel order ID</div><div style="font-size:13px;margin-top:4px;font-family:ui-monospace,monospace">${escape(s.external_order_id)}</div></div>` : ''}
+        ${s.order_number && s.order_number !== s.external_order_id ? `<div><div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600">Order no.</div><div style="font-size:13px;margin-top:4px">${escape(s.order_number)}</div></div>` : ''}
+        ${s.vehicle_reg ? `<div><div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600">Vehicle reg.</div><div style="font-size:13px;margin-top:4px;font-weight:600">${escape(s.vehicle_reg)}</div></div>` : ''}
+      </div>
+
+      <div style="border-top:1px solid var(--line);padding-top:12px;margin-bottom:14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600;margin-bottom:6px">Customer</div>
+        <div style="font-size:13px;font-weight:600">${escape(s.customer_name || 'Walk-in customer')}</div>
+        ${s.shipping_address ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:4px;white-space:pre-line">${escape(s.shipping_address)}</div>` : '<div style="font-size:12px;color:var(--ink-soft);font-style:italic;margin-top:4px">No delivery address on file</div>'}
+        ${s.customer_phone ? `<div style="font-size:12px;margin-top:4px">📞 ${escape(s.customer_phone)}</div>` : ''}
+        ${s.customer_email ? `<div style="font-size:12px;margin-top:2px">✉ ${escape(s.customer_email)}</div>` : ''}
+      </div>
+
+      <div style="border-top:1px solid var(--line);padding-top:12px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600;margin-bottom:8px">Items (${items.length})</div>
+        ${items.map(i => `
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px dashed var(--line);font-size:13px">
+            <div style="flex:1">
+              <div style="font-weight:500">${escape(i.title)}</div>
+              <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escape(i.sku)}</div>
+            </div>
+            <div style="text-align:right;min-width:140px">
+              <div>${i.qty} × ${fmt(i.unit_price)}</div>
+              <div style="font-weight:600;margin-top:2px">${fmt(i.line_total)}</div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+
+      <div style="margin-top:14px;display:grid;grid-template-columns:1fr 180px;gap:8px;font-size:13px">
+        <div style="text-align:right;color:var(--ink-soft)">Subtotal</div><div style="text-align:right">${fmt(s.subtotal)}</div>
+        ${parseFloat(s.vat) > 0 ? `<div style="text-align:right;color:var(--ink-soft)">VAT</div><div style="text-align:right">${fmt(s.vat)}</div>` : ''}
+        ${parseFloat(s.shipping) > 0 ? `<div style="text-align:right;color:var(--ink-soft)">Shipping</div><div style="text-align:right">${fmt(s.shipping)}</div>` : ''}
+        <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px">Total</div>
+        <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px">${fmt(s.total)}</div>
+      </div>
+    `,
+    actions: [
+      { label: 'Close', onClick: closeModal },
+      { label: '✉ Email', onClick: () => { closeModal(); emailSingleInvoice(id); } },
+      { label: '🖨 Print / PDF', primary: true, onClick: () => { closeModal(); printSingleInvoice(id); } },
+    ],
+  });
+}
+
 async function emailSingleInvoice(id) {
   const sale = State.sales.find(s => s.id == id);
   const defaultEmail = sale?.customerEmail || '';
@@ -2351,21 +2436,36 @@ async function convertEstimateToInvoice(id) {
 function exportSalesCsv() {
   const active = document.querySelector('[data-sf].active');
   const filter = active?.dataset.sf || 'all';
-  // Frontend uses 'shopify' | 'ebay' | 'cash' | 'bank', but the backend column is more granular.
-  // For 'ebay' filter, we want both 'ebay_em' and 'ebay_cl'. For 'cash' → 'direct_cash', 'bank' → 'direct_bank'.
   const channelMap = { shopify: 'shopify', cash: 'direct_cash', bank: 'direct_bank' };
   let qs = '';
-  if (filter !== 'all' && filter !== 'ebay') {
-    qs = '?channel=' + encodeURIComponent(channelMap[filter] || filter);
-  } else if (filter === 'ebay') {
-    qs = '?channel=ebay_em'; // For now CSV only handles one channel at a time; eBay = ebay_em
-  }
-  // Trigger download by opening in new tab — server returns content-disposition: attachment
+  if (filter !== 'all' && filter !== 'ebay') qs = '?channel=' + encodeURIComponent(channelMap[filter] || filter);
+  else if (filter === 'ebay') qs = '?channel=ebay_em';
   const a = document.createElement('a');
   a.href = '/api/sales/export.csv' + qs;
   a.download = 'sales.csv';
   document.body.appendChild(a); a.click(); a.remove();
   toast('Generating CSV…', 'info');
+}
+
+function exportSalesXlsx() {
+  toast('Generating Excel workbook…', 'info');
+  // Use fetch + blob so we can show errors (xlsx route may return JSON error)
+  fetch('/api/sales/export.xlsx', { headers: API_TOKEN ? { Authorization: 'Bearer ' + API_TOKEN } : {} })
+    .then(async r => {
+      const ct = r.headers.get('content-type') || '';
+      if (!r.ok || ct.includes('application/json')) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.message || 'Export failed (status ' + r.status + ')');
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'sales-all-channels.xlsx';
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 100);
+      toast('Excel workbook downloaded', 'success');
+    })
+    .catch(e => toast(e.message, 'error'));
 }
 async function printSelectedInvoices() {
   const ids = Array.from(State.salesSelected);
@@ -2648,9 +2748,14 @@ function renderPricing() {
 function quotePrice(id) {
   const p = State.products.find(x => x.id == id);
   const cfg = State.pricingConfig || { cashDiscountPct: State.settings.cashDiscount || 10, bankTransferPct: 10, ebayBuyerProtectionMarkup: 0, shopifyFreeDeliveryOver: 50 };
-  const cashPrice = p.priceEbay * (1 - cfg.cashDiscountPct/100);
-  const bankPrice = p.priceEbay * (1 - cfg.bankTransferPct/100);
-  const ebayProtectedPrice = p.priceEbay * (1 + cfg.ebayBuyerProtectionMarkup/100);
+  // If price_ebay is missing (products imported from Shopify only), fall back to Shopify price
+  // as the eBay basis. This way Cash / Bank / eBay quotes still compute reasonably until
+  // eBay listings are mirrored back to populate price_ebay properly.
+  const ebayBasis = (p.priceEbay && p.priceEbay > 0) ? p.priceEbay : (p.priceShopify || 0);
+  const ebayBasisIsFromShopify = !(p.priceEbay && p.priceEbay > 0) && (p.priceShopify || 0) > 0;
+  const cashPrice = ebayBasis * (1 - cfg.cashDiscountPct/100);
+  const bankPrice = ebayBasis * (1 - cfg.bankTransferPct/100);
+  const ebayProtectedPrice = ebayBasis * (1 + cfg.ebayBuyerProtectionMarkup/100);
   el('pt-detail').innerHTML = `
     <div style="height:16px"></div>
     <div class="card">
@@ -2658,11 +2763,12 @@ function quotePrice(id) {
       <div class="card-body">
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
           <span class="pill ${totalQty(p)>0?'green':'red'}">${totalQty(p)>0 ? totalQty(p) + ' in stock' : 'Out of stock'}</span>
-          <span style="color:var(--ink-soft);font-size:13px">${p.location}</span>
+          <span style="color:var(--ink-soft);font-size:13px">${p.location || ''}</span>
         </div>
+        ${ebayBasisIsFromShopify ? `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ No eBay price on file — using Shopify price as the basis. Mirror this listing from eBay to set the proper eBay price.</div>` : ''}
         <div class="pt-result">
           <div class="pt-row featured">
-            <div><div class="ch-name">💰 Cash on collection</div><div class="ch-meta">eBay price minus ${cfg.cashDiscountPct}% — best price for the customer</div></div>
+            <div><div class="ch-name">💰 Cash on collection</div><div class="ch-meta">${ebayBasisIsFromShopify ? 'Shopify' : 'eBay'} price minus ${cfg.cashDiscountPct}% — best price for the customer</div></div>
             <div class="ch-price">${gbp(cashPrice)}</div>
           </div>
           <div class="pt-row">
@@ -2674,7 +2780,7 @@ function quotePrice(id) {
             <div class="ch-price">${gbp(ebayProtectedPrice)}</div>
           </div>
           <div class="pt-row">
-            <div><div class="ch-name">🏦 Bank transfer (trade)</div><div class="ch-meta">eBay price minus ${cfg.bankTransferPct}% — invoiced</div></div>
+            <div><div class="ch-name">🏦 Bank transfer (trade)</div><div class="ch-meta">${ebayBasisIsFromShopify ? 'Shopify' : 'eBay'} price minus ${cfg.bankTransferPct}% — invoiced</div></div>
             <div class="ch-price">${gbp(bankPrice)}</div>
           </div>
         </div>
@@ -3033,13 +3139,21 @@ function paintNotifs() {
   const list = el('notif-list');
   if (!list) return;
   list.innerHTML = State.notifications.length ? State.notifications.map(n => {
-    const icon = n.type === 'low-stock' ? '⚠️' : n.type === 'return' ? '↩️' : n.type === 'sync' ? '🔄' : '🔔';
+    const icon = (n.type === 'low_stock' || n.type === 'low-stock') ? '⚠️'
+               : n.type === 'return' ? '↩️'
+               : n.type === 'sync_error' ? '🔄'
+               : n.type === 'sale' ? '💰'
+               : '🔔';
+    const severityBg = n.severity === 'error' ? 'background:var(--red-light)'
+                     : n.severity === 'warn' ? 'background:var(--amber-light)'
+                     : '';
     return `
-    <div style="display:flex;align-items:flex-start;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);${n.read?'':'background:var(--red-light)'}">
+    <div style="display:flex;align-items:flex-start;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);${n.read ? '' : severityBg || 'background:var(--bg-soft)'}">
       <div style="font-size:20px">${icon}</div>
       <div style="flex:1">
-        <div style="font-weight:${n.read?500:600};font-size:13px">${n.message}</div>
-        <div style="color:var(--ink-soft);font-size:11px;margin-top:2px">${fmtDate(n.date)}</div>
+        <div style="font-weight:${n.read?500:600};font-size:13px">${n.title || '(untitled)'}</div>
+        ${n.body ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:3px">${n.body}</div>` : ''}
+        <div style="color:var(--ink-soft);font-size:11px;margin-top:4px">${fmtDate(n.date)}</div>
       </div>
       ${!n.read ? `<button class="btn btn-ghost btn-sm" onclick="markRead('${n.id}')">Mark read</button>`:''}
     </div>
@@ -4235,6 +4349,11 @@ function renderSettings() {
             <button class="btn btn-outline" onclick="resetSyncCursor()">Rewind cursor</button>
             <button class="btn btn-outline" onclick="syncNow()">↻ Sync now</button>
           </div>
+          <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+            <div style="font-size:13px;font-weight:600;margin-bottom:4px">Phone pricing showing £0?</div>
+            <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Pulls live eBay listing prices and populates them on your warehouse products. Only needed once — after this all phone-pricing quotes will show real eBay/cash/bank prices.</div>
+            <button class="btn btn-outline" onclick="hydrateEbayPrices()">💷 Populate eBay prices from live listings</button>
+          </div>
         </div>
       </div>
 
@@ -4393,6 +4512,18 @@ async function resetSyncCursor() {
     toast('Reset failed: ' + (e.data?.message || e.message), 'error');
   }
 }
+
+async function hydrateEbayPrices() {
+  if (!confirm('This will fetch all active eBay listings (~1-2 minutes) and update eBay prices on your warehouse products. Continue?')) return;
+  toast('Fetching eBay listings — this takes 1-2 minutes…', 'info', 5000);
+  try {
+    const r = await Api.post('/api/listings/hydrate-ebay-prices');
+    toast(`Done. Updated ${r.productsUpdated} products from ${r.listingsFound} eBay listings.`, 'success', 5000);
+    await Store.refresh('products');
+  } catch (e) {
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
 async function resetData() {
   // In production mode this is disabled — wiping a real DB requires using
   // psql or running `npm run seed -- --force` from the server.
@@ -4404,35 +4535,49 @@ async function resetData() {
    ========================================================== */
 function el(id) { return document.getElementById(id); }
 async function syncNow() {
-  toast('Syncing Shopify ↔ eBay…', 'info');
+  toast('Pulling new orders from Shopify and eBay, pushing stock to Shopify…', 'info');
   try {
     const result = await Api.post('/api/settings/sync-now');
-    const parts = [];
-    if (result.result?.shopify) {
-      const s = result.result.shopify;
-      parts.push(s.skipped ? 'Shopify orders: skipped (not configured)' : `Shopify orders: ${s.inserted ?? 0} new`);
+    const r = result.result || {};
+    const lines = [];
+    if (r.shopify) {
+      const s = r.shopify;
+      if (s.skipped) lines.push('• Shopify orders: not configured (set SHOPIFY env vars)');
+      else if (s.inserted > 0) lines.push(`✓ ${s.inserted} new Shopify order${s.inserted === 1 ? '' : 's'} imported`);
+      else lines.push('• Shopify: no new orders since last sync');
     }
-    if (result.result?.ebay) {
-      const e = result.result.ebay;
-      parts.push(e.skipped ? 'eBay orders: skipped' : `eBay orders: ${e.inserted ?? 0} new`);
+    if (r.ebay) {
+      const e = r.ebay;
+      if (e.skipped) lines.push('• eBay orders: not configured');
+      else if (e.inserted > 0) lines.push(`✓ ${e.inserted} new eBay order${e.inserted === 1 ? '' : 's'} imported`);
+      else lines.push('• eBay: no new orders since last sync');
     }
-    if (result.result?.shopifyStock) {
-      const ss = result.result.shopifyStock;
-      if (!ss.skipped) parts.push(`Stock pushed to Shopify: ${ss.pushed}/${ss.total}`);
+    if (r.shopifyStock && !r.shopifyStock.skipped) {
+      const ss = r.shopifyStock;
+      lines.push(`✓ Stock pushed to Shopify: ${ss.pushed} of ${ss.total} products`);
     }
-    toast('Sync complete · ' + (parts.join(' · ') || 'nothing to sync'), 'success');
+    const msg = lines.length
+      ? 'Sync complete:\n' + lines.join('\n')
+      : 'Sync complete. No new data.';
+    toast(msg, 'success', 6000);
     await Store.refreshAll();
     if (typeof renderDashboard === 'function' && State.page === 'dashboard') renderDashboard();
+    if (State.page === 'sales' && typeof renderSales === 'function') renderSales();
   } catch (e) {
-    toast('Sync failed: ' + (e.data?.message || e.message), 'error');
+    toast('Sync failed: ' + (e.data?.message || e.message), 'error', 6000);
   }
 }
-function toast(msg, type='') {
+function toast(msg, type='', duration=3000) {
   const t = document.createElement('div');
   t.className = 'toast ' + type;
+  // Support multi-line toasts
+  if (msg.includes('\n')) {
+    t.style.whiteSpace = 'pre-line';
+    t.style.lineHeight = '1.5';
+  }
   t.textContent = msg;
   el('toast-host').appendChild(t);
-  setTimeout(() => { t.style.opacity='0'; setTimeout(()=>t.remove(),200); }, 3000);
+  setTimeout(() => { t.style.opacity='0'; setTimeout(()=>t.remove(),200); }, duration);
 }
 function modal({ title, body, actions=[] }) {
   el('modal-title').textContent = title;
