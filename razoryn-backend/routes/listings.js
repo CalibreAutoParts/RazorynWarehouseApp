@@ -10,6 +10,19 @@ const router = express.Router();
 
 router.use(requireAuth);
 
+// GET /api/listings/debug-ebay-returns
+// Hits the Post-Order Returns API and dumps whatever eBay returns.
+// Useful to verify the AuthToken has access to the returns endpoint.
+router.get('/debug-ebay-returns', requireAdmin, async (req, res) => {
+  if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
+  try {
+    const data = await ebay.getAllRecentReturns(parseInt(req.query.days || 90));
+    res.json({ ok: true, ...data, count: (data.members || data.returns || []).length });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: 'failed', status: e.status, message: e.message, detail: e.detail });
+  }
+});
+
 // GET /api/listings/debug-ebay-order?orderId=...
 // Dumps the raw Trading-API GetOrders XML for one order so we can see WHICH fields are
 // actually present (vs. what our extractor is finding). Strips eBay seller token from output.
@@ -21,6 +34,120 @@ router.get('/debug-ebay-order', requireAdmin, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: 'failed', message: e.message });
   }
+});
+
+// GET /api/listings/link-status
+// Returns a unified view of every warehouse product and its links:
+//   - shopify_product_id (from products table, set by Shopify sync)
+//   - mirror_links row (ebay_item_id → shopify_product_id)
+// Each row has flags: linkedToShopify, linkedToEbay, plus the live SKU.
+// Used by the "Link Status" tab to show what's linked vs. orphan products and
+// listings, and to manually create or break a mirror link.
+router.get('/link-status', requireAdmin, async (req, res) => {
+  const { rows: products } = await query(`
+    SELECT p.id, p.sku, p.title, p.barcode, p.part_number,
+           p.shopify_product_id, p.shopify_inventory_id,
+           ml.ebay_item_id, ml.last_synced_sku, ml.last_synced_title, ml.last_mirrored_at
+    FROM products p
+    LEFT JOIN mirror_links ml ON ml.shopify_product_id::text = p.shopify_product_id
+    WHERE p.active = true
+    ORDER BY p.id DESC
+    LIMIT 1000
+  `);
+  const { rows: orphanMirrors } = await query(`
+    SELECT ml.ebay_item_id, ml.shopify_product_id, ml.last_synced_sku, ml.last_synced_title, ml.last_mirrored_at
+    FROM mirror_links ml
+    LEFT JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text
+    WHERE p.id IS NULL
+    ORDER BY ml.last_mirrored_at DESC NULLS LAST
+    LIMIT 500
+  `);
+  const summary = {
+    total: products.length,
+    linkedShopify: products.filter(p => p.shopify_product_id).length,
+    linkedEbay: products.filter(p => p.ebay_item_id).length,
+    linkedBoth: products.filter(p => p.shopify_product_id && p.ebay_item_id).length,
+    orphan: products.filter(p => !p.shopify_product_id && !p.ebay_item_id).length,
+    orphanMirrors: orphanMirrors.length,
+  };
+  res.json({ summary, products, orphanMirrors });
+});
+
+// POST /api/listings/link-status/link
+router.post('/link-status/link', requireAdmin, async (req, res) => {
+  const { productId, ebayItemId, shopifyProductId } = req.body || {};
+  if (!ebayItemId) return res.status(400).json({ error: 'ebay_item_id_required' });
+  const p = await query(`SELECT shopify_product_id, sku, title FROM products WHERE id = $1`, [productId]);
+  if (!p.rows[0]) return res.status(404).json({ error: 'product_not_found' });
+  const spId = shopifyProductId || p.rows[0].shopify_product_id;
+  if (!spId) return res.status(400).json({ error: 'no_shopify_product_id', message: 'Product has no Shopify product_id. Sync from Shopify first.' });
+  await query(
+    `INSERT INTO mirror_links (ebay_item_id, shopify_product_id, last_mirrored_at, last_synced_sku, last_synced_title)
+     VALUES ($1, $2, now(), $3, $4)
+     ON CONFLICT (ebay_item_id) DO UPDATE SET shopify_product_id = EXCLUDED.shopify_product_id, last_mirrored_at = now()`,
+    [String(ebayItemId), spId, p.rows[0].sku, p.rows[0].title]
+  );
+  await audit(req, 'create_mirror_link', 'product', productId, { ebayItemId, shopifyProductId: spId });
+  res.json({ ok: true });
+});
+
+router.post('/link-status/unlink', requireAdmin, async (req, res) => {
+  const { ebayItemId } = req.body || {};
+  if (!ebayItemId) return res.status(400).json({ error: 'ebay_item_id_required' });
+  await query(`DELETE FROM mirror_links WHERE ebay_item_id = $1`, [String(ebayItemId)]);
+  await audit(req, 'delete_mirror_link', 'mirror_link', null, { ebayItemId });
+  res.json({ ok: true });
+});
+
+// POST /api/listings/link-status/force-match
+// Auto-link by SKU + part-number + title-token fuzzy matching.
+router.post('/link-status/force-match', requireAdmin, async (req, res) => {
+  if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
+  const sync = require('../services/sync');
+
+  let listings;
+  try { listings = await ebay.getActiveListings(); }
+  catch (e) { return res.status(500).json({ error: 'fetch_failed', message: e.message }); }
+
+  let matched = 0, alreadyLinked = 0, noMatch = 0;
+  const matches = [];
+  for (const l of listings) {
+    const existing = await query(`SELECT 1 FROM mirror_links WHERE ebay_item_id = $1`, [String(l.itemId)]);
+    if (existing.rows[0]) { alreadyLinked++; continue; }
+
+    let product = null;
+    if (l.sku) {
+      try { product = await sync.resolveProductBySku(null, l.sku); } catch (e) {}
+    }
+    if (!product && l.title) {
+      const tokens = String(l.title).match(/\b[A-Z0-9]{5,}(?:[-\/][A-Z0-9]{2,})*\b/gi) || [];
+      tokens.sort((a, b) => b.length - a.length);
+      for (const tok of tokens.slice(0, 5)) {
+        const norm = tok.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+        if (norm.length < 5) continue;
+        const r = await query(
+          `SELECT id, sku, shopify_product_id FROM products
+           WHERE REGEXP_REPLACE(UPPER(sku), '[^A-Z0-9]', '', 'g') = $1
+              OR REGEXP_REPLACE(UPPER(COALESCE(part_number,'')), '[^A-Z0-9]', '', 'g') = $1
+              OR REGEXP_REPLACE(UPPER(COALESCE(barcode,'')), '[^A-Z0-9]', '', 'g') = $1
+           LIMIT 1`, [norm]
+        );
+        if (r.rows[0]) { product = r.rows[0]; break; }
+      }
+    }
+    if (!product || !product.shopify_product_id) { noMatch++; continue; }
+
+    await query(
+      `INSERT INTO mirror_links (ebay_item_id, shopify_product_id, last_mirrored_at, last_synced_sku, last_synced_title)
+       VALUES ($1, $2, now(), $3, $4)
+       ON CONFLICT (ebay_item_id) DO NOTHING`,
+      [String(l.itemId), product.shopify_product_id, l.sku || product.sku, l.title]
+    );
+    matched++;
+    if (matches.length < 20) matches.push({ ebayItemId: l.itemId, productId: product.id, sku: product.sku, title: l.title });
+  }
+  await audit(req, 'force_match_links', null, null, { matched, alreadyLinked, noMatch });
+  res.json({ scanned: listings.length, matched, alreadyLinked, noMatch, sample: matches });
 });
 
 // POST /api/listings/hydrate-ebay-prices

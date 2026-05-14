@@ -167,6 +167,63 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
   res.json({ return: result });
 });
 
+// POST /api/returns/resync-statuses
+// Re-applies the state→status mapping to all existing returns. Useful after the mapping
+// is tightened — fixes old returns that were imported before unknown states were handled
+// and got stuck on 'open'. Maps based on the stored external_state, no eBay API call needed.
+router.post('/resync-statuses', requirePermission('returns'), async (req, res) => {
+  const statusMap = {
+    'OPEN': 'open', 'RETURN_OPEN': 'open',
+    'AWAITING_SELLER_RESPONSE': 'open', 'AWAITING_BUYER_SHIPMENT': 'open', 'SHIPPED_IN_TRANSIT': 'open',
+    'DELIVERED': 'received',
+    'CLOSED': 'closed', 'RETURN_CLOSED': 'closed', 'CLOSED_REFUNDED': 'processed', 'CLOSED_DENIED': 'closed',
+  };
+  const { rows } = await query(`SELECT id, external_state, status FROM returns WHERE external_state IS NOT NULL`);
+  let updated = 0;
+  for (const r of rows) {
+    const correct = statusMap[r.external_state] || (String(r.external_state).includes('CLOSED') ? 'closed' : r.status);
+    if (correct !== r.status) {
+      await query(`UPDATE returns SET status = $1 WHERE id = $2`, [correct, r.id]);
+      updated++;
+    }
+  }
+  await audit(req, 'resync_return_statuses', null, null, { scanned: rows.length, updated });
+  res.json({ scanned: rows.length, updated });
+});
+
+// POST /api/returns/unlink-loose-matches
+// Clears product_id from returns where the link was created by the (now-removed) loose
+// title-similarity matcher. Identifies these by: product_id is set, but the product's SKU
+// does NOT appear in the return's item_title. Run this once to clean up bad matches.
+router.post('/unlink-loose-matches', requirePermission('returns'), async (req, res) => {
+  // Pull all linked returns + their product SKU
+  const linked = await query(`
+    SELECT r.id, r.item_title, r.item_sku, r.product_id,
+           p.sku AS product_sku, p.part_number AS product_part_number
+    FROM returns r
+    JOIN products p ON p.id = r.product_id
+    WHERE r.external_return_id IS NOT NULL
+  `);
+
+  const norm = (s) => (s || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
+  let cleared = 0;
+  for (const r of linked.rows) {
+    const productKey = norm(r.product_sku) || norm(r.product_part_number);
+    if (!productKey || productKey.length < 4) continue;
+    // If the SKU normalised form appears in the title, KEEP the link.
+    const titleNorm = norm(r.item_title);
+    if (titleNorm.includes(productKey)) continue;
+    // If the SKU also matches item_sku (from eBay), KEEP it.
+    const itemSkuNorm = norm(r.item_sku);
+    if (itemSkuNorm && (itemSkuNorm === productKey || itemSkuNorm.endsWith(productKey) || productKey.endsWith(itemSkuNorm))) continue;
+    // Otherwise this was a loose title-similarity match — clear it
+    await query(`UPDATE returns SET product_id = NULL WHERE id = $1`, [r.id]);
+    cleared++;
+  }
+  await audit(req, 'unlink_loose_matches', null, null, { scanned: linked.rows.length, cleared });
+  res.json({ scanned: linked.rows.length, cleared });
+});
+
 // POST /api/returns/relink-unmatched
 // Re-runs the multi-strategy product matching (SKU fuzzy + title token + title similarity)
 // against all returns currently missing a product_id. Useful after fixing SKUs or
@@ -220,11 +277,13 @@ router.post('/relink-unmatched', requirePermission('returns'), async (req, res) 
       } catch (e) { /* ignore */ }
     }
 
-    // Title-token extraction
+    // Title-token extraction — only count tokens with BOTH letters AND digits
+    // (part-number shape). Pure-letter tokens like "KONA" are too loose.
     if (!productId && r.item_title) {
       const tokens = String(r.item_title).match(/\b[A-Z0-9]{5,}(?:[-\/][A-Z0-9]{2,})*\b/gi) || [];
-      tokens.sort((a, b) => b.length - a.length);
-      for (const tok of tokens.slice(0, 5)) {
+      const partNumberTokens = tokens.filter(t => /[A-Z]/i.test(t) && /[0-9]/.test(t));
+      partNumberTokens.sort((a, b) => b.length - a.length);
+      for (const tok of partNumberTokens.slice(0, 5)) {
         const norm = tok.replace(/[^A-Z0-9]/gi, '').toUpperCase();
         if (norm.length < 5) continue;
         const p = await query(
@@ -238,18 +297,8 @@ router.post('/relink-unmatched', requirePermission('returns'), async (req, res) 
       }
     }
 
-    // Title-similarity
-    if (!productId && r.item_title && r.item_title.length > 15) {
-      const firstWords = r.item_title.split(/\s+/).slice(0, 3).join(' ');
-      const candidates = await query(
-        `SELECT id, sku FROM products WHERE title ILIKE $1 ORDER BY LENGTH(title) ASC LIMIT 1`,
-        ['%' + firstWords + '%']
-      );
-      if (candidates.rows[0]) {
-        productId = candidates.rows[0].id;
-        chosenSku = chosenSku || candidates.rows[0].sku;
-      }
-    }
+    // Title-similarity (first-words ILIKE) strategy was REMOVED — too loose,
+    // matched things like "Kona bonnet hinge" → "Kona wing/fender".
 
     if (productId) {
       await query(
@@ -341,7 +390,6 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
         );
         productId = item.rows[0]?.product_id || null;
         qty = itemQty || item.rows[0]?.qty || 1;
-        // Fill in missing item info from the sale's line item when Post-Order didn't include it
         resolvedSku = resolvedSku || item.rows[0]?.sku || null;
         resolvedTitle = resolvedTitle || item.rows[0]?.title || null;
         break;
@@ -349,12 +397,11 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
     }
     if (!saleId) noLocalSale++;
 
-    // Strategy 2: aggressive SKU resolution via the same fuzzy matcher used for sales sync.
-    // Handles prefixed SKUs like "HYUNDAI I20 - 86551-Q0000" → matches "86551-Q0000",
-    // case differences, alphanumeric-only variants, and the part_number column.
+    // Strategy 2: SKU resolution using the shared fuzzy matcher. Handles prefixed SKUs,
+    // case variants, alphanumeric-only matches. SKUs are unique-ish so this is safe.
     if (!productId) {
       const sync = require('../services/sync');
-      for (const candidate of [resolvedSku, sku, variationSku, itemId].filter(Boolean)) {
+      for (const candidate of [resolvedSku, sku, variationSku].filter(Boolean)) {
         try {
           const m = await sync.resolveProductBySku(null, candidate);
           if (m) { productId = m.id; resolvedSku = resolvedSku || m.sku; break; }
@@ -362,15 +409,16 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
       }
     }
 
-    // Strategy 3: extract a part-number-looking token from the title and search.
-    // eBay listing titles often embed the SKU at the end, e.g.
-    // "Hyundai Front Left Bumper Bracket 86551Q0000".
+    // Strategy 3: SKU-shape token extraction from the eBay title.
+    // ONLY runs if the title contains a token that looks like a real part number
+    // (5+ chars, alphanumeric with optional dashes/slashes, contains BOTH letters AND digits).
+    // This avoids matching on car-model names like "KONA" — those are letters-only.
     if (!productId && resolvedTitle) {
-      // Match common part-number formats: 5-12 alphanumerics with optional dashes
       const tokens = String(resolvedTitle).match(/\b[A-Z0-9]{5,}(?:[-\/][A-Z0-9]{2,})*\b/gi) || [];
-      // Sort by length desc — longer tokens are more specific
-      tokens.sort((a, b) => b.length - a.length);
-      for (const tok of tokens.slice(0, 5)) {
+      // Require BOTH letters AND digits — eliminates "KONA", "HYUNDAI", etc.
+      const partNumberTokens = tokens.filter(t => /[A-Z]/i.test(t) && /[0-9]/.test(t));
+      partNumberTokens.sort((a, b) => b.length - a.length);
+      for (const tok of partNumberTokens.slice(0, 5)) {
         const norm = tok.replace(/[^A-Z0-9]/gi, '').toUpperCase();
         if (norm.length < 5) continue;
         const p = await query(
@@ -385,24 +433,10 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
       }
     }
 
-    // Strategy 4: title-similarity match. If the eBay title closely matches a product
-    // title (e.g. "Hyundai Bayon 2021-2026 FRONT HEADLIGHT…" vs our "Hyundai Bayon
-    // 2021-2026 Front Headlight RH"), use it.
-    if (!productId && resolvedTitle && resolvedTitle.length > 15) {
-      // Pull a handful of candidate products by trigram-style overlap on the first 3 words
-      const firstWords = resolvedTitle.split(/\s+/).slice(0, 3).join(' ');
-      const candidates = await query(
-        `SELECT id, title, sku FROM products
-         WHERE title ILIKE $1
-         ORDER BY LENGTH(title) ASC
-         LIMIT 5`,
-        ['%' + firstWords + '%']
-      );
-      if (candidates.rows[0]) {
-        productId = candidates.rows[0].id;
-        resolvedSku = resolvedSku || candidates.rows[0].sku;
-      }
-    }
+    // Strategy 4 (title-similarity by first words) REMOVED — it produced false matches like
+    // "Kona bonnet hinge" → "Kona wing/fender" because both shared "Kona Hyundai…". We now
+    // only auto-link when there's a real SKU/part-number match. If a return can't be linked
+    // automatically, staff can click "🔗 Re-link items" or link manually from the detail modal.
 
     const reasonRaw = ret.reason || dig(ret, 'creationInfo', 'reason') || ret.returnReason || 'Return requested';
     const reason = String(reasonRaw).replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());

@@ -114,32 +114,42 @@ router.get('/export.csv', requireAdmin, async (req, res) => {
   res.send(lines.join('\r\n'));
 });
 
-// GET /api/sales/export.xlsx?from=&to=
-// Multi-sheet Excel workbook with one sheet per channel: Shopify, eBay, Cash, Bank.
-// Used for accounting — each channel reconciles separately.
+// GET /api/sales/export.xlsx?from=&to=&channel=
+// Multi-sheet Excel workbook. Layout:
+//   - One "Summary" sheet (revenue per channel × month)
+//   - One sheet per channel showing line items
+//   - Within each channel sheet, rows are grouped & sub-totaled per month
+// `channel` query param filters to a single channel (shopify | ebay | cash | bank | all)
 router.get('/export.xlsx', requireAdmin, async (req, res) => {
   let XLSX;
   try { XLSX = require('xlsx'); }
   catch (e) {
     return res.status(503).json({ error: 'xlsx_not_installed', message: 'Run `npm install` after pulling — adds xlsx dependency.' });
   }
-  const { from, to } = req.query;
+  const { from, to, channel: filterChannel } = req.query;
   const baseWhere = [], baseParams = [];
   if (from) { baseParams.push(from); baseWhere.push(`s.occurred_at >= $${baseParams.length}`); }
   if (to)   { baseParams.push(to);   baseWhere.push(`s.occurred_at <= $${baseParams.length}`); }
 
-  const channels = [
-    { label: 'Shopify',       sheetName: 'Shopify',  match: ['shopify'] },
-    { label: 'eBay',          sheetName: 'eBay',     match: ['ebay_em', 'ebay_cl'] },
-    { label: 'Cash',          sheetName: 'Cash',     match: ['direct_cash'] },
-    { label: 'Bank transfer', sheetName: 'Bank',     match: ['direct_bank'] },
+  const allChannels = [
+    { key: 'shopify', label: 'Store (Shopify)', sheetName: 'Store',  match: ['shopify'] },
+    { key: 'ebay',    label: 'eBay',            sheetName: 'eBay',     match: ['ebay_em', 'ebay_cl'] },
+    { key: 'cash',    label: 'Cash',            sheetName: 'Cash',     match: ['direct_cash'] },
+    { key: 'bank',    label: 'Bank transfer',   sheetName: 'Bank',     match: ['direct_bank'] },
   ];
+  const channels = filterChannel && filterChannel !== 'all'
+    ? allChannels.filter(c => c.key === filterChannel)
+    : allChannels;
+  if (!channels.length) return res.status(400).json({ error: 'invalid_channel' });
 
   const wb = XLSX.utils.book_new();
   const headers = [
-    'Date', 'Invoice / Reference', 'Channel Order ID', 'Customer', 'Customer Email',
-    'Item', 'SKU', 'Part Number', 'Qty', 'Unit Price', 'Line Total', 'Order Total', 'Payment Method',
+    'Date', 'Month', 'Invoice / Ref', 'Channel Order ID', 'Customer', 'Customer Email',
+    'Item', 'SKU', 'Part Number', 'Qty', 'Unit Price (£)', 'Line Total (£)', 'Order Total (£)', 'Payment',
   ];
+
+  // Collect data for the Summary sheet
+  const summary = {}; // { 'YYYY-MM': { shopify: 0, ebay: 0, cash: 0, bank: 0 } }
 
   for (const ch of channels) {
     const params = baseParams.slice();
@@ -149,47 +159,99 @@ router.get('/export.xlsx', requireAdmin, async (req, res) => {
     const w = `WHERE ${where.join(' AND ')}`;
 
     const { rows } = await query(`
-      SELECT s.occurred_at, s.invoice_number, s.payment_reference, s.external_order_id,
-             s.customer_name, s.customer_email, s.total, s.payment_method,
+      SELECT s.id AS sale_id, s.occurred_at, s.invoice_number, s.payment_reference, s.external_order_id,
+             s.customer_name, s.customer_email, s.total, s.payment_method, s.is_estimate,
              si.title AS item_title, si.sku AS item_sku, si.qty, si.unit_price, si.line_total,
              p.part_number AS part_number
       FROM sales s
       LEFT JOIN sale_items si ON si.sale_id = s.id
       LEFT JOIN products p ON p.id = si.product_id
       ${w}
-      ORDER BY s.occurred_at DESC, si.id`, params);
+      ORDER BY s.occurred_at ASC, si.id`, params);
 
-    const data = [headers];
+    // Group rows by month
+    const byMonth = {}; // 'YYYY-MM' → array of rows
+    const seenSales = new Set(); // to avoid double-counting totals across multi-line orders
     for (const r of rows) {
-      data.push([
-        r.occurred_at ? new Date(r.occurred_at) : '',
-        r.invoice_number || r.payment_reference || '',
-        r.external_order_id || '',
-        r.customer_name || '',
-        r.customer_email || '',
-        r.item_title || '',
-        r.item_sku || '',
-        r.part_number || '',
-        r.qty || 0,
-        Number(r.unit_price || 0),
-        Number(r.line_total || 0),
-        Number(r.total || 0),
-        r.payment_method || '',
-      ]);
+      if (r.is_estimate) continue; // exclude estimates from accounting export
+      const month = r.occurred_at ? new Date(r.occurred_at).toISOString().slice(0, 7) : 'unknown';
+      (byMonth[month] = byMonth[month] || []).push(r);
+      if (!seenSales.has(r.sale_id)) {
+        seenSales.add(r.sale_id);
+        if (!summary[month]) summary[month] = { shopify: 0, ebay: 0, cash: 0, bank: 0 };
+        summary[month][ch.key] = (summary[month][ch.key] || 0) + Number(r.total || 0);
+      }
     }
-    if (data.length === 1) data.push(['(no sales in date range)']);
+
+    // Build sheet rows: month section header + items + monthly subtotal
+    const data = [];
+    const sortedMonths = Object.keys(byMonth).sort();
+    for (const month of sortedMonths) {
+      const monthRows = byMonth[month];
+      // Pretty month label, e.g. "August 2025"
+      const [yr, mo] = month.split('-');
+      const monthLabel = mo ? new Date(yr, parseInt(mo) - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }) : 'Unknown';
+      data.push([`── ${monthLabel} ──`]);
+      data.push(headers);
+      const uniqueOrderTotals = new Map(); // sale_id → total
+      for (const r of monthRows) {
+        if (!uniqueOrderTotals.has(r.sale_id)) uniqueOrderTotals.set(r.sale_id, Number(r.total || 0));
+        data.push([
+          r.occurred_at ? new Date(r.occurred_at) : '',
+          monthLabel,
+          r.invoice_number || r.payment_reference || '',
+          r.external_order_id || '',
+          r.customer_name || '',
+          r.customer_email || '',
+          r.item_title || '',
+          r.item_sku || '',
+          r.part_number || '',
+          r.qty || 0,
+          Number(r.unit_price || 0),
+          Number(r.line_total || 0),
+          Number(r.total || 0),
+          r.payment_method || '',
+        ]);
+      }
+      // Subtotal row
+      const monthTotal = [...uniqueOrderTotals.values()].reduce((a, b) => a + b, 0);
+      data.push(['', '', '', '', '', '', `${monthLabel} subtotal`, '', '', uniqueOrderTotals.size + ' orders', '', '', monthTotal, '']);
+      data.push([]); // blank separator
+    }
+    if (!data.length) data.push(['(no sales in date range for ' + ch.label + ')']);
 
     const ws = XLSX.utils.aoa_to_sheet(data);
-    // Column widths
     ws['!cols'] = [
-      { wch: 18 }, { wch: 22 }, { wch: 20 }, { wch: 22 }, { wch: 26 },
-      { wch: 42 }, { wch: 22 }, { wch: 18 }, { wch: 6 }, { wch: 10 }, { wch: 11 }, { wch: 12 }, { wch: 12 },
+      { wch: 18 }, { wch: 18 }, { wch: 22 }, { wch: 20 }, { wch: 22 }, { wch: 26 },
+      { wch: 42 }, { wch: 22 }, { wch: 18 }, { wch: 8 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 14 },
     ];
     XLSX.utils.book_append_sheet(wb, ws, ch.sheetName);
   }
 
+  // Summary sheet — built first so it appears as the first tab
+  const summarySheet = [['Month', 'Store (£)', 'eBay (£)', 'Cash (£)', 'Bank (£)', 'TOTAL (£)']];
+  const months = Object.keys(summary).sort();
+  let grandStore = 0, grandEbay = 0, grandCash = 0, grandBank = 0;
+  for (const m of months) {
+    const [yr, mo] = m.split('-');
+    const monthLabel = mo ? new Date(yr, parseInt(mo) - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }) : 'Unknown';
+    const row = summary[m];
+    const total = (row.shopify||0) + (row.ebay||0) + (row.cash||0) + (row.bank||0);
+    grandStore += row.shopify||0; grandEbay += row.ebay||0; grandCash += row.cash||0; grandBank += row.bank||0;
+    summarySheet.push([monthLabel, row.shopify||0, row.ebay||0, row.cash||0, row.bank||0, total]);
+  }
+  summarySheet.push([]);
+  summarySheet.push(['TOTAL', grandStore, grandEbay, grandCash, grandBank, grandStore+grandEbay+grandCash+grandBank]);
+  const summaryWs = XLSX.utils.aoa_to_sheet(summarySheet);
+  summaryWs['!cols'] = [{ wch: 22 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }];
+  // Prepend Summary sheet
+  wb.SheetNames.unshift('Summary');
+  wb.Sheets['Summary'] = summaryWs;
+
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-  const filename = `sales-${new Date().toISOString().slice(0,10)}.xlsx`;
+  const filename = filterChannel && filterChannel !== 'all'
+    ? `sales-${filterChannel}-${new Date().toISOString().slice(0,10)}.xlsx`
+    : `sales-all-${new Date().toISOString().slice(0,10)}.xlsx`;
   res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.set('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(buf);
@@ -410,9 +472,17 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   // Never use the eBay username on the customer-facing invoice — it's not their name.
   // If we have no shipping address yet, show a friendly placeholder; staff still see
   // the username in the Sales tab and order detail modal.
+  // Also clean any stale "ebayXXX" anonymized email proxies or "GB" country lines stored
+  // before the sanitiser was added to the sync code.
+  const cleanedAddressLines = (sale.shipping_address || '')
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !/^ebay[a-z0-9]{4,}$/i.test(l) && !/^(GB|UK|GBR|United Kingdom)$/i.test(l));
+  const cleanedAddress = cleanedAddressLines.join('\n');
+
   let billedToName = sale.customer_name || 'Walk-in customer';
-  if (sale.shipping_address) {
-    const firstLine = String(sale.shipping_address).split('\n')[0].trim();
+  if (cleanedAddress) {
+    const firstLine = cleanedAddressLines[0];
     if (firstLine) billedToName = firstLine;
   } else if (isEbay) {
     billedToName = 'eBay customer';
@@ -499,7 +569,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   <div class="customer-block">
     <div class="label">For</div>
     <div class="name">${escapeHtml(billedToName)}</div>
-    ${sale.shipping_address ? `<div class="addr">${escapeHtml(sale.shipping_address).split('\n').slice(1).join('\n')}</div>` : ''}
+    ${cleanedAddress ? `<div class="addr">${escapeHtml(cleanedAddressLines.slice(1).join('\n'))}</div>` : ''}
     ${sale.customer_phone ? `<div class="addr">${escapeHtml(sale.customer_phone)}</div>` : ''}
     ${sale.customer_email ? `<div class="addr">${escapeHtml(sale.customer_email)}</div>` : ''}
   </div>
@@ -693,8 +763,8 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
       <div class="lbl">Billed / Delivered to</div>
       <div class="name">${escapeHtml(billedToName)}</div>
       <div class="lines">
-        ${sale.shipping_address
-          ? escapeHtml(sale.shipping_address).split('\n').slice(1).join('<br>') + '<br>'
+        ${cleanedAddress
+          ? escapeHtml(cleanedAddressLines.slice(1).join('\n')).replace(/\n/g, '<br>') + '<br>'
           : '<em style="color:#bbb">No address on file</em><br>'}
         ${sale.customer_phone ? 'Tel: ' + escapeHtml(sale.customer_phone) + '<br>' : ''}
         ${sale.customer_email ? escapeHtml(sale.customer_email) : ''}
@@ -1039,18 +1109,23 @@ router.post('/backfill-ebay-addresses', requireAdmin, async (req, res) => {
       };
       const name = extract('Name');
       const street1 = extract('Street1');
-      const street2 = extract('Street2');
+      let street2 = extract('Street2');
       const city = extract('CityName');
       const state = extract('StateOrProvince');
       const postal = extract('PostalCode');
       const country = extract('Country');
       const phone = extract('Phone');
 
+      // eBay sometimes injects an anonymized buyer-email proxy in Street2 (e.g. "ebayerm7qr9")
+      // — strip these. Also strip plain country codes like "GB" / "UK" from the visible address.
+      if (/^ebay[a-z0-9]{4,}$/i.test(street2 || '')) street2 = '';
+      const countryClean = (country === 'GB' || country === 'UK' || country === 'United Kingdom' || country === 'GBR') ? '' : country;
+
       // Also try to extract buyer email (often in TransactionArray > Transaction > Buyer)
       const emailM = orderBlock.match(/<Buyer>[\s\S]*?<Email>([^<]+)<\/Email>/);
       const buyerEmail = emailM ? emailM[1].trim() : null;
 
-      const parts = [name, street1, street2, city, state, postal, country].filter(Boolean);
+      const parts = [name, street1, street2, city, state, postal, countryClean].filter(Boolean);
       if (!parts.length) { noAddress++; continue; }
 
       const address = parts.join('\n');

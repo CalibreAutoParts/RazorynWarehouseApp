@@ -82,14 +82,46 @@ router.patch('/:id', async (req, res) => {
   res.json({ user: rows[0] });
 });
 
-// DELETE /api/staff/:id (soft delete via active=false; we never hard-delete to preserve audit FKs)
+// DELETE /api/staff/:id?hard=true
+// hard=true → permanently delete the user row. Cascades may fail if the user is referenced
+// by sales (recorded_by), stock_movements (performed_by), etc. — in that case we fall back
+// to deactivating, preserving the FK relationships and the audit trail.
+// hard=false (default) → soft delete (active = false) which is reversible.
 router.delete('/:id', async (req, res) => {
   if (parseInt(req.params.id) === req.user.id) {
     return res.status(400).json({ error: 'cannot_delete_self' });
   }
-  await query(`UPDATE users SET active = false WHERE id = $1`, [req.params.id]);
-  await audit(req, 'deactivate_user', 'user', req.params.id);
-  res.json({ ok: true });
+  const hard = req.query.hard === 'true' || req.query.hard === '1';
+
+  if (!hard) {
+    await query(`UPDATE users SET active = false WHERE id = $1`, [req.params.id]);
+    await audit(req, 'deactivate_user', 'user', req.params.id);
+    return res.json({ ok: true, mode: 'deactivated' });
+  }
+
+  // Hard delete attempt — clear FK references first
+  try {
+    // Nullify recorded_by / performed_by / handled_by / target_user_id / user_id references
+    // to keep historical records intact.
+    await query(`UPDATE sales SET recorded_by = NULL WHERE recorded_by = $1`, [req.params.id]);
+    await query(`UPDATE stock_movements SET performed_by = NULL WHERE performed_by = $1`, [req.params.id]);
+    await query(`UPDATE returns SET handled_by = NULL WHERE handled_by = $1`, [req.params.id]);
+    await query(`UPDATE schedule_tasks SET assigned_to = NULL WHERE assigned_to = $1`, [req.params.id]).catch(() => {});
+    await query(`UPDATE notifications SET target_user_id = NULL WHERE target_user_id = $1`, [req.params.id]).catch(() => {});
+    // staff_notes has ON DELETE CASCADE so they'll be removed automatically.
+    // audit_log keeps user_id as-is (it's a record of who did what).
+    await query(`UPDATE audit_log SET user_id = NULL WHERE user_id = $1`, [req.params.id]).catch(() => {});
+
+    await query(`DELETE FROM users WHERE id = $1`, [req.params.id]);
+    await audit(req, 'delete_user_hard', 'user', req.params.id);
+    res.json({ ok: true, mode: 'deleted' });
+  } catch (e) {
+    // Fall back to deactivate so the UI still gets a useful result
+    console.error('[staff delete] hard delete failed:', e.message);
+    await query(`UPDATE users SET active = false WHERE id = $1`, [req.params.id]);
+    await audit(req, 'deactivate_user_fallback', 'user', req.params.id, { reason: e.message });
+    res.json({ ok: true, mode: 'deactivated', message: 'Hard delete failed (referenced by existing records). User has been deactivated instead.' });
+  }
 });
 
 module.exports = router;
