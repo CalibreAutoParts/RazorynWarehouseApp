@@ -663,7 +663,7 @@
           <span class="ct" id="nav-ret-count">0</span>
         </button>
         <button class="nav-item admin-only" data-page="sales">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 7c0-5.333-8-5.333-8 0"/><path d="M10 7v6h-4"/><path d="M6 13h9"/><path d="M6 19h12"/></svg>
           Sales
         </button>
         <button class="nav-item" data-page="pricing">
@@ -1007,19 +1007,21 @@ function adaptNotification(n) {
    ========================================================== */
 const Store = {
   async refreshAll() {
-    // Fan out — if any single endpoint fails, log it but keep going so a
-    // single broken slice doesn't take down the whole UI.
+    // Fan out — if any single endpoint fails (e.g. warehouse staff getting 403
+    // on sales), log it but keep going so a single broken slice doesn't take
+    // down the whole UI. Always preserve a sane fallback (empty array) so
+    // dashboard renderers can call .filter/.length without crashing.
     const calls = [
-      ['products',      () => Api.get('/api/products?pageSize=200').then(r => r.products.map(adaptProduct))],
-      ['sales',         () => Api.get('/api/sales?pageSize=200').then(r => r.sales.map(adaptSale))],
-      ['returns',       () => Api.get('/api/returns').then(r => r.returns.map(adaptReturn))],
-      ['schedule',      () => Api.get('/api/schedule').then(r => r.tasks.map(adaptTask))],
-      ['videos',        () => Api.get('/api/videos').then(r => r.videos.map(adaptVideo))],
-      ['knowledge',     () => Api.get('/api/kb').then(r => r.entries.map(adaptKb))],
-      ['notifications', () => Api.get('/api/notifications').then(r => r.notifications.map(adaptNotification))],
+      ['products',      () => Api.get('/api/products?pageSize=200').then(r => (r.products || []).map(adaptProduct))],
+      ['sales',         () => Api.get('/api/sales?pageSize=200').then(r => (r.sales || []).map(adaptSale))],
+      ['returns',       () => Api.get('/api/returns').then(r => (r.returns || []).map(adaptReturn))],
+      ['schedule',      () => Api.get('/api/schedule').then(r => (r.tasks || []).map(adaptTask))],
+      ['videos',        () => Api.get('/api/videos').then(r => (r.videos || []).map(adaptVideo))],
+      ['knowledge',     () => Api.get('/api/kb').then(r => (r.entries || []).map(adaptKb))],
+      ['notifications', () => Api.get('/api/notifications').then(r => (r.notifications || []).map(adaptNotification))],
     ];
     if (State.user && State.user.role === 'admin') {
-      calls.push(['staff', () => Api.get('/api/staff').then(r => r.users.map(adaptUser))]);
+      calls.push(['staff', () => Api.get('/api/staff').then(r => (r.users || []).map(adaptUser))]);
     }
     const settingsCall = Api.get('/api/settings').then(r => ({
       lowStockDefault: 3,
@@ -1032,25 +1034,34 @@ const Store = {
 
     const results = await Promise.all(calls.map(async ([k, fn]) => {
       try { return [k, await fn()]; }
-      catch (e) { console.warn('[store] failed to load', k, e.message); return [k, State[k]]; }
+      catch (e) {
+        // 403 is expected for warehouse staff hitting admin-only endpoints; don't spam errors
+        if (e.status !== 403) console.warn('[store] failed to load', k, e.message);
+        return [k, Array.isArray(State[k]) ? State[k] : []];
+      }
     }));
-    for (const [k, v] of results) State[k] = v;
+    for (const [k, v] of results) State[k] = Array.isArray(v) ? v : [];
     State.settings = await settingsCall;
   },
 
   async refresh(key) {
     const map = {
-      products:      () => Api.get('/api/products?pageSize=200').then(r => r.products.map(adaptProduct)),
-      sales:         () => Api.get('/api/sales?pageSize=200').then(r => r.sales.map(adaptSale)),
-      returns:       () => Api.get('/api/returns').then(r => r.returns.map(adaptReturn)),
-      schedule:      () => Api.get('/api/schedule').then(r => r.tasks.map(adaptTask)),
-      videos:        () => Api.get('/api/videos').then(r => r.videos.map(adaptVideo)),
-      knowledge:     () => Api.get('/api/kb').then(r => r.entries.map(adaptKb)),
-      notifications: () => Api.get('/api/notifications').then(r => r.notifications.map(adaptNotification)),
-      staff:         () => Api.get('/api/staff').then(r => r.users.map(adaptUser)),
+      products:      () => Api.get('/api/products?pageSize=200').then(r => (r.products || []).map(adaptProduct)),
+      sales:         () => Api.get('/api/sales?pageSize=200').then(r => (r.sales || []).map(adaptSale)),
+      returns:       () => Api.get('/api/returns').then(r => (r.returns || []).map(adaptReturn)),
+      schedule:      () => Api.get('/api/schedule').then(r => (r.tasks || []).map(adaptTask)),
+      videos:        () => Api.get('/api/videos').then(r => (r.videos || []).map(adaptVideo)),
+      knowledge:     () => Api.get('/api/kb').then(r => (r.entries || []).map(adaptKb)),
+      notifications: () => Api.get('/api/notifications').then(r => (r.notifications || []).map(adaptNotification)),
+      staff:         () => Api.get('/api/staff').then(r => (r.users || []).map(adaptUser)),
     };
     if (!map[key]) return;
-    try { State[key] = await map[key](); } catch (e) { console.warn('[store] refresh', key, e.message); }
+    try { State[key] = await map[key](); }
+    catch (e) {
+      if (e.status !== 403) console.warn('[store] refresh', key, e.message);
+      // keep previous value, ensure it stays an array
+      if (!Array.isArray(State[key])) State[key] = [];
+    }
   },
 
   // No-ops kept for backwards compatibility with any older calls.
@@ -1419,14 +1430,26 @@ function routeTo(page) {
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror,
     labels: renderLabels, notes: renderNotes
   };
-  (pages[page] || renderDashboard)();
+  try {
+    (pages[page] || renderDashboard)();
+  } catch (e) {
+    console.error('[render] page failed:', page, e);
+    el('content').innerHTML = `<div class="page"><div class="card"><div class="card-body" style="padding:24px;text-align:center">
+      <h3 style="color:var(--red)">Something went wrong rendering this page</h3>
+      <p style="color:var(--ink-soft);font-size:13px">${escapeHtml(e.message || String(e))}</p>
+      <button class="btn btn-outline" onclick="routeTo('dashboard')">Back to dashboard</button>
+    </div></div></div>`;
+  }
   document.getElementById('content').scrollTo(0, 0);
 }
 
 function refreshNavCounts() {
-  document.getElementById('nav-inv-count').textContent = State.products.length;
-  document.getElementById('nav-ret-count').textContent = State.returns.filter(r => r.status === 'pending').length;
-  const unread = State.notifications.filter(n => !n.read).length;
+  const products = Array.isArray(State.products) ? State.products : [];
+  const returns = Array.isArray(State.returns) ? State.returns : [];
+  const notifications = Array.isArray(State.notifications) ? State.notifications : [];
+  document.getElementById('nav-inv-count').textContent = products.length;
+  document.getElementById('nav-ret-count').textContent = returns.filter(r => r.status === 'open' || r.status === 'pending').length;
+  const unread = notifications.filter(n => !n.read).length;
   document.getElementById('nav-notif-count').textContent = unread;
   document.getElementById('notif-badge').textContent = unread;
   document.getElementById('notif-badge').style.display = unread ? 'flex' : 'none';
@@ -1436,11 +1459,16 @@ function refreshNavCounts() {
    DASHBOARD
    ========================================================== */
 function renderDashboard() {
-  const lowStock = State.products.filter(p => totalQty(p) <= p.lowThresh);
-  const todayRev = State.sales.filter(s => isToday(s.date)).reduce((a,b)=>a+b.amount,0);
-  const totalUnits = State.products.reduce((a,b)=>a+totalQty(b),0);
-  const todaySales = State.sales.filter(s => isToday(s.date));
-  const pendingReturns = State.returns.filter(r => r.status === 'pending').length;
+  // Defensive defaults — warehouse staff get 403 on /api/sales so State.sales
+  // may be missing for them. Same for other arrays during a transient outage.
+  const products = Array.isArray(State.products) ? State.products : [];
+  const sales = Array.isArray(State.sales) ? State.sales : [];
+  const returns = Array.isArray(State.returns) ? State.returns : [];
+  const lowStock = products.filter(p => totalQty(p) <= (p.lowThresh ?? 3));
+  const todayRev = sales.filter(s => s && isToday(s.date)).reduce((a,b)=>a+(b.amount||0),0);
+  const totalUnits = products.reduce((a,b)=>a+totalQty(b),0);
+  const todaySales = sales.filter(s => s && isToday(s.date));
+  const pendingReturns = returns.filter(r => r && (r.status === 'open' || r.status === 'pending')).length;
 
   el('content').innerHTML = `
     <div class="page">
@@ -1464,7 +1492,7 @@ function renderDashboard() {
       <div class="grid-4" style="margin-bottom:20px">
         ${State.user?.role === 'admin' ? `
         <div class="stat stat-clickable" onclick="routeTo('sales')" role="button" tabindex="0">
-          <div class="icon-wrap"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+          <div class="icon-wrap"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 7c0-5.333-8-5.333-8 0"/><path d="M10 7v6h-4"/><path d="M6 13h9"/><path d="M6 19h12"/></svg></div>
           <div class="label">Today's revenue</div>
           <div class="value">${gbp(todayRev)}</div>
           <div class="delta">${todaySales.length} sales</div>
@@ -2602,7 +2630,7 @@ function renderReturns() {
       <div class="page-head">
         <div><h1>Returns</h1><div class="desc">Auto-synced from eBay every 15 min. New cases &amp; state changes appear in 🔔 notifications. Click any card for details.</div></div>
         <div class="actions">
-          <button class="btn btn-outline" onclick="relinkReturns()" title="Re-scan all unlinked returns and try to match by SKU, title, and barcode">🔗 Re-link items</button>
+          <button class="btn btn-outline" onclick="relinkReturns()" title="Fix wrong product matches, re-link unmatched returns, and re-sync open/closed statuses">🔧 Repair</button>
           <button class="btn btn-outline" onclick="syncEbayReturns()" title="Pull return cases from eBay right now">↩️ Pull from eBay</button>
           <button class="btn btn-primary" onclick="openReturnModal()">+ Log return</button>
         </div>
@@ -3160,39 +3188,97 @@ async function convertEstimateToInvoice(id) {
   }
 }
 
-function exportSalesCsv() {
+async function exportSalesCsv() {
   const active = document.querySelector('[data-sf].active');
   const filter = active?.dataset.sf || 'all';
   const channelMap = { shopify: 'shopify', cash: 'direct_cash', bank: 'direct_bank' };
   let qs = '';
-  if (filter !== 'all' && filter !== 'ebay') qs = '?channel=' + encodeURIComponent(channelMap[filter] || filter);
+  if (filter !== 'all' && filter !== 'ebay' && filter !== 'estimates') qs = '?channel=' + encodeURIComponent(channelMap[filter] || filter);
   else if (filter === 'ebay') qs = '?channel=ebay_em';
-  const a = document.createElement('a');
-  a.href = '/api/sales/export.csv' + qs;
-  a.download = 'sales.csv';
-  document.body.appendChild(a); a.click(); a.remove();
   toast('Generating CSV…', 'info');
+  try {
+    const r = await fetch('/api/sales/export.csv' + qs, {
+      credentials: 'include',
+      headers: API_TOKEN ? { Authorization: 'Bearer ' + API_TOKEN } : {},
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      throw new Error('Export failed (status ' + r.status + '): ' + text.slice(0, 100));
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `sales-${filter}-${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 100);
+    toast('CSV downloaded', 'success');
+  } catch (e) {
+    toast(e.message, 'error', 6000);
+  }
 }
 
 function exportSalesXlsx() {
-  toast('Generating Excel workbook…', 'info');
-  // Use fetch + blob so we can show errors (xlsx route may return JSON error)
-  fetch('/api/sales/export.xlsx', { headers: API_TOKEN ? { Authorization: 'Bearer ' + API_TOKEN } : {} })
-    .then(async r => {
-      const ct = r.headers.get('content-type') || '';
-      if (!r.ok || ct.includes('application/json')) {
-        const j = await r.json().catch(() => ({}));
-        throw new Error(j.message || 'Export failed (status ' + r.status + ')');
-      }
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = 'sales-all-channels.xlsx';
-      document.body.appendChild(a); a.click();
-      setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 100);
-      toast('Excel workbook downloaded', 'success');
-    })
-    .catch(e => toast(e.message, 'error'));
+  modal({
+    title: 'Export sales to Excel',
+    body: `
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:14px">
+        Workbook includes a Summary tab with month-by-month revenue, plus per-channel detail tabs.
+      </div>
+      <div class="field">
+        <label>Channel</label>
+        <select id="xls-channel">
+          <option value="all" selected>All channels (Summary + Store + eBay + Cash + Bank)</option>
+          <option value="shopify">Store (Shopify) only</option>
+          <option value="ebay">eBay only</option>
+          <option value="cash">Cash only</option>
+          <option value="bank">Bank transfer only</option>
+        </select>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field"><label>From date (optional)</label><input id="xls-from" type="date"></div>
+        <div class="field"><label>To date (optional)</label><input id="xls-to" type="date"></div>
+      </div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '⬇ Download Excel', primary: true, onClick: async () => {
+        const channel = el('xls-channel').value;
+        const from = el('xls-from').value;
+        const to = el('xls-to').value;
+        const qs = new URLSearchParams();
+        if (channel && channel !== 'all') qs.set('channel', channel);
+        if (from) qs.set('from', from);
+        if (to) qs.set('to', to);
+        const url = '/api/sales/export.xlsx' + (qs.toString() ? '?' + qs : '');
+        closeModal();
+        toast('Generating Excel workbook…', 'info');
+        try {
+          const r = await fetch(url, {
+            credentials: 'include',
+            headers: API_TOKEN ? { Authorization: 'Bearer ' + API_TOKEN } : {},
+          });
+          const ct = r.headers.get('content-type') || '';
+          if (!r.ok || ct.includes('application/json')) {
+            const j = await r.json().catch(() => ({}));
+            throw new Error(j.message || j.error || ('Export failed (status ' + r.status + ')'));
+          }
+          const blob = await r.blob();
+          const blobUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          // Filename from Content-Disposition or fallback
+          const cd = r.headers.get('content-disposition') || '';
+          const m = cd.match(/filename="([^"]+)"/);
+          a.href = blobUrl;
+          a.download = m ? m[1] : `sales-${channel}.xlsx`;
+          document.body.appendChild(a); a.click();
+          setTimeout(() => { a.remove(); URL.revokeObjectURL(blobUrl); }, 100);
+          toast('Excel workbook downloaded', 'success');
+        } catch (e) {
+          toast(e.message, 'error', 6000);
+        }
+      }},
+    ],
+  });
 }
 async function printSelectedInvoices() {
   const ids = Array.from(State.salesSelected);
@@ -4253,7 +4339,11 @@ function paintStaff() {
           ${permRow(u, 'kbSensitive', 'Sensitive entries', 'Login info, supplier contacts')}
         `}
 
-        ${!isSelf ? `<div style="margin-top:14px;display:flex;gap:8px"><button class="btn btn-outline btn-sm" onclick="editStaff('${u.id}')">Edit details</button><button class="btn btn-ghost btn-sm" onclick="deleteStaff('${u.id}')" style="color:var(--red)">Deactivate</button></div>` : ''}
+        ${!isSelf ? `<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-outline btn-sm" onclick="editStaff('${u.id}')">Edit details</button>
+          ${u.active !== false ? `<button class="btn btn-ghost btn-sm" onclick="deactivateStaff('${u.id}')" style="color:var(--amber)">Deactivate</button>` : ''}
+          <button class="btn btn-ghost btn-sm" onclick="deleteStaff('${u.id}')" style="color:var(--red)">🗑 Delete</button>
+        </div>` : ''}
       </div>
     </div>
     `;
@@ -4295,14 +4385,30 @@ async function togglePerm(uid, key, val) {
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 function editStaff(id) { openStaffModal(id); }
-async function deleteStaff(id) {
-  if (!confirm('Deactivate this staff member? Their account will be disabled but their history is kept.')) return;
+async function deactivateStaff(id) {
+  if (!confirm('Deactivate this staff member? They will be unable to log in but all their history is preserved. This is reversible — you can reactivate them later.')) return;
   try {
     await Api.delete('/api/staff/' + id);
     await Store.refresh('staff');
     paintStaff();
     toast('Staff deactivated', 'success');
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+async function deleteStaff(id) {
+  const u = State.staff.find(x => x.id == id);
+  const name = u ? u.name : 'this user';
+  if (!confirm(`PERMANENTLY DELETE ${name}?\n\nThis removes the user account completely. Their historical records (sales, stock movements, returns) will keep working but will show "Unknown" instead of their name.\n\nThis cannot be undone. Are you sure?`)) return;
+  if (!confirm(`Last chance — delete ${name}'s account permanently?`)) return;
+  try {
+    const r = await Api.delete('/api/staff/' + id + '?hard=true');
+    await Store.refresh('staff');
+    paintStaff();
+    if (r.mode === 'deleted') {
+      toast(`${name} permanently deleted`, 'success');
+    } else {
+      toast(r.message || 'Could not hard-delete — deactivated instead', 'warn', 6000);
+    }
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 function openStaffModal(id) {
   const u = id ? State.staff.find(x => x.id == id) : { id: null, name:'', email:'', role:'warehouse', pin:'', perms:{ inventory:true, scan:true, locations:true, returns:true, sales:false, pricing:true, schedule:true, videos:true, kb:true, kbSensitive:false } };
@@ -4445,130 +4551,259 @@ function renderMirror() {
     <div class="page">
       <div class="page-head">
         <div>
-          <h1>Listing Mirror</h1>
-          <div class="desc">Copy eBay listings to Shopify — title, photos, SKU (= barcode), price</div>
+          <h1>Listing Mirror &amp; Link Status</h1>
+          <div class="desc">Mirror eBay → Shopify + manage which listings are linked across platforms</div>
         </div>
-        <div class="actions">
+        <div class="actions" id="mirror-page-actions">
           <button class="btn btn-primary" onclick="pullEbayListings()">⟳ Pull eBay listings</button>
         </div>
       </div>
-
-      <div id="mirror-empty" class="card">
-        <div class="card-body empty">
-          <div class="t">No listings loaded yet</div>
-          <div class="d">Click <strong>Pull eBay listings</strong> to fetch your active eBay listings. Make sure <code>EBAY_CLIENT_ID</code>, <code>EBAY_CLIENT_SECRET</code>, and <code>EBAY_REFRESH_TOKEN</code> are set in Railway first.</div>
-        </div>
+      <div class="seg" style="margin-bottom:14px">
+        <button class="active" data-mtab="mirror" onclick="switchMirrorTab('mirror')">Mirror to Shopify</button>
+        <button data-mtab="links" onclick="switchMirrorTab('links')">Link Status</button>
       </div>
-
-      <div id="mirror-toolbar" style="display:none">
-        <div class="card" style="margin-bottom:14px">
-          <div class="card-body">
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;align-items:end">
-              <div>
-                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Pricing</div>
-                <select id="mr-pricing-mode" class="select" onchange="updatePricingMode()">
-                  <option value="percent">% off eBay price</option>
-                  <option value="manual">Set each price manually</option>
-                </select>
-              </div>
-              <div id="mr-percent-wrap">
-                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">% Discount</div>
-                <div style="display:flex;gap:6px">
-                  <input type="number" id="mr-percent" value="0" min="0" max="100" step="0.5" placeholder="e.g. 10 for 10% off" style="flex:1">
-                  <button class="btn btn-primary btn-sm" onclick="applyDiscount()">Apply</button>
-                </div>
-                <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Applied: <span id="mr-percent-applied" style="font-weight:600;color:var(--ink)">0%</span></div>
-              </div>
-              <div>
-                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Status on Shopify</div>
-                <select id="mr-status" class="select" onchange="MirrorState.productStatus=this.value">
-                  <option value="draft">Draft (review before publishing)</option>
-                  <option value="active">Active (live immediately)</option>
-                </select>
-              </div>
-            </div>
-
-            <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
-              <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Filter listings</div>
-              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-                <button class="btn btn-outline btn-sm" onclick="setStatusFilter('all')" id="mr-status-all">All</button>
-                <button class="btn btn-outline btn-sm" onclick="setStatusFilter('new')" id="mr-status-new">New only</button>
-                <button class="btn btn-outline btn-sm" onclick="setStatusFilter('mirrored')" id="mr-status-mirrored">Already on Shopify</button>
-              </div>
-              <input type="text" id="mr-filter" placeholder="Search by title, SKU, or item ID…" oninput="updateFilter(this.value)" style="width:100%">
-            </div>
-
-              <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
-                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Bulk settings (applied to all selected on mirror)</div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px">
-                  <div>
-                    <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Tags (comma-separated, used for collections)</div>
-                    <input type="text" id="mr-tags" placeholder="e.g. body-panel, hyundai, primed" oninput="MirrorState.commonTags=this.value">
-                  </div>
-                  <div>
-                    <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Product template</div>
-                    <select id="mr-template" onchange="MirrorState.commonTemplateSuffix=this.value">
-                      <option value="">Default product</option>
-                      <option value="large-parts">large-parts</option>
-                    </select>
-                  </div>
-                  <div>
-                    <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Shipping profile</div>
-                    <select id="mr-shipping-profile" onchange="MirrorState.commonShippingProfileId=this.value">
-                      <option value="">Store default</option>
-                      <!-- populated dynamically from Shopify -->
-                    </select>
-                  </div>
-                  <div>
-                    <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Template image policy</div>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;padding:8px 0">
-                      <input type="checkbox" id="mr-hide-tmpl" onchange="toggleHideTemplates(this.checked)">
-                      <span>Hide TMPL images everywhere</span>
-                    </label>
-                  </div>
-                </div>
-                <div style="font-size:11px;color:var(--ink-soft)">Per-item edits (in each row) override these bulk values.</div>
-              </div>
-
-            <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">Common metafields (applied to all selected listings on mirror)</div>
-                <div style="display:flex;gap:6px">
-                  <button class="btn btn-outline btn-sm" onclick="addSeoDescriptionTemplate()" title="Adds a metafield with a token-templated SEO description">+ SEO description template</button>
-                  <button class="btn btn-outline btn-sm" onclick="addMetafield()">+ Add metafield</button>
-                </div>
-              </div>
-              <div id="mr-metafields"></div>
-              <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">
-                Pick a metafield Shopify already knows (Part Number, Position, Finish, etc.) or add a custom one. Values can use tokens: <code>{{sku}}</code>, <code>{{title}}</code>, <code>{{ebay_price}}</code>, <code>{{qty}}</code>, <code>{{item_id}}</code> — substituted per listing on mirror. Per-listing edits (in each row's "Metafields" panel) take priority over these.
-              </div>
-              <div style="margin-top:6px">
-                <button class="btn btn-ghost btn-sm" onclick="runShopifyDiag()" style="font-size:11px;color:var(--ink-soft)">🔍 Diagnose Shopify (channels & metafields)</button>
-                <button class="btn btn-ghost btn-sm" onclick="checkSkuMatches()" style="font-size:11px;color:var(--ink-soft)">🔗 Verify SKU sync (eBay ↔ Shopify)</button>
-              </div>
-            </div>
-
-            <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <button class="btn btn-outline btn-sm" onclick="selectAll(true)">Select all listings</button>
-              <button class="btn btn-outline btn-sm" onclick="selectAll(false)">Deselect all listings</button>
-              <span style="width:1px;height:18px;background:var(--line)"></span>
-              <button class="btn btn-outline btn-sm" onclick="resetPhotoSelections('first')">📷 First photo only</button>
-              <button class="btn btn-outline btn-sm" onclick="resetPhotoSelections('all')">📷 All photos</button>
-              <span id="mr-counter" style="margin-left:auto;font-size:13px;color:var(--ink-soft)"></span>
-              <button class="btn btn-primary" onclick="mirrorSelected()" id="mr-mirror-btn">Mirror selected to Shopify →</button>
-            </div>
+      <div id="mirror-pane-mirror">
+        <div id="mirror-empty" class="card">
+          <div class="card-body empty">
+            <div class="t">No listings loaded yet</div>
+            <div class="d">Click <strong>Pull eBay listings</strong> to fetch your active eBay listings.</div>
           </div>
         </div>
-        <div id="mirror-list"></div>
+        <div id="mirror-toolbar" style="display:none"></div>
+        <div id="mirror-list" style="display:none"></div>
+      </div>
+      <div id="mirror-pane-links" style="display:none">
+        <div id="links-content">
+          <div class="empty"><div class="t">Loading link status…</div></div>
+        </div>
       </div>
     </div>
   `;
-  if (MirrorState.listings.length) {
-    el('mirror-empty').style.display = 'none';
-    el('mirror-toolbar').style.display = 'block';
-    paintMirrorList();
+  // Render full mirror toolbar + list into mirror pane
+  setupMirrorPaneMarkup();
+  if (MirrorState.listings.length) renderMirrorList();
+}
+
+function switchMirrorTab(tab) {
+  document.querySelectorAll('[data-mtab]').forEach(b => b.classList.toggle('active', b.dataset.mtab === tab));
+  el('mirror-pane-mirror').style.display = tab === 'mirror' ? '' : 'none';
+  el('mirror-pane-links').style.display = tab === 'links' ? '' : 'none';
+  if (tab === 'links') loadLinkStatus();
+}
+
+function setupMirrorPaneMarkup() {
+  // Populate mirror-toolbar with the original toolbar+list markup
+  el('mirror-toolbar').innerHTML = `
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;align-items:end">
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Pricing</div>
+            <select id="mr-pricing-mode" class="select" onchange="updatePricingMode()">
+              <option value="percent">% off eBay price</option>
+              <option value="manual">Set each price manually</option>
+            </select>
+          </div>
+          <div id="mr-percent-wrap">
+            <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">% Discount</div>
+            <div style="display:flex;gap:6px">
+              <input type="number" id="mr-percent" value="0" min="0" max="100" step="0.5" placeholder="e.g. 10 for 10% off" style="flex:1">
+              <button class="btn btn-primary btn-sm" onclick="applyDiscount()">Apply</button>
+            </div>
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Applied: <span id="mr-percent-applied" style="font-weight:600;color:var(--ink)">0%</span></div>
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Push to Shopify</div>
+            <button class="btn btn-primary" onclick="pushToShopify()" id="mr-push-btn">Push selected →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="mirror-list-container"></div>
+  `;
+}
+
+async function loadLinkStatus() {
+  const wrap = el('links-content');
+  wrap.innerHTML = '<div class="empty"><div class="t">Loading…</div></div>';
+  try {
+    const r = await Api.get('/api/listings/link-status');
+    State.linkStatus = r;
+    renderLinkStatus();
+  } catch (e) {
+    wrap.innerHTML = `<div class="empty"><div class="t">Failed to load: ${escapeHtml(e.message)}</div></div>`;
   }
 }
+
+function renderLinkStatus() {
+  const data = State.linkStatus;
+  if (!data) return;
+  const filter = State.linkFilter || 'unlinked';
+  const products = data.products || [];
+  let filtered;
+  if (filter === 'linked') filtered = products.filter(p => p.shopify_product_id && p.ebay_item_id);
+  else if (filter === 'only-shopify') filtered = products.filter(p => p.shopify_product_id && !p.ebay_item_id);
+  else if (filter === 'only-ebay') filtered = products.filter(p => !p.shopify_product_id && p.ebay_item_id);
+  else if (filter === 'unlinked') filtered = products.filter(p => !p.shopify_product_id || !p.ebay_item_id);
+  else if (filter === 'orphan') filtered = []; // shown separately
+  else filtered = products;
+
+  const search = (State.linkSearch || '').toLowerCase().trim();
+  if (search) filtered = filtered.filter(p =>
+    (p.sku || '').toLowerCase().includes(search) ||
+    (p.title || '').toLowerCase().includes(search) ||
+    (p.part_number || '').toLowerCase().includes(search)
+  );
+
+  el('links-content').innerHTML = `
+    <div class="grid-4" style="margin-bottom:14px">
+      <div class="stat"><div class="label">Total products</div><div class="value">${data.summary.total}</div></div>
+      <div class="stat"><div class="label">Linked to both</div><div class="value">${data.summary.linkedBoth}</div><div class="delta">${data.summary.total ? Math.round(data.summary.linkedBoth*100/data.summary.total) : 0}%</div></div>
+      <div class="stat"><div class="label">Shopify only</div><div class="value">${data.summary.linkedShopify - data.summary.linkedBoth}</div><div class="delta">Need eBay link</div></div>
+      <div class="stat"><div class="label">No links</div><div class="value">${data.summary.orphan}</div><div class="delta down">Action needed</div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-body">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-primary" onclick="forceMatchLinks()" title="Pull active eBay listings and auto-match by SKU + barcode + title token">🔗 Force match all</button>
+          <input id="links-search" placeholder="Search by SKU, title or part #…" oninput="State.linkSearch = this.value; renderLinkStatus()" value="${escapeAttr(State.linkSearch || '')}" style="flex:1;min-width:220px">
+        </div>
+      </div>
+    </div>
+
+    <div class="seg" style="margin-bottom:14px">
+      <button class="${filter==='unlinked' ? 'active':''}" onclick="State.linkFilter='unlinked';renderLinkStatus()">Needs linking (${data.summary.total - data.summary.linkedBoth})</button>
+      <button class="${filter==='linked' ? 'active':''}" onclick="State.linkFilter='linked';renderLinkStatus()">Fully linked (${data.summary.linkedBoth})</button>
+      <button class="${filter==='only-shopify' ? 'active':''}" onclick="State.linkFilter='only-shopify';renderLinkStatus()">Shopify only (${data.summary.linkedShopify - data.summary.linkedBoth})</button>
+      <button class="${filter==='only-ebay' ? 'active':''}" onclick="State.linkFilter='only-ebay';renderLinkStatus()">eBay only (${data.summary.linkedEbay - data.summary.linkedBoth})</button>
+      <button class="${filter==='all' ? 'active':''}" onclick="State.linkFilter='all';renderLinkStatus()">All</button>
+      <button class="${filter==='orphan' ? 'active':''}" onclick="State.linkFilter='orphan';renderLinkStatus()">Orphan eBay (${data.summary.orphanMirrors})</button>
+    </div>
+
+    ${filter === 'orphan' ? renderOrphanMirrors(data.orphanMirrors) : `
+      <div class="card">
+        <div style="overflow-x:auto">
+          <table class="table">
+            <thead><tr>
+              <th>Product</th>
+              <th>SKU</th>
+              <th>Shopify</th>
+              <th>eBay</th>
+              <th></th>
+            </tr></thead>
+            <tbody>
+              ${filtered.slice(0, 200).map(p => `
+                <tr>
+                  <td><div style="font-weight:500">${escapeHtml(p.title || '')}</div></td>
+                  <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(p.sku || '')}</td>
+                  <td>${p.shopify_product_id
+                    ? `<span class="pill green" style="font-size:10px">✓ Linked</span><div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--ink-soft);margin-top:2px">${escapeHtml(p.shopify_product_id)}</div>`
+                    : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">No link</span>'}
+                  </td>
+                  <td>${p.ebay_item_id
+                    ? `<span class="pill green" style="font-size:10px">✓ Linked</span><div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--ink-soft);margin-top:2px">${escapeHtml(p.ebay_item_id)}</div>`
+                    : '<span class="pill amber" style="font-size:10px">⚠ Not linked</span>'}
+                  </td>
+                  <td style="white-space:nowrap">
+                    ${!p.ebay_item_id ? `<button class="btn btn-outline btn-sm" onclick="openLinkProductToEbay(${p.id})">🔗 Link to eBay</button>` : ''}
+                    ${p.ebay_item_id ? `<button class="btn btn-ghost btn-sm" onclick="unlinkEbay('${escapeAttr(p.ebay_item_id)}')" title="Remove link" style="color:var(--red)">✕</button>` : ''}
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${filtered.length > 200 ? `<div style="padding:10px;text-align:center;font-size:12px;color:var(--ink-soft)">Showing first 200 of ${filtered.length}. Use search to narrow down.</div>` : ''}
+      </div>
+    `}
+  `;
+}
+
+function renderOrphanMirrors(orphans) {
+  if (!orphans?.length) return '<div class="empty"><div class="t">No orphan mirror links</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Every mirror_links entry has a matching warehouse product.</div></div>';
+  return `
+    <div class="card">
+      <div class="card-body" style="padding-top:14px"><div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">These eBay listings are linked to Shopify products that no longer exist in your warehouse. Unlink them to clean up.</div></div>
+      <div style="overflow-x:auto">
+        <table class="table">
+          <thead><tr><th>eBay Item</th><th>Last SKU</th><th>Last Title</th><th>Linked</th><th></th></tr></thead>
+          <tbody>
+            ${orphans.map(o => `
+              <tr>
+                <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(o.ebay_item_id)}</td>
+                <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(o.last_synced_sku || '')}</td>
+                <td>${escapeHtml(o.last_synced_title || '')}</td>
+                <td style="font-size:11px;color:var(--ink-soft)">${o.last_mirrored_at ? new Date(o.last_mirrored_at).toLocaleDateString('en-GB') : ''}</td>
+                <td><button class="btn btn-ghost btn-sm" onclick="unlinkEbay('${escapeAttr(o.ebay_item_id)}')" style="color:var(--red)">✕ Remove</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function openLinkProductToEbay(productId) {
+  const product = State.linkStatus?.products.find(p => p.id === productId);
+  if (!product) return;
+  modal({
+    title: 'Link to eBay listing',
+    body: `
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:14px">
+        Product: <strong style="color:var(--ink)">${escapeHtml(product.title)}</strong><br>
+        SKU: <span style="font-family:ui-monospace,monospace">${escapeHtml(product.sku)}</span>
+      </div>
+      <div class="field">
+        <label>eBay Item ID</label>
+        <input id="lpe-itemid" placeholder="e.g. 317195662843" autofocus>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Find this in your eBay seller dashboard or in the listing URL (after /itm/).</div>
+      </div>
+      ${!product.shopify_product_id ? `
+        <div style="padding:10px;background:var(--amber-light);color:var(--amber);border-radius:6px;font-size:12px;margin-top:10px">
+          ⚠ This product has no Shopify product_id. Run a Shopify sync first, or link won't persist properly.
+        </div>` : ''}
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Link', primary: true, onClick: async () => {
+        const ebayItemId = el('lpe-itemid').value.trim();
+        if (!ebayItemId) { toast('eBay Item ID required', 'warn'); return; }
+        try {
+          await Api.post('/api/listings/link-status/link', { productId, ebayItemId });
+          closeModal();
+          toast('Linked ✓', 'success');
+          await loadLinkStatus();
+        } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+      }},
+    ],
+  });
+}
+
+async function unlinkEbay(ebayItemId) {
+  if (!confirm('Remove this eBay link?')) return;
+  try {
+    await Api.post('/api/listings/link-status/unlink', { ebayItemId });
+    toast('Unlinked', 'success');
+    await loadLinkStatus();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+async function forceMatchLinks() {
+  if (!confirm('Pull active eBay listings and auto-match them to warehouse products by SKU, part number, barcode, and title tokens. Continue?')) return;
+  toast('Pulling eBay listings & matching… this can take 1-2 min', 'info', 8000);
+  try {
+    const r = await Api.post('/api/listings/link-status/force-match');
+    const lines = [];
+    lines.push(`Scanned ${r.scanned} eBay listings.`);
+    lines.push(`✓ ${r.matched} newly linked`);
+    if (r.alreadyLinked) lines.push(`• ${r.alreadyLinked} already linked`);
+    if (r.noMatch) lines.push(`• ${r.noMatch} couldn't match`);
+    toast(lines.join('\n'), 'success', 8000);
+    await loadLinkStatus();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
 
 async function pullEbayListings() {
   toast('Pulling eBay listings + photos… ~1-2 min for big stores', 'info');
@@ -5783,10 +6018,18 @@ async function backfillEbayAddresses() {
 }
 
 async function relinkReturns() {
-  toast('Re-scanning unlinked returns…', 'info');
+  if (!confirm('Run full returns repair? This will:\n\n1. Re-sync statuses from eBay state mapping\n2. Clear any incorrectly-matched products (matched by title similarity)\n3. Re-link unmatched returns using strict SKU/part-number matching\n\nThis is safe to run multiple times.')) return;
+  toast('Repairing returns…', 'info', 4000);
   try {
-    const r = await Api.post('/api/returns/relink-unmatched');
-    toast(`Scanned ${r.scanned} unlinked returns, ${r.linked} newly linked.`, 'success', 6000);
+    const a = await Api.post('/api/returns/resync-statuses');
+    const b = await Api.post('/api/returns/unlink-loose-matches');
+    const c = await Api.post('/api/returns/relink-unmatched');
+    const lines = [];
+    if (a.updated) lines.push(`✓ ${a.updated} status fixed`);
+    if (b.cleared) lines.push(`✓ ${b.cleared} bad links cleared`);
+    if (c.linked) lines.push(`✓ ${c.linked} newly linked`);
+    if (!lines.length) lines.push('Already clean — nothing to repair.');
+    toast(lines.join('\n'), 'success', 7000);
     await Store.refresh('returns');
     if (State.page === 'returns') {
       const active = document.querySelector('[data-rfilter].active')?.dataset.rfilter || 'open';
