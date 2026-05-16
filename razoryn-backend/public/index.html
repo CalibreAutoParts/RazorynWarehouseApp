@@ -867,12 +867,16 @@ function adaptProduct(p) {
   };
 }
 function adaptSale(s) {
+  // Generic channel buckets used by the simple all/shopify/ebay/cash/bank filter.
+  // For multi-store brands, raw channel codes (ebay_em, ebay_cl) flow through to
+  // channelPill which resolves them to store names. The simple filter UI uses
+  // the bucket; the per-store filter UI uses the raw channelCode directly.
   const channelMap = {
-    shopify: 'shopify', ebay_em: 'ebay', ebay_cl: 'ebay',
+    shopify: 'shopify',
     direct_cash: 'cash', direct_bank: 'bank',
   };
+  const isEbay = (s.channel || '').startsWith('ebay');
   // Compose a meaningful item label.
-  // Single-item sales → just the title. Multi-item → "Title +N more"
   const itemCount = s.item_count || 0;
   const firstTitle = s.first_item_title;
   const itemLabel = firstTitle
@@ -884,7 +888,9 @@ function adaptSale(s) {
     sku: s.first_item_sku || s.sku || '',
     title: itemLabel,
     itemCount,
-    channel: channelMap[s.channel] || s.channel,
+    // For the display pill we use the raw eBay channel so multi-store brands
+    // show the right store name. For non-eBay channels we use the bucketed form.
+    channel: isEbay ? s.channel : (channelMap[s.channel] || s.channel),
     amount: parseFloat(s.total),
     date: s.occurred_at,
     customer: s.customer_name || '—',
@@ -1671,14 +1677,25 @@ function isToday(iso) {
 function totalQty(p) { return p.qtyShopify; /* eBay & Shopify share the same physical stock */ }
 
 function channelPill(ch) {
+  // Map raw channel codes to (colour, label) pairs. eBay store codes look up
+  // the human-readable store name from the brand config so e.g. ebay_em →
+  // "EVBODYPARTS" for Calibre or "eBay" for Razoryn.
+  const stores = (State.brand?.stores || []);
+  // Try to find a store whose channelCode matches
+  if (ch && ch.startsWith('ebay')) {
+    const store = stores.find(s => s.channelCode === ch);
+    const label = store ? store.name : 'eBay';
+    return `<span class="pill blue"><span class="dot"></span>${escapeHtml(label)}</span>`;
+  }
   const map = {
-    shopify: ['green', 'Store'],
-    ebay: ['blue', 'eBay'],
-    cash: ['amber', 'Cash'],
-    bank: ['amber', 'Bank']
+    shopify:      ['green', 'Store'],
+    direct_cash:  ['amber', 'Cash'],
+    direct_bank:  ['amber', 'Bank'],
+    cash:         ['amber', 'Cash'],
+    bank:         ['amber', 'Bank'],
   };
   const [c, l] = map[ch] || ['', ch];
-  return `<span class="pill ${c}"><span class="dot"></span>${l}</span>`;
+  return `<span class="pill ${c}"><span class="dot"></span>${escapeHtml(l)}</span>`;
 }
 
 /* ==========================================================
@@ -3014,7 +3031,9 @@ function renderSales() {
       <div class="seg" style="margin-bottom:14px" id="sales-filter">
         <button class="active" data-sf="all">All channels</button>
         <button data-sf="shopify">Store</button>
-        <button data-sf="ebay">eBay</button>
+        ${(State.brand?.stores || []).length > 1
+          ? (State.brand.stores.map(s => `<button data-sf="${escapeAttr(s.channelCode)}">${escapeHtml(s.name)}</button>`).join(''))
+          : `<button data-sf="ebay">eBay</button>`}
         <button data-sf="cash">Cash</button>
         <button data-sf="bank">Bank</button>
         <button data-sf="estimates">Estimates</button>
@@ -3045,6 +3064,8 @@ function renderSales() {
   function applyFilter(filter) {
     if (filter === 'estimates') return State.sales.filter(s => s.isEstimate);
     if (filter === 'all') return State.sales.filter(s => !s.isEstimate);
+    // 'ebay' is the legacy single-store bucket — matches any ebay_* channel.
+    if (filter === 'ebay') return State.sales.filter(s => (s.channel || '').startsWith('ebay') && !s.isEstimate);
     return State.sales.filter(s => s.channel === filter && !s.isEstimate);
   }
 
@@ -3052,13 +3073,14 @@ function renderSales() {
     const subset = applyFilter(filter);
     const allPaid = State.sales.filter(s => !s.isEstimate);
     const totalShop = allPaid.filter(s=>s.channel==='shopify').reduce((a,b)=>a+b.amount,0);
-    const totalEby = allPaid.filter(s=>s.channel==='ebay').reduce((a,b)=>a+b.amount,0);
+    const totalEby = allPaid.filter(s=>(s.channel||'').startsWith('ebay')).reduce((a,b)=>a+b.amount,0);
+    const ebyCount = allPaid.filter(s=>(s.channel||'').startsWith('ebay')).length;
     const totalDirect = allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').reduce((a,b)=>a+b.amount,0);
     const estimatesCount = State.sales.filter(s => s.isEstimate).length;
     el('sales-stats').innerHTML = `
       <div class="stat"><div class="label">Total revenue</div><div class="value">${gbp(allPaid.reduce((a,b)=>a+b.amount,0))}</div><div class="delta">${allPaid.length} sales</div></div>
       <div class="stat"><div class="label">Store</div><div class="value">${gbp(totalShop)}</div><div class="delta">${allPaid.filter(s=>s.channel==='shopify').length} orders</div></div>
-      <div class="stat"><div class="label">eBay</div><div class="value">${gbp(totalEby)}</div><div class="delta">${allPaid.filter(s=>s.channel==='ebay').length} orders</div></div>
+      <div class="stat"><div class="label">eBay${(State.brand?.stores||[]).length > 1 ? ' (all)' : ''}</div><div class="value">${gbp(totalEby)}</div><div class="delta">${ebyCount} orders</div></div>
       <div class="stat"><div class="label">${filter === 'estimates' ? 'Estimates' : 'Direct (cash + bank)'}</div><div class="value">${filter === 'estimates' ? estimatesCount : gbp(totalDirect)}</div><div class="delta">${filter === 'estimates' ? 'open quotes' : allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').length + ' orders'}</div></div>
     `;
   }

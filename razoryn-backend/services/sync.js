@@ -190,80 +190,113 @@ async function pullShopify() {
 
 // --------- PULL: eBay orders ---------
 async function pullEbay() {
+  const brand = require('../lib/brand');
   if (!ebay.isConfigured()) return { skipped: 'not_configured' };
 
+  // Sync cursor is shared across all eBay stores for this brand. Each store's
+  // orders are tagged with that store's channelCode so the Sales tab can
+  // differentiate them.
   const state = await getCursor('ebay');
   const since = (state && state.last_synced_at)
     ? state.last_synced_at.toISOString()
     : new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-  const orders = await ebay.getRecentOrders(since);
-  let inserted = 0;
+  // Determine which stores have a usable token. Skip silently for stores
+  // without tokens (warning logged at brand-import time).
+  const activeStores = brand.stores.filter(s => s.token);
+  if (!activeStores.length) {
+    console.warn('[sync.pullEbay] no eBay stores have tokens configured');
+    return { channel: 'ebay', orders: 0, inserted: 0, stores: [] };
+  }
 
-  for (const order of orders) {
-    const existing = await query(
-      `SELECT id FROM sales WHERE external_order_id = $1`,
-      [order.orderId]
-    );
-    if (existing.rows.length) continue;
+  let totalOrders = 0, totalInserted = 0;
+  const perStore = [];
 
-    await withTx(async (c) => {
-      const subtotal = parseFloat(order.pricingSummary?.priceSubtotal?.value || 0);
-      const vat = parseFloat(order.pricingSummary?.tax?.value || 0);
-      const shipping = parseFloat(order.pricingSummary?.deliveryCost?.value || 0);
-      const total = parseFloat(order.pricingSummary?.total?.value || 0);
+  for (const store of activeStores) {
+    let orders = [];
+    try {
+      orders = await ebay.getRecentOrders(since, store);
+    } catch (e) {
+      console.error(`[sync.pullEbay] store=${store.code} fetch failed: ${e.message}`);
+      perStore.push({ code: store.code, error: e.message, orders: 0, inserted: 0 });
+      continue;
+    }
+    let inserted = 0;
 
-      const paymentRef = 'REP-' + Math.random().toString(36).slice(2,6).toUpperCase()
-                        + Math.random().toString(36).slice(2,6).toUpperCase() + '-E';
-
-      const sale = await c.query(
-        `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
-                            subtotal, vat, shipping, total, status, occurred_at, shipping_address,
-                            payment_method, payment_reference, order_number)
-         VALUES ('ebay_em',$1,$2,$3,$4,$5,$6,$7,$8,'paid',$9,$10,$11,$12,$13) RETURNING id`,
-        [
-          order.orderId,
-          order.buyer?.name || order.buyer?.username || null,
-          order.buyer?.email || null,
-          order.buyer?.phone || null,
-          subtotal, vat, shipping, total,
-          order.creationDate,
-          order.shippingAddress || null,
-          'ebay', paymentRef, order.orderId,
-        ]
+    for (const order of orders) {
+      const existing = await query(
+        `SELECT id FROM sales WHERE external_order_id = $1`,
+        [order.orderId]
       );
+      if (existing.rows.length) continue;
 
-      for (const li of order.lineItems || []) {
-        const matched = await resolveProductBySku(c, li.sku);
-        const productId = matched?.id || null;
-        const qty = li.quantity || 1;
-        const unitPrice = parseFloat(li.lineItemCost?.value || 0) / qty;
-        await c.query(
-          `INSERT INTO sale_items (sale_id, product_id, sku, title, qty, unit_price, line_total)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-          [sale.rows[0].id, productId, li.sku || `(no-sku-${li.lineItemId})`,
-           li.title, qty, unitPrice, parseFloat(li.lineItemCost?.value || 0)]
+      await withTx(async (c) => {
+        const subtotal = parseFloat(order.pricingSummary?.priceSubtotal?.value || 0);
+        const vat = parseFloat(order.pricingSummary?.tax?.value || 0);
+        const shipping = parseFloat(order.pricingSummary?.deliveryCost?.value || 0);
+        const total = parseFloat(order.pricingSummary?.total?.value || 0);
+
+        // Use the brand's invoice prefix instead of hard-coded REP-.
+        const prefix = brand.invoicePrefix || 'REP';
+        const paymentRef = prefix + '-' + Math.random().toString(36).slice(2,6).toUpperCase()
+                          + Math.random().toString(36).slice(2,6).toUpperCase() + '-E';
+
+        // Channel = the store's channelCode (ebay_em / ebay_cl / etc.).
+        const channelCode = store.channelCode || 'ebay_em';
+
+        const sale = await c.query(
+          `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
+                              subtotal, vat, shipping, total, status, occurred_at, shipping_address,
+                              payment_method, payment_reference, order_number)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'paid',$10,$11,$12,$13,$14) RETURNING id`,
+          [
+            channelCode,
+            order.orderId,
+            order.buyer?.name || order.buyer?.username || null,
+            order.buyer?.email || null,
+            order.buyer?.phone || null,
+            subtotal, vat, shipping, total,
+            order.creationDate,
+            order.shippingAddress || null,
+            'ebay', paymentRef, order.orderId,
+          ]
         );
-        if (productId) {
-          await c.query(`UPDATE products SET qty_on_hand = qty_on_hand - $1 WHERE id = $2`,
-            [qty, productId]);
+
+        for (const li of order.lineItems || []) {
+          const matched = await resolveProductBySku(c, li.sku);
+          const productId = matched?.id || null;
+          const qty = li.quantity || 1;
+          const unitPrice = parseFloat(li.lineItemCost?.value || 0) / qty;
           await c.query(
-            `INSERT INTO stock_movements (product_id, delta, reason, reference_id)
-             VALUES ($1,$2,'sale_ebay',$3)`,
-            [productId, -qty, sale.rows[0].id]
+            `INSERT INTO sale_items (sale_id, product_id, sku, title, qty, unit_price, line_total)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+            [sale.rows[0].id, productId, li.sku || `(no-sku-${li.lineItemId})`,
+             li.title, qty, unitPrice, parseFloat(li.lineItemCost?.value || 0)]
           );
+          if (productId) {
+            await c.query(`UPDATE products SET qty_on_hand = qty_on_hand - $1 WHERE id = $2`,
+              [qty, productId]);
+            await c.query(
+              `INSERT INTO stock_movements (product_id, delta, reason, reference_id)
+               VALUES ($1,$2,$3,$4)`,
+              [productId, -qty, `sale_${channelCode}`, sale.rows[0].id]
+            );
+          }
         }
-      }
-      for (const li of order.lineItems || []) {
-        const matched = await resolveProductBySku(c, li.sku);
-        if (matched) await recordLowStockIfNeeded(matched.id);
-      }
-    });
-    inserted++;
+        for (const li of order.lineItems || []) {
+          const matched = await resolveProductBySku(c, li.sku);
+          if (matched) await recordLowStockIfNeeded(matched.id);
+        }
+      });
+      inserted++;
+    }
+    totalOrders += orders.length;
+    totalInserted += inserted;
+    perStore.push({ code: store.code, orders: orders.length, inserted });
   }
 
   await setCursor('ebay', { lastSyncedAt: new Date(), status: 'ok' });
-  return { channel: 'ebay', orders: orders.length, inserted };
+  return { channel: 'ebay', orders: totalOrders, inserted: totalInserted, stores: perStore };
 }
 
 // --------- PUSH: stock levels for sale items ---------

@@ -100,18 +100,26 @@ router.post('/link-status/unlink', requireAdmin, async (req, res) => {
 });
 
 // POST /api/listings/link-status/force-match
-// Auto-link by SKU + part-number + title-token fuzzy matching.
+// Auto-link by SKU + part-number + title-token fuzzy matching. Pulls listings from
+// every eBay store the brand has configured and aggregates the results.
 router.post('/link-status/force-match', requireAdmin, async (req, res) => {
   if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
   const sync = require('../services/sync');
+  const stores = ebay.listStores().filter(s => s.hasToken);
 
-  let listings;
-  try { listings = await ebay.getActiveListings(); }
-  catch (e) { return res.status(500).json({ error: 'fetch_failed', message: e.message }); }
+  let allListings = [];
+  for (const s of stores) {
+    try {
+      const part = await ebay.getActiveListings(s.code);
+      allListings = allListings.concat(part);
+    } catch (e) {
+      console.warn(`[force-match] store=${s.code} fetch failed: ${e.message}`);
+    }
+  }
 
   let matched = 0, alreadyLinked = 0, noMatch = 0;
   const matches = [];
-  for (const l of listings) {
+  for (const l of allListings) {
     const existing = await query(`SELECT 1 FROM mirror_links WHERE ebay_item_id = $1`, [String(l.itemId)]);
     if (existing.rows[0]) { alreadyLinked++; continue; }
 
@@ -121,8 +129,10 @@ router.post('/link-status/force-match', requireAdmin, async (req, res) => {
     }
     if (!product && l.title) {
       const tokens = String(l.title).match(/\b[A-Z0-9]{5,}(?:[-\/][A-Z0-9]{2,})*\b/gi) || [];
-      tokens.sort((a, b) => b.length - a.length);
-      for (const tok of tokens.slice(0, 5)) {
+      // Require BOTH letters AND digits — eliminates false matches on car-model names
+      const partNumberTokens = tokens.filter(t => /[A-Z]/i.test(t) && /[0-9]/.test(t));
+      partNumberTokens.sort((a, b) => b.length - a.length);
+      for (const tok of partNumberTokens.slice(0, 5)) {
         const norm = tok.replace(/[^A-Z0-9]/gi, '').toUpperCase();
         if (norm.length < 5) continue;
         const r = await query(
@@ -144,10 +154,10 @@ router.post('/link-status/force-match', requireAdmin, async (req, res) => {
       [String(l.itemId), product.shopify_product_id, l.sku || product.sku, l.title]
     );
     matched++;
-    if (matches.length < 20) matches.push({ ebayItemId: l.itemId, productId: product.id, sku: product.sku, title: l.title });
+    if (matches.length < 20) matches.push({ ebayItemId: l.itemId, productId: product.id, sku: product.sku, title: l.title, store: l.storeCode });
   }
-  await audit(req, 'force_match_links', null, null, { matched, alreadyLinked, noMatch });
-  res.json({ scanned: listings.length, matched, alreadyLinked, noMatch, sample: matches });
+  await audit(req, 'force_match_links', null, null, { matched, alreadyLinked, noMatch, stores: stores.map(s => s.code) });
+  res.json({ scanned: allListings.length, matched, alreadyLinked, noMatch, sample: matches, stores: stores.map(s => s.code) });
 });
 
 // POST /api/listings/hydrate-ebay-prices
@@ -157,9 +167,16 @@ router.post('/link-status/force-match', requireAdmin, async (req, res) => {
 router.post('/hydrate-ebay-prices', requireAdmin, async (req, res) => {
   if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
   try {
-    const listings = await ebay.getActiveListings();
+    const stores = ebay.listStores().filter(s => s.hasToken);
+    let allListings = [];
+    for (const s of stores) {
+      try {
+        const part = await ebay.getActiveListings(s.code);
+        allListings = allListings.concat(part);
+      } catch (e) { console.warn(`[hydrate-ebay-prices] store=${s.code} failed: ${e.message}`); }
+    }
     let updated = 0, matched = 0, skipped = 0;
-    for (const l of listings) {
+    for (const l of allListings) {
       if (!l.sku) { skipped++; continue; }
       const ebayPrice = l.priceEbay || 0;
       const upd = await query(
@@ -169,7 +186,7 @@ router.post('/hydrate-ebay-prices', requireAdmin, async (req, res) => {
       if (upd.rows.length > 0) { updated += upd.rows.length; matched++; }
       else skipped++;
     }
-    res.json({ ok: true, listingsFound: listings.length, productsMatched: matched, productsUpdated: updated, skipped });
+    res.json({ ok: true, listingsFound: allListings.length, productsMatched: matched, productsUpdated: updated, skipped, stores: stores.map(s => s.code) });
   } catch (e) {
     console.error('[hydrate-ebay-prices]', e);
     res.status(500).json({ error: 'hydrate_failed', message: e.message });
@@ -198,8 +215,15 @@ router.get('/sku-mismatches', requireAdmin, async (req, res) => {
     );
     if (!links.rows.length) return res.json({ checked: 0, mismatches: [] });
 
-    // 1) Pull live eBay SKUs (only for our mirrored items)
-    const ebayListings = await ebay.getActiveListings();
+    // 1) Pull live eBay SKUs across all stores (only for our mirrored items)
+    const stores = ebay.listStores().filter(s => s.hasToken);
+    let ebayListings = [];
+    for (const s of stores) {
+      try {
+        const part = await ebay.getActiveListings(s.code);
+        ebayListings = ebayListings.concat(part);
+      } catch (e) { console.warn(`[sku-mismatches] store=${s.code} failed: ${e.message}`); }
+    }
     const ebaySkuByItemId = {};
     for (const l of ebayListings) ebaySkuByItemId[l.itemId] = l.sku || '';
 
@@ -285,7 +309,16 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
     });
   }
   try {
-    const listings = await ebay.getActiveListings();
+    const stores = ebay.listStores().filter(s => s.hasToken);
+    let listings = [];
+    for (const s of stores) {
+      try {
+        const part = await ebay.getActiveListings(s.code);
+        listings = listings.concat(part);
+      } catch (e) {
+        console.warn(`[mirror.pull] store=${s.code} failed: ${e.message}`);
+      }
+    }
 
     const itemIds = listings.map(l => l.itemId);
 
@@ -482,14 +515,17 @@ router.post('/mirror', requireAdmin, async (req, res) => {
   res.json({ ok: true, ...results });
 });
 
-// PUSH TO EBAY — write SKU/title back to an eBay listing
+// PUSH TO EBAY — write SKU / title / price back to a specific eBay listing.
+// Body: { itemId, sku?, title?, price?, store? }
+// `store` is the store code (e.g. 'evbodyparts'). Required for multi-store brands.
+// For single-store brands (Razoryn), defaults to the primary store.
 router.post('/push-to-ebay', requireAdmin, async (req, res) => {
   if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
-  const { itemId, sku, title } = req.body;
+  const { itemId, sku, title, price, store } = req.body || {};
   if (!itemId) return res.status(400).json({ error: 'missing_item_id' });
   try {
-    const r = await ebay.reviseItem(itemId, { sku, title });
-    await audit(req, 'push_to_ebay', 'ebay_listing', itemId, { sku, title });
+    const r = await ebay.reviseItem(itemId, { sku, title, price }, store);
+    await audit(req, 'push_to_ebay', 'ebay_listing', itemId, { sku, title, price, store: r.storeCode });
     res.json({ ok: true, ...r });
   } catch (e) {
     console.error('[listings/push-to-ebay]', e.message);

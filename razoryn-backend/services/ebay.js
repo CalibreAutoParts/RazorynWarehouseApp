@@ -1,17 +1,22 @@
 // services/ebay.js — eBay Sell API client
 //
-// Uses OAuth refresh-token flow to get a fresh access token, then calls
-// the Inventory and Fulfillment APIs.
+// MULTI-STORE: as of Pass 2, every public method accepts an optional `store`
+// argument (a brand.stores[i] object). When omitted, falls back to the primary
+// store from brand config. This lets one deployment serve multiple eBay seller
+// accounts (Calibre has EVBODYPARTS + Evanta Grande) using the same App credentials
+// but different Auth'n'Auth tokens per seller.
 //
-// Env vars supported (either naming convention works — eBay's dashboard uses
-// APP_ID/CERT_ID, the OAuth spec uses CLIENT_ID/CLIENT_SECRET; pick whichever):
-//   EBAY_CLIENT_ID    or  EBAY_APP_ID         — public app identifier
-//   EBAY_CLIENT_SECRET or EBAY_CERT_ID        — secret key
-//   EBAY_REFRESH_TOKEN                        — long-lived seller token (required)
+// Env vars supported:
+//   EBAY_CLIENT_ID    or  EBAY_APP_ID         — public app identifier (shared by all stores)
+//   EBAY_CLIENT_SECRET or EBAY_CERT_ID        — secret key (shared by all stores)
 //   EBAY_DEV_ID                               — optional, only some Trading API calls need it
 //   EBAY_MARKETPLACE_ID                       — defaults to EBAY_GB
 //   EBAY_SITE_ID                              — defaults to 3 (UK) for Trading API
+//
+// Per-store tokens come from the brand config — see lib/brand.js. Each store's
+// `tokenEnv` field names the env var holding its Auth'n'Auth token.
 const axios = require('axios');
+const brand = require('../lib/brand');
 
 const ENV = process.env.EBAY_ENV || 'production';
 const BASE = ENV === 'production'
@@ -21,13 +26,35 @@ const BASE = ENV === 'production'
 // Accept either naming pattern
 const CLIENT_ID = process.env.EBAY_CLIENT_ID || process.env.EBAY_APP_ID;
 const CLIENT_SECRET = process.env.EBAY_CLIENT_SECRET || process.env.EBAY_CERT_ID;
+// Legacy single-token fallback (used by Razoryn). For new brands prefer per-store
+// tokens defined via brand.stores[i].tokenEnv.
 const REFRESH_TOKEN = process.env.EBAY_REFRESH_TOKEN;
 
-function isConfigured() {
-  // Two valid configurations:
-  //  A. Auth'n'Auth: just need EBAY_AUTH_TOKEN + APP_ID + CERT_ID + DEV_ID (for Trading API)
-  //  B. OAuth: need APP_ID/CLIENT_ID + CERT_ID/CLIENT_SECRET + REFRESH_TOKEN
-  if (process.env.EBAY_AUTH_TOKEN && CLIENT_ID && CLIENT_SECRET) return true;
+// Resolve a store argument to its full brand.store object. Accepts:
+//  - a store code string ('razoryn', 'evbodyparts', 'evantagrande')
+//  - a store object { code, token, channelCode, ... }
+//  - undefined → falls back to the brand's primary store
+function resolveStore(arg) {
+  if (!arg) return brand.getPrimaryStore();
+  if (typeof arg === 'string') return brand.getStore(arg) || brand.getPrimaryStore();
+  if (arg.code) return arg;
+  return brand.getPrimaryStore();
+}
+
+// Return the Auth'n'Auth token for a given store. Each store's token is
+// preloaded onto the store object at brand-import time.
+function tokenFor(storeArg) {
+  const s = resolveStore(storeArg);
+  return s && s.token ? s.token : null;
+}
+
+function isConfigured(storeArg) {
+  // For multi-store brands: configured if the chosen store has a token, plus
+  // the shared App credentials (CLIENT_ID/CLIENT_SECRET). For legacy single-token
+  // setups, the primary store's tokenEnv defaults to EBAY_AUTH_TOKEN.
+  const t = tokenFor(storeArg);
+  if (t && CLIENT_ID && CLIENT_SECRET) return true;
+  // OAuth fallback (Razoryn legacy)
   return !!(CLIENT_ID && CLIENT_SECRET && REFRESH_TOKEN);
 }
 
@@ -112,17 +139,16 @@ async function setInventoryQty(sku, qty) {
   await http('POST', '/sell/inventory/v1/bulk_update_price_quantity', body);
 }
 
-// Pull recent orders. Tries Sell Fulfillment API first (modern OAuth), falls
-// back to Trading API GetOrders which works with the simpler Auth'n'Auth token.
-async function getRecentOrders(sinceISO) {
-  // Try OAuth-based Sell Fulfillment API first
+// Pull recent orders for a given eBay store. Tries Sell Fulfillment API first (OAuth),
+// falls back to Trading API GetOrders which works with the simpler Auth'n'Auth token.
+async function getRecentOrders(sinceISO, storeArg) {
+  // Try OAuth-based Sell Fulfillment API first (uses shared refresh-token across stores)
   if (REFRESH_TOKEN && CLIENT_ID && CLIENT_SECRET) {
     try {
       const filter = `creationdate:[${sinceISO}..]`;
       const r = await http('GET',
         `/sell/fulfillment/v1/order?filter=${encodeURIComponent(filter)}&limit=200`);
       const orders = r.data.orders || [];
-      // Normalise to a common shape (the Trading API path uses the same fields)
       return orders.map(o => ({
         orderId: o.orderId,
         creationDate: o.creationDate,
@@ -134,12 +160,11 @@ async function getRecentOrders(sinceISO) {
       console.warn('[ebay] Sell Fulfillment API failed, falling back to Trading API:', e.message);
     }
   }
-  // Trading API fallback — uses Auth'n'Auth token
-  return getRecentOrdersTrading(sinceISO);
+  return getRecentOrdersTrading(sinceISO, storeArg);
 }
 
-// Trading API GetOrders — works with EBAY_AUTH_TOKEN (Auth'n'Auth)
-async function getRecentOrdersTrading(sinceISO) {
+// Trading API GetOrders — per-store token
+async function getRecentOrdersTrading(sinceISO, storeArg) {
   const sinceDate = new Date(sinceISO);
   const fromDate = sinceDate.toISOString();
   const toDate = new Date().toISOString();
@@ -154,7 +179,7 @@ async function getRecentOrdersTrading(sinceISO) {
     <DetailLevel>ReturnAll</DetailLevel>
     <IncludeFinalValueFee>true</IncludeFinalValueFee>`;
 
-  const xml = await tradingCall('GetOrders', bodyInner);
+  const xml = await tradingCall('GetOrders', bodyInner, storeArg);
   if (xml.includes('<Ack>Failure</Ack>')) {
     const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
     throw new Error('eBay GetOrders error: ' + decodeEntities(err));
@@ -242,14 +267,15 @@ const TRADING_BASE = ENV === 'production'
   ? 'https://api.ebay.com/ws/api.dll'
   : 'https://api.sandbox.ebay.com/ws/api.dll';
 
-async function tradingCall(callName, bodyInner) {
+async function tradingCall(callName, bodyInner, storeArg) {
   // Two auth options for Trading API:
-  //  A. EBAY_AUTH_TOKEN (Auth'n'Auth legacy token from User Tokens page) →
-  //     uses Dev/App/Cert headers + <RequesterCredentials><eBayAuthToken> in body.
-  //     Simpler, works without OAuth scope dance. Tokens last ~18 months.
-  //  B. OAuth IAF token via refresh-token flow → modern, uses X-EBAY-API-IAF-TOKEN header,
-  //     no <RequesterCredentials> in body. Requires `https://api.ebay.com/oauth/api_scope` granted.
-  const authToken = process.env.EBAY_AUTH_TOKEN;
+  //  A. Auth'n'Auth token (legacy User Token) → uses Dev/App/Cert headers
+  //     + <RequesterCredentials><eBayAuthToken> in body. Simpler, works without
+  //     OAuth scope dance. Tokens last ~18 months. PER-STORE.
+  //  B. OAuth IAF token via refresh-token flow → modern, uses X-EBAY-API-IAF-TOKEN
+  //     header. Requires `https://api.ebay.com/oauth/api_scope` granted.
+  //     Currently shared across stores (one refresh token in env).
+  const authToken = tokenFor(storeArg);
   const useAuthnAuth = !!authToken;
 
   let headers;
@@ -291,7 +317,8 @@ async function tradingCall(callName, bodyInner) {
   } catch (e) {
     const status = e.response?.status;
     const body = e.response?.data;
-    let detail = `Trading API ${callName} failed`;
+    const storeCode = resolveStore(storeArg)?.code || 'default';
+    let detail = `Trading API ${callName} failed [store=${storeCode}]`;
     if (status) detail += ` (HTTP ${status})`;
     if (typeof body === 'string') {
       const short = extractOne(body, 'ShortMessage');
@@ -328,14 +355,15 @@ function decodeEntities(s) {
     .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&apos;/g, "'");
 }
 
-// Pull all active eBay listings (paginated)
-async function getActiveListings() {
-  if (!isConfigured()) return [];
+// Pull all active eBay listings (paginated) for a given store.
+async function getActiveListings(storeArg) {
+  if (!isConfigured(storeArg)) return [];
+  const store = resolveStore(storeArg);
   const all = [];
-  const seenItemIds = new Set(); // dedupe — eBay sometimes returns the same item twice across pages
+  const seenItemIds = new Set();
   let page = 1;
   const perPage = 200;
-  while (page < 50) { // safety cap (~10k listings)
+  while (page < 50) {
     const xml = await tradingCall('GetMyeBaySelling', `
       <ActiveList>
         <Include>true</Include>
@@ -343,7 +371,7 @@ async function getActiveListings() {
           <EntriesPerPage>${perPage}</EntriesPerPage>
           <PageNumber>${page}</PageNumber>
         </Pagination>
-      </ActiveList>`);
+      </ActiveList>`, storeArg);
 
     if (xml.includes('<Ack>Failure</Ack>')) {
       const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
@@ -387,6 +415,8 @@ async function getActiveListings() {
         quantitySold,
         pictureUrls: allPics,
         viewItemURL: decodeEntities(extractOne(itemXml, 'ViewItemURL') || ''),
+        storeCode: store.code,
+        storeName: store.name,
       });
     }
 
@@ -405,7 +435,7 @@ async function getActiveListings() {
     const batch = all.slice(i, i + concurrency);
     await Promise.all(batch.map(async (l) => {
       try {
-        const itemXml = await tradingCall('GetItem', `<ItemID>${l.itemId}</ItemID><IncludeItemSpecifics>false</IncludeItemSpecifics>`);
+        const itemXml = await tradingCall('GetItem', `<ItemID>${l.itemId}</ItemID><IncludeItemSpecifics>false</IncludeItemSpecifics>`, storeArg);
         const picBlock = extractOne(itemXml, 'PictureDetails') || '';
         const pictureUrls = extractAll(picBlock, 'PictureURL').map(decodeEntities);
         const galleryUrl = decodeEntities(extractOne(picBlock, 'GalleryURL') || '');
@@ -437,23 +467,30 @@ async function getActiveListings() {
 
 // ReviseItem — push a SKU and/or title change back to eBay.
 // Risks: revision counts toward eBay's per-listing limit; major changes may affect search ranking;
+// ReviseItem — push SKU, title, and/or price change back to eBay.
+// Risks: revision counts toward eBay's per-listing limit; major changes may affect search ranking;
 // some listings can't be revised (e.g. with bids). Use sparingly, with explicit user confirm.
-async function reviseItem(itemId, { sku, title } = {}) {
-  if (!isConfigured()) throw new Error('ebay_not_configured');
+async function reviseItem(itemId, { sku, title, price } = {}, storeArg) {
+  if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
   if (!itemId) throw new Error('missing_item_id');
-  if (!sku && !title) return { skipped: true };
+  if (sku == null && title == null && price == null) return { skipped: true };
 
   const fields = [`<ItemID>${itemId}</ItemID>`];
   if (title) fields.push(`<Title>${escapeXml(title)}</Title>`);
   if (sku) fields.push(`<SKU>${escapeXml(sku)}</SKU>`);
+  if (price != null) {
+    // For fixed-price listings — eBay rejects StartPrice changes on auctions with bids.
+    const formatted = Number(price).toFixed(2);
+    fields.push(`<StartPrice currencyID="GBP">${formatted}</StartPrice>`);
+  }
   const body = `<Item>${fields.join('')}</Item>`;
 
-  const xml = await tradingCall('ReviseItem', body);
+  const xml = await tradingCall('ReviseItem', body, storeArg);
   if (xml.includes('<Ack>Failure</Ack>')) {
     const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
     throw new Error('eBay ReviseItem error: ' + decodeEntities(err));
   }
-  return { ok: true, itemId };
+  return { ok: true, itemId, storeCode: resolveStore(storeArg)?.code };
 }
 
 function escapeXml(s) {
@@ -469,12 +506,11 @@ function escapeXml(s) {
 // The Trading API does NOT expose return cases. They live in the Post-Order Returns API.
 // Even with Auth'n'Auth, the Post-Order API accepts the legacy token via
 // "Authorization: TOKEN <auth-token>" — no OAuth dance needed for read-only.
-async function getOpenReturns() {
-  const authToken = process.env.EBAY_AUTH_TOKEN;
-  if (!authToken) throw new Error('EBAY_AUTH_TOKEN required for returns API');
+async function getOpenReturns(storeArg) {
+  const authToken = tokenFor(storeArg);
+  if (!authToken) throw new Error('No Auth\'n\'Auth token configured for this store');
   const axios = require('axios');
   const marketplace = process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
-  // Filter: get open returns from the last 90 days
   const url = 'https://api.ebay.com/post-order/v2/return/search'
             + '?filter=role:{SELLER},sellerInquiryStage:{INQUIRY_PROCESSING},returnCountFilter:{ALL_RETURNS}'
             + '&limit=50';
@@ -490,22 +526,21 @@ async function getOpenReturns() {
     });
     return r.data;
   } catch (e) {
-    // If Post-Order fails (e.g. needs OAuth) fall back to GetUserCases via Trading
     if (e.response?.status === 401 || e.response?.status === 403) {
       console.warn('[ebay returns] Post-Order needs OAuth; falling back to GetUserCases');
-      return getUserCasesViaTrading();
+      return getUserCasesViaTrading(storeArg);
     }
     throw e;
   }
 }
 
-// Same as above but with broader filter — used for "show all returns" view
-async function getAllRecentReturns(days = 90) {
-  const authToken = process.env.EBAY_AUTH_TOKEN;
-  if (!authToken) throw new Error('EBAY_AUTH_TOKEN required for returns API');
+// Same as above but with broader filter — used for "show all returns" view.
+// Per-store; the eBay Post-Order API is scoped to whichever seller's token you use.
+async function getAllRecentReturns(days = 90, storeArg) {
+  const authToken = tokenFor(storeArg);
+  if (!authToken) throw new Error('No Auth\'n\'Auth token configured for this store');
   const axios = require('axios');
   const marketplace = process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
-  // Wider filter: any return where I'm the seller, created in the last N days
   const fromDate = new Date(Date.now() - days * 86400000).toISOString();
   const url = 'https://api.ebay.com/post-order/v2/return/search'
             + `?filter=role:{SELLER},creation_date:[${fromDate}..]&limit=100`;
@@ -532,15 +567,14 @@ async function getAllRecentReturns(days = 90) {
   }
 }
 
-// Fallback: Trading API GetUserCases for buyer-opened cases (item not received, dispute, etc.)
-async function getUserCasesViaTrading() {
+async function getUserCasesViaTrading(storeArg) {
   const bodyInner = `
     <CaseStatusFilter>OpenedCases</CaseStatusFilter>
     <CaseTypeFilter>RequestReturn</CaseTypeFilter>
     <ItemFilter><DateFilter>LastThirtyDays</DateFilter></ItemFilter>
     <DetailLevel>ReturnAll</DetailLevel>`;
   try {
-    const xml = await tradingCall('GetUserCases', bodyInner);
+    const xml = await tradingCall('GetUserCases', bodyInner, storeArg);
     return { source: 'trading_getusercases', xml };
   } catch (e) {
     console.warn('[ebay returns] GetUserCases failed:', e.message);
@@ -549,21 +583,20 @@ async function getUserCasesViaTrading() {
 }
 
 // Single-order detail via Trading-API GetOrders with a specific OrderID filter.
-// Often returns more detail than the bulk listing — especially shipping address.
-async function getOrderDetail(orderId) {
+async function getOrderDetail(orderId, storeArg) {
   const bodyInner = `
     <OrderIDArray><OrderID>${orderId}</OrderID></OrderIDArray>
     <DetailLevel>ReturnAll</DetailLevel>
     <IncludeFinalValueFee>true</IncludeFinalValueFee>`;
-  const xml = await tradingCall('GetOrders', bodyInner);
+  const xml = await tradingCall('GetOrders', bodyInner, storeArg);
   return xml;
 }
 
 // Returns raw XML for debugging — sanitises auth token from output.
-async function dumpOrderXml(orderId, days) {
+async function dumpOrderXml(orderId, days, storeArg) {
   let xml;
   if (orderId) {
-    xml = await getOrderDetail(orderId);
+    xml = await getOrderDetail(orderId, storeArg);
   } else {
     const sinceISO = new Date(Date.now() - (parseInt(days || 7) * 86400000)).toISOString();
     const bodyInner = `
@@ -572,9 +605,8 @@ async function dumpOrderXml(orderId, days) {
       <OrderStatus>All</OrderStatus>
       <Pagination><EntriesPerPage>3</EntriesPerPage><PageNumber>1</PageNumber></Pagination>
       <DetailLevel>ReturnAll</DetailLevel>`;
-    xml = await tradingCall('GetOrders', bodyInner);
+    xml = await tradingCall('GetOrders', bodyInner, storeArg);
   }
-  // Mask the auth token from output before returning
   return xml.replace(/<eBayAuthToken>[^<]*<\/eBayAuthToken>/g, '<eBayAuthToken>***REDACTED***</eBayAuthToken>');
 }
 
@@ -590,4 +622,8 @@ module.exports = {
   pushStockForProduct,
   getActiveListings,
   reviseItem,
+  // Multi-store helpers
+  listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary })),
+  getPrimaryStore: () => brand.getPrimaryStore(),
+  getStore: (code) => brand.getStore(code),
 };

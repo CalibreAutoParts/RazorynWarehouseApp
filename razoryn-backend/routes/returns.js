@@ -338,11 +338,17 @@ router.post('/sync-ebay', requirePermission('returns'), async (req, res) => {
 // changes state — so staff see "New eBay return" / "eBay return closed" alerts.
 async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {}) {
   const ebay = require('../services/ebay');
+  const brand = require('../lib/brand');
   if (!ebay.isConfigured()) throw Object.assign(new Error('ebay_not_configured'), { status: 400 });
 
-  const data = await ebay.getAllRecentReturns(days);
-  const returns = data.members || data.returns || [];
-  let created = 0, updated = 0, noLocalSale = 0, notifications = 0;
+  // Filter to stores that have a token configured. Each store's returns are
+  // pulled separately because eBay's Post-Order API is scoped to whichever
+  // seller's token you authenticate with.
+  const activeStores = brand.stores.filter(s => s.token);
+  if (!activeStores.length) throw Object.assign(new Error('no_ebay_stores_configured'), { status: 400 });
+
+  let totalFetched = 0, created = 0, updated = 0, noLocalSale = 0, notifications = 0;
+  const perStore = [];
 
   const dig = (obj, ...keys) => {
     let v = obj;
@@ -350,29 +356,48 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
     return v;
   };
 
-  for (const ret of returns) {
-    const returnId = ret.returnId || dig(ret, 'returnInfo', 'returnId') || null;
-    if (!returnId) continue;
+  for (const store of activeStores) {
+    let data;
+    try {
+      data = await ebay.getAllRecentReturns(days, store);
+    } catch (e) {
+      // Propagate auth errors so the route can surface them; log others & continue.
+      if (e.status === 401 || e.status === 403) {
+        e.message = `[store=${store.code}] ${e.message}`;
+        throw e;
+      }
+      console.error(`[returns.sync] store=${store.code} failed: ${e.message}`);
+      perStore.push({ code: store.code, error: e.message, fetched: 0 });
+      continue;
+    }
+    const returns = data.members || data.returns || [];
+    totalFetched += returns.length;
+    let storeCreated = 0, storeUpdated = 0;
 
-    const itemTitle = ret.itemTitle
-                   || dig(ret, 'creationInfo', 'item', 'itemTitle')
-                   || dig(ret, 'item', 'itemTitle') || null;
-    const itemId = dig(ret, 'creationInfo', 'item', 'itemId')
-                || dig(ret, 'item', 'itemId') || null;
-    const variationSku = dig(ret, 'creationInfo', 'item', 'variationSku')
-                      || dig(ret, 'item', 'variationSku') || null;
-    const itemQty = ret.itemQty
-                 || dig(ret, 'creationInfo', 'item', 'quantity')
-                 || dig(ret, 'item', 'quantity') || 1;
-    const orderId = ret.orderId
-                 || dig(ret, 'creationInfo', 'order', 'orderId')
-                 || dig(ret, 'order', 'orderId') || null;
-    const legacyOrderId = dig(ret, 'creationInfo', 'order', 'legacyOrderId')
-                       || dig(ret, 'order', 'legacyOrderId') || null;
+    for (const ret of returns) {
+      const returnId = ret.returnId || dig(ret, 'returnInfo', 'returnId') || null;
+      if (!returnId) continue;
 
-    let saleId = null, productId = null, qty = itemQty, channel = 'ebay_em', sku = variationSku;
-    let resolvedTitle = itemTitle;
-    let resolvedSku = sku;
+      const itemTitle = ret.itemTitle
+                     || dig(ret, 'creationInfo', 'item', 'itemTitle')
+                     || dig(ret, 'item', 'itemTitle') || null;
+      const itemId = dig(ret, 'creationInfo', 'item', 'itemId')
+                  || dig(ret, 'item', 'itemId') || null;
+      const variationSku = dig(ret, 'creationInfo', 'item', 'variationSku')
+                        || dig(ret, 'item', 'variationSku') || null;
+      const itemQty = ret.itemQty
+                   || dig(ret, 'creationInfo', 'item', 'quantity')
+                   || dig(ret, 'item', 'quantity') || 1;
+      const orderId = ret.orderId
+                   || dig(ret, 'creationInfo', 'order', 'orderId')
+                   || dig(ret, 'order', 'orderId') || null;
+      const legacyOrderId = dig(ret, 'creationInfo', 'order', 'legacyOrderId')
+                         || dig(ret, 'order', 'legacyOrderId') || null;
+
+      // Channel defaults to this store's channelCode (e.g. ebay_em, ebay_cl).
+      let saleId = null, productId = null, qty = itemQty, channel = store.channelCode || 'ebay_em', sku = variationSku;
+      let resolvedTitle = itemTitle;
+      let resolvedSku = sku;
 
     // Strategy 1: match by eBay order ID → local sale → product
     const candidateOrderIds = [orderId, legacyOrderId].filter(Boolean);
@@ -479,6 +504,7 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
          resolvedTitle, resolvedSku, orderId || legacyOrderId, existing.rows[0].id]
       );
       updated++;
+      storeUpdated++;
       // Notify on state change (open→closed, etc.) — but only meaningful transitions
       if (isStateChange) {
         const sevMap = { closed: 'success', received: 'info', processed: 'success', open: 'warn' };
@@ -487,7 +513,7 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
            VALUES ('return_state_change', $1, $2, $3, 'return', $4)`,
           [
             `eBay return ${ourStatus === 'closed' ? 'closed' : 'updated'}: ${(resolvedTitle || returnId).slice(0, 60)}`,
-            `Buyer ${buyerUser || 'unknown'} · case ${returnId} · was ${wasState}, now ${state}`,
+            `[${store.name}] Buyer ${buyerUser || 'unknown'} · case ${returnId} · was ${wasState}, now ${state}`,
             sevMap[ourStatus] || 'info',
             existing.rows[0].id,
           ]
@@ -502,25 +528,29 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
                               item_title, item_sku, external_order_id, last_synced_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now()) RETURNING id`,
         [saleId, productId, channel, qty, reason, 'pending', refundAmt, ourStatus,
-         `eBay return · order ${orderId || legacyOrderId || '?'}`, performedByUserId,
+         `eBay return [${store.name}] · order ${orderId || legacyOrderId || '?'}`, performedByUserId,
          returnId, state, respondBy, buyerUser,
          resolvedTitle, resolvedSku, orderId || legacyOrderId]
       );
       created++;
+      storeCreated++;
       // Notify on every NEW return — staff need to see these immediately
       await query(
         `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
          VALUES ('return_opened', $1, $2, 'warn', 'return', $3)`,
         [
-          `New eBay return: ${(resolvedTitle || returnId).slice(0, 60)}`,
+          `New eBay return [${store.name}]: ${(resolvedTitle || returnId).slice(0, 60)}`,
           `Buyer ${buyerUser || 'unknown'} · reason: ${reason}${respondBy ? ' · respond by ' + new Date(respondBy).toLocaleDateString('en-GB') : ''}`,
           inserted.rows[0].id,
         ]
       );
       notifications++;
     }
-  }
-  return { fetched: returns.length, created, updated, noLocalSale, notifications };
+    }  // end per-return for loop
+    perStore.push({ code: store.code, fetched: returns.length, created: storeCreated, updated: storeUpdated });
+  }  // end per-store for loop
+
+  return { fetched: totalFetched, created, updated, noLocalSale, notifications, stores: perStore };
 }
 
 // Exported so server.js cron can call it
