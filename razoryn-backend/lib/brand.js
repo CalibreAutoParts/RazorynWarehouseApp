@@ -1,0 +1,91 @@
+// lib/brand.js — Per-tenant brand configuration.
+//
+// Selected at boot from the APP_BRAND env var. All hard-coded company / colour /
+// logo references should go through this module rather than being baked into
+// templates or HTML. Adding a new brand = add a new entry below.
+//
+// The eBay store list is also brand-scoped: Razoryn has 1 store, Calibre has 2.
+// Each store entry tells the eBay service which env var holds its Auth'n'Auth token.
+
+const BRANDS = {
+  razoryn: {
+    code: 'razoryn',
+    name: 'Razoryn e-Parts',
+    fullName: 'Razoryn e-Parts',
+    domain: 'razoryn.co.uk',
+    logoUrl: '/logo.png',
+    primaryColor: '#c8202d',        // brand red — sidebar, primary buttons, accents
+    secondaryColor: '#1a1a1a',       // ink colour for headers
+    supportColor: '#ffffff',
+    invoicePrefix: 'REP',
+    appTitle: 'Razoryn Warehouse Hub',
+    tagline: 'Quality aftermarket vehicle parts',
+    stores: [
+      {
+        code: 'razoryn',
+        name: 'Razoryn',
+        channelCode: 'ebay_em',
+        tokenEnv: 'EBAY_AUTH_TOKEN',
+      },
+    ],
+  },
+
+  calibre: {
+    code: 'calibre',
+    name: 'Calibre Auto Parts',
+    fullName: 'Calibre Auto Parts Ltd',
+    domain: 'calibreautoparts.co.uk',
+    logoUrl: '/logo-calibre.png',
+    primaryColor: '#0D1B2A',         // navy — sidebar, headings
+    secondaryColor: '#E30613',        // red accent — primary buttons, links
+    supportColor: '#ffffff',
+    invoicePrefix: 'CAP',
+    appTitle: 'Calibre Warehouse Hub',
+    tagline: 'EV and modern vehicle body parts',
+    stores: [
+      {
+        code: 'evbodyparts',
+        name: 'EVBODYPARTS',
+        channelCode: 'ebay_em',          // keep legacy code for sales schema continuity
+        tokenEnv: 'EBAY_AUTH_TOKEN_EVBODYPARTS',
+        primary: true,                    // source of truth for cross-listing
+      },
+      {
+        code: 'evantagrande',
+        name: 'Evanta Grande',
+        channelCode: 'ebay_cl',
+        tokenEnv: 'EBAY_AUTH_TOKEN_EVANTAGRANDE',
+      },
+    ],
+  },
+};
+
+const requestedCode = (process.env.APP_BRAND || 'razoryn').toLowerCase().trim();
+const brand = BRANDS[requestedCode];
+
+if (!brand) {
+  console.error(`[brand] Unknown APP_BRAND="${requestedCode}" — falling back to razoryn.`);
+}
+
+const active = brand || BRANDS.razoryn;
+
+// Resolve each store's token at import time so callers can do
+// `brand.stores[0].token` instead of re-reading env every call. A missing token
+// is logged but doesn't throw — useful for dev environments without all creds.
+for (const s of active.stores) {
+  s.token = process.env[s.tokenEnv] || null;
+  if (!s.token) {
+    console.warn(`[brand] Store "${s.code}" has no token (${s.tokenEnv} not set).`);
+  }
+}
+
+module.exports = active;
+module.exports.all = BRANDS;
+// Helper: get store by code, or null
+module.exports.getStore = function (code) {
+  return active.stores.find(s => s.code === code) || null;
+};
+// Helper: get the primary store (used by cross-listing — content flows FROM here)
+module.exports.getPrimaryStore = function () {
+  return active.stores.find(s => s.primary) || active.stores[0];
+};

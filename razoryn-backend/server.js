@@ -73,6 +73,7 @@ app.use('/api/pricing',      require('./routes/pricing'));
 app.use('/api/settings',     require('./routes/settings'));
 app.use('/api/listings',     require('./routes/listings'));
 app.use('/api/notes',        require('./routes/notes'));
+app.use('/api/brand',        require('./routes/brand'));
 
 // ---------- Static: PWA ----------
 app.use(express.static(path.join(__dirname, 'public'), {
@@ -161,7 +162,9 @@ cron.schedule('15 3 * * *', async () => {
 });
 
 // ---------- Start ----------
+const brand = require('./lib/brand');
 app.listen(PORT, () => {
-  console.log(`[boot] Razoryn warehouse listening on :${PORT}`);
+  console.log(`[boot] ${brand.appTitle} (${brand.code}) listening on :${PORT}`);
   console.log(`[boot] env=${process.env.NODE_ENV || 'development'} upload_dir=${UPLOAD_DIR}`);
+  console.log(`[boot] eBay stores: ${brand.stores.map(s => s.code + (s.token ? '✓' : '✗')).join(', ')}`);
 });

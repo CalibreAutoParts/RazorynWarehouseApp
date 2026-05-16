@@ -437,6 +437,7 @@ function escapeHtml(s) {
 
 function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   // mode: 'invoice' | 'estimate' | 'receipt'
+  const brand = require('../lib/brand');
   const fmt = (n) => '\u00A3' + parseFloat(n || 0).toFixed(2);
   const date = sale.occurred_at ? new Date(sale.occurred_at) : new Date();
   const datePretty = date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -663,7 +664,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   }
 
   // ----- FULL INVOICE -----
-  const logoUrl = (baseUrl || '') + '/logo.png';
+  const logoUrl = (baseUrl || '') + brand.logoUrl;
   const subtotalNet = isVatRegistered ? (parseFloat(sale.subtotal) / 1.2) : parseFloat(sale.subtotal);
   const vatAmount = isVatRegistered ? (parseFloat(sale.subtotal) - subtotalNet) : 0;
 
@@ -736,9 +737,9 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
 <div class="page">
   <div class="top">
     <div class="left">
-      <img class="logo" src="${logoUrl}" alt="Razoryn e-Parts" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
-      <div style="display:none;font-size:22px;font-weight:700;letter-spacing:-.02em">Razoryn <span style="color:#c8202d">e-Parts</span></div>
-      <div class="tagline">Quality aftermarket vehicle parts</div>
+      <img class="logo" src="${logoUrl}" alt="${escapeHtml(brand.name)}" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+      <div style="display:none;font-size:22px;font-weight:700;letter-spacing:-.02em">${escapeHtml(brand.name)}</div>
+      <div class="tagline">${escapeHtml(brand.tagline || '')}</div>
     </div>
     <div class="right">
       <div class="doctype">${docTitle}</div>
@@ -749,7 +750,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   <div class="addr-grid">
     <div class="addr-block">
       <div class="lbl">From</div>
-      <div class="name">Razoryn e-Parts</div>
+      <div class="name">${escapeHtml(company.company_name || brand.name)}</div>
       <div class="lines">
         ${escapeHtml(company.company_address || '').replace(/\n/g, '<br>')}<br>
         ${company.company_phone ? 'Tel: ' + escapeHtml(company.company_phone) + '<br>' : ''}
@@ -848,7 +849,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
       </div>
     </div>
     <div class="terms">
-      ${company.company_reg_no ? `Razoryn e-Parts is a trading name of Razoryn Ltd, Company Reg Number ${escapeHtml(company.company_reg_no)}, registered in England & Wales.` : ''}
+      ${company.company_reg_no ? `${escapeHtml(brand.name)} is a trading name of ${escapeHtml(company.company_name || brand.fullName)}, Company Reg Number ${escapeHtml(company.company_reg_no)}, registered in England & Wales.` : ''}
       ${isVatRegistered && company.vat_number ? ` VAT Number: ${escapeHtml(company.vat_number)}.` : ''}
       Full terms: ${company.company_website ? escapeHtml(company.company_website) + '/policies' : 'razoryn.co.uk/policies'}
     </div>
@@ -882,12 +883,13 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
 
   const items = (await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id])).rows;
   const company = await getCompanySettings();
+  const brand = require('../lib/brand');
   const mode = sale.is_estimate ? 'estimate'
              : (sale.payment_method === 'cash' && !company.vat_registered) ? 'receipt'
              : 'invoice';
   const html = renderInvoiceHtml({ sale, items, company, mode, baseUrl: `${req.protocol}://${req.get('host')}` });
   const docLabel = mode === 'estimate' ? 'Estimate' : mode === 'receipt' ? 'Receipt' : 'Invoice';
-  const subject = `${docLabel} ${sale.invoice_number || sale.payment_reference || ''} — Razoryn e-Parts`;
+  const subject = `${docLabel} ${sale.invoice_number || sale.payment_reference || ''} — ${brand.name}`;
 
   if (!process.env.RESEND_API_KEY) {
     return res.status(503).json({
@@ -895,11 +897,11 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
       message: 'Set RESEND_API_KEY env var in Railway. Sign up at resend.com (free tier: 3000 emails/month).'
     });
   }
-  const fromEmail = process.env.WAREHOUSE_FROM_EMAIL || 'noreply@razoryn.co.uk';
+  const fromEmail = process.env.WAREHOUSE_FROM_EMAIL || `noreply@${brand.domain}`;
   try {
     const axios = require('axios');
     const r = await axios.post('https://api.resend.com/emails', {
-      from: `Razoryn e-Parts <${fromEmail}>`,
+      from: `${brand.name} <${fromEmail}>`,
       to: [to],
       subject,
       html,

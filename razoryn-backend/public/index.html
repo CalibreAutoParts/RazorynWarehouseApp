@@ -28,6 +28,12 @@
     --amber-light: #fff4e0;
     --blue: #1e5ae8;
     --blue-light: #e8eefd;
+    /* Brand colours — overridden at runtime from /api/brand. Defaults match Razoryn. */
+    --brand-primary: #c8202d;
+    --brand-primary-dark: #a51823;
+    --brand-primary-light: #fce8ea;
+    --brand-secondary: #1a1a1a;
+    --brand-on-primary: #ffffff;
     --shadow: 0 1px 2px rgba(15,17,21,.04), 0 4px 12px rgba(15,17,21,.04);
     --shadow-lg: 0 8px 32px rgba(15,17,21,.12);
     --radius: 10px;
@@ -104,7 +110,7 @@
     font-weight: 800; font-size: 22px; letter-spacing: -0.02em;
   }
   .login-logo .mark .dot {
-    width: 28px; height: 28px; background: var(--red); border-radius: 6px;
+    width: 28px; height: 28px; background: var(--brand-primary); border-radius: 6px;
     display: flex; align-items: center; justify-content: center;
     color: white; font-size: 14px;
   }
@@ -127,14 +133,14 @@
     width: 100%; padding: 11px 14px; border: 1px solid var(--line);
     border-radius: 8px; background: var(--white); transition: border .15s;
   }
-  .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--red); }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--brand-primary); }
   .btn {
     padding: 11px 18px; border-radius: 8px; font-weight: 600;
     font-size: 14px; transition: all .15s; display: inline-flex;
     align-items: center; gap: 8px; justify-content: center;
   }
-  .btn-primary { background: var(--red); color: white; }
-  .btn-primary:hover { background: var(--red-dark); }
+  .btn-primary { background: var(--brand-primary); color: var(--brand-on-primary); }
+  .btn-primary:hover { background: var(--brand-primary-dark); }
   .btn-secondary { background: var(--ink); color: white; }
   .btn-ghost { background: transparent; color: var(--ink-soft); }
   .btn-ghost:hover { background: var(--line-2); color: var(--ink); }
@@ -220,7 +226,7 @@
   }
   .avatar {
     width: 28px; height: 28px; border-radius: 50%;
-    background: var(--red); color: white;
+    background: var(--brand-primary); color: var(--brand-on-primary);
     display: flex; align-items: center; justify-content: center;
     font-weight: 700; font-size: 12px;
   }
@@ -245,13 +251,13 @@
     cursor: pointer; margin-bottom: 1px;
   }
   .nav-item:hover { background: var(--line-2); }
-  .nav-item.active { background: var(--red-light); color: var(--red); font-weight: 600; }
+  .nav-item.active { background: var(--brand-primary-light); color: var(--brand-primary); font-weight: 600; }
   .nav-item .ic { width: 18px; height: 18px; flex-shrink: 0; }
   .nav-item .ct {
     margin-left: auto; background: var(--line-2); color: var(--ink-soft);
     font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 10px;
   }
-  .nav-item.active .ct { background: var(--red); color: white; }
+  .nav-item.active .ct { background: var(--brand-primary); color: var(--brand-on-primary); }
   .nav-item.alert .ct { background: var(--amber); color: white; }
 
   .content {
@@ -560,7 +566,7 @@
 <div class="login-screen" id="login-screen">
   <div class="login-card">
     <div class="login-logo">
-      <img src="/logo-dark.png" alt="Razoryn e-Parts" style="width:240px;max-width:80%;height:auto;display:block;margin:0 auto 6px;">
+      <img id="login-logo-img" src="/logo-dark.png" alt="" data-brand-logo-dark style="width:240px;max-width:80%;height:auto;display:block;margin:0 auto 6px;">
       <div class="sub">Warehouse Hub</div>
     </div>
     <div class="login-tabs">
@@ -579,7 +585,7 @@
         <button class="pin-key">7</button><button class="pin-key">8</button><button class="pin-key">9</button>
         <button class="pin-key" data-act="clear">⌫</button>
         <button class="pin-key">0</button>
-        <button class="pin-key" data-act="enter" style="background:var(--red);color:white">→</button>
+        <button class="pin-key" data-act="enter" style="background:var(--brand-primary);color:var(--brand-on-primary)">→</button>
       </div>
       <div class="pin-error" id="pin-error"></div>
     </div>
@@ -605,8 +611,8 @@
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
     <div class="logo">
-      <img class="brand-logo light" src="/logo.png" alt="Razoryn e-Parts">
-      <img class="brand-logo dark" src="/logo-dark.png" alt="Razoryn e-Parts">
+      <img class="brand-logo light" src="/logo.png" alt="" data-brand-logo-light>
+      <img class="brand-logo dark" src="/logo-dark.png" alt="" data-brand-logo-dark>
       <span class="sub">Warehouse Hub</span>
     </div>
     <div class="spacer"></div>
@@ -1160,6 +1166,9 @@ function gbp(n) { return '£' + Number(n).toLocaleString('en-GB', { minimumFract
    INIT
    ========================================================== */
 async function init() {
+  // Load brand (logo, colours, title) FIRST so even the login screen is correctly branded.
+  await loadBrand();
+
   // Theme: load saved preference or fall back to system preference
   await loadTheme();
 
@@ -1182,6 +1191,68 @@ async function init() {
 }
 
 /* ==================== THEME ==================== */
+// Fetch brand config from /api/brand and apply: page title, logo srcs, brand colour CSS vars.
+// Runs before login so the login screen already shows the correct brand.
+async function loadBrand() {
+  try {
+    const r = await fetch('/api/brand', { cache: 'no-cache' });
+    if (!r.ok) throw new Error('http_' + r.status);
+    const b = await r.json();
+    State.brand = b;
+    // Page title
+    if (b.appTitle) document.title = b.appTitle;
+    // Logos — both light and dark variants. Backend serves /logo.png (light) and
+    // /logo-dark.png (dark) for Razoryn. Calibre brand uses /logo-calibre.png and
+    // /logo-calibre-dark.png. If a dark variant isn't deployed, both fall back to the light one.
+    const lightUrl = b.logoUrl || '/logo.png';
+    const darkUrl = lightUrl.replace(/(\.[a-z]+)$/i, '-dark$1');
+    document.querySelectorAll('[data-brand-logo-light]').forEach(el => { el.src = lightUrl; el.alt = b.name; });
+    document.querySelectorAll('[data-brand-logo-dark]').forEach(el => {
+      el.src = darkUrl;
+      el.alt = b.name;
+      // Fall back to the light URL if no dark logo exists
+      el.addEventListener('error', () => { if (el.src !== lightUrl) el.src = lightUrl; }, { once: true });
+    });
+    // Brand colours — these override the :root defaults baked into the stylesheet.
+    const root = document.documentElement.style;
+    if (b.primaryColor) {
+      root.setProperty('--brand-primary', b.primaryColor);
+      root.setProperty('--brand-primary-dark', shadeColor(b.primaryColor, -12));
+      root.setProperty('--brand-primary-light', tintColor(b.primaryColor, 0.92));
+    }
+    if (b.secondaryColor) root.setProperty('--brand-secondary', b.secondaryColor);
+    if (b.supportColor) root.setProperty('--brand-on-primary', b.supportColor);
+    // Mark body so brand-specific overrides can hook on it later
+    document.body.setAttribute('data-brand', b.code);
+  } catch (e) {
+    console.warn('[brand] failed to load — defaults will be used:', e.message);
+  }
+}
+
+// Darken a hex colour by N percent (negative) for hover states.
+function shadeColor(hex, percent) {
+  const c = hex.replace('#', '');
+  const num = parseInt(c.length === 3 ? c.split('').map(x => x + x).join('') : c, 16);
+  let r = (num >> 16) + Math.round(255 * percent / 100);
+  let g = ((num >> 8) & 0xff) + Math.round(255 * percent / 100);
+  let b = (num & 0xff) + Math.round(255 * percent / 100);
+  r = Math.max(0, Math.min(255, r));
+  g = Math.max(0, Math.min(255, g));
+  b = Math.max(0, Math.min(255, b));
+  return '#' + ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+}
+
+// Lighten a hex colour towards white by `amount` (0..1).
+function tintColor(hex, amount) {
+  const c = hex.replace('#', '');
+  const num = parseInt(c.length === 3 ? c.split('').map(x => x + x).join('') : c, 16);
+  let r = num >> 16, g = (num >> 8) & 0xff, b = num & 0xff;
+  r = Math.round(r + (255 - r) * amount);
+  g = Math.round(g + (255 - g) * amount);
+  b = Math.round(b + (255 - b) * amount);
+  return '#' + ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+}
+
 async function loadTheme() {
   let theme = null;
   try {
@@ -1475,7 +1546,7 @@ function renderDashboard() {
       <div class="page-head">
         <div>
           <h1>Welcome back, ${State.user.name}</h1>
-          <div class="desc">${new Date().toLocaleDateString('en-GB', { weekday:'long', day:'numeric', month:'long' })} · Razoryn e-Parts, Watford</div>
+          <div class="desc">${new Date().toLocaleDateString('en-GB', { weekday:'long', day:'numeric', month:'long' })} · ${escapeHtml(State.brand?.name || 'Warehouse Hub')}</div>
         </div>
         <div class="actions">
           <button class="btn btn-outline" onclick="syncNow()">
