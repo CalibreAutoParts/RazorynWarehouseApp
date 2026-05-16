@@ -4562,16 +4562,55 @@ function renderMirror() {
         <button class="active" data-mtab="mirror" onclick="switchMirrorTab('mirror')">Mirror to Shopify</button>
         <button data-mtab="links" onclick="switchMirrorTab('links')">Link Status</button>
       </div>
+
       <div id="mirror-pane-mirror">
         <div id="mirror-empty" class="card">
           <div class="card-body empty">
             <div class="t">No listings loaded yet</div>
-            <div class="d">Click <strong>Pull eBay listings</strong> to fetch your active eBay listings.</div>
+            <div class="d">Click <strong>Pull eBay listings</strong> to fetch your active eBay listings. Make sure <code>EBAY_CLIENT_ID</code>, <code>EBAY_CLIENT_SECRET</code>, and <code>EBAY_REFRESH_TOKEN</code> are set in Railway first.</div>
           </div>
         </div>
-        <div id="mirror-toolbar" style="display:none"></div>
+
+        <div id="mirror-toolbar" style="display:none">
+          <div class="card" style="margin-bottom:14px">
+            <div class="card-body">
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;align-items:end">
+                <div>
+                  <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Pricing</div>
+                  <select id="mr-pricing-mode" class="select" onchange="updatePricingMode()">
+                    <option value="percent">% off eBay price</option>
+                    <option value="manual">Set each price manually</option>
+                  </select>
+                </div>
+                <div id="mr-percent-wrap">
+                  <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">% Discount</div>
+                  <div style="display:flex;gap:6px">
+                    <input type="number" id="mr-percent" value="0" min="0" max="100" step="0.5" placeholder="e.g. 10 for 10% off" style="flex:1">
+                    <button class="btn btn-primary btn-sm" onclick="applyDiscount()">Apply</button>
+                  </div>
+                  <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Applied: <span id="mr-percent-applied" style="font-weight:600;color:var(--ink)">0%</span></div>
+                </div>
+                <div>
+                  <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Push to Shopify</div>
+                  <button class="btn btn-primary" onclick="pushToShopify()" id="mr-push-btn">Push selected →</button>
+                </div>
+              </div>
+
+              <div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                <input id="mr-search" placeholder="Filter by title, SKU, or item ID…" oninput="updateFilter(this.value)" style="flex:1;min-width:240px">
+                <div class="seg">
+                  <button class="active" data-mstatus="all" onclick="setStatusFilter('all')">All</button>
+                  <button data-mstatus="new" onclick="setStatusFilter('new')">Not mirrored</button>
+                  <button data-mstatus="mirrored" onclick="setStatusFilter('mirrored')">Already mirrored</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div id="mirror-list" style="display:none"></div>
       </div>
+
       <div id="mirror-pane-links" style="display:none">
         <div id="links-content">
           <div class="empty"><div class="t">Loading link status…</div></div>
@@ -4579,9 +4618,13 @@ function renderMirror() {
       </div>
     </div>
   `;
-  // Render full mirror toolbar + list into mirror pane
-  setupMirrorPaneMarkup();
-  if (MirrorState.listings.length) renderMirrorList();
+  // If listings were previously pulled, restore the toolbar + list straight away
+  if (MirrorState.listings && MirrorState.listings.length) {
+    el('mirror-empty').style.display = 'none';
+    el('mirror-toolbar').style.display = 'block';
+    el('mirror-list').style.display = 'block';
+    paintMirrorList();
+  }
 }
 
 function switchMirrorTab(tab) {
@@ -4589,38 +4632,6 @@ function switchMirrorTab(tab) {
   el('mirror-pane-mirror').style.display = tab === 'mirror' ? '' : 'none';
   el('mirror-pane-links').style.display = tab === 'links' ? '' : 'none';
   if (tab === 'links') loadLinkStatus();
-}
-
-function setupMirrorPaneMarkup() {
-  // Populate mirror-toolbar with the original toolbar+list markup
-  el('mirror-toolbar').innerHTML = `
-    <div class="card" style="margin-bottom:14px">
-      <div class="card-body">
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;align-items:end">
-          <div>
-            <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Pricing</div>
-            <select id="mr-pricing-mode" class="select" onchange="updatePricingMode()">
-              <option value="percent">% off eBay price</option>
-              <option value="manual">Set each price manually</option>
-            </select>
-          </div>
-          <div id="mr-percent-wrap">
-            <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">% Discount</div>
-            <div style="display:flex;gap:6px">
-              <input type="number" id="mr-percent" value="0" min="0" max="100" step="0.5" placeholder="e.g. 10 for 10% off" style="flex:1">
-              <button class="btn btn-primary btn-sm" onclick="applyDiscount()">Apply</button>
-            </div>
-            <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Applied: <span id="mr-percent-applied" style="font-weight:600;color:var(--ink)">0%</span></div>
-          </div>
-          <div>
-            <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Push to Shopify</div>
-            <button class="btn btn-primary" onclick="pushToShopify()" id="mr-push-btn">Push selected →</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div id="mirror-list-container"></div>
-  `;
 }
 
 async function loadLinkStatus() {
@@ -4834,6 +4845,7 @@ async function pullEbayListings() {
     }
     el('mirror-empty').style.display = 'none';
     el('mirror-toolbar').style.display = 'block';
+    el('mirror-list').style.display = 'block';
     paintMirrorList();
     paintMetafields();
     const noPhotos = MirrorState.listings.filter(l => !l.pictureUrls.length).length;
