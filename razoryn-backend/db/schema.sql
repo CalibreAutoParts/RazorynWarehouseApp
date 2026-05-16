@@ -155,39 +155,8 @@ DO $$ BEGIN
   END IF;
 END $$;
 
--- Settings: VAT registration toggle + company details
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'vat_registered') THEN
-    ALTER TABLE app_settings ADD COLUMN vat_registered BOOLEAN NOT NULL DEFAULT false;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'vat_number') THEN
-    ALTER TABLE app_settings ADD COLUMN vat_number TEXT;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_address') THEN
-    ALTER TABLE app_settings ADD COLUMN company_address TEXT DEFAULT 'Unit 4 Shakespeare Industrial Estate, Watford';
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_phone') THEN
-    ALTER TABLE app_settings ADD COLUMN company_phone TEXT DEFAULT '+44 7494589542';
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_email') THEN
-    ALTER TABLE app_settings ADD COLUMN company_email TEXT DEFAULT 'eparts@razoryn.co.uk';
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_website') THEN
-    ALTER TABLE app_settings ADD COLUMN company_website TEXT DEFAULT 'www.razoryn.co.uk';
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_reg_no') THEN
-    ALTER TABLE app_settings ADD COLUMN company_reg_no TEXT DEFAULT '16466013';
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'bank_account_name') THEN
-    ALTER TABLE app_settings ADD COLUMN bank_account_name TEXT;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'bank_sort_code') THEN
-    ALTER TABLE app_settings ADD COLUMN bank_sort_code TEXT;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'bank_account_number') THEN
-    ALTER TABLE app_settings ADD COLUMN bank_account_number TEXT;
-  END IF;
-END $$;
+-- Settings: VAT registration toggle + company details — see migration block below
+-- (after CREATE TABLE app_settings).
 
 CREATE TABLE IF NOT EXISTS sale_items (
   id          SERIAL PRIMARY KEY,
@@ -347,8 +316,11 @@ CREATE TABLE IF NOT EXISTS app_settings (
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Add bank_transfer_pct column for phone-pricing configuration
+-- Schema migrations for app_settings — run AFTER the CREATE TABLE above so
+-- fresh databases (e.g. new tenant deployments) don't try to ALTER a table
+-- that doesn't exist yet. Each IF NOT EXISTS guard makes this idempotent.
 DO $$ BEGIN
+  -- Pricing config
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns
     WHERE table_name = 'app_settings' AND column_name = 'bank_transfer_pct'
@@ -360,6 +332,43 @@ DO $$ BEGIN
     WHERE table_name = 'app_settings' AND column_name = 'ebay_buyer_protection_markup'
   ) THEN
     ALTER TABLE app_settings ADD COLUMN ebay_buyer_protection_markup NUMERIC(5,2) NOT NULL DEFAULT 0.00;
+  END IF;
+  -- VAT registration toggle + number
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'vat_registered') THEN
+    ALTER TABLE app_settings ADD COLUMN vat_registered BOOLEAN NOT NULL DEFAULT false;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'vat_number') THEN
+    ALTER TABLE app_settings ADD COLUMN vat_number TEXT;
+  END IF;
+  -- Company details — these get sensible defaults for Razoryn; Calibre will
+  -- overwrite via Settings → Company & invoice details.
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_name') THEN
+    ALTER TABLE app_settings ADD COLUMN company_name TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_address') THEN
+    ALTER TABLE app_settings ADD COLUMN company_address TEXT DEFAULT 'Unit 4 Shakespeare Industrial Estate, Watford';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_phone') THEN
+    ALTER TABLE app_settings ADD COLUMN company_phone TEXT DEFAULT '+44 7494589542';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_email') THEN
+    ALTER TABLE app_settings ADD COLUMN company_email TEXT DEFAULT 'eparts@razoryn.co.uk';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_website') THEN
+    ALTER TABLE app_settings ADD COLUMN company_website TEXT DEFAULT 'www.razoryn.co.uk';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'company_reg_no') THEN
+    ALTER TABLE app_settings ADD COLUMN company_reg_no TEXT DEFAULT '16466013';
+  END IF;
+  -- Bank account details for bank-transfer invoices
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'bank_account_name') THEN
+    ALTER TABLE app_settings ADD COLUMN bank_account_name TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'bank_sort_code') THEN
+    ALTER TABLE app_settings ADD COLUMN bank_sort_code TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'app_settings' AND column_name = 'bank_account_number') THEN
+    ALTER TABLE app_settings ADD COLUMN bank_account_number TEXT;
   END IF;
 END $$;
 
