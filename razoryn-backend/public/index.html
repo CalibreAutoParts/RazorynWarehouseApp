@@ -4566,6 +4566,10 @@ let MirrorState = {
   commonTemplateSuffix: '',
   hideTemplateImages: false,
   saveTimers: {},
+  // Pagination — rendering all listings at once freezes the browser for large
+  // catalogues (300+). Render in pages of pageSize, with prev/next controls.
+  page: 1,
+  pageSize: 30,
 };
 
 // Token substitution helpers — values like "{{sku}} {{title}}" get filled per listing
@@ -5033,6 +5037,7 @@ function renderPriceCell(l) {
 
 function updateFilter(text) {
   MirrorState.filterText = (text || '').toLowerCase().trim();
+  MirrorState.page = 1;
   paintMirrorList();
 }
 
@@ -5195,7 +5200,46 @@ function paintMirrorList() {
     return true;
   });
 
-  list.innerHTML = filtered.map(l => {
+  // Pagination — render only the current page's slice to keep the DOM small.
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / MirrorState.pageSize));
+  if (MirrorState.page > totalPages) MirrorState.page = 1;
+  if (MirrorState.page < 1) MirrorState.page = 1;
+  const startIdx = (MirrorState.page - 1) * MirrorState.pageSize;
+  const endIdx = Math.min(startIdx + MirrorState.pageSize, total);
+  const pageSlice = filtered.slice(startIdx, endIdx);
+
+  const renderPager = (label) => {
+    if (total <= MirrorState.pageSize) return ''; // nothing to paginate
+    const selectedOnPage = pageSlice.filter(l => MirrorState.selected.has(l.itemId)).length;
+    const selectedTotal = filtered.filter(l => MirrorState.selected.has(l.itemId)).length;
+    return `
+      <div class="card" style="margin-bottom:10px;background:var(--bg-soft)">
+        <div class="card-body" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 14px">
+          <div style="font-size:13px">
+            <strong>${startIdx + 1}–${endIdx}</strong> of <strong>${total}</strong>
+            <span style="color:var(--ink-soft)">listings</span>
+            <span style="color:var(--ink-soft);margin-left:8px">·</span>
+            <span style="color:var(--ink-soft);margin-left:8px">${selectedTotal} selected across all pages</span>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <button class="btn btn-ghost btn-sm" ${MirrorState.page <= 1 ? 'disabled' : ''} onclick="mirrorGoToPage(${MirrorState.page - 1})">← Prev</button>
+            <span style="font-size:12px;color:var(--ink-soft);min-width:80px;text-align:center">Page ${MirrorState.page} of ${totalPages}</span>
+            <button class="btn btn-ghost btn-sm" ${MirrorState.page >= totalPages ? 'disabled' : ''} onclick="mirrorGoToPage(${MirrorState.page + 1})">Next →</button>
+            <select onchange="mirrorSetPageSize(parseInt(this.value))" style="font-size:12px;padding:4px 6px;height:auto;margin-left:8px" title="Items per page">
+              <option value="20" ${MirrorState.pageSize === 20 ? 'selected' : ''}>20 / page</option>
+              <option value="30" ${MirrorState.pageSize === 30 ? 'selected' : ''}>30 / page</option>
+              <option value="50" ${MirrorState.pageSize === 50 ? 'selected' : ''}>50 / page</option>
+              <option value="100" ${MirrorState.pageSize === 100 ? 'selected' : ''}>100 / page</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  const rowsHtml = pageSlice.map(l => {
     const sel = MirrorState.selected.has(l.itemId);
     const imgSet = MirrorState.selectedImages[l.itemId] || new Set();
     const titleVal = MirrorState.titleOverrides[l.itemId] != null ? MirrorState.titleOverrides[l.itemId] : l.title;
@@ -5235,7 +5279,7 @@ function paintMirrorList() {
                   return `
                     <label style="position:relative;display:block;cursor:pointer" title="${tmpl ? 'Likely template image' : ''}">
                       <input type="checkbox" ${checked?'checked':''} onchange="toggleImage('${l.itemId}','${escapeAttr(url)}',this.checked)" style="position:absolute;top:4px;left:4px;z-index:2">
-                      <img src="${escapeAttr(url)}" style="width:80px;height:80px;object-fit:cover;border-radius:6px;border:2px solid ${checked?'var(--red)':'var(--line)'};${tmpl?'filter:grayscale(0.7)':''}" loading="lazy" referrerpolicy="no-referrer">
+                      <img src="${escapeAttr(url)}" style="width:80px;height:80px;object-fit:cover;border-radius:6px;border:2px solid ${checked?'var(--brand-primary)':'var(--line)'};${tmpl?'filter:grayscale(0.7)':''}" loading="lazy" referrerpolicy="no-referrer">
                       ${tmpl ? '<span style="position:absolute;bottom:2px;right:2px;background:var(--amber);color:white;font-size:9px;padding:1px 4px;border-radius:3px;font-weight:600">TMPL</span>' : ''}
                     </label>
                   `;
@@ -5248,10 +5292,27 @@ function paintMirrorList() {
       </div>
     `;
   }).join('');
-  if (!filtered.length) {
+
+  if (total === 0) {
     list.innerHTML = '<div class="empty"><div class="t">No listings match the current filter</div></div>';
+  } else {
+    list.innerHTML = renderPager('top') + rowsHtml + renderPager('bottom');
   }
   updateMirrorCounter();
+}
+
+// Pagination controls
+function mirrorGoToPage(n) {
+  MirrorState.page = n;
+  paintMirrorList();
+  // Scroll to top of the list so user sees the new page
+  const list = el('mirror-list');
+  if (list) list.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function mirrorSetPageSize(n) {
+  MirrorState.pageSize = n;
+  MirrorState.page = 1;
+  paintMirrorList();
 }
 
 function renderMetafieldPanel(l) {
@@ -5426,6 +5487,11 @@ function populateShippingProfileDropdown() {
 
 function setStatusFilter(v) {
   MirrorState.statusFilter = v;
+  MirrorState.page = 1;
+  // Update segmented button visual state (the buttons aren't auto-managed)
+  document.querySelectorAll('[data-mstatus]').forEach(b => {
+    b.classList.toggle('active', b.dataset.mstatus === v);
+  });
   paintMirrorList();
 }
 
