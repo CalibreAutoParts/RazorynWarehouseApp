@@ -558,9 +558,94 @@
   .admin-only { display: none; }
   body.is-admin .admin-only { display: initial; }
   body.is-admin .nav-item.admin-only { display: flex; }
+
+  /* ==================== PROGRESS BAR ====================
+     Top-of-screen task indicator. A thin brand-coloured stripe shows long-running
+     work is in progress; a small label pill below the topbar tells the user what's
+     happening. Animated indeterminate by default; switches to determinate fill if
+     a percentage is supplied. Auto-dismisses 1.5s after a task ends. */
+  #task-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 9999;
+    pointer-events: none;
+  }
+  #task-bar .task-bar-stripe {
+    height: 3px;
+    width: 0;
+    background: var(--brand-primary);
+    transition: width 0.3s ease, background 0.2s ease;
+  }
+  #task-bar.active .task-bar-stripe {
+    width: 100%;
+    background: linear-gradient(90deg, transparent 0%, var(--brand-primary) 50%, transparent 100%);
+    background-size: 50% 100%;
+    background-repeat: no-repeat;
+    animation: task-bar-stripe 1.4s linear infinite;
+  }
+  #task-bar.determinate .task-bar-stripe {
+    background: var(--brand-primary);
+    width: var(--task-pct, 0%);
+    animation: none;
+    background-size: 100% 100%;
+  }
+  #task-bar.success .task-bar-stripe {
+    background: var(--green);
+    width: 100%;
+    animation: none;
+    background-size: 100% 100%;
+  }
+  #task-bar.fail .task-bar-stripe {
+    background: var(--red);
+    width: 100%;
+    animation: none;
+    background-size: 100% 100%;
+  }
+  #task-bar .task-bar-label-wrap {
+    position: absolute;
+    top: 8px;
+    left: 0;
+    right: 0;
+    text-align: center;
+  }
+  #task-bar .task-bar-label {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    color: white;
+    background: var(--ink);
+    padding: 4px 14px;
+    border-radius: 14px;
+    white-space: nowrap;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity 0.2s, transform 0.2s, background 0.2s;
+  }
+  #task-bar.active .task-bar-label,
+  #task-bar.success .task-bar-label,
+  #task-bar.fail .task-bar-label {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  #task-bar.success .task-bar-label { background: var(--green); }
+  #task-bar.fail .task-bar-label { background: var(--red); }
+  @keyframes task-bar-stripe {
+    0%   { background-position: -50% 0; }
+    100% { background-position: 150% 0; }
+  }
 </style>
 </head>
 <body>
+
+<!-- ==================== PROGRESS BAR ====================
+     Global task indicator. Driven by the Task helper at the bottom of the JS. -->
+<div id="task-bar" aria-live="polite" aria-atomic="true">
+  <div class="task-bar-stripe"></div>
+  <div class="task-bar-label-wrap"><span class="task-bar-label" id="task-bar-label"></span></div>
+</div>
 
 <!-- ==================== LOGIN ==================== -->
 <div class="login-screen" id="login-screen">
@@ -4899,7 +4984,7 @@ async function unlinkEbay(ebayItemId) {
 
 async function forceMatchLinks() {
   if (!confirm('Pull active eBay listings and auto-match them to warehouse products by SKU, part number, barcode, and title tokens. Continue?')) return;
-  toast('Pulling eBay listings & matching… this can take 1-2 min', 'info', 8000);
+  const taskId = Task.start('Auto-matching eBay listings to products');
   try {
     const r = await Api.post('/api/listings/link-status/force-match');
     const lines = [];
@@ -4907,14 +4992,18 @@ async function forceMatchLinks() {
     lines.push(`✓ ${r.matched} newly linked`);
     if (r.alreadyLinked) lines.push(`• ${r.alreadyLinked} already linked`);
     if (r.noMatch) lines.push(`• ${r.noMatch} couldn't match`);
+    Task.done(taskId, `${r.matched} newly linked`);
     toast(lines.join('\n'), 'success', 8000);
     await loadLinkStatus();
-  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  } catch (e) {
+    Task.fail(taskId, 'Match failed');
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 
 async function pullEbayListings() {
-  toast('Pulling eBay listings + photos… ~1-2 min for big stores', 'info');
+  const taskId = Task.start('Pulling eBay listings & photos');
   // Load metafield definitions and delivery profiles in parallel
   Api.get('/api/listings/metafield-definitions').then(r => {
     MirrorState.metafieldDefs = r.definitions || [];
@@ -4950,8 +5039,10 @@ async function pullEbayListings() {
     let msg = `Loaded ${MirrorState.listings.length} listings`;
     if (onShopify) msg += ` · ${onShopify} already on Shopify`;
     if (noPhotos) msg += ` · ${noPhotos} no photos`;
+    Task.done(taskId, `Loaded ${MirrorState.listings.length} listings`);
     toast(msg, 'success');
   } catch (e) {
+    Task.fail(taskId, 'Pull failed');
     toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
 }
@@ -5643,14 +5734,16 @@ async function mirrorSelected() {
     shippingProfileId: MirrorState.itemShippingProfileIds[l.itemId] != null ? MirrorState.itemShippingProfileIds[l.itemId] : (MirrorState.commonShippingProfileId || null),
   }));
 
-  toast(`Mirroring ${items.length} listings to Shopify…`, 'info');
+  const taskId = Task.start(`Mirroring ${items.length} listings to Shopify`);
   try {
     const r = await Api.post('/api/listings/mirror', { items, overwriteConflicts });
     let msg = `Created: ${r.created}, Updated: ${r.updated}, Skipped: ${r.skipped}`;
     if (r.errors && r.errors.length) msg += `, Errors: ${r.errors.length}`;
+    Task.done(taskId, `Mirrored ${r.created + r.updated}`);
     toast(msg, r.errors?.length ? 'warn' : 'success');
     if (r.errors?.length) console.warn('Mirror errors:', r.errors);
   } catch (e) {
+    Task.fail(taskId, 'Mirror failed');
     toast('Mirror failed: ' + (e.data?.message || e.message), 'error');
   }
 }
@@ -5846,6 +5939,7 @@ async function importFromShopify() {
   if (!confirm('Pull all products from Shopify into the warehouse? Safe to re-run — existing products will be updated.')) return;
   const out = el('shopify-result');
   if (out) out.innerHTML = 'Importing… this can take a minute for large catalogues.';
+  const taskId = Task.start('Importing Shopify catalogue');
   try {
     const r = await Api.post('/api/settings/import-shopify');
     if (out) {
@@ -5854,8 +5948,10 @@ async function importFromShopify() {
         '. Refresh Inventory to see them.';
     }
     await Store.refresh('products');
+    Task.done(taskId, `Imported ${r.inserted + r.updated} products`);
     toast('Shopify import complete', 'success');
   } catch (e) {
+    Task.fail(taskId, 'Import failed');
     if (out) out.innerHTML = '<span style="color:var(--red)">Import failed: ' + (e.data?.message || e.message) + '</span>';
   }
 }
@@ -6190,7 +6286,7 @@ async function backfillEbayAddresses() {
 
 async function relinkReturns() {
   if (!confirm('Run full returns repair? This will:\n\n1. Re-sync statuses from eBay state mapping\n2. Clear any incorrectly-matched products (matched by title similarity)\n3. Re-link unmatched returns using strict SKU/part-number matching\n\nThis is safe to run multiple times.')) return;
-  toast('Repairing returns…', 'info', 4000);
+  const taskId = Task.start('Repairing returns');
   try {
     const a = await Api.post('/api/returns/resync-statuses');
     const b = await Api.post('/api/returns/unlink-loose-matches');
@@ -6200,17 +6296,22 @@ async function relinkReturns() {
     if (b.cleared) lines.push(`✓ ${b.cleared} bad links cleared`);
     if (c.linked) lines.push(`✓ ${c.linked} newly linked`);
     if (!lines.length) lines.push('Already clean — nothing to repair.');
+    const total = (a.updated || 0) + (b.cleared || 0) + (c.linked || 0);
+    Task.done(taskId, total ? `${total} fix${total === 1 ? '' : 'es'}` : 'Already clean');
     toast(lines.join('\n'), 'success', 7000);
     await Store.refresh('returns');
     if (State.page === 'returns') {
       const active = document.querySelector('[data-rfilter].active')?.dataset.rfilter || 'open';
       filterReturns(active);
     }
-  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  } catch (e) {
+    Task.fail(taskId, 'Repair failed');
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 async function syncEbayReturns() {
-  toast('Scanning eBay…', 'info', 4000);
+  const taskId = Task.start('Pulling returns from eBay');
   try {
     const r = await Api.post('/api/returns/sync-ebay', { days: 90 });
     const lines = [];
@@ -6220,6 +6321,7 @@ async function syncEbayReturns() {
     if (r.notifications) lines.push(`🔔 ${r.notifications} notification${r.notifications === 1 ? '' : 's'}`);
     if (r.noLocalSale) lines.push(`• ${r.noLocalSale} unmatched (not in our DB)`);
     if (!r.created && !r.updated) lines.push('Everything up to date.');
+    Task.done(taskId, r.created || r.updated ? `${(r.created || 0) + (r.updated || 0)} return${(r.created || 0) + (r.updated || 0) === 1 ? '' : 's'}` : 'Up to date');
     toast(lines.join('\n'), 'success', 7000);
     await Store.refresh('returns');
     await Store.refresh('notifications');
@@ -6228,6 +6330,7 @@ async function syncEbayReturns() {
       filterReturns(active);
     }
   } catch (e) {
+    Task.fail(taskId, 'Returns pull failed');
     if (e.data?.error === 'post_order_api_unavailable') {
       toast(e.data.message, 'error', 10000);
     } else {
@@ -6238,12 +6341,20 @@ async function syncEbayReturns() {
 
 async function hydrateEbayPrices() {
   if (!confirm('This will fetch all active eBay listings (~1-2 minutes) and update eBay prices on your warehouse products. Continue?')) return;
-  toast('Fetching eBay listings — this takes 1-2 minutes…', 'info', 5000);
+  const taskId = Task.start('Fetching eBay listings & updating prices');
   try {
     const r = await Api.post('/api/listings/hydrate-ebay-prices');
-    toast(`Done. Updated ${r.productsUpdated} products from ${r.listingsFound} eBay listings.`, 'success', 5000);
+    Task.done(taskId, `Updated ${r.updated} products`);
+    // Build a detailed result so the user can see which match strategy fired
+    const lines = [`Done. ${r.updated} products updated from ${r.listingsFound} eBay listings.`];
+    if (r.matchedViaLink)         lines.push(`✓ ${r.matchedViaLink} via mirror links`);
+    if (r.matchedViaSku)          lines.push(`✓ ${r.matchedViaSku} via exact SKU`);
+    if (r.matchedViaNormalizedSku) lines.push(`✓ ${r.matchedViaNormalizedSku} via normalised SKU`);
+    if (r.unmatched)              lines.push(`• ${r.unmatched} unmatched (no product in DB)`);
+    toast(lines.join('\n'), 'success', 6000);
     await Store.refresh('products');
   } catch (e) {
+    Task.fail(taskId, 'Hydrate failed');
     toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
 }
@@ -6258,7 +6369,7 @@ async function resetData() {
    ========================================================== */
 function el(id) { return document.getElementById(id); }
 async function syncNow() {
-  toast('Pulling new orders from Shopify and eBay, pushing stock to Shopify…', 'info');
+  const taskId = Task.start('Syncing orders & stock');
   try {
     const result = await Api.post('/api/settings/sync-now');
     const r = result.result || {};
@@ -6279,17 +6390,114 @@ async function syncNow() {
       const ss = r.shopifyStock;
       lines.push(`✓ Stock pushed to Shopify: ${ss.pushed} of ${ss.total} products`);
     }
+    const newCount = (r.shopify?.inserted || 0) + (r.ebay?.inserted || 0);
     const msg = lines.length
       ? 'Sync complete:\n' + lines.join('\n')
       : 'Sync complete. No new data.';
+    Task.done(taskId, newCount ? `${newCount} new order${newCount === 1 ? '' : 's'}` : 'Sync complete');
     toast(msg, 'success', 6000);
     await Store.refreshAll();
     if (typeof renderDashboard === 'function' && State.page === 'dashboard') renderDashboard();
     if (State.page === 'sales' && typeof renderSales === 'function') renderSales();
   } catch (e) {
+    Task.fail(taskId, 'Sync failed');
     toast('Sync failed: ' + (e.data?.message || e.message), 'error', 6000);
   }
 }
+/* ==================== TASK PROGRESS BAR ====================
+   A tiny module that shows a global progress indicator while long-running
+   operations are in flight (mirror, pull, hydrate, sync). Each operation
+   calls `Task.start('Pulling eBay listings')` to begin and `Task.done(id)`
+   or `Task.fail(id, message)` to end. Supports multiple concurrent tasks —
+   the bar stays active while any task is open, and the most recent task's
+   label is shown.
+
+   Usage:
+     const taskId = Task.start('Pulling eBay listings');
+     try { ...await something...; Task.done(taskId); }
+     catch (e) { Task.fail(taskId, e.message); }
+
+   Optional progress percentage:
+     Task.update(taskId, 'Pulling… 23 of 180', 12); // 12 = 12% complete
+*/
+const Task = {
+  _active: new Map(),
+  _nextId: 1,
+  _flashTimeout: null,
+  start(label) {
+    const id = this._nextId++;
+    this._active.set(id, { label: label || 'Working…', pct: null });
+    this._render();
+    return id;
+  },
+  update(id, label, pct) {
+    const t = this._active.get(id);
+    if (!t) return;
+    if (label != null) t.label = label;
+    if (pct != null) t.pct = pct;
+    this._render();
+  },
+  done(id, label) {
+    if (id == null) return;
+    const t = this._active.get(id);
+    if (!t) return;
+    this._active.delete(id);
+    // If no other tasks are running, briefly flash the success state.
+    // Otherwise just re-render to show the next active task's label.
+    if (!this._active.size) this._flash('success', label || t.label, 1500);
+    else this._render();
+  },
+  fail(id, label) {
+    if (id == null) return;
+    const t = this._active.get(id);
+    if (!t) return;
+    this._active.delete(id);
+    if (!this._active.size) this._flash('fail', label || t.label, 3000);
+    else this._render();
+  },
+  _flash(state, label, duration) {
+    const bar = document.getElementById('task-bar');
+    const lab = document.getElementById('task-bar-label');
+    if (!bar || !lab) return;
+    bar.classList.remove('active', 'determinate', 'success', 'fail');
+    bar.classList.add(state);
+    lab.textContent = (state === 'success' ? '✓ ' : '✗ ') + (label || (state === 'success' ? 'Done' : 'Failed'));
+    if (this._flashTimeout) clearTimeout(this._flashTimeout);
+    this._flashTimeout = setTimeout(() => {
+      if (!this._active.size) {
+        bar.classList.remove('success', 'fail');
+        lab.textContent = '';
+      } else this._render();
+    }, duration);
+  },
+  _render() {
+    const bar = document.getElementById('task-bar');
+    const lab = document.getElementById('task-bar-label');
+    if (!bar || !lab) return;
+    if (this._flashTimeout) { clearTimeout(this._flashTimeout); this._flashTimeout = null; }
+    if (!this._active.size) {
+      bar.classList.remove('active', 'determinate', 'success', 'fail');
+      lab.textContent = '';
+      return;
+    }
+    bar.classList.remove('success', 'fail');
+    bar.classList.add('active');
+    // Show the most-recently-started task's label (last one in insertion order).
+    const tasks = [...this._active.values()];
+    const latest = tasks[tasks.length - 1];
+    let label = latest.label;
+    if (tasks.length > 1) label += ` · ${tasks.length} running`;
+    if (latest.pct != null) {
+      bar.classList.add('determinate');
+      bar.style.setProperty('--task-pct', Math.max(0, Math.min(100, latest.pct)) + '%');
+      label += ` · ${Math.round(latest.pct)}%`;
+    } else {
+      bar.classList.remove('determinate');
+    }
+    lab.textContent = label;
+  },
+};
+
 function toast(msg, type='', duration=3000) {
   const t = document.createElement('div');
   t.className = 'toast ' + type;
