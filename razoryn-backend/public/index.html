@@ -3954,6 +3954,38 @@ function invoiceHtml(items, filter) {
 // Lookup table for the payment methods. Used in labels everywhere.
 const QB_PM_LABELS = { cash: 'Cash on collection', bank: 'Bank transfer' };
 
+// Lazy cache for link status (mirror_links data). Populated once per session,
+// used by Quote Builder to construct direct eBay URLs and by Link Status itself.
+async function loadLinkStatusCache(force = false) {
+  if (State.linkStatus && !force) return State.linkStatus;
+  try {
+    State.linkStatus = await Api.get('/api/listings/link-status');
+  } catch (e) {
+    State.linkStatus = { products: [], summary: { total: 0, linkedBoth: 0 } };
+  }
+  return State.linkStatus;
+}
+
+// Find the eBay item ID linked to a warehouse product, via mirror_links data.
+function ebayItemIdForProduct(productId) {
+  const list = State.linkStatus?.products || [];
+  const link = list.find(p => String(p.id) === String(productId));
+  return link?.ebay_item_id || null;
+}
+
+// Copy a URL to the clipboard and toast about it. Falls back to a prompt on
+// older browsers that don't expose the Clipboard API.
+async function qbCopyUrl(url, label, note) {
+  try {
+    await navigator.clipboard.writeText(url);
+    let msg = `${label} copied — paste into your messaging app`;
+    if (note) msg += `\n\n${note}`;
+    toast(msg, 'success', note ? 7000 : 4000);
+  } catch (e) {
+    prompt(`Copy this ${label}:`, url);
+  }
+}
+
 // Compute the cash + bank price for a product, given the current pricing config.
 function qbComputePrices(p) {
   const cfg = State.pricingConfig || { cashDiscountPct: 10, bankTransferPct: 10, ebayBuyerProtectionMarkup: 0, shopifyFreeDeliveryOver: 50 };
@@ -3983,6 +4015,7 @@ function qbTotalAt(items, paymentMethod) {
 
 function renderQuoteBuilder() {
   loadPricingConfig();
+  loadLinkStatusCache();  // background load — needed for direct eBay URLs in copy-link
   if (!State.quote) State.quote = { items: [], paymentMethod: null, customer: {} };
 
   const pm = State.quote.paymentMethod;
@@ -4126,32 +4159,39 @@ function qbSelectProduct(id) {
   `;
 }
 
-// Copy a Shopify or eBay link for the product to the clipboard. Constructs a
-// best-effort URL using the SKU as a search query — works without storing
-// product handles. If the product has been mirrored, the URL handles get
-// populated by the backend and this can be upgraded to direct links later.
+// Copy a Shopify or eBay link for the product to the clipboard.
+// eBay: uses the actual ebay_item_id from mirror_links (loaded into State.linkStatus)
+//       to produce a direct URL like https://www.ebay.co.uk/itm/{id}. If the product
+//       isn't linked, we tell the user to link it first.
+// Shopify: best-effort. We don't currently store Shopify product handles in the
+//       warehouse DB, so we have no direct customer-facing URL. We give the
+//       storefront search URL with a clear note about why it's a search.
 async function qbCopyChannelLink(productId, channel) {
   const p = State.products.find(x => x.id == productId);
   if (!p) return;
-  const sku = encodeURIComponent(p.sku || '');
   const domain = (State.brand?.domain || 'razoryn.co.uk').replace(/^https?:\/\//, '');
-  let url, label;
-  if (channel === 'shopify') {
-    // Storefront SKU search — works for any Shopify store. If the product handle
-    // were available we'd use /products/{handle} directly.
-    url = `https://${domain}/search?q=${sku}`;
-    label = 'Shopify link';
+
+  if (channel === 'ebay') {
+    // Ensure link cache is loaded (no-op if already loaded)
+    await loadLinkStatusCache();
+    const itemId = ebayItemIdForProduct(productId);
+    if (!itemId) {
+      toast(
+        `${escapeHtml(p.sku || p.title)} isn't linked to an eBay listing yet. ` +
+        `Open Listing Mirror → Link Status and use "Force match all" or the per-row "Link to eBay" button.`,
+        'warn', 8000
+      );
+      return;
+    }
+    const url = `https://www.ebay.co.uk/itm/${itemId}`;
+    await qbCopyUrl(url, 'eBay link');
   } else {
-    // eBay search by SKU on .co.uk marketplace.
-    url = `https://www.ebay.co.uk/sch/i.html?_nkw=${sku}`;
-    label = 'eBay link';
-  }
-  try {
-    await navigator.clipboard.writeText(url);
-    toast(`${label} copied — paste into your messaging app`, 'success');
-  } catch (e) {
-    // Older browsers: fall back to a prompt the user can copy manually.
-    prompt(`Copy this ${label}:`, url);
+    // Shopify — until product handles are stored in the DB we can't give a
+    // direct URL. Fall back to a storefront search by SKU.
+    const sku = encodeURIComponent(p.sku || '');
+    const url = `https://${domain}/search?q=${sku}`;
+    await qbCopyUrl(url, 'Shopify search link',
+      'This is a search URL (direct product links require product handle tracking — coming soon).');
   }
 }
 
@@ -5454,17 +5494,11 @@ function renderLinkStatus() {
               <th>Product</th>
               <th>SKU</th>
               <th>Shopify</th>
-              <th>eBay account</th>
-              <th>eBay item</th>
+              <th>eBay listing</th>
               <th></th>
             </tr></thead>
             <tbody>
-              ${filtered.slice(0, 200).map(p => {
-                // Linked items always come from the catalogue-primary store
-                // (standalone stores are excluded from mirror operations).
-                const primaryStore = (State.brand?.stores || []).find(s => !s.standalone) || (State.brand?.stores || [])[0];
-                const ebayStoreName = primaryStore?.name || 'eBay';
-                return `
+              ${filtered.slice(0, 200).map(p => `
                 <tr>
                   <td><div style="font-weight:500">${escapeHtml(p.title || '')}</div></td>
                   <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(p.sku || '')}</td>
@@ -5473,11 +5507,7 @@ function renderLinkStatus() {
                     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">No link</span>'}
                   </td>
                   <td>${p.ebay_item_id
-                    ? `<span style="font-size:12px;font-weight:600">${escapeHtml(ebayStoreName)}</span>`
-                    : `<span style="font-size:11px;color:var(--ink-soft)">—</span>`}
-                  </td>
-                  <td>${p.ebay_item_id
-                    ? `<span class="pill green" style="font-size:10px">✓ Linked</span><div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--ink-soft);margin-top:2px">${escapeHtml(p.ebay_item_id)}</div>`
+                    ? `<span class="pill green" style="font-size:10px">✓ Linked</span><div style="font-family:ui-monospace,monospace;font-size:10px;margin-top:2px"><a href="https://www.ebay.co.uk/itm/${escapeAttr(p.ebay_item_id)}" target="_blank" rel="noopener" style="color:var(--brand-primary);text-decoration:none">${escapeHtml(p.ebay_item_id)} ↗</a></div>`
                     : '<span class="pill amber" style="font-size:10px">⚠ Not linked</span>'}
                   </td>
                   <td style="white-space:nowrap">
@@ -5485,7 +5515,7 @@ function renderLinkStatus() {
                     ${p.ebay_item_id ? `<button class="btn btn-ghost btn-sm" onclick="unlinkEbay('${escapeAttr(p.ebay_item_id)}')" title="Remove link" style="color:var(--red)">✕</button>` : ''}
                   </td>
                 </tr>
-              `; }).join('')}
+              `).join('')}
             </tbody>
           </table>
         </div>
