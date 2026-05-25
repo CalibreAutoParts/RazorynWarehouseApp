@@ -489,11 +489,113 @@
   .pt-row {
     display: flex; align-items: center; justify-content: space-between;
     padding: 14px; border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--white);
+    transition: border-color 0.15s, background 0.15s, transform 0.05s;
   }
-  .pt-row.featured { background: var(--red-light); border-color: var(--red); }
+  /* Clickable price rows in Quote Builder — hover gives lift + brand outline */
+  .pt-row.clickable { cursor: pointer; }
+  .pt-row.clickable:hover {
+    border-color: var(--brand-primary);
+    background: var(--brand-primary-light);
+    transform: translateY(-1px);
+  }
+  /* Greyed-out row when payment method is already locked elsewhere */
+  .pt-row.locked-out {
+    opacity: 0.45;
+    cursor: not-allowed;
+    background: var(--bg);
+  }
+  /* The price row that matches the currently-locked payment method */
+  .pt-row.matches-lock {
+    border-color: var(--brand-primary);
+    border-width: 2px;
+    padding: 13px;
+  }
+  /* Informational-only rows (eBay/Shopify prices — customer orders directly) */
+  .pt-row.info-only {
+    background: var(--bg);
+    cursor: default;
+  }
   .pt-row .ch-name { font-weight: 600; font-size: 13px; }
   .pt-row .ch-meta { color: var(--ink-soft); font-size: 12px; }
   .pt-row .ch-price { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+  .pt-row .ch-price-sub { font-size: 10px; color: var(--ink-soft); font-weight: 500; text-align: right; margin-top: 2px; }
+
+  /* Quote Builder sticky footer */
+  #qb-footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--white);
+    border-top: 1px solid var(--line);
+    box-shadow: 0 -4px 16px rgba(15,17,21,0.08);
+    padding: 12px 20px;
+    z-index: 50;
+  }
+  [data-theme="dark"] #qb-footer { background: var(--ink-2); }
+  #qb-footer .qb-footer-inner {
+    max-width: 1400px;
+    margin: 0 auto;
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  #qb-footer .qb-summary {
+    flex: 1;
+    min-width: 200px;
+  }
+  #qb-footer .qb-summary .lab {
+    font-size: 11px;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin-bottom: 2px;
+  }
+  #qb-footer-details {
+    display: none;
+    max-width: 1400px;
+    margin: 12px auto 0;
+    border-top: 1px solid var(--line);
+    padding-top: 12px;
+    max-height: 280px;
+    overflow-y: auto;
+  }
+  #qb-footer-details .qb-line {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line-2);
+  }
+  #qb-footer-details .qb-line:last-child { border-bottom: none; }
+  #qb-footer-details .qb-qty {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  #qb-footer-details .qb-qty input {
+    width: 50px;
+    text-align: center;
+    font-size: 14px;
+    padding: 4px;
+  }
+  /* Lock banner shown at top of QB once a payment method is locked */
+  .qb-lock-banner {
+    background: var(--blue-light);
+    border-left: 3px solid var(--blue);
+    padding: 10px 14px;
+    border-radius: 6px;
+    margin-bottom: 14px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  [data-theme="dark"] .qb-lock-banner { background: rgba(30,90,232,0.15); }
 
   /* Empty state */
   .empty {
@@ -758,8 +860,8 @@
           Sales
         </button>
         <button class="nav-item" data-page="pricing">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
-          Phone Pricing
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><polyline points="9 14 11 16 15 12"/></svg>
+          Quote Builder
         </button>
       </div>
 
@@ -1220,7 +1322,7 @@ const SEED_VIDEOS = [
   { id:'v2', title:'Packing a headlight safely', desc:'Bubble wrap, corners, label placement — protect against transit damage', duration:'3:18', thumb:'#0f1115' },
   { id:'v3', title:'Processing a return (Shopify)', desc:'From received to refunded — full Shopify return flow', duration:'5:46', thumb:'#1e5ae8' },
   { id:'v4', title:'Processing a return (eBay)', desc:'eBay returns differ from Shopify — here\'s what to do', duration:'6:02', thumb:'#1a7f3e' },
-  { id:'v5', title:'Phone enquiry pricing', desc:'How to use the phone pricing tool when a customer calls', duration:'2:54', thumb:'#b76b00' },
+  { id:'v5', title:'Quote Builder', desc:'Build a multi-item quote and send a pro-forma when a customer calls', duration:'2:54', thumb:'#b76b00' },
   { id:'v6', title:'Receiving new stock', desc:'Unboxing, scanning, and putting stock away in the right location', duration:'4:11', thumb:'#a51823' },
 ];
 
@@ -1588,7 +1690,7 @@ function routeTo(page) {
   const pages = {
     dashboard: renderDashboard, inventory: renderInventory, scan: renderScan,
     locations: renderLocations, returns: renderReturns, sales: renderSales,
-    pricing: renderPricing, schedule: renderSchedule, videos: renderVideos,
+    pricing: renderQuoteBuilder, schedule: renderSchedule, videos: renderVideos,
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror,
     labels: renderLabels, notes: renderNotes
   };
@@ -3172,12 +3274,22 @@ function renderSales() {
   function paintTable(filter='all') {
     const subset = applyFilter(filter);
     State._salesFiltered = subset;
-    el('sales-tbody').innerHTML = subset.length ? subset.map(s => `
+    el('sales-tbody').innerHTML = subset.length ? subset.map(s => {
+      // Pro-forma badge for estimates that have a payment method (created via Quote Builder)
+      // vs vanilla "ESTIMATE" for legacy estimates without one. Either way payment method
+      // is locked — staff can't change it via the UI once the row exists.
+      const pmLabels = { cash: 'Cash', bank: 'Bank', card: 'Card' };
+      const pmLabel = pmLabels[s.paymentMethod] || (s.paymentMethod || '').toUpperCase();
+      const estimateBadge = s.isEstimate
+        ? (s.paymentMethod ? ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="Payment method locked: ${pmLabel}">PRO FORMA · ${escapeHtml(pmLabel)}</span>`
+                           : ` <span class="pill amber" style="font-size:10px;margin-left:4px">ESTIMATE</span>`)
+        : '';
+      return `
       <tr style="cursor:pointer" onclick="if(!event.target.closest('button,input,a'))openSaleDetail('${s.id}')">
         <td onclick="event.stopPropagation()"><input type="checkbox" class="sale-row-check" data-sid="${s.id}" ${State.salesSelected.has(s.id)?'checked':''} onchange="salesToggleRow('${s.id}',this.checked)"></td>
         <td>${fmtDate(s.date)}</td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${s.invoice||'—'}</td>
-        <td>${channelPill(s.channel)}${s.isEstimate ? ' <span class="pill amber" style="font-size:10px;margin-left:4px">ESTIMATE</span>' : ''}</td>
+        <td>${channelPill(s.channel)}${estimateBadge}</td>
         <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
         <td>${s.customer}</td>
         <td class="num"><strong>${gbp(s.amount)}</strong></td>
@@ -3185,11 +3297,11 @@ function renderSales() {
           <button class="btn btn-ghost btn-sm" onclick="printSingleInvoice('${s.id}')" title="Open invoice in new tab to print or save as PDF">🖨</button>
           <button class="btn btn-ghost btn-sm" onclick="emailSingleInvoice('${s.id}')" title="Email this invoice to the customer">✉</button>
           <button class="btn btn-ghost btn-sm" onclick="openEditSale('${s.id}')" title="Edit customer / reg / VIN / notes">✏️</button>
-          ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Mark as paid → decrements stock, generates paid invoice" style="color:var(--green)">✓ Pay</button>` : ''}
+          ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Mark payment received → decrements stock, generates paid invoice using locked payment method" style="color:var(--green)">✓ Mark paid</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="deleteSale('${s.id}', ${s.isEstimate})" title="Delete this ${s.isEstimate ? 'estimate' : 'invoice'} ${!s.isEstimate ? '(restores stock)' : ''}" style="color:var(--red)">🗑</button>
         </td>
       </tr>
-    `).join('') : '<tr><td colspan="8"><div class="empty"><div class="t">No ' + (filter === 'estimates' ? 'estimates' : 'sales') + '</div></div></td></tr>';
+    `; }).join('') : '<tr><td colspan="8"><div class="empty"><div class="t">No ' + (filter === 'estimates' ? 'estimates' : 'sales') + '</div></div></td></tr>';
     salesUpdateBulkBar();
   }
   paintStats(); paintTable();
@@ -3351,10 +3463,23 @@ async function emailSingleInvoice(id) {
 }
 
 async function convertEstimateToInvoice(id) {
-  const paymentMethod = prompt('Payment received via — type one of:\ncash, bank, card', 'cash');
-  if (!paymentMethod || !['cash','bank','card'].includes(paymentMethod.toLowerCase())) return;
+  // Find the sale in state to read its locked payment method.
+  const sale = State.sales.find(s => s.id == id);
+  let paymentMethod = sale?.paymentMethod;
+
+  // Legacy estimates (created before Quote Builder) may not have a payment method.
+  // Fall back to prompting in that case only.
+  if (!paymentMethod || !['cash','bank','card'].includes(paymentMethod)) {
+    const typed = prompt('Payment received via — type one of:\ncash, bank, card', 'cash');
+    if (!typed || !['cash','bank','card'].includes(typed.toLowerCase())) return;
+    paymentMethod = typed.toLowerCase();
+  } else {
+    // Confirmed sale has locked method → just ask staff to confirm payment was received.
+    const labels = { cash: 'Cash on collection', bank: 'Bank transfer', card: 'Card' };
+    if (!confirm(`Confirm payment received via ${labels[paymentMethod]}? This will:\n\n• Decrement stock\n• Convert pro-forma to real invoice\n• Lock the payment method permanently`)) return;
+  }
   try {
-    const r = await Api.post('/api/sales/' + id + '/convert-to-invoice', { paymentMethod: paymentMethod.toLowerCase() });
+    const r = await Api.post('/api/sales/' + id + '/convert-to-invoice', { paymentMethod });
     toast('Converted to paid invoice — opening…', 'success');
     await Store.refresh('sales');
     await Store.refresh('products');
@@ -3773,90 +3898,171 @@ function invoiceHtml(items, filter) {
 }
 
 /* ==========================================================
-   PHONE PRICING TOOL
-   ========================================================== */
-function renderPricing() {
-  // Make sure the latest cash/bank/eBay percentages are loaded before quoting.
-  // Without this, the first time staff open this page the State.pricingConfig is
-  // undefined and quotePrice() falls back to its default (cash=10, bank=10)
-  // — making cash and bank prices look identical even though they differ in settings.
+   QUOTE BUILDER
+   ==========================================================
+   Replaces the old "Phone Pricing" page. Lets staff search for parts,
+   pick a payment method per quote (cash on collection or bank transfer),
+   add multiple items to a single quote, then generate a pro-forma
+   invoice the customer can pay (Resend email or downloaded for WhatsApp etc).
+
+   State model:
+     State.quote = {
+       items: [{ productId, title, sku, partNumber, qty, unitPrice, paymentMethod }],
+       lockedPaymentMethod: 'cash' | 'bank' | null,
+       customer: {} // not used yet — collected at pro-forma submit time
+     }
+
+   Rules enforced by the UI:
+   - Only Cash on collection and Bank transfer are clickable. eBay and Shopify
+     prices are shown for reference only because customers order those
+     channels directly through the platform.
+   - First click locks the payment method for the whole quote. Subsequent
+     items must use the same method; the other clickable row is greyed out.
+   - Once a pro-forma is generated, the payment method is permanent on the
+     resulting sale row. The "Pay" button on the Sales tab converts directly
+     using that locked method without prompting.
+*/
+function renderQuoteBuilder() {
   loadPricingConfig();
+  if (!State.quote) State.quote = { items: [], lockedPaymentMethod: null, customer: {} };
+
+  const lockLabels = { cash: 'Cash on collection', bank: 'Bank transfer' };
   el('content').innerHTML = `
-    <div class="page">
+    <div class="page" id="qb-page">
       <div class="page-head">
-        <div><h1>Phone Pricing Tool</h1><div class="desc">Customer on the phone? Find the part and quote them on the spot.</div></div>
+        <div><h1>Quote Builder</h1><div class="desc">Search a part, click a price to add it to the quote, then generate a pro-forma invoice for the customer.</div></div>
       </div>
+
+      ${State.quote.lockedPaymentMethod ? `
+        <div class="qb-lock-banner">
+          <div style="flex:1">
+            <strong>Payment method locked:</strong> ${lockLabels[State.quote.lockedPaymentMethod]}
+            <span style="color:var(--ink-soft)"> · all items in this quote must use the same method</span>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="clearQuote()" style="color:var(--ink-soft)">↺ Start new quote</button>
+        </div>
+      ` : ''}
+
       <div class="card">
         <div class="card-body">
-          <div class="field"><label>Search the part</label><input id="pt-q" placeholder="Try 'Kia Niro headlight' or '92102'..." style="font-size:16px;padding:14px"></div>
-          <div id="pt-list"></div>
+          <div class="field"><label>Search for a part</label><input id="qb-q" placeholder="Try 'Kia Niro headlight' or a part number..." style="font-size:16px;padding:14px" autocomplete="off"></div>
+          <div id="qb-list"></div>
         </div>
       </div>
-      <div id="pt-detail"></div>
+      <div id="qb-detail"></div>
+      <div style="height:140px"></div>
     </div>
+    ${renderQuoteFooter()}
   `;
-  el('pt-q').addEventListener('input', () => {
-    const q = el('pt-q').value.trim().toLowerCase();
-    if (!q) { el('pt-list').innerHTML=''; return; }
+
+  el('qb-q').addEventListener('input', () => {
+    const q = el('qb-q').value.trim().toLowerCase();
+    if (!q) { el('qb-list').innerHTML = ''; return; }
     const matches = State.products.filter(p =>
       p.title.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) ||
       (p.partNumber||'').toLowerCase().includes(q) || (p.brand+' '+p.model).toLowerCase().includes(q)
     ).slice(0, 6);
-    el('pt-list').innerHTML = matches.map(p => `
-      <div onclick="quotePrice('${p.id}')" style="padding:12px;border-top:1px solid var(--line);cursor:pointer;display:flex;align-items:center;gap:12px">
+    el('qb-list').innerHTML = matches.length ? matches.map(p => `
+      <div onclick="qbSelectProduct('${p.id}')" style="padding:12px;border-top:1px solid var(--line);cursor:pointer;display:flex;align-items:center;gap:12px">
         <div style="flex:1">
-          <div style="font-weight:600">${p.title}</div>
-          <div style="color:var(--ink-soft);font-size:12px">${p.sku} · ${p.partNumber||''} · <strong>${totalQty(p)} in stock</strong></div>
+          <div style="font-weight:600">${escapeHtml(p.title)}</div>
+          <div style="color:var(--ink-soft);font-size:12px">${escapeHtml(p.sku)} · ${escapeHtml(p.partNumber||'')} · <strong>${totalQty(p)} in stock</strong></div>
         </div>
-        <div style="font-size:18px;font-weight:700">${gbp(p.priceEbay)}</div>
+        <div style="font-size:18px;font-weight:700">${gbp(p.priceEbay || p.priceShopify || 0)}</div>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
       </div>
-    `).join('') || '<div class="empty"><div class="t">No matches</div></div>';
+    `).join('') : '<div class="empty"><div class="t">No matches</div></div>';
   });
 }
-function quotePrice(id) {
+
+// Show pricing tile for a product. All four prices visible; only cash + bank are clickable.
+function qbSelectProduct(id) {
   const p = State.products.find(x => x.id == id);
+  if (!p) return;
   if (!State.pricingConfig) {
-    // Config not loaded yet — kick off the load and re-render once it arrives.
-    el('pt-detail').innerHTML = '<div style="padding:20px;text-align:center;color:var(--ink-soft)">Loading pricing config…</div>';
-    loadPricingConfig().then(() => quotePrice(id));
+    el('qb-detail').innerHTML = '<div style="padding:20px;text-align:center;color:var(--ink-soft)">Loading pricing config…</div>';
+    loadPricingConfig().then(() => qbSelectProduct(id));
     return;
   }
   const cfg = State.pricingConfig;
-  // If price_ebay is missing (products imported from Shopify only), fall back to Shopify price
-  // as the eBay basis. This way Cash / Bank / eBay quotes still compute reasonably until
-  // eBay listings are mirrored back to populate price_ebay properly.
+  // If price_ebay is missing (products imported from Shopify only), fall back to Shopify price.
   const ebayBasis = (p.priceEbay && p.priceEbay > 0) ? p.priceEbay : (p.priceShopify || 0);
-  const ebayBasisIsFromShopify = !(p.priceEbay && p.priceEbay > 0) && (p.priceShopify || 0) > 0;
+  const fromShopify = !(p.priceEbay && p.priceEbay > 0) && (p.priceShopify || 0) > 0;
   const cashPrice = ebayBasis * (1 - cfg.cashDiscountPct/100);
   const bankPrice = ebayBasis * (1 - cfg.bankTransferPct/100);
   const ebayProtectedPrice = ebayBasis * (1 + cfg.ebayBuyerProtectionMarkup/100);
-  el('pt-detail').innerHTML = `
+
+  const locked = State.quote.lockedPaymentMethod;
+  // For locked-out states: a payment method other than the currently-locked one
+  const cashLocked = locked && locked !== 'cash';
+  const bankLocked = locked && locked !== 'bank';
+
+  el('qb-detail').innerHTML = `
     <div style="height:16px"></div>
     <div class="card">
-      <div class="card-head"><h3>Quote for: ${p.title}</h3></div>
+      <div class="card-head"><h3>Quote for: ${escapeHtml(p.title)}</h3></div>
       <div class="card-body">
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
           <span class="pill ${totalQty(p)>0?'green':'red'}">${totalQty(p)>0 ? totalQty(p) + ' in stock' : 'Out of stock'}</span>
-          <span style="color:var(--ink-soft);font-size:13px">${p.location || ''}</span>
+          <span style="color:var(--ink-soft);font-size:13px">${escapeHtml(p.sku)}${p.partNumber ? ' · ' + escapeHtml(p.partNumber) : ''}</span>
+          ${p.location ? `<span style="color:var(--ink-soft);font-size:13px">${escapeHtml(p.location)}</span>` : ''}
         </div>
-        ${ebayBasisIsFromShopify ? `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ No eBay price on file — using Shopify price as the basis. Mirror this listing from eBay to set the proper eBay price.</div>` : ''}
+        ${fromShopify ? `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ No eBay price on file — using Shopify price as the basis. Run "Hydrate eBay prices" from Listing Mirror to populate proper eBay prices.</div>` : ''}
+        ${!locked ? `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Click <strong>Cash on collection</strong> or <strong>Bank transfer</strong> to add to the quote. That choice locks the payment method for the rest of the order.</div>` : ''}
         <div class="pt-result">
-          <div class="pt-row featured">
-            <div><div class="ch-name">💰 Cash on collection</div><div class="ch-meta">${ebayBasisIsFromShopify ? 'Shopify' : 'eBay'} price minus ${cfg.cashDiscountPct}% — best price for the customer</div></div>
-            <div class="ch-price">${gbp(cashPrice)}</div>
+
+          <!-- Cash on collection — clickable -->
+          <div class="pt-row ${cashLocked ? 'locked-out' : 'clickable'} ${locked === 'cash' ? 'matches-lock' : ''}"
+               ${cashLocked ? '' : `onclick="qbAddToQuote('${p.id}', 'cash', ${cashPrice.toFixed(2)})"`}
+               role="button" tabindex="${cashLocked ? -1 : 0}">
+            <div>
+              <div class="ch-name">💰 Cash on collection</div>
+              <div class="ch-meta">${fromShopify ? 'Shopify' : 'eBay'} price minus ${cfg.cashDiscountPct}%</div>
+              ${cashLocked ? '<div style="font-size:11px;color:var(--amber);margin-top:4px">Locked — quote is using bank transfer</div>' : ''}
+            </div>
+            <div>
+              <div class="ch-price">${gbp(cashPrice)}</div>
+              ${!cashLocked && locked !== 'cash' ? '<div class="ch-price-sub">Tap to add →</div>' : ''}
+              ${locked === 'cash' ? '<div class="ch-price-sub" style="color:var(--brand-primary)">✓ Locked in</div>' : ''}
+            </div>
           </div>
-          <div class="pt-row">
-            <div><div class="ch-name">🛒 Shopify (online order)</div><div class="ch-meta">Free delivery on orders over £${cfg.shopifyFreeDeliveryOver}</div></div>
-            <div class="ch-price">${gbp(p.priceShopify)}</div>
+
+          <!-- Bank transfer — clickable -->
+          <div class="pt-row ${bankLocked ? 'locked-out' : 'clickable'} ${locked === 'bank' ? 'matches-lock' : ''}"
+               ${bankLocked ? '' : `onclick="qbAddToQuote('${p.id}', 'bank', ${bankPrice.toFixed(2)})"`}
+               role="button" tabindex="${bankLocked ? -1 : 0}">
+            <div>
+              <div class="ch-name">🏦 Bank transfer (trade)</div>
+              <div class="ch-meta">${fromShopify ? 'Shopify' : 'eBay'} price minus ${cfg.bankTransferPct}% — invoiced</div>
+              ${bankLocked ? '<div style="font-size:11px;color:var(--amber);margin-top:4px">Locked — quote is using cash on collection</div>' : ''}
+            </div>
+            <div>
+              <div class="ch-price">${gbp(bankPrice)}</div>
+              ${!bankLocked && locked !== 'bank' ? '<div class="ch-price-sub">Tap to add →</div>' : ''}
+              ${locked === 'bank' ? '<div class="ch-price-sub" style="color:var(--brand-primary)">✓ Locked in</div>' : ''}
+            </div>
           </div>
-          <div class="pt-row">
-            <div><div class="ch-name">📦 eBay listing</div><div class="ch-meta">If they want eBay buyer protection${cfg.ebayBuyerProtectionMarkup ? ` (+${cfg.ebayBuyerProtectionMarkup}%)` : ''}</div></div>
-            <div class="ch-price">${gbp(ebayProtectedPrice)}</div>
+
+          <!-- Reference prices: customer orders these channels themselves, not invoiceable through us -->
+          <div class="pt-row info-only">
+            <div>
+              <div class="ch-name">🛒 Shopify (online order)</div>
+              <div class="ch-meta">Customer orders on calibreautoparts.co.uk · free delivery over £${cfg.shopifyFreeDeliveryOver}</div>
+            </div>
+            <div>
+              <div class="ch-price" style="color:var(--ink-soft)">${gbp(p.priceShopify || 0)}</div>
+              <div class="ch-price-sub">For reference</div>
+            </div>
           </div>
-          <div class="pt-row">
-            <div><div class="ch-name">🏦 Bank transfer (trade)</div><div class="ch-meta">${ebayBasisIsFromShopify ? 'Shopify' : 'eBay'} price minus ${cfg.bankTransferPct}% — invoiced</div></div>
-            <div class="ch-price">${gbp(bankPrice)}</div>
+          <div class="pt-row info-only">
+            <div>
+              <div class="ch-name">📦 eBay listing</div>
+              <div class="ch-meta">Customer orders on eBay with buyer protection${cfg.ebayBuyerProtectionMarkup ? ' (+' + cfg.ebayBuyerProtectionMarkup + '%)' : ''}</div>
+            </div>
+            <div>
+              <div class="ch-price" style="color:var(--ink-soft)">${gbp(ebayProtectedPrice)}</div>
+              <div class="ch-price-sub">For reference</div>
+            </div>
           </div>
         </div>
         <div style="margin-top:16px;padding:12px;background:var(--amber-light);border-radius:8px;font-size:13px;color:var(--amber)">
@@ -3866,6 +4072,232 @@ function quotePrice(id) {
     </div>
   `;
 }
+
+// Footer: sticky bar at the bottom showing the current quote summary.
+// Expand to show line-item editor; submit kicks off the pro-forma flow.
+function renderQuoteFooter() {
+  const items = (State.quote?.items) || [];
+  if (!items.length) return '';
+  const total = items.reduce((a, b) => a + b.unitPrice * b.qty, 0);
+  const labels = { cash: 'Cash on collection', bank: 'Bank transfer' };
+  const pmLabel = labels[State.quote.lockedPaymentMethod] || '—';
+  return `
+    <div id="qb-footer">
+      <div class="qb-footer-inner">
+        <div class="qb-summary">
+          <div class="lab">Current quote · ${pmLabel}</div>
+          <div style="font-weight:700;font-size:16px"><span id="qb-item-count">${items.length}</span> item${items.length === 1 ? '' : 's'} · <span id="qb-total">${gbp(total)}</span></div>
+        </div>
+        <button class="btn btn-outline btn-sm" onclick="qbToggleDetails()" id="qb-view-btn">View items</button>
+        <button class="btn btn-outline btn-sm" onclick="clearQuote()">Clear</button>
+        <button class="btn btn-primary" onclick="qbOpenProformaModal()">Generate pro-forma →</button>
+      </div>
+      <div id="qb-footer-details"></div>
+    </div>
+  `;
+}
+
+// Add a product+price to the current quote. First add locks the payment method.
+function qbAddToQuote(productId, paymentMethod, unitPrice) {
+  if (!State.quote) State.quote = { items: [], lockedPaymentMethod: null, customer: {} };
+  if (State.quote.lockedPaymentMethod && State.quote.lockedPaymentMethod !== paymentMethod) {
+    toast('This quote is locked to ' + State.quote.lockedPaymentMethod, 'warn');
+    return;
+  }
+  State.quote.lockedPaymentMethod = paymentMethod;
+
+  const existing = State.quote.items.find(i => i.productId == productId);
+  if (existing) {
+    existing.qty += 1;
+    toast(`Quantity increased — now ${existing.qty}`, 'success');
+  } else {
+    const p = State.products.find(x => x.id == productId);
+    State.quote.items.push({
+      productId,
+      title: p.title,
+      sku: p.sku,
+      partNumber: p.partNumber || null,
+      qty: 1,
+      unitPrice,
+      paymentMethod,
+    });
+    toast('Added to quote', 'success');
+  }
+  // Full re-render — clears the search box ready for the next part, updates lock banner + footer.
+  renderQuoteBuilder();
+}
+
+function clearQuote() {
+  if (State.quote && State.quote.items.length && !confirm('Clear all items from the current quote?')) return;
+  State.quote = { items: [], lockedPaymentMethod: null, customer: {} };
+  renderQuoteBuilder();
+}
+
+// Toggle the expanded item list in the footer (qty +/- controls).
+function qbToggleDetails() {
+  const d = el('qb-footer-details');
+  if (!d) return;
+  const btn = el('qb-view-btn');
+  if (d.style.display === 'block') {
+    d.style.display = 'none';
+    if (btn) btn.textContent = 'View items';
+  } else {
+    qbPaintItems();
+    d.style.display = 'block';
+    if (btn) btn.textContent = 'Hide items';
+  }
+}
+
+function qbPaintItems() {
+  const d = el('qb-footer-details');
+  if (!d) return;
+  const items = State.quote.items;
+  d.innerHTML = items.map((item, i) => `
+    <div class="qb-line">
+      <div>
+        <div style="font-weight:500">${escapeHtml(item.title)}</div>
+        <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(item.sku)} · ${gbp(item.unitPrice)} each</div>
+      </div>
+      <div class="qb-qty">
+        <button class="btn btn-ghost btn-sm" onclick="qbQtyChange(${i}, -1)">−</button>
+        <input type="number" value="${item.qty}" min="1" onchange="qbQtySet(${i}, parseInt(this.value)||1)">
+        <button class="btn btn-ghost btn-sm" onclick="qbQtyChange(${i}, 1)">+</button>
+      </div>
+      <div style="width:80px;text-align:right;font-weight:600">${gbp(item.unitPrice * item.qty)}</div>
+      <button class="btn btn-ghost btn-sm" onclick="qbItemRemove(${i})" style="color:var(--red)">×</button>
+    </div>
+  `).join('');
+}
+
+function qbQtyChange(idx, delta) {
+  const item = State.quote.items[idx];
+  if (!item) return;
+  item.qty = Math.max(1, item.qty + delta);
+  qbPaintItems();
+  qbUpdateSummary();
+}
+function qbQtySet(idx, val) {
+  const item = State.quote.items[idx];
+  if (!item) return;
+  item.qty = Math.max(1, val);
+  qbPaintItems();
+  qbUpdateSummary();
+}
+function qbItemRemove(idx) {
+  State.quote.items.splice(idx, 1);
+  if (!State.quote.items.length) {
+    // No items left → unlock payment method, full re-render so footer goes away.
+    State.quote.lockedPaymentMethod = null;
+    renderQuoteBuilder();
+  } else {
+    qbPaintItems();
+    qbUpdateSummary();
+  }
+}
+function qbUpdateSummary() {
+  const items = State.quote.items;
+  const total = items.reduce((a, b) => a + b.unitPrice * b.qty, 0);
+  const cnt = el('qb-item-count');
+  const tot = el('qb-total');
+  if (cnt) cnt.textContent = items.length;
+  if (tot) tot.textContent = gbp(total);
+}
+
+// Open the customer-info modal, then submit the pro-forma.
+function qbOpenProformaModal() {
+  const items = State.quote.items;
+  if (!items.length) { toast('Quote is empty', 'warn'); return; }
+  const total = items.reduce((a, b) => a + b.unitPrice * b.qty, 0);
+  const pm = State.quote.lockedPaymentMethod;
+  const labels = { cash: 'Cash on collection', bank: 'Bank transfer' };
+
+  modal({
+    title: 'Generate pro-forma invoice',
+    body: `
+      <div style="background:var(--bg-soft);padding:12px;border-radius:6px;margin-bottom:14px">
+        <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Quote summary</div>
+        <div>${items.length} item${items.length === 1 ? '' : 's'} · <strong>${gbp(total)}</strong></div>
+        <div style="font-size:12px;color:var(--ink-soft);margin-top:4px">Payment method: <strong>${labels[pm]}</strong> — locked once pro-forma is generated</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field"><label>Customer name *</label><input id="pf-name" placeholder="Required" autofocus></div>
+        <div class="field"><label>Phone</label><input id="pf-phone" placeholder="Optional"></div>
+        <div class="field" style="grid-column:1/-1"><label>Email (required to send via Resend)</label><input id="pf-email" type="email" placeholder="customer@example.com"></div>
+        <div class="field" style="grid-column:1/-1"><label>Billing / shipping address (optional)</label><textarea id="pf-address" rows="2" placeholder="123 Example Road&#10;Town, Postcode"></textarea></div>
+        <div class="field"><label>Vehicle reg (optional)</label><input id="pf-reg" placeholder="e.g. AB12 CDE"></div>
+        <div class="field"><label>Order number (optional)</label><input id="pf-ordernum" placeholder="Internal ref"></div>
+        <div class="field" style="grid-column:1/-1"><label>Notes (optional)</label><input id="pf-notes" placeholder="e.g. Confirmed fitment: 2020 Niro EV"></div>
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">After generating, you can email the pro-forma to the customer or download it for WhatsApp / other channels. Convert to a real invoice from the Sales tab once payment is received.</div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Generate & open', primary: true, onClick: () => qbSubmitProforma(false) },
+      { label: 'Generate & email', primary: false, onClick: () => qbSubmitProforma(true) },
+    ],
+  });
+}
+
+// Submit the pro-forma as an estimate sale + open the rendered invoice in a new tab.
+// If sendEmail is true, also call /send-invoice after creation.
+async function qbSubmitProforma(sendEmail) {
+  const name = el('pf-name').value.trim();
+  const email = el('pf-email').value.trim();
+  if (!name) { toast('Customer name is required', 'warn'); return; }
+  if (sendEmail && !email) { toast('Email is required to send via Resend', 'warn'); return; }
+
+  const items = State.quote.items;
+  const pm = State.quote.lockedPaymentMethod;
+  const channel = pm === 'cash' ? 'direct_cash' : 'direct_bank';
+
+  const payload = {
+    channel,
+    paymentMethod: pm,
+    isEstimate: true,    // pro-forma = estimate with locked payment method
+    customerName: name,
+    customerEmail: email || null,
+    customerPhone: el('pf-phone').value.trim() || null,
+    shippingAddress: el('pf-address').value.trim() || null,
+    orderNumber: el('pf-ordernum').value.trim() || null,
+    vehicleReg: el('pf-reg').value.trim() || null,
+    items: items.map(i => ({ productId: i.productId, qty: i.qty, unitPrice: i.unitPrice })),
+    shipping: 0,
+    notes: el('pf-notes').value.trim() || null,
+  };
+
+  const taskId = Task.start(sendEmail ? 'Generating pro-forma & emailing' : 'Generating pro-forma');
+  try {
+    const r = await Api.post('/api/sales', payload);
+    if (sendEmail) {
+      try {
+        await Api.post('/api/sales/' + r.sale.id + '/send-invoice', { to: email });
+      } catch (e) {
+        Task.fail(taskId, 'Created but email failed');
+        toast('Pro-forma saved but email failed: ' + (e.data?.message || e.message), 'warn', 8000);
+        closeModal();
+        await Store.refresh('sales');
+        // Still open it locally so staff can download manually
+        setTimeout(() => window.open('/api/sales/' + r.sale.id + '/invoice.html?proforma=1', '_blank'), 200);
+        clearQuote();
+        return;
+      }
+    }
+    Task.done(taskId, sendEmail ? 'Pro-forma emailed' : 'Pro-forma ready');
+    toast(sendEmail ? 'Pro-forma emailed to ' + email : 'Pro-forma saved — opening…', 'success');
+    closeModal();
+    await Store.refresh('sales');
+    // Clear quote AFTER successful save so a failed save lets staff retry without losing items
+    setTimeout(() => window.open('/api/sales/' + r.sale.id + '/invoice.html?proforma=1', '_blank'), 200);
+    clearQuote();
+  } catch (e) {
+    Task.fail(taskId, 'Failed to generate');
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// Backwards-compat: old code may still call quotePrice() / renderPricing() / openPhoneQuoteSale().
+const renderPricing = renderQuoteBuilder;
+const quotePrice = qbSelectProduct;
 
 /* ==========================================================
    SCHEDULE
@@ -5785,7 +6217,7 @@ function renderSettings() {
       </div>
 
       <div class="card" style="margin-bottom:16px">
-        <div class="card-head"><h3>Phone pricing rules</h3><div class="card-desc">Drives quotes on the Phone Pricing tab and unit prices for manual sales.</div></div>
+        <div class="card-head"><h3>Quote pricing rules</h3><div class="card-desc">Drives quotes on the Quote Builder page and unit prices for manual sales.</div></div>
         <div class="card-body">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
             <div class="field">
@@ -5810,7 +6242,7 @@ function renderSettings() {
             </div>
           </div>
           <div style="margin-top:14px">
-            <button class="btn btn-primary" onclick="savePricingConfig()">Save phone pricing</button>
+            <button class="btn btn-primary" onclick="savePricingConfig()">Save quote pricing</button>
           </div>
         </div>
       </div>
