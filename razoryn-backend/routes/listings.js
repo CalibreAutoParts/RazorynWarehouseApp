@@ -105,7 +105,7 @@ router.post('/link-status/unlink', requireAdmin, async (req, res) => {
 router.post('/link-status/force-match', requireAdmin, async (req, res) => {
   if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
   const sync = require('../services/sync');
-  const stores = ebay.listStores().filter(s => s.hasToken);
+  const stores = ebay.listStores().filter(s => s.hasToken && !s.standalone);
 
   let allListings = [];
   for (const s of stores) {
@@ -182,7 +182,7 @@ router.post('/hydrate-ebay-prices', requireAdmin, async (req, res) => {
   if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
   try {
     // 1) Pull active listings from every configured eBay store
-    const stores = ebay.listStores().filter(s => s.hasToken);
+    const stores = ebay.listStores().filter(s => s.hasToken && !s.standalone);
     let allListings = [];
     for (const s of stores) {
       try {
@@ -320,7 +320,7 @@ router.get('/sku-mismatches', requireAdmin, async (req, res) => {
     if (!links.rows.length) return res.json({ checked: 0, mismatches: [] });
 
     // 1) Pull live eBay SKUs across all stores (only for our mirrored items)
-    const stores = ebay.listStores().filter(s => s.hasToken);
+    const stores = ebay.listStores().filter(s => s.hasToken && !s.standalone);
     let ebayListings = [];
     for (const s of stores) {
       try {
@@ -413,7 +413,7 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
     });
   }
   try {
-    const stores = ebay.listStores().filter(s => s.hasToken);
+    const stores = ebay.listStores().filter(s => s.hasToken && !s.standalone);
     let listings = [];
     for (const s of stores) {
       try {
