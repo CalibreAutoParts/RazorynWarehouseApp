@@ -164,9 +164,24 @@ router.post('/link-status/force-match', requireAdmin, async (req, res) => {
 // Pull live eBay listings, then update products.price_ebay for any matching SKUs.
 // Useful when products were imported from Shopify but their eBay price is blank,
 // causing phone-pricing quotes to show £0.
+// POST /api/listings/hydrate-ebay-prices
+// Pull live eBay listings, then update products.price_ebay for any matching products.
+//
+// PRIOR BUG: This used to match purely by `WHERE sku = $1`. That fails when:
+//  - The eBay listing has no SKU set (common on older listings)
+//  - The SKU on eBay is formatted differently (spaces, dashes, case)
+// Result: phone pricing showed many items "pulled from Shopify" because price_ebay
+// was null, even though the listing was already linked via mirror_links.
+//
+// FIX: Try three strategies in order, falling through to the next if no match:
+//   A) mirror_links — most reliable since the link is explicit
+//   B) Exact SKU match
+//   C) Normalised SKU (uppercase, strip non-alphanumeric)
+// Returns a detailed breakdown so the user can see which strategies fired.
 router.post('/hydrate-ebay-prices', requireAdmin, async (req, res) => {
   if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
   try {
+    // 1) Pull active listings from every configured eBay store
     const stores = ebay.listStores().filter(s => s.hasToken);
     let allListings = [];
     for (const s of stores) {
@@ -175,22 +190,111 @@ router.post('/hydrate-ebay-prices', requireAdmin, async (req, res) => {
         allListings = allListings.concat(part);
       } catch (e) { console.warn(`[hydrate-ebay-prices] store=${s.code} failed: ${e.message}`); }
     }
-    let updated = 0, matched = 0, skipped = 0;
-    for (const l of allListings) {
-      if (!l.sku) { skipped++; continue; }
-      const ebayPrice = l.priceEbay || 0;
-      const upd = await query(
-        `UPDATE products SET price_ebay = $1 WHERE sku = $2 AND $1::numeric > 0 RETURNING id`,
-        [ebayPrice, l.sku]
-      );
-      if (upd.rows.length > 0) { updated += upd.rows.length; matched++; }
-      else skipped++;
+
+    // 2) Pre-load mirror_links into an in-memory map. One query instead of N.
+    const linksResult = await query(`SELECT ebay_item_id, shopify_product_id FROM mirror_links`);
+    const linkMap = {};
+    for (const row of linksResult.rows) {
+      linkMap[String(row.ebay_item_id)] = row.shopify_product_id;
     }
-    res.json({ ok: true, listingsFound: allListings.length, productsMatched: matched, productsUpdated: updated, skipped, stores: stores.map(s => s.code) });
+
+    let updated = 0;
+    let matchedViaLink = 0, matchedViaSku = 0, matchedViaNormalizedSku = 0;
+    let unmatched = 0, zeroPrice = 0;
+    const unmatchedSample = [];
+
+    for (const l of allListings) {
+      const ebayPrice = parseFloat(l.priceEbay) || 0;
+      if (ebayPrice <= 0) { zeroPrice++; continue; }
+
+      let productId = null;
+
+      // Strategy A — mirror_links (most reliable, handles listings without SKU on eBay)
+      const linkedShopifyId = linkMap[String(l.itemId)];
+      if (linkedShopifyId) {
+        const r = await query(
+          `SELECT id FROM products WHERE shopify_product_id = $1 LIMIT 1`,
+          [linkedShopifyId]
+        );
+        if (r.rows[0]) { productId = r.rows[0].id; matchedViaLink++; }
+      }
+
+      // Strategy B — exact SKU match
+      if (!productId && l.sku) {
+        const r = await query(`SELECT id FROM products WHERE sku = $1 LIMIT 1`, [l.sku]);
+        if (r.rows[0]) { productId = r.rows[0].id; matchedViaSku++; }
+      }
+
+      // Strategy C — normalised SKU (case + punctuation tolerant)
+      if (!productId && l.sku) {
+        const norm = l.sku.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+        if (norm.length >= 5) {
+          const r = await query(
+            `SELECT id FROM products WHERE REGEXP_REPLACE(UPPER(sku), '[^A-Z0-9]', '', 'g') = $1 LIMIT 1`,
+            [norm]
+          );
+          if (r.rows[0]) { productId = r.rows[0].id; matchedViaNormalizedSku++; }
+        }
+      }
+
+      if (productId) {
+        await query(`UPDATE products SET price_ebay = $1 WHERE id = $2`, [ebayPrice, productId]);
+        updated++;
+      } else {
+        unmatched++;
+        if (unmatchedSample.length < 10) {
+          unmatchedSample.push({
+            itemId: l.itemId,
+            sku: l.sku || '(no sku)',
+            title: (l.title || '').slice(0, 60),
+            price: ebayPrice,
+            store: l.storeCode || null,
+          });
+        }
+      }
+    }
+
+    res.json({
+      ok: true,
+      listingsFound: allListings.length,
+      updated,
+      matchedViaLink,
+      matchedViaSku,
+      matchedViaNormalizedSku,
+      unmatched,
+      zeroPrice,
+      unmatchedSample,
+      stores: stores.map(s => s.code),
+    });
   } catch (e) {
     console.error('[hydrate-ebay-prices]', e);
     res.status(500).json({ error: 'hydrate_failed', message: e.message });
   }
+});
+
+// GET /api/listings/ebay-price-coverage
+// Diagnostic: how many products have eBay prices vs not. Used by the Phone
+// Pricing page to show a "X of Y products have eBay prices" banner so staff
+// know when quotes might be falling back to Shopify prices.
+router.get('/ebay-price-coverage', requireAdmin, async (req, res) => {
+  const totals = await query(`
+    SELECT
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE price_ebay IS NOT NULL AND price_ebay::numeric > 0)::int AS with_ebay_price,
+      COUNT(*) FILTER (WHERE price_shopify IS NOT NULL AND price_shopify::numeric > 0)::int AS with_shopify_price,
+      COUNT(*) FILTER (WHERE shopify_product_id IS NOT NULL)::int AS linked_to_shopify,
+      COUNT(*) FILTER (WHERE (price_ebay IS NULL OR price_ebay::numeric = 0) AND shopify_product_id IS NOT NULL)::int AS linked_no_ebay_price
+    FROM products
+  `);
+  const missing = await query(`
+    SELECT id, sku, title, price_shopify
+    FROM products
+    WHERE (price_ebay IS NULL OR price_ebay::numeric = 0)
+      AND shopify_product_id IS NOT NULL
+    ORDER BY title
+    LIMIT 50
+  `);
+  res.json({ totals: totals.rows[0], missingSample: missing.rows });
 });
 
 // Diagnostic
