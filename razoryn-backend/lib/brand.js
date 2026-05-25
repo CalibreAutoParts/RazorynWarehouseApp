@@ -55,6 +55,7 @@ const BRANDS = {
         name: 'Evanta Grande',
         channelCode: 'ebay_cl',
         tokenEnv: 'EBAY_AUTH_TOKEN_EVANTAGRANDE',
+        standalone: true,
       },
     ],
   },
