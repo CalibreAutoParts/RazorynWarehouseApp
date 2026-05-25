@@ -623,7 +623,7 @@ module.exports = {
   getActiveListings,
   reviseItem,
   // Multi-store helpers
-  listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary })),
+  listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary, standalone: !!s.standalone })),
   getPrimaryStore: () => brand.getPrimaryStore(),
   getStore: (code) => brand.getStore(code),
 };
