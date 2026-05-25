@@ -597,6 +597,28 @@
   }
   [data-theme="dark"] .qb-lock-banner { background: rgba(30,90,232,0.15); }
 
+  /* Pre-pro-forma modal: payment method toggle */
+  .qb-pm-option {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px;
+    border: 2px solid var(--line);
+    border-radius: 8px;
+    cursor: pointer;
+    background: var(--white);
+    transition: border-color 0.15s, background 0.15s;
+  }
+  [data-theme="dark"] .qb-pm-option { background: var(--ink-2); }
+  .qb-pm-option:hover { border-color: var(--brand-primary); }
+  .qb-pm-option.selected {
+    border-color: var(--brand-primary);
+    background: var(--brand-primary-light);
+  }
+  [data-theme="dark"] .qb-pm-option.selected {
+    background: rgba(200, 32, 45, 0.15);
+  }
+
   /* Empty state */
   .empty {
     text-align: center; padding: 48px 20px;
@@ -3901,43 +3923,80 @@ function invoiceHtml(items, filter) {
    QUOTE BUILDER
    ==========================================================
    Replaces the old "Phone Pricing" page. Lets staff search for parts,
-   pick a payment method per quote (cash on collection or bank transfer),
-   add multiple items to a single quote, then generate a pro-forma
-   invoice the customer can pay (Resend email or downloaded for WhatsApp etc).
+   build a multi-item quote with a single payment method, then generate
+   a pro-forma invoice the customer can pay (Resend email or downloaded).
 
    State model:
      State.quote = {
-       items: [{ productId, title, sku, partNumber, qty, unitPrice, paymentMethod }],
-       lockedPaymentMethod: 'cash' | 'bank' | null,
-       customer: {} // not used yet — collected at pro-forma submit time
+       items: [{ productId, qty, title, sku, partNumber }],  // no per-item price
+       paymentMethod: 'cash' | 'bank' | null,                // current method
+       customer: {}
      }
 
-   Rules enforced by the UI:
-   - Only Cash on collection and Bank transfer are clickable. eBay and Shopify
-     prices are shown for reference only because customers order those
-     channels directly through the platform.
-   - First click locks the payment method for the whole quote. Subsequent
-     items must use the same method; the other clickable row is greyed out.
-   - Once a pro-forma is generated, the payment method is permanent on the
-     resulting sale row. The "Pay" button on the Sales tab converts directly
-     using that locked method without prompting.
+   UX rules:
+   - First click on a Cash or Bank price row adds that item and sets the
+     payment method for the whole quote.
+   - Subsequent items can be added by clicking the price row of the
+     currently-set method. The OTHER method's row remains visible (so
+     staff can quote it to the customer) but isn't clickable to add —
+     no warning toasts, no friction.
+   - Shopify and eBay rows are clickable to COPY the product link to
+     clipboard, NOT to add to quote. Customers order those channels
+     themselves; this just helps staff share the URL.
+   - At the pre-pro-forma stage, staff can switch the payment method
+     for the entire quote (final chance before sending to customer).
+     This re-prices every item.
+   - Once a pro-forma is generated, the payment method is locked on the
+     resulting sale. "Mark paid" converts using the locked method without
+     prompting.
 */
+
+// Lookup table for the payment methods. Used in labels everywhere.
+const QB_PM_LABELS = { cash: 'Cash on collection', bank: 'Bank transfer' };
+
+// Compute the cash + bank price for a product, given the current pricing config.
+function qbComputePrices(p) {
+  const cfg = State.pricingConfig || { cashDiscountPct: 10, bankTransferPct: 10, ebayBuyerProtectionMarkup: 0, shopifyFreeDeliveryOver: 50 };
+  const ebayBasis = (p.priceEbay && p.priceEbay > 0) ? p.priceEbay : (p.priceShopify || 0);
+  const fromShopify = !(p.priceEbay && p.priceEbay > 0) && (p.priceShopify || 0) > 0;
+  return {
+    cash: ebayBasis * (1 - cfg.cashDiscountPct / 100),
+    bank: ebayBasis * (1 - cfg.bankTransferPct / 100),
+    ebay: ebayBasis * (1 + cfg.ebayBuyerProtectionMarkup / 100),
+    shopify: p.priceShopify || 0,
+    fromShopify,
+    cfg,
+  };
+}
+
+// Compute the total for a quote at a given payment method.
+function qbTotalAt(items, paymentMethod) {
+  let total = 0;
+  for (const item of items) {
+    const p = State.products.find(x => x.id == item.productId);
+    if (!p) continue;
+    const prices = qbComputePrices(p);
+    total += (prices[paymentMethod] || 0) * item.qty;
+  }
+  return total;
+}
+
 function renderQuoteBuilder() {
   loadPricingConfig();
-  if (!State.quote) State.quote = { items: [], lockedPaymentMethod: null, customer: {} };
+  if (!State.quote) State.quote = { items: [], paymentMethod: null, customer: {} };
 
-  const lockLabels = { cash: 'Cash on collection', bank: 'Bank transfer' };
+  const pm = State.quote.paymentMethod;
   el('content').innerHTML = `
     <div class="page" id="qb-page">
       <div class="page-head">
-        <div><h1>Quote Builder</h1><div class="desc">Search a part, click a price to add it to the quote, then generate a pro-forma invoice for the customer.</div></div>
+        <div><h1>Quote Builder</h1><div class="desc">Search a part, build the quote, then send the customer a pro-forma. Cash/bank prices are addable; Shopify/eBay prices give you a link to share.</div></div>
       </div>
 
-      ${State.quote.lockedPaymentMethod ? `
+      ${pm ? `
         <div class="qb-lock-banner">
           <div style="flex:1">
-            <strong>Payment method locked:</strong> ${lockLabels[State.quote.lockedPaymentMethod]}
-            <span style="color:var(--ink-soft)"> · all items in this quote must use the same method</span>
+            <strong>Quote is using:</strong> ${QB_PM_LABELS[pm]}
+            <span style="color:var(--ink-soft)"> · you can switch before sending the pro-forma</span>
           </div>
           <button class="btn btn-ghost btn-sm" onclick="clearQuote()" style="color:var(--ink-soft)">↺ Start new quote</button>
         </div>
@@ -3975,7 +4034,9 @@ function renderQuoteBuilder() {
   });
 }
 
-// Show pricing tile for a product. All four prices visible; only cash + bank are clickable.
+// Show pricing tile for a product. All four rows visible:
+// - Cash + Bank: clickable to add to quote (if the current method matches, or if no method is set yet)
+// - Shopify + eBay: clickable to copy the product URL to clipboard so staff can share with the customer
 function qbSelectProduct(id) {
   const p = State.products.find(x => x.id == id);
   if (!p) return;
@@ -3984,84 +4045,76 @@ function qbSelectProduct(id) {
     loadPricingConfig().then(() => qbSelectProduct(id));
     return;
   }
-  const cfg = State.pricingConfig;
-  // If price_ebay is missing (products imported from Shopify only), fall back to Shopify price.
-  const ebayBasis = (p.priceEbay && p.priceEbay > 0) ? p.priceEbay : (p.priceShopify || 0);
-  const fromShopify = !(p.priceEbay && p.priceEbay > 0) && (p.priceShopify || 0) > 0;
-  const cashPrice = ebayBasis * (1 - cfg.cashDiscountPct/100);
-  const bankPrice = ebayBasis * (1 - cfg.bankTransferPct/100);
-  const ebayProtectedPrice = ebayBasis * (1 + cfg.ebayBuyerProtectionMarkup/100);
-
-  const locked = State.quote.lockedPaymentMethod;
-  // For locked-out states: a payment method other than the currently-locked one
-  const cashLocked = locked && locked !== 'cash';
-  const bankLocked = locked && locked !== 'bank';
+  const prices = qbComputePrices(p);
+  const pm = State.quote.paymentMethod;
+  // A method's row is "addable" if no method set yet OR it matches the current method.
+  const cashAddable = !pm || pm === 'cash';
+  const bankAddable = !pm || pm === 'bank';
 
   el('qb-detail').innerHTML = `
     <div style="height:16px"></div>
     <div class="card">
-      <div class="card-head"><h3>Quote for: ${escapeHtml(p.title)}</h3></div>
+      <div class="card-head"><h3>${escapeHtml(p.title)}</h3></div>
       <div class="card-body">
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
           <span class="pill ${totalQty(p)>0?'green':'red'}">${totalQty(p)>0 ? totalQty(p) + ' in stock' : 'Out of stock'}</span>
           <span style="color:var(--ink-soft);font-size:13px">${escapeHtml(p.sku)}${p.partNumber ? ' · ' + escapeHtml(p.partNumber) : ''}</span>
           ${p.location ? `<span style="color:var(--ink-soft);font-size:13px">${escapeHtml(p.location)}</span>` : ''}
         </div>
-        ${fromShopify ? `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ No eBay price on file — using Shopify price as the basis. Run "Hydrate eBay prices" from Listing Mirror to populate proper eBay prices.</div>` : ''}
-        ${!locked ? `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Click <strong>Cash on collection</strong> or <strong>Bank transfer</strong> to add to the quote. That choice locks the payment method for the rest of the order.</div>` : ''}
+        ${prices.fromShopify ? `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ No eBay price on file — using Shopify price as the basis. Run "Hydrate eBay prices" from Listing Mirror.</div>` : ''}
         <div class="pt-result">
 
-          <!-- Cash on collection — clickable -->
-          <div class="pt-row ${cashLocked ? 'locked-out' : 'clickable'} ${locked === 'cash' ? 'matches-lock' : ''}"
-               ${cashLocked ? '' : `onclick="qbAddToQuote('${p.id}', 'cash', ${cashPrice.toFixed(2)})"`}
-               role="button" tabindex="${cashLocked ? -1 : 0}">
+          <!-- Cash on collection -->
+          <div class="pt-row ${cashAddable ? 'clickable' : 'info-only'} ${pm === 'cash' ? 'matches-lock' : ''}"
+               ${cashAddable ? `onclick="qbAddToQuote('${p.id}', 'cash')"` : ''}>
             <div>
               <div class="ch-name">💰 Cash on collection</div>
-              <div class="ch-meta">${fromShopify ? 'Shopify' : 'eBay'} price minus ${cfg.cashDiscountPct}%</div>
-              ${cashLocked ? '<div style="font-size:11px;color:var(--amber);margin-top:4px">Locked — quote is using bank transfer</div>' : ''}
+              <div class="ch-meta">${prices.fromShopify ? 'Shopify' : 'eBay'} price minus ${prices.cfg.cashDiscountPct}%</div>
             </div>
             <div>
-              <div class="ch-price">${gbp(cashPrice)}</div>
-              ${!cashLocked && locked !== 'cash' ? '<div class="ch-price-sub">Tap to add →</div>' : ''}
-              ${locked === 'cash' ? '<div class="ch-price-sub" style="color:var(--brand-primary)">✓ Locked in</div>' : ''}
+              <div class="ch-price">${gbp(prices.cash)}</div>
+              ${pm === 'cash' ? '<div class="ch-price-sub" style="color:var(--brand-primary)">Tap to add ✓</div>'
+                : !pm ? '<div class="ch-price-sub">Tap to add →</div>'
+                : '<div class="ch-price-sub" style="color:var(--ink-soft)">For reference</div>'}
             </div>
           </div>
 
-          <!-- Bank transfer — clickable -->
-          <div class="pt-row ${bankLocked ? 'locked-out' : 'clickable'} ${locked === 'bank' ? 'matches-lock' : ''}"
-               ${bankLocked ? '' : `onclick="qbAddToQuote('${p.id}', 'bank', ${bankPrice.toFixed(2)})"`}
-               role="button" tabindex="${bankLocked ? -1 : 0}">
+          <!-- Bank transfer -->
+          <div class="pt-row ${bankAddable ? 'clickable' : 'info-only'} ${pm === 'bank' ? 'matches-lock' : ''}"
+               ${bankAddable ? `onclick="qbAddToQuote('${p.id}', 'bank')"` : ''}>
             <div>
               <div class="ch-name">🏦 Bank transfer (trade)</div>
-              <div class="ch-meta">${fromShopify ? 'Shopify' : 'eBay'} price minus ${cfg.bankTransferPct}% — invoiced</div>
-              ${bankLocked ? '<div style="font-size:11px;color:var(--amber);margin-top:4px">Locked — quote is using cash on collection</div>' : ''}
+              <div class="ch-meta">${prices.fromShopify ? 'Shopify' : 'eBay'} price minus ${prices.cfg.bankTransferPct}% — invoiced</div>
             </div>
             <div>
-              <div class="ch-price">${gbp(bankPrice)}</div>
-              ${!bankLocked && locked !== 'bank' ? '<div class="ch-price-sub">Tap to add →</div>' : ''}
-              ${locked === 'bank' ? '<div class="ch-price-sub" style="color:var(--brand-primary)">✓ Locked in</div>' : ''}
+              <div class="ch-price">${gbp(prices.bank)}</div>
+              ${pm === 'bank' ? '<div class="ch-price-sub" style="color:var(--brand-primary)">Tap to add ✓</div>'
+                : !pm ? '<div class="ch-price-sub">Tap to add →</div>'
+                : '<div class="ch-price-sub" style="color:var(--ink-soft)">For reference</div>'}
             </div>
           </div>
 
-          <!-- Reference prices: customer orders these channels themselves, not invoiceable through us -->
-          <div class="pt-row info-only">
+          <!-- Shopify — clickable to copy link -->
+          <div class="pt-row clickable" onclick="qbCopyChannelLink('${p.id}', 'shopify')">
             <div>
               <div class="ch-name">🛒 Shopify (online order)</div>
-              <div class="ch-meta">Customer orders on calibreautoparts.co.uk · free delivery over £${cfg.shopifyFreeDeliveryOver}</div>
+              <div class="ch-meta">Free delivery over £${prices.cfg.shopifyFreeDeliveryOver} · tap to copy link to share with customer</div>
             </div>
             <div>
-              <div class="ch-price" style="color:var(--ink-soft)">${gbp(p.priceShopify || 0)}</div>
-              <div class="ch-price-sub">For reference</div>
+              <div class="ch-price">${gbp(prices.shopify)}</div>
+              <div class="ch-price-sub" style="color:var(--brand-primary)">📋 Copy link</div>
             </div>
           </div>
-          <div class="pt-row info-only">
+
+          <!-- eBay — clickable to copy link -->
+          <div class="pt-row clickable" onclick="qbCopyChannelLink('${p.id}', 'ebay')">
             <div>
               <div class="ch-name">📦 eBay listing</div>
-              <div class="ch-meta">Customer orders on eBay with buyer protection${cfg.ebayBuyerProtectionMarkup ? ' (+' + cfg.ebayBuyerProtectionMarkup + '%)' : ''}</div>
+              <div class="ch-meta">Buyer protection${prices.cfg.ebayBuyerProtectionMarkup ? ' (+' + prices.cfg.ebayBuyerProtectionMarkup + '%)' : ''} · tap to copy link to share with customer</div>
             </div>
             <div>
-              <div class="ch-price" style="color:var(--ink-soft)">${gbp(ebayProtectedPrice)}</div>
-              <div class="ch-price-sub">For reference</div>
+              <div class="ch-price">${gbp(prices.ebay)}</div>
+              <div class="ch-price-sub" style="color:var(--brand-primary)">📋 Copy link</div>
             </div>
           </div>
         </div>
@@ -4073,19 +4126,46 @@ function qbSelectProduct(id) {
   `;
 }
 
-// Footer: sticky bar at the bottom showing the current quote summary.
-// Expand to show line-item editor; submit kicks off the pro-forma flow.
+// Copy a Shopify or eBay link for the product to the clipboard. Constructs a
+// best-effort URL using the SKU as a search query — works without storing
+// product handles. If the product has been mirrored, the URL handles get
+// populated by the backend and this can be upgraded to direct links later.
+async function qbCopyChannelLink(productId, channel) {
+  const p = State.products.find(x => x.id == productId);
+  if (!p) return;
+  const sku = encodeURIComponent(p.sku || '');
+  const domain = (State.brand?.domain || 'razoryn.co.uk').replace(/^https?:\/\//, '');
+  let url, label;
+  if (channel === 'shopify') {
+    // Storefront SKU search — works for any Shopify store. If the product handle
+    // were available we'd use /products/{handle} directly.
+    url = `https://${domain}/search?q=${sku}`;
+    label = 'Shopify link';
+  } else {
+    // eBay search by SKU on .co.uk marketplace.
+    url = `https://www.ebay.co.uk/sch/i.html?_nkw=${sku}`;
+    label = 'eBay link';
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    toast(`${label} copied — paste into your messaging app`, 'success');
+  } catch (e) {
+    // Older browsers: fall back to a prompt the user can copy manually.
+    prompt(`Copy this ${label}:`, url);
+  }
+}
+
+// Footer: sticky bar showing the current quote summary and the actions.
 function renderQuoteFooter() {
   const items = (State.quote?.items) || [];
   if (!items.length) return '';
-  const total = items.reduce((a, b) => a + b.unitPrice * b.qty, 0);
-  const labels = { cash: 'Cash on collection', bank: 'Bank transfer' };
-  const pmLabel = labels[State.quote.lockedPaymentMethod] || '—';
+  const pm = State.quote.paymentMethod || 'cash';
+  const total = qbTotalAt(items, pm);
   return `
     <div id="qb-footer">
       <div class="qb-footer-inner">
         <div class="qb-summary">
-          <div class="lab">Current quote · ${pmLabel}</div>
+          <div class="lab">Current quote · ${QB_PM_LABELS[pm]}</div>
           <div style="font-weight:700;font-size:16px"><span id="qb-item-count">${items.length}</span> item${items.length === 1 ? '' : 's'} · <span id="qb-total">${gbp(total)}</span></div>
         </div>
         <button class="btn btn-outline btn-sm" onclick="qbToggleDetails()" id="qb-view-btn">View items</button>
@@ -4097,14 +4177,13 @@ function renderQuoteFooter() {
   `;
 }
 
-// Add a product+price to the current quote. First add locks the payment method.
-function qbAddToQuote(productId, paymentMethod, unitPrice) {
-  if (!State.quote) State.quote = { items: [], lockedPaymentMethod: null, customer: {} };
-  if (State.quote.lockedPaymentMethod && State.quote.lockedPaymentMethod !== paymentMethod) {
-    toast('This quote is locked to ' + State.quote.lockedPaymentMethod, 'warn');
-    return;
-  }
-  State.quote.lockedPaymentMethod = paymentMethod;
+// Add a product to the current quote at the chosen payment method. If no
+// method is set yet, this sets it. If a different method is already set,
+// this function isn't reachable (the row isn't clickable in that case).
+function qbAddToQuote(productId, paymentMethod) {
+  if (!State.quote) State.quote = { items: [], paymentMethod: null, customer: {} };
+  // Set or confirm the method (caller already filters disallowed clicks).
+  State.quote.paymentMethod = paymentMethod;
 
   const existing = State.quote.items.find(i => i.productId == productId);
   if (existing) {
@@ -4118,18 +4197,16 @@ function qbAddToQuote(productId, paymentMethod, unitPrice) {
       sku: p.sku,
       partNumber: p.partNumber || null,
       qty: 1,
-      unitPrice,
-      paymentMethod,
     });
     toast('Added to quote', 'success');
   }
-  // Full re-render — clears the search box ready for the next part, updates lock banner + footer.
+  // Full re-render — clears the search box ready for the next part, updates banner + footer.
   renderQuoteBuilder();
 }
 
 function clearQuote() {
   if (State.quote && State.quote.items.length && !confirm('Clear all items from the current quote?')) return;
-  State.quote = { items: [], lockedPaymentMethod: null, customer: {} };
+  State.quote = { items: [], paymentMethod: null, customer: {} };
   renderQuoteBuilder();
 }
 
@@ -4152,21 +4229,27 @@ function qbPaintItems() {
   const d = el('qb-footer-details');
   if (!d) return;
   const items = State.quote.items;
-  d.innerHTML = items.map((item, i) => `
-    <div class="qb-line">
-      <div>
-        <div style="font-weight:500">${escapeHtml(item.title)}</div>
-        <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(item.sku)} · ${gbp(item.unitPrice)} each</div>
+  const pm = State.quote.paymentMethod || 'cash';
+  d.innerHTML = items.map((item, i) => {
+    const p = State.products.find(x => x.id == item.productId);
+    const prices = p ? qbComputePrices(p) : null;
+    const unitPrice = prices ? (prices[pm] || 0) : 0;
+    return `
+      <div class="qb-line">
+        <div>
+          <div style="font-weight:500">${escapeHtml(item.title)}</div>
+          <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(item.sku)} · ${gbp(unitPrice)} each</div>
+        </div>
+        <div class="qb-qty">
+          <button class="btn btn-ghost btn-sm" onclick="qbQtyChange(${i}, -1)">−</button>
+          <input type="number" value="${item.qty}" min="1" onchange="qbQtySet(${i}, parseInt(this.value)||1)">
+          <button class="btn btn-ghost btn-sm" onclick="qbQtyChange(${i}, 1)">+</button>
+        </div>
+        <div style="width:80px;text-align:right;font-weight:600">${gbp(unitPrice * item.qty)}</div>
+        <button class="btn btn-ghost btn-sm" onclick="qbItemRemove(${i})" style="color:var(--red)">×</button>
       </div>
-      <div class="qb-qty">
-        <button class="btn btn-ghost btn-sm" onclick="qbQtyChange(${i}, -1)">−</button>
-        <input type="number" value="${item.qty}" min="1" onchange="qbQtySet(${i}, parseInt(this.value)||1)">
-        <button class="btn btn-ghost btn-sm" onclick="qbQtyChange(${i}, 1)">+</button>
-      </div>
-      <div style="width:80px;text-align:right;font-weight:600">${gbp(item.unitPrice * item.qty)}</div>
-      <button class="btn btn-ghost btn-sm" onclick="qbItemRemove(${i})" style="color:var(--red)">×</button>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 }
 
 function qbQtyChange(idx, delta) {
@@ -4186,8 +4269,7 @@ function qbQtySet(idx, val) {
 function qbItemRemove(idx) {
   State.quote.items.splice(idx, 1);
   if (!State.quote.items.length) {
-    // No items left → unlock payment method, full re-render so footer goes away.
-    State.quote.lockedPaymentMethod = null;
+    State.quote.paymentMethod = null;
     renderQuoteBuilder();
   } else {
     qbPaintItems();
@@ -4196,39 +4278,29 @@ function qbItemRemove(idx) {
 }
 function qbUpdateSummary() {
   const items = State.quote.items;
-  const total = items.reduce((a, b) => a + b.unitPrice * b.qty, 0);
+  const pm = State.quote.paymentMethod || 'cash';
+  const total = qbTotalAt(items, pm);
   const cnt = el('qb-item-count');
   const tot = el('qb-total');
   if (cnt) cnt.textContent = items.length;
   if (tot) tot.textContent = gbp(total);
 }
 
-// Open the customer-info modal, then submit the pro-forma.
+// Open the pre-pro-forma confirmation modal. Shows BOTH cash and bank totals
+// with a switch (final chance to change payment method based on customer's choice),
+// plus customer details fields.
 function qbOpenProformaModal() {
   const items = State.quote.items;
   if (!items.length) { toast('Quote is empty', 'warn'); return; }
-  const total = items.reduce((a, b) => a + b.unitPrice * b.qty, 0);
-  const pm = State.quote.lockedPaymentMethod;
-  const labels = { cash: 'Cash on collection', bank: 'Bank transfer' };
+  const currentPm = State.quote.paymentMethod || 'cash';
+  State.quote._modalPm = currentPm;  // working copy of method inside modal
 
   modal({
-    title: 'Generate pro-forma invoice',
+    title: 'Review & send pro-forma',
     body: `
-      <div style="background:var(--bg-soft);padding:12px;border-radius:6px;margin-bottom:14px">
-        <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Quote summary</div>
-        <div>${items.length} item${items.length === 1 ? '' : 's'} · <strong>${gbp(total)}</strong></div>
-        <div style="font-size:12px;color:var(--ink-soft);margin-top:4px">Payment method: <strong>${labels[pm]}</strong> — locked once pro-forma is generated</div>
+      <div id="qb-modal-content">
+        ${qbRenderProformaModalBody()}
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="field"><label>Customer name *</label><input id="pf-name" placeholder="Required" autofocus></div>
-        <div class="field"><label>Phone</label><input id="pf-phone" placeholder="Optional"></div>
-        <div class="field" style="grid-column:1/-1"><label>Email (required to send via Resend)</label><input id="pf-email" type="email" placeholder="customer@example.com"></div>
-        <div class="field" style="grid-column:1/-1"><label>Billing / shipping address (optional)</label><textarea id="pf-address" rows="2" placeholder="123 Example Road&#10;Town, Postcode"></textarea></div>
-        <div class="field"><label>Vehicle reg (optional)</label><input id="pf-reg" placeholder="e.g. AB12 CDE"></div>
-        <div class="field"><label>Order number (optional)</label><input id="pf-ordernum" placeholder="Internal ref"></div>
-        <div class="field" style="grid-column:1/-1"><label>Notes (optional)</label><input id="pf-notes" placeholder="e.g. Confirmed fitment: 2020 Niro EV"></div>
-      </div>
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">After generating, you can email the pro-forma to the customer or download it for WhatsApp / other channels. Convert to a real invoice from the Sales tab once payment is received.</div>
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
@@ -4238,8 +4310,68 @@ function qbOpenProformaModal() {
   });
 }
 
-// Submit the pro-forma as an estimate sale + open the rendered invoice in a new tab.
-// If sendEmail is true, also call /send-invoice after creation.
+// Body of the pro-forma modal. Extracted so the payment-method toggle can
+// re-render the totals without rebuilding the modal frame.
+function qbRenderProformaModalBody() {
+  const items = State.quote.items;
+  const pm = State.quote._modalPm || State.quote.paymentMethod || 'cash';
+  const cashTotal = qbTotalAt(items, 'cash');
+  const bankTotal = qbTotalAt(items, 'bank');
+  return `
+    <div style="background:var(--bg-soft);padding:12px;border-radius:8px;margin-bottom:14px">
+      <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Confirm payment method · final chance to switch</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <label class="qb-pm-option ${pm === 'cash' ? 'selected' : ''}">
+          <input type="radio" name="qb-pm" value="cash" ${pm === 'cash' ? 'checked' : ''} onchange="qbSetModalPm('cash')" style="display:none">
+          <div>
+            <div style="font-size:12px;color:var(--ink-soft);font-weight:600">💰 Cash on collection</div>
+            <div style="font-size:20px;font-weight:700">${gbp(cashTotal)}</div>
+          </div>
+          ${pm === 'cash' ? '<div style="font-size:11px;color:var(--brand-primary);font-weight:600">✓ Selected</div>' : ''}
+        </label>
+        <label class="qb-pm-option ${pm === 'bank' ? 'selected' : ''}">
+          <input type="radio" name="qb-pm" value="bank" ${pm === 'bank' ? 'checked' : ''} onchange="qbSetModalPm('bank')" style="display:none">
+          <div>
+            <div style="font-size:12px;color:var(--ink-soft);font-weight:600">🏦 Bank transfer</div>
+            <div style="font-size:20px;font-weight:700">${gbp(bankTotal)}</div>
+          </div>
+          ${pm === 'bank' ? '<div style="font-size:11px;color:var(--brand-primary);font-weight:600">✓ Selected</div>' : ''}
+        </label>
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">${items.length} item${items.length === 1 ? '' : 's'} · payment method becomes permanent once the pro-forma is generated.</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="field"><label>Customer name *</label><input id="pf-name" placeholder="Required" autofocus value="${escapeAttr(State.quote.customer.name || '')}"></div>
+      <div class="field"><label>Phone</label><input id="pf-phone" placeholder="Optional" value="${escapeAttr(State.quote.customer.phone || '')}"></div>
+      <div class="field" style="grid-column:1/-1"><label>Email (required to send via Resend)</label><input id="pf-email" type="email" placeholder="customer@example.com" value="${escapeAttr(State.quote.customer.email || '')}"></div>
+      <div class="field" style="grid-column:1/-1"><label>Billing / shipping address (optional)</label><textarea id="pf-address" rows="2" placeholder="123 Example Road&#10;Town, Postcode">${escapeHtml(State.quote.customer.address || '')}</textarea></div>
+      <div class="field"><label>Vehicle reg (optional)</label><input id="pf-reg" placeholder="e.g. AB12 CDE" value="${escapeAttr(State.quote.customer.reg || '')}"></div>
+      <div class="field"><label>Order number (optional)</label><input id="pf-ordernum" placeholder="Internal ref" value="${escapeAttr(State.quote.customer.orderNum || '')}"></div>
+      <div class="field" style="grid-column:1/-1"><label>Notes (optional)</label><input id="pf-notes" placeholder="e.g. Confirmed fitment: 2020 Niro EV" value="${escapeAttr(State.quote.customer.notes || '')}"></div>
+    </div>
+    <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">After generating, you can email the pro-forma to the customer or download it. Convert to a real invoice from the Sales tab once payment is received.</div>
+  `;
+}
+
+// Switch the payment method inside the modal — re-renders totals + re-priced summary.
+// Persists field values by reading them before the re-paint and writing them back.
+function qbSetModalPm(method) {
+  // Snapshot field values before re-render (we paint the same fields).
+  State.quote.customer = {
+    name: el('pf-name')?.value || '',
+    phone: el('pf-phone')?.value || '',
+    email: el('pf-email')?.value || '',
+    address: el('pf-address')?.value || '',
+    reg: el('pf-reg')?.value || '',
+    orderNum: el('pf-ordernum')?.value || '',
+    notes: el('pf-notes')?.value || '',
+  };
+  State.quote._modalPm = method;
+  el('qb-modal-content').innerHTML = qbRenderProformaModalBody();
+}
+
+// Submit the pro-forma as an estimate. Uses the method selected in the modal
+// (may differ from the original "current method" if staff toggled).
 async function qbSubmitProforma(sendEmail) {
   const name = el('pf-name').value.trim();
   const email = el('pf-email').value.trim();
@@ -4247,20 +4379,30 @@ async function qbSubmitProforma(sendEmail) {
   if (sendEmail && !email) { toast('Email is required to send via Resend', 'warn'); return; }
 
   const items = State.quote.items;
-  const pm = State.quote.lockedPaymentMethod;
+  // Use the modal's working copy of payment method — that's the staff's final choice
+  // after confirming with the customer.
+  const pm = State.quote._modalPm || State.quote.paymentMethod || 'cash';
+  State.quote.paymentMethod = pm;
   const channel = pm === 'cash' ? 'direct_cash' : 'direct_bank';
+
+  // Compute per-item prices using the chosen method.
+  const lineItems = items.map(i => {
+    const p = State.products.find(x => x.id == i.productId);
+    const prices = p ? qbComputePrices(p) : { cash: 0, bank: 0 };
+    return { productId: i.productId, qty: i.qty, unitPrice: prices[pm] || 0 };
+  });
 
   const payload = {
     channel,
     paymentMethod: pm,
-    isEstimate: true,    // pro-forma = estimate with locked payment method
+    isEstimate: true,
     customerName: name,
     customerEmail: email || null,
     customerPhone: el('pf-phone').value.trim() || null,
     shippingAddress: el('pf-address').value.trim() || null,
     orderNumber: el('pf-ordernum').value.trim() || null,
     vehicleReg: el('pf-reg').value.trim() || null,
-    items: items.map(i => ({ productId: i.productId, qty: i.qty, unitPrice: i.unitPrice })),
+    items: lineItems,
     shipping: 0,
     notes: el('pf-notes').value.trim() || null,
   };
@@ -4276,7 +4418,6 @@ async function qbSubmitProforma(sendEmail) {
         toast('Pro-forma saved but email failed: ' + (e.data?.message || e.message), 'warn', 8000);
         closeModal();
         await Store.refresh('sales');
-        // Still open it locally so staff can download manually
         setTimeout(() => window.open('/api/sales/' + r.sale.id + '/invoice.html?proforma=1', '_blank'), 200);
         clearQuote();
         return;
@@ -4286,7 +4427,6 @@ async function qbSubmitProforma(sendEmail) {
     toast(sendEmail ? 'Pro-forma emailed to ' + email : 'Pro-forma saved — opening…', 'success');
     closeModal();
     await Store.refresh('sales');
-    // Clear quote AFTER successful save so a failed save lets staff retry without losing items
     setTimeout(() => window.open('/api/sales/' + r.sale.id + '/invoice.html?proforma=1', '_blank'), 200);
     clearQuote();
   } catch (e) {
@@ -4295,7 +4435,7 @@ async function qbSubmitProforma(sendEmail) {
   }
 }
 
-// Backwards-compat: old code may still call quotePrice() / renderPricing() / openPhoneQuoteSale().
+// Backwards-compat for code that still references the old names.
 const renderPricing = renderQuoteBuilder;
 const quotePrice = qbSelectProduct;
 
@@ -5314,17 +5454,27 @@ function renderLinkStatus() {
               <th>Product</th>
               <th>SKU</th>
               <th>Shopify</th>
-              <th>eBay</th>
+              <th>eBay account</th>
+              <th>eBay item</th>
               <th></th>
             </tr></thead>
             <tbody>
-              ${filtered.slice(0, 200).map(p => `
+              ${filtered.slice(0, 200).map(p => {
+                // Linked items always come from the catalogue-primary store
+                // (standalone stores are excluded from mirror operations).
+                const primaryStore = (State.brand?.stores || []).find(s => !s.standalone) || (State.brand?.stores || [])[0];
+                const ebayStoreName = primaryStore?.name || 'eBay';
+                return `
                 <tr>
                   <td><div style="font-weight:500">${escapeHtml(p.title || '')}</div></td>
                   <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(p.sku || '')}</td>
                   <td>${p.shopify_product_id
                     ? `<span class="pill green" style="font-size:10px">✓ Linked</span><div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--ink-soft);margin-top:2px">${escapeHtml(p.shopify_product_id)}</div>`
                     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">No link</span>'}
+                  </td>
+                  <td>${p.ebay_item_id
+                    ? `<span style="font-size:12px;font-weight:600">${escapeHtml(ebayStoreName)}</span>`
+                    : `<span style="font-size:11px;color:var(--ink-soft)">—</span>`}
                   </td>
                   <td>${p.ebay_item_id
                     ? `<span class="pill green" style="font-size:10px">✓ Linked</span><div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--ink-soft);margin-top:2px">${escapeHtml(p.ebay_item_id)}</div>`
@@ -5335,7 +5485,7 @@ function renderLinkStatus() {
                     ${p.ebay_item_id ? `<button class="btn btn-ghost btn-sm" onclick="unlinkEbay('${escapeAttr(p.ebay_item_id)}')" title="Remove link" style="color:var(--red)">✕</button>` : ''}
                   </td>
                 </tr>
-              `).join('')}
+              `; }).join('')}
             </tbody>
           </table>
         </div>
