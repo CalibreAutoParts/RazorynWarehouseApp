@@ -161,6 +161,10 @@ async function* iterateAllProductsAndVariants() {
           shopify_product_id: String(p.id),
           shopify_variant_id: String(v.id),
           shopify_inventory_id: v.inventory_item_id ? String(v.inventory_item_id) : null,
+          // Shopify product handle — the URL slug for the storefront /products/{handle}.
+          // All variants of a product share the same handle. Used by Quote Builder
+          // to generate direct product links instead of search-by-SKU.
+          shopify_handle: p.handle || null,
           sku: v.sku || `SHOPIFY-${v.id}`,
           title: v.title === 'Default Title' ? p.title : `${p.title} — ${v.title}`,
           brand: p.vendor || null,
