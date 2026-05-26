@@ -3308,7 +3308,6 @@ async function loadDispatch() {
 // channel pill, age, customer, items, total, action button.
 function paintDispatch() {
   const data = State.dispatch || {};
-  const carriers = data.carriers || [];
   const toShip = data.toShip || [];
   const toCollect = data.toCollect || [];
   const recent = data.recent || [];
@@ -3394,9 +3393,6 @@ function paintDispatch() {
             </table>`}
       </div>
     </details>
-
-    <!-- Stash the carriers list on the page so the modal can use it -->
-    <script type="application/json" id="dispatch-carriers">${JSON.stringify(carriers)}</script>
   `;
 }
 
