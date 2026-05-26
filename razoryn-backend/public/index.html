@@ -881,6 +881,11 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 7c0-5.333-8-5.333-8 0"/><path d="M10 7v6h-4"/><path d="M6 13h9"/><path d="M6 19h12"/></svg>
           Sales
         </button>
+        <button class="nav-item admin-only" data-page="dispatch">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16h6"/><path d="M19 13v6"/><path d="M14 8h6"/><path d="M3 7l9-4 9 4M3 7v10l9 4 9-4V7M3 7l9 4 9-4M12 11v10"/></svg>
+          Dispatch
+          <span class="ct" id="nav-dispatch-count">0</span>
+        </button>
         <button class="nav-item" data-page="pricing">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><polyline points="9 14 11 16 15 12"/></svg>
           Quote Builder
@@ -1117,6 +1122,15 @@ function adaptSale(s) {
     subtotal: parseFloat(s.subtotal || 0),
     vat: parseFloat(s.vat || 0),
     shipping: parseFloat(s.shipping || 0),
+    // Dispatch — populated for sales that have been shipped / collected
+    dispatchedAt: s.dispatched_at || null,
+    trackingNumber: s.tracking_number || null,
+    carrier: s.carrier || null,
+    dispatchNotes: s.dispatch_notes || null,
+    channelPushState: s.channel_push_state || null,
+    channelPushError: s.channel_push_error || null,
+    collectedAt: s.collected_at || null,
+    ageHours: s.age_hours != null ? parseFloat(s.age_hours) : null,
   };
 }
 function adaptReturn(r) {
@@ -1714,7 +1728,7 @@ function routeTo(page) {
     locations: renderLocations, returns: renderReturns, sales: renderSales,
     pricing: renderQuoteBuilder, schedule: renderSchedule, videos: renderVideos,
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror,
-    labels: renderLabels, notes: renderNotes
+    labels: renderLabels, notes: renderNotes, dispatch: renderDispatch
   };
   try {
     (pages[page] || renderDashboard)();
@@ -1733,12 +1747,22 @@ function refreshNavCounts() {
   const products = Array.isArray(State.products) ? State.products : [];
   const returns = Array.isArray(State.returns) ? State.returns : [];
   const notifications = Array.isArray(State.notifications) ? State.notifications : [];
+  const sales = Array.isArray(State.sales) ? State.sales : [];
   document.getElementById('nav-inv-count').textContent = products.length;
   document.getElementById('nav-ret-count').textContent = returns.filter(r => r.status === 'open' || r.status === 'pending').length;
   const unread = notifications.filter(n => !n.read).length;
   document.getElementById('nav-notif-count').textContent = unread;
   document.getElementById('notif-badge').textContent = unread;
   document.getElementById('notif-badge').style.display = unread ? 'flex' : 'none';
+  // Dispatch count: paid non-estimate sales without dispatched_at or collected_at.
+  // Approximate from State.sales (admin-only view). Warehouse staff don't see this
+  // count anyway because their sidebar hides the Dispatch link via admin-only class.
+  const outstanding = sales.filter(s => s && !s.isEstimate && !s.dispatchedAt && !s.collectedAt).length;
+  const dispBadge = document.getElementById('nav-dispatch-count');
+  if (dispBadge) {
+    dispBadge.textContent = outstanding;
+    dispBadge.style.display = outstanding > 0 ? 'inline-block' : 'none';
+  }
 }
 
 /* ==========================================================
@@ -3218,6 +3242,522 @@ function openReturnModal() {
 }
 
 /* ==========================================================
+   DISPATCH
+   ==========================================================
+   The "what's still to do" worklist for the warehouse.
+
+   Three sections:
+   • Awaiting dispatch — paid Shopify/eBay/bank orders that need a tracking
+     number and a shipping label. Sorted oldest-first so nothing slips through.
+   • Awaiting collection — paid cash-on-collection orders, waiting for the
+     customer to walk in and pick the part up.
+   • Recent — last 14 days of dispatches/collections, for verification and
+     fixing typos.
+
+   Mark dispatched flow:
+     1. Click the row (or "📦 Mark dispatched")
+     2. Modal opens with carrier dropdown + tracking input + notes
+     3. Submit — saves to DB, status → 'dispatched'
+     4. Optionally pushes back to eBay/Shopify (best-effort, async)
+
+   Channel push uses eBay's CompleteSale (Trading API) and Shopify's
+   Fulfillment API. Both are wrapped in services/ebay.js and services/shopify.js
+   — if those service helpers don't exist yet, the backend records the dispatch
+   locally and surfaces "channel push not implemented" as a non-fatal warning.
+*/
+function renderDispatch() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div>
+          <h1>Dispatch</h1>
+          <div class="desc">Outstanding orders waiting to ship or be collected. Oldest first — clear them in order.</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-outline btn-sm" onclick="loadDispatch()" title="Refresh">↻ Refresh</button>
+        </div>
+      </div>
+      <div id="dispatch-content">
+        <div class="empty"><div class="t">Loading…</div></div>
+      </div>
+    </div>
+  `;
+  loadDispatch();
+}
+
+// Fetch the worklist and re-render. Called on page open, after every action,
+// and when the sidebar polls for the dispatch count badge.
+async function loadDispatch() {
+  try {
+    const data = await Api.get('/api/dispatch/outstanding');
+    State.dispatch = data;
+    paintDispatch();
+    // Update sidebar badge — total outstanding work
+    const total = (data.summary?.toShip || 0) + (data.summary?.toCollect || 0);
+    const badge = el('nav-dispatch-count');
+    if (badge) {
+      badge.textContent = total;
+      badge.style.display = total > 0 ? 'inline-block' : 'none';
+    }
+  } catch (e) {
+    el('dispatch-content').innerHTML = `<div class="empty"><div class="t">Failed to load</div><div style="font-size:12px;color:var(--ink-soft)">${escapeHtml(e.data?.message || e.message)}</div></div>`;
+  }
+}
+
+// Paint the three sections. Each adopts a common "order row" pattern with
+// channel pill, age, customer, items, total, action button.
+function paintDispatch() {
+  const data = State.dispatch || {};
+  const carriers = data.carriers || [];
+  const toShip = data.toShip || [];
+  const toCollect = data.toCollect || [];
+  const recent = data.recent || [];
+
+  el('dispatch-content').innerHTML = `
+    <!-- Top summary cards -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:20px">
+      <div class="card" style="margin:0">
+        <div class="card-body" style="padding:14px">
+          <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:4px">Awaiting dispatch</div>
+          <div style="font-size:28px;font-weight:700">${toShip.length}</div>
+          ${toShip.length ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Oldest: ${describeAge(toShip[0].age_hours)}</div>` : '<div style="font-size:11px;color:var(--green);margin-top:2px">All caught up</div>'}
+        </div>
+      </div>
+      <div class="card" style="margin:0">
+        <div class="card-body" style="padding:14px">
+          <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:4px">Awaiting collection</div>
+          <div style="font-size:28px;font-weight:700">${toCollect.length}</div>
+          ${toCollect.length ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Oldest: ${describeAge(toCollect[0].age_hours)}</div>` : '<div style="font-size:11px;color:var(--green);margin-top:2px">No cash orders waiting</div>'}
+        </div>
+      </div>
+      <div class="card" style="margin:0">
+        <div class="card-body" style="padding:14px">
+          <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:4px">Last 14 days</div>
+          <div style="font-size:28px;font-weight:700">${(data.summary?.recentDispatched || 0) + (data.summary?.recentCollected || 0)}</div>
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">${data.summary?.recentDispatched || 0} shipped · ${data.summary?.recentCollected || 0} collected</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AWAITING DISPATCH -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head" style="display:flex;justify-content:space-between;align-items:center">
+        <h3>📦 Awaiting dispatch (${toShip.length})</h3>
+        ${toShip.length ? `<div style="font-size:12px;color:var(--ink-soft)">Click any row to mark dispatched</div>` : ''}
+      </div>
+      <div class="card-body" style="padding:0">
+        ${toShip.length === 0
+          ? '<div class="empty" style="padding:30px 16px"><div class="t">Nothing to dispatch</div><div style="font-size:12px;color:var(--ink-soft)">When new paid orders come in they\'ll appear here.</div></div>'
+          : `<table class="table">
+              <thead><tr>
+                <th>Order</th><th>Channel</th><th>Customer</th><th>Items</th><th class="num">Total</th><th>Age</th><th></th>
+              </tr></thead>
+              <tbody>
+                ${toShip.map(s => renderDispatchRow(s, 'ship')).join('')}
+              </tbody>
+            </table>`}
+      </div>
+    </div>
+
+    <!-- AWAITING COLLECTION -->
+    ${toCollect.length > 0 ? `
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head" style="display:flex;justify-content:space-between;align-items:center">
+        <h3>💰 Awaiting collection (${toCollect.length})</h3>
+        <div style="font-size:12px;color:var(--ink-soft)">Cash-on-collection orders — mark when customer collects</div>
+      </div>
+      <div class="card-body" style="padding:0">
+        <table class="table">
+          <thead><tr>
+            <th>Order</th><th>Customer</th><th>Items</th><th class="num">Total</th><th>Age</th><th></th>
+          </tr></thead>
+          <tbody>
+            ${toCollect.map(s => renderDispatchRow(s, 'collect')).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>` : ''}
+
+    <!-- RECENT (collapsed by default) -->
+    <details class="card" style="margin-bottom:16px">
+      <summary style="cursor:pointer;padding:18px;font-weight:600;font-size:15px">
+        Recently dispatched / collected (${recent.length})
+      </summary>
+      <div class="card-body" style="padding:0;border-top:1px solid var(--line)">
+        ${recent.length === 0
+          ? '<div class="empty" style="padding:30px 16px"><div class="t">Nothing in the last 14 days</div></div>'
+          : `<table class="table">
+              <thead><tr>
+                <th>Order</th><th>Channel</th><th>Customer</th><th>Method</th><th>When</th><th>Status</th><th></th>
+              </tr></thead>
+              <tbody>${recent.map(renderRecentRow).join('')}</tbody>
+            </table>`}
+      </div>
+    </details>
+
+    <!-- Stash the carriers list on the page so the modal can use it -->
+    <script type="application/json" id="dispatch-carriers">${JSON.stringify(carriers)}</script>
+  `;
+}
+
+function renderDispatchRow(s, kind) {
+  const adapted = adaptSale(s);
+  const ref = s.invoice_number || s.payment_reference || s.external_order_id || '#' + s.id;
+  const itemLabel = s.first_item_title
+    ? (s.item_count > 1 ? `${escapeHtml(s.first_item_title)} <span style="color:var(--ink-soft)">+${s.item_count - 1}</span>` : escapeHtml(s.first_item_title))
+    : '(no items)';
+  const ageBadge = describeAge(s.age_hours, /*withClass=*/true);
+
+  if (kind === 'ship') {
+    return `
+      <tr style="cursor:pointer" onclick="if(!event.target.closest('button'))openDispatchModal('${s.id}')">
+        <td>
+          <div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div>
+          ${s.order_number && s.order_number !== ref ? `<div style="font-size:10px;color:var(--ink-soft)">${escapeHtml(s.order_number)}</div>` : ''}
+        </td>
+        <td>${channelPill(s.channel)}</td>
+        <td>${escapeHtml(s.customer_name || '—')}</td>
+        <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div></td>
+        <td class="num"><strong>${gbp(s.total)}</strong></td>
+        <td>${ageBadge}</td>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap">
+          <button class="btn btn-primary btn-sm" onclick="openDispatchModal('${s.id}')">📦 Mark dispatched</button>
+        </td>
+      </tr>
+    `;
+  } else {
+    // collect
+    return `
+      <tr style="cursor:pointer" onclick="if(!event.target.closest('button'))openCollectModal('${s.id}')">
+        <td>
+          <div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div>
+          ${s.order_number && s.order_number !== ref ? `<div style="font-size:10px;color:var(--ink-soft)">${escapeHtml(s.order_number)}</div>` : ''}
+        </td>
+        <td>${escapeHtml(s.customer_name || '—')}<div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(s.customer_phone || '')}</div></td>
+        <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div></td>
+        <td class="num"><strong>${gbp(s.total)}</strong></td>
+        <td>${ageBadge}</td>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap">
+          <button class="btn btn-primary btn-sm" onclick="openCollectModal('${s.id}')">✓ Mark collected</button>
+        </td>
+      </tr>
+    `;
+  }
+}
+
+function renderRecentRow(s) {
+  const ref = s.invoice_number || s.payment_reference || s.external_order_id || '#' + s.id;
+  const isCollected = !!s.collected_at;
+  const when = isCollected ? s.collected_at : s.dispatched_at;
+  const whenDate = when ? new Date(when) : null;
+  // Channel-push state badge — only shown for orders that needed a channel push
+  let pushBadge = '';
+  if (s.channel_push_state === 'ok')      pushBadge = '<span class="pill green" style="font-size:9px;margin-left:4px" title="Tracking pushed to channel">✓ Pushed</span>';
+  else if (s.channel_push_state === 'pending') pushBadge = '<span class="pill amber" style="font-size:9px;margin-left:4px" title="Push in progress">⋯ Pushing</span>';
+  else if (s.channel_push_state === 'error')   pushBadge = '<span class="pill" style="font-size:9px;margin-left:4px;background:var(--red-light);color:var(--red)" title="' + escapeAttr(s.channel_push_error || 'Push failed') + '">⚠ Push failed</span>';
+  return `
+    <tr>
+      <td><div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div></td>
+      <td>${channelPill(s.channel)}</td>
+      <td>${escapeHtml(s.customer_name || '—')}</td>
+      <td>${isCollected ? '💰 Cash collection' : (s.carrier ? `<div style="font-size:12px">${escapeHtml(s.carrier)}</div>${s.tracking_number ? `<div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--ink-soft)">${escapeHtml(s.tracking_number)}</div>` : ''}` : '—')}</td>
+      <td><div style="font-size:12px">${whenDate ? whenDate.toLocaleDateString('en-GB', { day:'2-digit', month:'short' }) : '—'}</div><div style="font-size:10px;color:var(--ink-soft)">${whenDate ? whenDate.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' }) : ''}</div></td>
+      <td>${isCollected ? '<span class="pill green" style="font-size:10px">✓ Collected</span>' : '<span class="pill green" style="font-size:10px">✓ Dispatched</span>'}${pushBadge}</td>
+      <td style="white-space:nowrap">
+        ${!isCollected && s.tracking_number && s.carrier ? `<a class="btn btn-ghost btn-sm" href="${dispatchTrackingUrl(s.carrier, s.tracking_number) || '#'}" target="_blank" rel="noopener" title="Open tracking">↗ Track</a>` : ''}
+        <button class="btn btn-ghost btn-sm" onclick="openEditDispatch('${s.id}')" title="Edit tracking">✏</button>
+        ${s.channel_push_state === 'error' ? `<button class="btn btn-ghost btn-sm" onclick="retryChannelPush('${s.id}')" style="color:var(--amber)" title="Retry channel push">↻</button>` : ''}
+      </td>
+    </tr>
+  `;
+}
+
+// Compose tracking URL on the frontend, mirrors backend logic so we don't
+// need an extra round-trip just to render a link.
+function dispatchTrackingUrl(carrier, tracking) {
+  if (!carrier || !tracking) return null;
+  const t = encodeURIComponent(tracking);
+  const templates = {
+    'Royal Mail':   `https://www.royalmail.com/track-your-item#/tracking-results/${t}`,
+    'Parcelforce':  `https://www.parcelforce.com/portal/pw/track?trackNumber=${t}`,
+    'DPD':          `https://www.dpd.co.uk/apps/tracking/?reference=${t}`,
+    'Evri':         `https://www.evri.com/track/parcel/${t}`,
+    'UPS':          `https://www.ups.com/track?tracknum=${t}`,
+    'DHL':          `https://www.dhl.com/gb-en/home/tracking.html?tracking-id=${t}`,
+    'FedEx':        `https://www.fedex.com/fedextrack/?trknbr=${t}`,
+    'Tuffnells':    `https://www.tuffnells.co.uk/track-a-parcel?consignment=${t}`,
+    'Yodel':        `https://www.yodel.co.uk/tracking/${t}`,
+    'APC Overnight': `https://apc-overnight.com/customers/tracking-customer-portal?jobref=${t}`,
+  };
+  return templates[carrier] || null;
+}
+
+// Human-friendly age — "2 hr", "1 day", "3 days". Optional pill formatting:
+// green ≤24h, amber 24-72h, red >72h. Helps staff spot stale orders.
+function describeAge(hours, withClass) {
+  if (hours == null) return '—';
+  let label, cls;
+  if (hours < 1)       { label = '<1 hr';                              cls = 'green'; }
+  else if (hours < 24) { label = `${Math.round(hours)} hr`;            cls = 'green'; }
+  else if (hours < 72) { label = `${Math.round(hours/24)} day${Math.round(hours/24)===1?'':'s'}`; cls = 'amber'; }
+  else                 { label = `${Math.round(hours/24)} days`;       cls = 'red'; }
+  if (!withClass) return label;
+  return `<span class="pill ${cls}" style="font-size:10px">${label}</span>`;
+}
+
+// Mark-dispatched modal — carrier dropdown, tracking input, notes, push toggle.
+function openDispatchModal(saleId) {
+  const sale = (State.dispatch?.toShip || []).find(s => String(s.id) === String(saleId))
+            || (State.dispatch?.recent || []).find(s => String(s.id) === String(saleId));
+  if (!sale) { toast('Order not found', 'error'); return; }
+
+  const carriers = State.dispatch?.carriers || [];
+  const ref = sale.invoice_number || sale.payment_reference || sale.external_order_id || '#' + sale.id;
+  const isExternalChannel = (sale.channel || '').match(/^(shopify|ebay_)/);
+
+  modal({
+    title: 'Mark order dispatched',
+    body: `
+      <div style="background:var(--bg-soft);padding:12px;border-radius:8px;margin-bottom:14px">
+        <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Order</div>
+        <div style="font-family:ui-monospace,monospace;font-size:13px;margin-bottom:4px">${escapeHtml(ref)}</div>
+        <div style="font-size:13px">${escapeHtml(sale.customer_name || '—')} · ${gbp(sale.total)} · ${channelPill(sale.channel)}</div>
+        ${sale.shipping_address ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:6px;white-space:pre-line;line-height:1.5">${escapeHtml(sale.shipping_address)}</div>` : '<div style="font-size:11px;color:var(--amber);margin-top:6px">⚠ No shipping address on file — check this before posting</div>'}
+      </div>
+      <div class="field"><label>Carrier *</label>
+        <select id="d-carrier" style="font-size:14px">
+          <option value="">— Select carrier —</option>
+          ${carriers.map(c => `<option value="${escapeAttr(c)}">${escapeHtml(c)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Tracking number</label>
+        <input id="d-tracking" placeholder="Optional for some courier collections" autofocus>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Type or scan the tracking number. Leave blank if your courier hasn't generated one yet.</div>
+      </div>
+      <div class="field"><label>Notes (optional)</label>
+        <input id="d-notes" placeholder="e.g. 'Posted with bumper protected by 2x bubble layers'">
+      </div>
+      ${isExternalChannel ? `
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:8px">
+          <input type="checkbox" id="d-push" checked>
+          <span>Push tracking to ${sale.channel.startsWith('ebay') ? 'eBay' : 'Shopify'} so the customer gets the "shipped" notification</span>
+        </label>
+      ` : ''}
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '📦 Mark dispatched', primary: true, onClick: () => submitDispatch(saleId, isExternalChannel) },
+    ],
+  });
+}
+
+async function submitDispatch(saleId, isExternalChannel) {
+  const carrier = el('d-carrier').value;
+  const trackingNumber = el('d-tracking').value.trim();
+  const notes = el('d-notes').value.trim();
+  if (!carrier) { toast('Carrier is required', 'warn'); return; }
+  const pushToChannel = isExternalChannel ? el('d-push').checked : false;
+
+  const taskId = Task.start('Marking dispatched');
+  try {
+    const r = await Api.post(`/api/dispatch/${saleId}/mark-dispatched`, {
+      carrier, trackingNumber, notes, pushToChannel,
+    });
+    Task.done(taskId, 'Dispatched');
+    let toastMsg = 'Order marked dispatched';
+    if (pushToChannel) toastMsg += ' · pushing tracking to channel in background';
+    if (r.trackingUrl) toastMsg += '\n🔗 ' + r.trackingUrl;
+    toast(toastMsg, 'success', 6000);
+    closeModal();
+    await loadDispatch();
+    await Store.refresh('sales');
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// Mark-collected modal — much simpler than dispatch; just confirms + optional notes.
+function openCollectModal(saleId) {
+  const sale = (State.dispatch?.toCollect || []).find(s => String(s.id) === String(saleId));
+  if (!sale) { toast('Order not found', 'error'); return; }
+  const ref = sale.invoice_number || sale.payment_reference || '#' + sale.id;
+
+  modal({
+    title: 'Mark as collected',
+    body: `
+      <div style="background:var(--bg-soft);padding:12px;border-radius:8px;margin-bottom:14px">
+        <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Cash on collection</div>
+        <div style="font-family:ui-monospace,monospace;font-size:13px;margin-bottom:4px">${escapeHtml(ref)}</div>
+        <div style="font-size:13px">${escapeHtml(sale.customer_name || '—')} · ${gbp(sale.total)}</div>
+        ${sale.customer_phone ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:6px">📞 ${escapeHtml(sale.customer_phone)}</div>` : ''}
+      </div>
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">Customer has picked up the item and paid cash. This will close the order.</div>
+      <div class="field"><label>Notes (optional)</label>
+        <input id="c-notes" placeholder="e.g. 'Collected by John Smith, 2pm'" autofocus>
+      </div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '✓ Confirm collected', primary: true, onClick: () => submitCollect(saleId) },
+    ],
+  });
+}
+
+async function submitCollect(saleId) {
+  const notes = el('c-notes').value.trim();
+  const taskId = Task.start('Marking collected');
+  try {
+    await Api.post(`/api/dispatch/${saleId}/mark-collected`, { notes });
+    Task.done(taskId, 'Collected');
+    toast('Order marked as collected', 'success');
+    closeModal();
+    await loadDispatch();
+    await Store.refresh('sales');
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// Edit tracking on an already-dispatched order. Same modal shape as dispatch
+// but pre-fills with current values and the action calls edit-tracking.
+function openEditDispatch(saleId) {
+  const sale = (State.dispatch?.recent || []).find(s => String(s.id) === String(saleId));
+  if (!sale) { toast('Order not found', 'error'); return; }
+  if (sale.collected_at) {
+    // Collected orders just allow undo + notes — no tracking applicable
+    if (confirm('Undo collection on this order? It will return to the "awaiting collection" list.')) {
+      undoDispatch(saleId);
+    }
+    return;
+  }
+
+  const carriers = State.dispatch?.carriers || [];
+  const isExternalChannel = (sale.channel || '').match(/^(shopify|ebay_)/);
+  const ref = sale.invoice_number || sale.payment_reference || '#' + sale.id;
+
+  modal({
+    title: 'Edit dispatch details',
+    body: `
+      <div style="background:var(--bg-soft);padding:12px;border-radius:8px;margin-bottom:14px">
+        <div style="font-family:ui-monospace,monospace;font-size:13px;margin-bottom:4px">${escapeHtml(ref)}</div>
+        <div style="font-size:13px">${escapeHtml(sale.customer_name || '—')} · ${gbp(sale.total)}</div>
+      </div>
+      <div class="field"><label>Carrier</label>
+        <select id="e-carrier" style="font-size:14px">
+          ${carriers.map(c => `<option value="${escapeAttr(c)}" ${c === sale.carrier ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Tracking number</label>
+        <input id="e-tracking" value="${escapeAttr(sale.tracking_number || '')}" autofocus>
+      </div>
+      <div class="field"><label>Notes</label>
+        <input id="e-notes" value="${escapeAttr(sale.dispatch_notes || '')}">
+      </div>
+      ${isExternalChannel ? `
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:8px">
+          <input type="checkbox" id="e-repush">
+          <span>Re-push updated tracking to ${sale.channel.startsWith('ebay') ? 'eBay' : 'Shopify'}</span>
+        </label>
+      ` : ''}
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+        <button class="btn btn-ghost btn-sm" onclick="undoDispatch('${saleId}')" style="color:var(--red)">↺ Undo dispatch (return to worklist)</button>
+      </div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Save', primary: true, onClick: () => submitEditDispatch(saleId, isExternalChannel) },
+    ],
+  });
+}
+
+async function submitEditDispatch(saleId, isExternalChannel) {
+  const carrier = el('e-carrier').value;
+  const trackingNumber = el('e-tracking').value.trim();
+  const notes = el('e-notes').value.trim();
+  const repushToChannel = isExternalChannel ? el('e-repush').checked : false;
+  const taskId = Task.start('Updating tracking');
+  try {
+    await Api.post(`/api/dispatch/${saleId}/edit-tracking`, {
+      carrier, trackingNumber, notes, repushToChannel,
+    });
+    Task.done(taskId, 'Updated');
+    toast(`Tracking updated${repushToChannel ? ' · re-pushing to channel' : ''}`, 'success');
+    closeModal();
+    await loadDispatch();
+  } catch (e) {
+    Task.fail(taskId, 'Update failed');
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+async function undoDispatch(saleId) {
+  if (!confirm('Undo dispatch and return this order to the worklist?\n\nThis only updates our records — if you already pushed tracking to eBay/Shopify, you\'ll need to unmark "shipped" there manually.')) return;
+  const taskId = Task.start('Undoing dispatch');
+  try {
+    await Api.post(`/api/dispatch/${saleId}/undo`);
+    Task.done(taskId, 'Undone');
+    toast('Dispatch undone — order is back on the worklist', 'success');
+    closeModal();
+    await loadDispatch();
+    await Store.refresh('sales');
+  } catch (e) {
+    Task.fail(taskId, 'Undo failed');
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+async function retryChannelPush(saleId) {
+  const taskId = Task.start('Retrying channel push');
+  try {
+    await Api.post(`/api/dispatch/${saleId}/retry-push`);
+    Task.done(taskId, 'Queued');
+    toast('Retry queued — refreshing in a few seconds', 'success');
+    setTimeout(loadDispatch, 3000);
+  } catch (e) {
+    Task.fail(taskId, 'Retry failed');
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// Shortcuts from Sales tab — we may not have the dispatch cache loaded yet,
+// so these wrappers fetch it (which gives us the carrier list) and then
+// look up the sale from the freshly-fetched outstanding list before opening
+// the modal. If the sale isn't in the outstanding list (e.g. it's already
+// dispatched), we synthesise a minimal sale object from State.sales so the
+// edit modal still works.
+async function openDispatchModalShortcut(saleId) {
+  if (!State.dispatch) await loadDispatch();
+  const inOutstanding = (State.dispatch?.toShip || []).find(s => String(s.id) === String(saleId));
+  if (inOutstanding) return openDispatchModal(saleId);
+  // Not in outstanding — synthesise from sales list so the modal can still open
+  const sale = State.sales.find(s => String(s.id) === String(saleId));
+  if (!sale) { toast('Order not found', 'error'); return; }
+  // Push a temporary row into the toShip list so openDispatchModal can find it
+  if (!State.dispatch) State.dispatch = { toShip: [], toCollect: [], recent: [], carriers: [] };
+  State.dispatch.toShip.push({
+    id: sale.id, customer_name: sale.customer, total: sale.amount,
+    channel: sale.apiChannel, invoice_number: sale.invoice, payment_reference: sale.paymentReference,
+    external_order_id: sale.externalOrderId, shipping_address: sale.shippingAddress,
+  });
+  openDispatchModal(saleId);
+}
+async function openCollectModalShortcut(saleId) {
+  if (!State.dispatch) await loadDispatch();
+  const inOutstanding = (State.dispatch?.toCollect || []).find(s => String(s.id) === String(saleId));
+  if (inOutstanding) return openCollectModal(saleId);
+  const sale = State.sales.find(s => String(s.id) === String(saleId));
+  if (!sale) { toast('Order not found', 'error'); return; }
+  if (!State.dispatch) State.dispatch = { toShip: [], toCollect: [], recent: [], carriers: [] };
+  State.dispatch.toCollect.push({
+    id: sale.id, customer_name: sale.customer, customer_phone: sale.customerPhone,
+    total: sale.amount, invoice_number: sale.invoice, payment_reference: sale.paymentReference,
+  });
+  openCollectModal(saleId);
+}
+
+/* ==========================================================
    SALES
    ========================================================== */
 function renderSales() {
@@ -3307,12 +3847,26 @@ function renderSales() {
         ? (s.paymentMethod ? ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="Payment method locked: ${pmLabel}">PRO FORMA · ${escapeHtml(pmLabel)}</span>`
                            : ` <span class="pill amber" style="font-size:10px;margin-left:4px">ESTIMATE</span>`)
         : '';
+      // Dispatch state: shows green pill when shipped/collected; empty otherwise.
+      // Helps staff scan the Sales tab without having to click into each row.
+      const dispatchBadge = !s.isEstimate && (s.dispatchedAt || s.collectedAt)
+        ? ` <span class="pill green" style="font-size:10px;margin-left:4px" title="${s.collectedAt ? 'Collected ' + new Date(s.collectedAt).toLocaleDateString() : 'Dispatched ' + new Date(s.dispatchedAt).toLocaleDateString()}">${s.collectedAt ? '✓ Collected' : '✓ Shipped'}</span>`
+        : '';
+      // Quick "Mark dispatched" shortcut: shows for paid non-cash orders that haven't shipped yet.
+      // Cash orders get the same shortcut wired to the collect modal.
+      const canDispatch = !s.isEstimate && !s.dispatchedAt && !s.collectedAt;
+      const isCashOrder = s.paymentMethod === 'cash';
+      const dispatchBtn = canDispatch
+        ? (isCashOrder
+            ? `<button class="btn btn-ghost btn-sm" onclick="openCollectModalShortcut('${s.id}')" title="Mark collected (cash on collection)" style="color:var(--green)">📦</button>`
+            : `<button class="btn btn-ghost btn-sm" onclick="openDispatchModalShortcut('${s.id}')" title="Mark dispatched — record carrier + tracking" style="color:var(--green)">📦</button>`)
+        : '';
       return `
       <tr style="cursor:pointer" onclick="if(!event.target.closest('button,input,a'))openSaleDetail('${s.id}')">
         <td onclick="event.stopPropagation()"><input type="checkbox" class="sale-row-check" data-sid="${s.id}" ${State.salesSelected.has(s.id)?'checked':''} onchange="salesToggleRow('${s.id}',this.checked)"></td>
         <td>${fmtDate(s.date)}</td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${s.invoice||'—'}</td>
-        <td>${channelPill(s.channel)}${estimateBadge}</td>
+        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}</td>
         <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
         <td>${s.customer}</td>
         <td class="num"><strong>${gbp(s.amount)}</strong></td>
@@ -3321,6 +3875,7 @@ function renderSales() {
           <button class="btn btn-ghost btn-sm" onclick="emailSingleInvoice('${s.id}')" title="Email this invoice to the customer">✉</button>
           <button class="btn btn-ghost btn-sm" onclick="openEditSale('${s.id}')" title="Edit customer / reg / VIN / notes">✏️</button>
           ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Mark payment received → decrements stock, generates paid invoice using locked payment method" style="color:var(--green)">✓ Mark paid</button>` : ''}
+          ${dispatchBtn}
           <button class="btn btn-ghost btn-sm" onclick="deleteSale('${s.id}', ${s.isEstimate})" title="Delete this ${s.isEstimate ? 'estimate' : 'invoice'} ${!s.isEstimate ? '(restores stock)' : ''}" style="color:var(--red)">🗑</button>
         </td>
       </tr>
