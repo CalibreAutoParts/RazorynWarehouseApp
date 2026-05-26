@@ -3282,6 +3282,7 @@ function openReturnModal() {
    locally and surfaces "channel push not implemented" as a non-fatal warning.
 */
 function renderDispatch() {
+  if (!State.dispatchSelected) State.dispatchSelected = new Set();
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
@@ -3343,10 +3344,26 @@ function paintDispatch() {
   const toCollect = data.toCollect || [];
   const recent = data.recent || [];
   const cutoffDays = data.cutoffDays || 10;
+  // Clear stale selections (items that were dispatched in a previous action)
+  const validIds = new Set([...toShip, ...toCollect].map(s => String(s.id)));
+  for (const id of Array.from(State.dispatchSelected)) {
+    if (!validIds.has(String(id))) State.dispatchSelected.delete(id);
+  }
+  const selectedCount = State.dispatchSelected.size;
 
   el('dispatch-content').innerHTML = `
     <div style="font-size:12px;color:var(--ink-soft);background:var(--bg-soft);padding:8px 14px;border-radius:6px;margin-bottom:14px">
       Showing orders from the last <strong>${cutoffDays} day${cutoffDays === 1 ? '' : 's'}</strong>. Older orders are assumed to be handled on the source channel (eBay / Shopify) before this app's dispatch tracking existed. Change via the dropdown above.
+    </div>
+
+    <!-- Bulk action bar — appears only when items are selected -->
+    <div id="dispatch-bulk-bar" style="display:${selectedCount > 0 ? 'flex' : 'none'};padding:10px 14px;background:var(--brand-primary-light);border:1px solid var(--brand-primary);border-radius:8px;margin-bottom:14px;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="font-weight:600"><span id="dispatch-bulk-count">${selectedCount}</span> selected</span>
+      <span style="margin-left:auto"></span>
+      <button class="btn btn-outline btn-sm" onclick="dispatchSelectAllOutstanding()">Select all visible</button>
+      <button class="btn btn-outline btn-sm" onclick="dispatchClearSelection()">Clear</button>
+      <button class="btn btn-outline btn-sm" onclick="openBulkDispatchModal()" title="Apply a shared carrier + tracking number to all selected">📦 Mark with tracking…</button>
+      <button class="btn btn-primary btn-sm" onclick="bulkMarkAlreadyShipped()" title="Mark all selected as 'already shipped on the channel' — no tracking, no push, clears the worklist">✓ Mark as already shipped elsewhere</button>
     </div>
 
     <!-- Top summary cards -->
@@ -3378,13 +3395,14 @@ function paintDispatch() {
     <div class="card" style="margin-bottom:16px">
       <div class="card-head" style="display:flex;justify-content:space-between;align-items:center">
         <h3>📦 Awaiting dispatch (${toShip.length})</h3>
-        ${toShip.length ? `<div style="font-size:12px;color:var(--ink-soft)">Click any row to mark dispatched</div>` : ''}
+        ${toShip.length ? `<div style="font-size:12px;color:var(--ink-soft)">Tick to bulk-select · click row for single action</div>` : ''}
       </div>
       <div class="card-body" style="padding:0">
         ${toShip.length === 0
           ? '<div class="empty" style="padding:30px 16px"><div class="t">Nothing to dispatch</div><div style="font-size:12px;color:var(--ink-soft)">When new paid orders come in they\'ll appear here.</div></div>'
           : `<table class="table">
               <thead><tr>
+                <th style="width:32px"><input type="checkbox" id="dispatch-ship-all" onchange="dispatchToggleAll('ship', this.checked)" ${toShip.every(s => State.dispatchSelected.has(String(s.id))) ? 'checked' : ''}></th>
                 <th>Order</th><th>Channel</th><th>Customer</th><th>Items</th><th class="num">Total</th><th>Age</th><th></th>
               </tr></thead>
               <tbody>
@@ -3404,6 +3422,7 @@ function paintDispatch() {
       <div class="card-body" style="padding:0">
         <table class="table">
           <thead><tr>
+            <th style="width:32px"><input type="checkbox" id="dispatch-collect-all" onchange="dispatchToggleAll('collect', this.checked)" ${toCollect.every(s => State.dispatchSelected.has(String(s.id))) ? 'checked' : ''}></th>
             <th>Order</th><th>Customer</th><th>Items</th><th class="num">Total</th><th>Age</th><th></th>
           </tr></thead>
           <tbody>
@@ -3433,16 +3452,19 @@ function paintDispatch() {
 }
 
 function renderDispatchRow(s, kind) {
-  const adapted = adaptSale(s);
   const ref = s.invoice_number || s.payment_reference || s.external_order_id || '#' + s.id;
   const itemLabel = s.first_item_title
     ? (s.item_count > 1 ? `${escapeHtml(s.first_item_title)} <span style="color:var(--ink-soft)">+${s.item_count - 1}</span>` : escapeHtml(s.first_item_title))
     : '(no items)';
   const ageBadge = describeAge(s.age_hours, /*withClass=*/true);
+  const isChecked = State.dispatchSelected.has(String(s.id));
+  // Checkbox cell — clicking just the checkbox toggles selection without firing the row click.
+  const checkboxCell = `<td onclick="event.stopPropagation()" style="width:32px"><input type="checkbox" class="dispatch-row-check" data-sid="${s.id}" ${isChecked ? 'checked' : ''} onchange="dispatchToggleRow('${s.id}', this.checked)"></td>`;
 
   if (kind === 'ship') {
     return `
-      <tr style="cursor:pointer" onclick="if(!event.target.closest('button'))openDispatchModal('${s.id}')">
+      <tr style="cursor:pointer" onclick="if(!event.target.closest('button,input'))openDispatchModal('${s.id}')">
+        ${checkboxCell}
         <td>
           <div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div>
           ${s.order_number && s.order_number !== ref ? `<div style="font-size:10px;color:var(--ink-soft)">${escapeHtml(s.order_number)}</div>` : ''}
@@ -3460,7 +3482,8 @@ function renderDispatchRow(s, kind) {
   } else {
     // collect
     return `
-      <tr style="cursor:pointer" onclick="if(!event.target.closest('button'))openCollectModal('${s.id}')">
+      <tr style="cursor:pointer" onclick="if(!event.target.closest('button,input'))openCollectModal('${s.id}')">
+        ${checkboxCell}
         <td>
           <div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div>
           ${s.order_number && s.order_number !== ref ? `<div style="font-size:10px;color:var(--ink-soft)">${escapeHtml(s.order_number)}</div>` : ''}
@@ -3535,6 +3558,148 @@ function describeAge(hours, withClass) {
   else                 { label = `${Math.round(hours/24)} days`;       cls = 'red'; }
   if (!withClass) return label;
   return `<span class="pill ${cls}" style="font-size:10px">${label}</span>`;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Bulk selection — toggles for the worklist tables
+// ──────────────────────────────────────────────────────────────────────────
+function dispatchToggleRow(id, on) {
+  if (on) State.dispatchSelected.add(String(id));
+  else State.dispatchSelected.delete(String(id));
+  dispatchUpdateBulkBar();
+}
+function dispatchToggleAll(section, on) {
+  // section: 'ship' | 'collect'
+  const src = section === 'ship' ? (State.dispatch?.toShip || []) : (State.dispatch?.toCollect || []);
+  for (const s of src) {
+    if (on) State.dispatchSelected.add(String(s.id));
+    else State.dispatchSelected.delete(String(s.id));
+  }
+  // Reflect new state on the per-row checkboxes too
+  document.querySelectorAll('.dispatch-row-check').forEach(cb => {
+    if (src.some(s => String(s.id) === cb.dataset.sid)) cb.checked = on;
+  });
+  dispatchUpdateBulkBar();
+}
+function dispatchSelectAllOutstanding() {
+  for (const s of (State.dispatch?.toShip || [])) State.dispatchSelected.add(String(s.id));
+  for (const s of (State.dispatch?.toCollect || [])) State.dispatchSelected.add(String(s.id));
+  paintDispatch();
+}
+function dispatchClearSelection() {
+  State.dispatchSelected.clear();
+  paintDispatch();
+}
+function dispatchUpdateBulkBar() {
+  const bar = el('dispatch-bulk-bar');
+  const count = State.dispatchSelected.size;
+  if (bar) bar.style.display = count > 0 ? 'flex' : 'none';
+  const cEl = el('dispatch-bulk-count'); if (cEl) cEl.textContent = count;
+}
+
+// One-click bulk action: "these were all already shipped via eBay/Shopify before
+// this app existed, just mark them dispatched so they leave the worklist".
+// No tracking number, no channel push.
+async function bulkMarkAlreadyShipped() {
+  const ids = Array.from(State.dispatchSelected);
+  if (!ids.length) { toast('Nothing selected', 'warn'); return; }
+  if (!confirm(`Mark ${ids.length} order${ids.length === 1 ? '' : 's'} as "already shipped on channel"?\n\nThis clears them from the worklist without tracking and without pushing to eBay/Shopify. Use this for legacy orders that were shipped before this app's dispatch tracking existed.\n\nCash-on-collection orders in your selection will be marked as collected instead.`)) return;
+
+  const taskId = Task.start(`Clearing ${ids.length} order${ids.length === 1 ? '' : 's'}`);
+  try {
+    const r = await Api.post('/api/dispatch/bulk-mark-dispatched', {
+      saleIds: ids,
+      carrier: 'Already shipped (channel)',
+      notes: 'Bulk-cleared — already shipped on source channel',
+      pushToChannel: false,
+    });
+    Task.done(taskId, `${r.dispatched + r.collected} cleared`);
+    const lines = [];
+    if (r.dispatched) lines.push(`✓ ${r.dispatched} marked dispatched`);
+    if (r.collected) lines.push(`✓ ${r.collected} marked collected`);
+    if (r.skipped) lines.push(`• ${r.skipped} skipped (already done or invalid)`);
+    toast(lines.join('\n'), 'success', 6000);
+    State.dispatchSelected.clear();
+    await loadDispatch();
+    await Store.refresh('sales');
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Bulk action failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// Bulk dispatch WITH shared tracking — opens a modal so staff can enter a single
+// carrier + tracking number to apply to all selected. Useful when 5 orders all
+// went out in the same DPD bag with consecutive tracking numbers (rare, but
+// happens) — though more commonly staff use the per-row modal for proper tracking.
+function openBulkDispatchModal() {
+  const ids = Array.from(State.dispatchSelected);
+  if (!ids.length) { toast('Nothing selected', 'warn'); return; }
+  // Filter to non-cash since cash goes through mark-collected
+  const allSales = [...(State.dispatch?.toShip || []), ...(State.dispatch?.toCollect || [])];
+  const selectedSales = allSales.filter(s => ids.includes(String(s.id)));
+  const cashCount = selectedSales.filter(s => s.payment_method === 'cash').length;
+  const dispatchCount = selectedSales.length - cashCount;
+  const carriers = State.dispatch?.carriers || [];
+
+  modal({
+    title: `Bulk mark ${ids.length} order${ids.length === 1 ? '' : 's'} dispatched`,
+    body: `
+      <div style="background:var(--bg-soft);padding:12px;border-radius:8px;margin-bottom:14px;font-size:13px">
+        <strong>${ids.length} selected:</strong> ${dispatchCount} for dispatch${cashCount ? `, ${cashCount} cash (will be marked collected)` : ''}
+      </div>
+      <div class="field"><label>Carrier (applied to all dispatch orders) *</label>
+        <select id="bd-carrier" style="font-size:14px">
+          <option value="">— Select carrier —</option>
+          ${carriers.map(c => `<option value="${escapeAttr(c)}">${escapeHtml(c)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Tracking number (optional, shared across all)</label>
+        <input id="bd-tracking" placeholder="Leave blank if each order has its own tracking">
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Only fill this if every selected order actually shares this number. Otherwise leave blank.</div>
+      </div>
+      <div class="field"><label>Notes</label>
+        <input id="bd-notes" placeholder="Optional shared note for all">
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:8px">
+        <input type="checkbox" id="bd-push">
+        <span>Push tracking to eBay/Shopify for applicable orders (slower, recommended off for bulk)</span>
+      </label>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Apply to all', primary: true, onClick: () => submitBulkDispatch() },
+    ],
+  });
+}
+
+async function submitBulkDispatch() {
+  const ids = Array.from(State.dispatchSelected);
+  const carrier = el('bd-carrier').value;
+  if (!carrier) { toast('Carrier is required', 'warn'); return; }
+  const trackingNumber = el('bd-tracking').value.trim();
+  const notes = el('bd-notes').value.trim();
+  const pushToChannel = el('bd-push').checked;
+
+  const taskId = Task.start(`Marking ${ids.length} dispatched`);
+  try {
+    const r = await Api.post('/api/dispatch/bulk-mark-dispatched', {
+      saleIds: ids, carrier, trackingNumber, notes, pushToChannel,
+    });
+    Task.done(taskId, `${r.dispatched + r.collected} done`);
+    const lines = [];
+    if (r.dispatched) lines.push(`✓ ${r.dispatched} dispatched`);
+    if (r.collected) lines.push(`✓ ${r.collected} collected`);
+    if (r.skipped) lines.push(`• ${r.skipped} skipped`);
+    toast(lines.join('\n'), 'success', 6000);
+    closeModal();
+    State.dispatchSelected.clear();
+    await loadDispatch();
+    await Store.refresh('sales');
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 // Mark-dispatched modal — carrier dropdown, tracking input, notes, push toggle.
