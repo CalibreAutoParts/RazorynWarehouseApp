@@ -1078,6 +1078,7 @@ function adaptProduct(p) {
     imageUrl: p.image_url,
     shopifyProductId: p.shopify_product_id,
     shopifyVariantId: p.shopify_variant_id,
+    shopifyHandle: p.shopify_handle || '',
   };
 }
 function adaptSale(s) {
@@ -5346,12 +5347,21 @@ async function qbCopyChannelLink(productId, channel) {
     const url = `https://www.ebay.co.uk/itm/${itemId}`;
     await qbCopyUrl(url, 'eBay link');
   } else {
-    // Shopify — until product handles are stored in the DB we can't give a
-    // direct URL. Fall back to a storefront search by SKU.
-    const sku = encodeURIComponent(p.sku || '');
-    const url = `https://${domain}/search?q=${sku}`;
-    await qbCopyUrl(url, 'Shopify search link',
-      'This is a search URL (direct product links require product handle tracking — coming soon).');
+    // Shopify — use the product handle for a direct storefront URL like
+    // /products/the-product-handle. Handles are populated when staff runs
+    // "Import Shopify products" in Settings. If a product was added before
+    // handles were tracked (or wasn't imported from Shopify at all), we
+    // fall back to a search-by-SKU URL with a hint.
+    const handle = (p.shopifyHandle || '').trim();
+    if (handle) {
+      const url = `https://${domain}/products/${encodeURIComponent(handle)}`;
+      await qbCopyUrl(url, 'Shopify link');
+    } else {
+      const sku = encodeURIComponent(p.sku || '');
+      const url = `https://${domain}/search?q=${sku}`;
+      await qbCopyUrl(url, 'Shopify search link',
+        'No product handle on file — run "Import Shopify products" in Settings to get direct links.');
+    }
   }
 }
 
