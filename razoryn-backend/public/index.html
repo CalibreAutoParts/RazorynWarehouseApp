@@ -1650,9 +1650,18 @@ function enterApp() {
 }
 
 function notifyNewSale(sale) {
+  // `sale` is an *adapted* row from State.sales (via adaptSale), so its fields
+  // are camelCase and renamed — not the raw DB column names. Common gotchas:
+  //   amount         (not total)
+  //   customer       (not customer_name)
+  //   invoice        (not invoice_number)
+  //   externalOrderId (not external_order_id)
+  // Using the wrong names was the cause of the "£0.00 in notification" bug.
   const channel = (sale.channel || '').replace('_', ' ');
-  const title = `New ${channel} order · £${parseFloat(sale.total || 0).toFixed(2)}`;
-  const body = `${sale.customer_name || 'Customer'} · ${sale.external_order_id || sale.invoice_number || ''}`;
+  const amount = parseFloat(sale.amount || sale.total || 0);  // fall back to total just in case
+  const title = `New ${channel} order · £${amount.toFixed(2)}`;
+  const ref = sale.invoice || sale.externalOrderId || sale.paymentReference || '';
+  const body = `${sale.customer || sale.customer_name || 'Customer'}${ref ? ' · ' + ref : ''}`;
   // Browser notification
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
