@@ -8,6 +8,25 @@ const sync = require('../services/sync');
 const router = express.Router();
 router.use(requireAuth);
 
+// ──────────────────────────────────────────────────────────────────────────
+// Self-healing migration — adds the social-media columns to app_settings if
+// they don't exist yet. Runs once on cold boot; idempotent.
+// ──────────────────────────────────────────────────────────────────────────
+let _migrationDone = false;
+async function ensureSocialColumns() {
+  if (_migrationDone) return;
+  try {
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS social_instagram TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS social_facebook  TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS social_tiktok    TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS social_linkedin  TEXT`);
+    _migrationDone = true;
+  } catch (e) {
+    console.warn('[settings.js] social migration warning:', e.message);
+  }
+}
+ensureSocialColumns();
+
 // GET /api/settings
 router.get('/', async (req, res) => {
   const { rows } = await query('SELECT * FROM app_settings WHERE id = 1');
@@ -93,6 +112,7 @@ router.post('/reset-sync-cursor', requireAdmin, async (req, res) => {
 
 // GET /api/settings/pricing-config — current phone-pricing percentages + company details
 router.get('/pricing-config', async (req, res) => {
+  await ensureSocialColumns();
   const { rows } = await query(`SELECT * FROM app_settings WHERE id = 1`);
   const r = rows[0] || {};
   res.json({
@@ -111,11 +131,18 @@ router.get('/pricing-config', async (req, res) => {
     bankAccountName: r.bank_account_name || '',
     bankSortCode: r.bank_sort_code || '',
     bankAccountNumber: r.bank_account_number || '',
+    // Socials — accepted as handles (with or without @) for ig/tiktok,
+    // or full URLs for facebook/linkedin. Invoice template handles both.
+    socialInstagram: r.social_instagram || '',
+    socialFacebook:  r.social_facebook  || '',
+    socialTiktok:    r.social_tiktok    || '',
+    socialLinkedin:  r.social_linkedin  || '',
   });
 });
 
 // POST /api/settings/pricing-config — update phone-pricing + company config
 router.post('/pricing-config', requireAdmin, async (req, res) => {
+  await ensureSocialColumns();
   const b = req.body || {};
   try {
     await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
@@ -135,6 +162,11 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       bankAccountName: 'bank_account_name',
       bankSortCode: 'bank_sort_code',
       bankAccountNumber: 'bank_account_number',
+      // Socials — TEXT columns, empty string is treated as "clear"
+      socialInstagram: 'social_instagram',
+      socialFacebook:  'social_facebook',
+      socialTiktok:    'social_tiktok',
+      socialLinkedin:  'social_linkedin',
     };
     const updates = [], params = [];
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
