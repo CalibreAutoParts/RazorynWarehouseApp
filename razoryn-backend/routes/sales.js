@@ -750,10 +750,14 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   /* Registration / VAT — small muted line */
   .addr-block .meta-row{margin-top:6px;font-size:10.5px;color:#999;letter-spacing:.02em}
   .addr-block .meta-row span:not(:last-child)::after{content:' · ';margin:0 2px}
-  /* Socials — clean horizontal links, only shown when company has socials configured */
-  .addr-block .socials-row{margin-top:10px;display:flex;gap:14px;flex-wrap:wrap;font-size:10.5px}
-  .addr-block .socials-row a{color:#666;text-decoration:none;font-weight:500}
-  .addr-block .socials-row a:hover{color:#111}
+  /* Socials — bottom-of-invoice section just above the .foot.
+     Monochrome single-colour for clean print + email delivery. SVG icons inline
+     so no external requests, no font dependencies, no broken images. */
+  .socials{margin-top:24px;padding:14px 0;border-top:1px solid #eee;display:flex;align-items:center;justify-content:center;gap:18px;flex-wrap:wrap;font-size:11.5px;color:#555}
+  .socials .lbl{font-size:9.5px;text-transform:uppercase;letter-spacing:.12em;color:#999;font-weight:500}
+  .socials a{display:inline-flex;align-items:center;gap:6px;color:#555;text-decoration:none;font-weight:500;transition:color .15s ease}
+  .socials a:hover{color:#111}
+  .socials svg{display:block;flex-shrink:0}
 
   /* Pro-forma notice — colour-coded by payment method.
      The method gets surfaced in a coloured banner above the From/To so the
@@ -864,17 +868,6 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
           ${isVatRegistered && company.vat_number ? `<span>VAT ${escapeHtml(company.vat_number)}</span>` : ''}
         </div>
       ` : ''}
-      <!-- Social media placeholder — rendered when company.socials_* fields are populated.
-           Settings UI will let admin add Instagram / Facebook / TikTok handles. Once set,
-           the placeholder above the foot becomes a row of small icon links. -->
-      ${(company.social_instagram || company.social_facebook || company.social_tiktok || company.social_linkedin) ? `
-        <div class="socials-row">
-          ${company.social_instagram ? `<a href="https://instagram.com/${escapeHtml(company.social_instagram.replace(/^@/,''))}" target="_blank" rel="noopener">Instagram @${escapeHtml(company.social_instagram.replace(/^@/,''))}</a>` : ''}
-          ${company.social_facebook ? `<a href="${escapeHtml(company.social_facebook)}" target="_blank" rel="noopener">Facebook</a>` : ''}
-          ${company.social_tiktok ? `<a href="https://tiktok.com/@${escapeHtml(company.social_tiktok.replace(/^@/,''))}" target="_blank" rel="noopener">TikTok @${escapeHtml(company.social_tiktok.replace(/^@/,''))}</a>` : ''}
-          ${company.social_linkedin ? `<a href="${escapeHtml(company.social_linkedin)}" target="_blank" rel="noopener">LinkedIn</a>` : ''}
-        </div>
-      ` : ''}
     </div>
     <div class="addr-block">
       <div class="lbl">${isProforma ? 'Billed to' : 'Billed / Delivered to'}</div>
@@ -952,6 +945,28 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
       Sort code: ${escapeHtml(company.bank_sort_code || '\u2014')} \u00B7 Account: ${escapeHtml(company.bank_account_number || '\u2014')}<br>
       Use reference: <strong>${escapeHtml(sale.payment_reference)}</strong>
     </div></div>
+  </div>
+  ` : ''}
+
+  ${(company.social_instagram || company.social_facebook || company.social_tiktok || company.social_linkedin) ? `
+  <div class="socials">
+    <span class="lbl">Follow us</span>
+    ${company.social_instagram ? `<a href="https://instagram.com/${escapeHtml(company.social_instagram.replace(/^@/,''))}" target="_blank" rel="noopener" aria-label="Instagram">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5"/><path d="M16 11.4a4 4 0 1 1-7.9 1.2 4 4 0 0 1 7.9-1.2Z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
+      <span>@${escapeHtml(company.social_instagram.replace(/^@/,''))}</span>
+    </a>` : ''}
+    ${company.social_tiktok ? `<a href="https://tiktok.com/@${escapeHtml(company.social_tiktok.replace(/^@/,''))}" target="_blank" rel="noopener" aria-label="TikTok">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-5.2 1.74 2.89 2.89 0 0 1 2.31-4.64 2.93 2.93 0 0 1 .88.13V9.4a6.84 6.84 0 0 0-1-.05A6.33 6.33 0 0 0 5.8 20.1a6.34 6.34 0 0 0 10.86-4.43V8.71a8.16 8.16 0 0 0 4.77 1.52V6.79c-.55 0-1-.09-1.84-.1Z"/></svg>
+      <span>@${escapeHtml(company.social_tiktok.replace(/^@/,''))}</span>
+    </a>` : ''}
+    ${company.social_facebook ? `<a href="${escapeHtml(company.social_facebook)}" target="_blank" rel="noopener" aria-label="Facebook">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M22 12c0-5.52-4.48-10-10-10S2 6.48 2 12c0 4.84 3.44 8.87 8 9.8V15H8v-3h2V9.5C10 7.57 11.57 6 13.5 6H16v3h-2c-.55 0-1 .45-1 1v2h3v3h-3v6.95c5.05-.5 9-4.76 9-9.95z"/></svg>
+      <span>Facebook</span>
+    </a>` : ''}
+    ${company.social_linkedin ? `<a href="${escapeHtml(company.social_linkedin)}" target="_blank" rel="noopener" aria-label="LinkedIn">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.5 2h-17A1.5 1.5 0 0 0 2 3.5v17A1.5 1.5 0 0 0 3.5 22h17a1.5 1.5 0 0 0 1.5-1.5v-17A1.5 1.5 0 0 0 20.5 2zM8 19H5v-9h3zM6.5 8.25A1.75 1.75 0 1 1 8.3 6.5a1.78 1.78 0 0 1-1.8 1.75zM19 19h-3v-4.74c0-1.42-.6-1.93-1.38-1.93A1.74 1.74 0 0 0 13 14.19a.66.66 0 0 0 0 .14V19h-3v-9h2.9v1.3a3.11 3.11 0 0 1 2.7-1.4c1.55 0 3.36.86 3.36 3.66z"/></svg>
+      <span>LinkedIn</span>
+    </a>` : ''}
   </div>
   ` : ''}
 
