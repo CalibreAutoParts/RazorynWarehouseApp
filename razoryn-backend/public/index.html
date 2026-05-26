@@ -3254,6 +3254,7 @@ function renderSales() {
         <button class="btn btn-outline btn-sm" onclick="salesSelectAll()">Select all visible</button>
         <button class="btn btn-outline btn-sm" onclick="salesClearSelection()">Clear</button>
         <button class="btn btn-primary btn-sm" onclick="printSelectedInvoices()">🖨 Print invoices</button>
+        <button class="btn btn-sm" onclick="bulkDeleteSales()" style="background:var(--red);border-color:var(--red);color:#fff">🗑 Delete selected</button>
       </div>
 
       <div class="card">
@@ -6809,6 +6810,67 @@ async function deleteSale(id, isEstimate) {
   } catch (e) {
     toast('Delete failed: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+// Bulk delete selected sales rows. Inspects the selection to figure out what
+// confirmation prompts to show — estimates are simple, paid invoices need a
+// restore-stock decision (applied uniformly to the whole batch).
+async function bulkDeleteSales() {
+  const ids = Array.from(State.salesSelected || []);
+  if (!ids.length) { toast('Nothing selected', 'warn'); return; }
+
+  // Partition the selection so we can use the right prompts and the right
+  // ?restoreStock flag per row. Estimates never touch stock; paid invoices do.
+  const selectedSales = State.sales.filter(s => ids.includes(s.id));
+  const estimates = selectedSales.filter(s => s.isEstimate);
+  const invoices = selectedSales.filter(s => !s.isEstimate);
+
+  // Build a clear summary so staff understand exactly what's about to happen
+  const lines = [`Permanently delete ${ids.length} row${ids.length === 1 ? '' : 's'}?`];
+  if (estimates.length) lines.push(`• ${estimates.length} estimate${estimates.length === 1 ? '' : 's'} / pro-forma${estimates.length === 1 ? '' : 's'} (no stock impact)`);
+  if (invoices.length) lines.push(`• ${invoices.length} paid invoice${invoices.length === 1 ? '' : 's'}`);
+  lines.push('', 'This cannot be undone.');
+  if (!confirm(lines.join('\n'))) return;
+
+  // For paid invoices, ask about stock restore once for the whole batch
+  let restoreStock = false;
+  if (invoices.length) {
+    restoreStock = confirm(
+      `Restore stock for the ${invoices.length} paid invoice${invoices.length === 1 ? '' : 's'}?\n\n` +
+      `OK = add items back to inventory\nCancel = delete without changing stock`
+    );
+  }
+
+  const taskId = Task.start(`Deleting ${ids.length} sale${ids.length === 1 ? '' : 's'}`);
+  let ok = 0, failed = 0;
+  const errs = [];
+  for (const id of ids) {
+    const sale = selectedSales.find(s => s.id === id);
+    const isEstimate = !!sale?.isEstimate;
+    // Estimates: no stock to restore. Invoices: use the batch decision.
+    const restore = !isEstimate && restoreStock;
+    const url = '/api/sales/' + id + (restore ? '' : '?restoreStock=false');
+    try {
+      await Api.delete(url);
+      ok++;
+    } catch (e) {
+      failed++;
+      errs.push(`${id}: ${e.data?.message || e.message}`);
+    }
+  }
+  if (failed === 0) Task.done(taskId, `Deleted ${ok}`);
+  else Task.fail(taskId, `${ok} deleted · ${failed} failed`);
+
+  const msg = [`Deleted ${ok} of ${ids.length}.`];
+  if (restoreStock && invoices.length) msg.push(`Stock restored on invoice rows.`);
+  if (failed) msg.push(`⚠ ${failed} failed`);
+  toast(msg.join(' '), failed ? 'warn' : 'success', failed ? 8000 : 4000);
+  if (failed && errs.length) console.warn('[bulkDeleteSales] errors:', errs);
+
+  State.salesSelected.clear();
+  await Store.refresh('sales');
+  await Store.refresh('products');
+  if (typeof renderSales === 'function' && State.page === 'sales') renderSales();
 }
 
 async function openLinkProduct(saleId, itemId, sku, decrementStockEligible) {
