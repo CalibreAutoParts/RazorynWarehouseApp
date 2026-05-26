@@ -4434,7 +4434,7 @@ async function openMessageModal(saleId) {
   // us the template list, sale's channel availability, and the rendered preview.
   let data;
   try {
-    data = await Api.get(`/api/messages/templates/${saleId}`);
+    data = await Api.get(`/api/messages/templates-for-sale/${saleId}`);
   } catch (e) {
     toast('Failed to load templates: ' + (e.data?.message || e.message), 'error');
     return;
@@ -4486,7 +4486,7 @@ function messageModalBody() {
   } else if (m.selectedChannel === 'whatsapp') {
     recipientLine = `<div class="field"><label>To (WhatsApp)</label><input id="msg-to" value="${escapeAttr(m.customer.phone)}" placeholder="+44 7494 589542"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Will open WhatsApp Web/app with the message pre-filled — hit Send there.</div></div>`;
   } else if (m.selectedChannel === 'ebay') {
-    recipientLine = `<div class="field"><label>To (eBay buyer)</label><input value="${escapeAttr(m.customer.name || 'eBay buyer')}" disabled style="background:var(--bg-soft)"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Looks up the buyer's eBay ID at send time and posts via the Trading API.</div></div>`;
+    recipientLine = `<div class="field"><label>To (eBay buyer)</label><input value="${escapeAttr(m.customer.name || 'eBay buyer')}" disabled style="background:var(--bg-soft)"><div style="font-size:11px;color:var(--ink-soft);margin-top:6px;line-height:1.5"><strong>How this works:</strong> sends a member message via the eBay Trading API. Requires:<br>• eBay tokens set up in Railway env (already done for this brand)<br>• At least one item in the order linked to a live eBay ItemID — run <strong>🔗 Force match all</strong> in Listing Mirror if a send fails with "no item ID"<br>• Order placed within the last ~30 days (after that eBay anonymises the buyer)</div></div>`;
   }
 
   return `
@@ -7646,9 +7646,63 @@ function renderSettings() {
               <div class="field"><label>LinkedIn</label><input id="set-social-linkedin" placeholder="https://linkedin.com/company/yourcompany"></div>
             </div>
           </div>
+          <div style="margin-top:14px;padding:14px;background:var(--bg-soft);border-radius:8px">
+            <div style="font-weight:600;margin-bottom:8px">Reviews (shown on invoices &amp; in feedback emails)</div>
+            <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Add your Trustpilot and/or Google review URLs. Customers see a "Review us" button on every invoice, and the "Feedback request" message template links to whichever platform you pick.</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <div class="field"><label>Trustpilot URL</label><input id="set-trustpilot-url" placeholder="https://uk.trustpilot.com/evaluate/yourdomain.co.uk"></div>
+              <div class="field"><label>Google review URL</label><input id="set-google-review-url" placeholder="https://g.page/r/your-place-id/review"></div>
+              <div class="field" style="grid-column:1/-1">
+                <label>Default platform for invoices &amp; feedback emails</label>
+                <select id="set-review-platform" style="font-size:14px">
+                  <option value="trustpilot">Trustpilot only</option>
+                  <option value="google">Google only</option>
+                  <option value="both">Both (show both links)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-top:14px;padding:14px;background:var(--bg-soft);border-radius:8px">
+            <div style="font-weight:600;margin-bottom:8px">Phone number defaults</div>
+            <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Used when a customer's phone is in local format (starts with a single 0). International numbers (starting with + or 00) are left alone. Common: 44 = UK, 1 = US/Canada, 353 = Ireland, 49 = Germany.</div>
+            <div class="field" style="max-width:200px">
+              <label>Default country code</label>
+              <input id="set-default-cc" placeholder="44" maxlength="4">
+            </div>
+          </div>
+
           <div style="margin-top:14px">
             <button class="btn btn-primary" onclick="savePricingConfig()">Save company details</button>
           </div>
+        </div>
+      </div>
+
+      <!-- Message templates editor -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>📨 Message templates</h3>
+          <div class="card-desc">Customise the email / eBay / WhatsApp templates used by the 💬 Message button. Built-in templates can be edited but not deleted (use Reset to restore the original). Variables like <code>{customer_name}</code> are auto-filled from the order.</div>
+        </div>
+        <div class="card-body">
+          <div id="templates-list" style="display:flex;flex-direction:column;gap:8px">
+            <div style="font-size:12px;color:var(--ink-soft);padding:14px 0">Loading…</div>
+          </div>
+          <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+            <button class="btn btn-outline btn-sm" onclick="openNewTemplate()">+ New custom template</button>
+          </div>
+          <details style="margin-top:14px;font-size:12px;color:var(--ink-soft)">
+            <summary style="cursor:pointer;font-weight:500">Available variables</summary>
+            <div style="padding:10px 0;line-height:1.7;font-family:ui-monospace,monospace;font-size:11px">
+              <code>{customer_name}</code> · <code>{first_name}</code><br>
+              <code>{invoice}</code> · <code>{payment_reference}</code> · <code>{order_number}</code><br>
+              <code>{total}</code> · <code>{subtotal}</code><br>
+              <code>{tracking_number}</code> · <code>{carrier}</code> · <code>{tracking_url}</code><br>
+              <code>{item_first}</code> · <code>{item_count}</code> · <code>{item_count_extra}</code><br>
+              <code>{company_name}</code> · <code>{company_phone}</code> · <code>{company_website}</code> · <code>{company_email}</code><br>
+              <code>{review_url}</code> (Trustpilot or Google based on platform setting)
+            </div>
+          </details>
         </div>
       </div>
 
@@ -7839,6 +7893,11 @@ async function loadPricingConfig() {
     setVal('set-social-tiktok',    r.socialTiktok);
     setVal('set-social-facebook',  r.socialFacebook);
     setVal('set-social-linkedin',  r.socialLinkedin);
+    // Reviews + phone defaults
+    setVal('set-trustpilot-url',    r.trustpilotUrl);
+    setVal('set-google-review-url', r.googleReviewUrl);
+    setVal('set-review-platform',   r.reviewPlatform || 'trustpilot');
+    setVal('set-default-cc',        r.defaultCountryCode || '44');
     // Show VAT number field if VAT-registered
     const vatNumWrap = el('set-vatnum-wrap');
     if (vatNumWrap) vatNumWrap.style.display = r.vatRegistered ? '' : 'none';
@@ -7853,6 +7912,8 @@ async function loadPricingConfig() {
     if (soundDropdown) soundDropdown.value = Sounds.getChoice('sale');
     // Show / hide custom upload panel based on current choice
     if (typeof refreshCustomSoundUI === 'function') refreshCustomSoundUI();
+    // Load message templates for the editor card
+    if (typeof loadTemplatesEditor === 'function' && el('templates-list')) loadTemplatesEditor();
   } catch (e) { console.warn('loadPricingConfig:', e); }
 }
 
@@ -7958,6 +8019,148 @@ function clearCustomSound() {
   toast('Custom sound removed', 'success');
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// MESSAGE TEMPLATES editor (Settings page)
+// Renders an accordion of all templates (built-in + custom) where each row
+// can be expanded to edit subject/body. Built-ins show a "Reset" button;
+// custom ones show a "Delete" button.
+// ──────────────────────────────────────────────────────────────────────────
+async function loadTemplatesEditor() {
+  const container = el('templates-list');
+  if (!container) return;
+  try {
+    const r = await Api.get('/api/messages/templates');
+    State.messageTemplates = r.templates;
+    paintTemplatesEditor();
+  } catch (e) {
+    container.innerHTML = `<div style="font-size:12px;color:var(--ink-soft);padding:10px 0">Failed to load: ${escapeHtml(e.data?.message || e.message)}</div>`;
+  }
+}
+
+function paintTemplatesEditor() {
+  const container = el('templates-list');
+  if (!container) return;
+  const templates = State.messageTemplates || [];
+  container.innerHTML = templates.map(t => `
+    <details class="tpl-row" data-id="${t.id}" style="border:1px solid var(--line);border-radius:6px;background:var(--bg-soft)">
+      <summary style="cursor:pointer;padding:10px 14px;display:flex;align-items:center;gap:8px;font-weight:500;font-size:13px">
+        ${t.isBuiltin ? '<span style="font-size:10px;color:var(--ink-soft);padding:2px 6px;background:var(--white);border-radius:3px">BUILT-IN</span>' : '<span style="font-size:10px;color:var(--blue);padding:2px 6px;background:#e5f0ff;border-radius:3px">CUSTOM</span>'}
+        ${escapeHtml(t.label)}
+        <span style="margin-left:auto;font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(t.key)}</span>
+      </summary>
+      <div style="padding:0 14px 14px;background:var(--white);border-top:1px solid var(--line);border-radius:0 0 6px 6px">
+        <div class="field" style="margin-top:12px"><label>Label</label><input class="tpl-label" value="${escapeAttr(t.label)}" ${t.isBuiltin ? 'readonly title="Built-in label is fixed"' : ''}></div>
+        <div class="field"><label>Default channel</label>
+          <select class="tpl-channel" style="font-size:14px">
+            <option value="email"    ${t.defaultChannel === 'email' ? 'selected' : ''}>Email</option>
+            <option value="whatsapp" ${t.defaultChannel === 'whatsapp' ? 'selected' : ''}>WhatsApp</option>
+            <option value="ebay"     ${t.defaultChannel === 'ebay' ? 'selected' : ''}>eBay</option>
+          </select>
+        </div>
+        <div class="field"><label>Subject (email only)</label><input class="tpl-subject" value="${escapeAttr(t.subject)}" placeholder="Leave blank for non-email channels"></div>
+        <div class="field"><label>Body</label><textarea class="tpl-body" rows="10" style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.5">${escapeHtml(t.body)}</textarea></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" onclick="saveTemplate(${t.id})">Save</button>
+          ${t.isBuiltin
+            ? `<button class="btn btn-outline btn-sm" onclick="resetTemplate(${t.id})" title="Restore original built-in template">↻ Reset to default</button>`
+            : `<button class="btn btn-outline btn-sm" onclick="deleteTemplate(${t.id})" style="color:var(--red)">🗑 Delete</button>`
+          }
+        </div>
+      </div>
+    </details>
+  `).join('');
+}
+
+function getTemplateRowFields(id) {
+  const row = document.querySelector(`.tpl-row[data-id="${id}"]`);
+  if (!row) return null;
+  return {
+    label: row.querySelector('.tpl-label')?.value || '',
+    subject: row.querySelector('.tpl-subject')?.value || '',
+    body: row.querySelector('.tpl-body')?.value || '',
+    defaultChannel: row.querySelector('.tpl-channel')?.value || 'email',
+  };
+}
+
+async function saveTemplate(id) {
+  const fields = getTemplateRowFields(id);
+  if (!fields) return;
+  try {
+    await Api.patch(`/api/messages/templates/${id}`, fields);
+    toast('Template saved', 'success');
+    await loadTemplatesEditor();
+  } catch (e) {
+    toast('Save failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+async function resetTemplate(id) {
+  if (!confirm('Reset this template to its original built-in version? Your edits will be lost.')) return;
+  try {
+    await Api.post(`/api/messages/templates/${id}/reset`);
+    toast('Template reset', 'success');
+    await loadTemplatesEditor();
+  } catch (e) {
+    toast('Reset failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+async function deleteTemplate(id) {
+  if (!confirm('Delete this custom template? This cannot be undone.')) return;
+  try {
+    await Api.delete(`/api/messages/templates/${id}`);
+    toast('Template deleted', 'success');
+    await loadTemplatesEditor();
+  } catch (e) {
+    toast('Delete failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+function openNewTemplate() {
+  modal({
+    title: 'New custom template',
+    body: `
+      <div class="field"><label>Label *</label><input id="new-tpl-label" placeholder="e.g. Christmas opening hours" autofocus></div>
+      <div class="field"><label>Key (lowercase letters/numbers/underscore) *</label><input id="new-tpl-key" placeholder="e.g. xmas_hours"></div>
+      <div class="field"><label>Default channel</label>
+        <select id="new-tpl-channel">
+          <option value="email">Email</option>
+          <option value="whatsapp">WhatsApp</option>
+          <option value="ebay">eBay</option>
+        </select>
+      </div>
+      <div class="field"><label>Subject (email only)</label><input id="new-tpl-subject" placeholder="e.g. Our Christmas opening hours"></div>
+      <div class="field"><label>Body</label><textarea id="new-tpl-body" rows="8" placeholder="Hi {first_name},&#10;&#10;Just a heads up..." style="font-family:ui-monospace,monospace;font-size:12px"></textarea></div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Create', primary: true, onClick: submitNewTemplate },
+    ],
+  });
+}
+
+async function submitNewTemplate() {
+  const label = el('new-tpl-label').value.trim();
+  const key   = el('new-tpl-key').value.trim();
+  const subject = el('new-tpl-subject').value;
+  const body    = el('new-tpl-body').value;
+  const defaultChannel = el('new-tpl-channel').value;
+  if (!label) { toast('Label required', 'warn'); return; }
+  if (!key)   { toast('Key required', 'warn'); return; }
+  try {
+    await Api.post('/api/messages/templates', { label, key, subject, body, defaultChannel });
+    closeModal();
+    toast('Template created', 'success');
+    await loadTemplatesEditor();
+  } catch (e) {
+    if (e.data?.error === 'key_exists') {
+      toast('A template with this key already exists', 'error');
+    } else {
+      toast('Create failed: ' + (e.data?.message || e.message), 'error');
+    }
+  }
+}
+
 async function savePricingConfig() {
   const getNum = (id) => { const e = el(id); return e && e.value !== '' ? parseFloat(e.value) : undefined; };
   const getStr = (id) => { const e = el(id); return e ? e.value : undefined; };
@@ -7981,6 +8184,10 @@ async function savePricingConfig() {
     socialTiktok:    getStr('set-social-tiktok'),
     socialFacebook:  getStr('set-social-facebook'),
     socialLinkedin:  getStr('set-social-linkedin'),
+    trustpilotUrl:       getStr('set-trustpilot-url'),
+    googleReviewUrl:     getStr('set-google-review-url'),
+    reviewPlatform:      getStr('set-review-platform'),
+    defaultCountryCode:  getStr('set-default-cc'),
   };
   // Strip undefined
   for (const k of Object.keys(payload)) if (payload[k] === undefined) delete payload[k];
