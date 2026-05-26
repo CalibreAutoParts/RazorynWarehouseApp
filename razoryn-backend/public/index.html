@@ -1694,17 +1694,20 @@ function notifyNewSale(sale) {
 const Sounds = {
   _ctx: null,
   _lastPlay: {},
+  // HTMLAudioElement cache for custom uploads — Web Audio API can't play
+  // arbitrary mp3/wav data without decoding; <audio> handles all formats natively.
+  _customAudio: null,
   _getCtx() {
     if (!this._ctx) {
       try { this._ctx = new (window.AudioContext || window.webkitAudioContext)(); }
       catch (e) { return null; }
     }
-    // Browser may suspend the context if the page lost focus — resume it.
     if (this._ctx.state === 'suspended') this._ctx.resume().catch(() => {});
     return this._ctx;
   },
 
-  // Get the user's chosen sound for a category, with a sane default.
+  // Get the user's chosen sound for a category. Default: cha-ching for sale,
+  // ding for everything else.
   getChoice(category) {
     return localStorage.getItem(`rwh_sound_${category}`) || (category === 'sale' ? 'chaching' : 'ding');
   },
@@ -1713,8 +1716,24 @@ const Sounds = {
     else localStorage.setItem(`rwh_sound_${category}`, name);
   },
 
-  // The main public API. Plays the sound a user has chosen for `category`.
-  // Debounced so rapid-fire calls don't stack.
+  // Custom uploaded sound storage — stored as data URL in localStorage.
+  // Limited to ~1MB raw (which becomes ~1.3MB base64 in localStorage) to stay
+  // well under the typical 5–10MB per-origin localStorage quota.
+  getCustom() {
+    return localStorage.getItem('rwh_sound_custom') || null;
+  },
+  setCustom(dataUrl, filename) {
+    if (dataUrl) {
+      localStorage.setItem('rwh_sound_custom', dataUrl);
+      localStorage.setItem('rwh_sound_custom_name', filename || 'custom.audio');
+    } else {
+      localStorage.removeItem('rwh_sound_custom');
+      localStorage.removeItem('rwh_sound_custom_name');
+    }
+    this._customAudio = null;  // invalidate cached <audio> element
+  },
+  getCustomName() { return localStorage.getItem('rwh_sound_custom_name'); },
+
   playForSale() { this._playDebounced('sale'); },
 
   _playDebounced(category) {
@@ -1726,13 +1745,31 @@ const Sounds = {
     this.play(name);
   },
 
-  // Force-play (used by the Settings page "Preview" button — bypasses debounce).
   preview(name) {
     if (name === 'none') return;
     this.play(name);
   },
 
   play(name) {
+    // Custom uploaded sound — play via HTMLAudioElement for format flexibility
+    if (name === 'custom') {
+      const dataUrl = this.getCustom();
+      if (!dataUrl) return;  // user selected "custom" but never uploaded — silently ignore
+      try {
+        // Reuse the audio element if possible; reload only when the source changes
+        if (!this._customAudio || this._customAudio.dataset.dataUrl !== dataUrl) {
+          this._customAudio = new Audio(dataUrl);
+          this._customAudio.dataset.dataUrl = dataUrl;
+          this._customAudio.volume = 0.8;
+        } else {
+          this._customAudio.currentTime = 0;  // restart if mid-play
+        }
+        const p = this._customAudio.play();
+        if (p?.catch) p.catch(() => {});  // ignore autoplay block errors
+      } catch (e) {}
+      return;
+    }
+    // Synthesised sounds — Web Audio API
     const ctx = this._getCtx();
     if (!ctx) return;
     const fn = this._synths[name];
@@ -7400,6 +7437,16 @@ function renderSettings() {
               <div class="field"><label>Account number</label><input id="set-bankacc" placeholder="12345678"></div>
             </div>
           </div>
+          <div style="margin-top:14px;padding:14px;background:var(--bg-soft);border-radius:8px">
+            <div style="font-weight:600;margin-bottom:8px">Social media (shown on invoices)</div>
+            <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Leave blank to omit. Handles or URLs both work. The invoice automatically hides this section if all fields are empty.</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <div class="field"><label>Instagram</label><input id="set-social-instagram" placeholder="@yourhandle or yourhandle"></div>
+              <div class="field"><label>TikTok</label><input id="set-social-tiktok" placeholder="@yourhandle or yourhandle"></div>
+              <div class="field"><label>Facebook</label><input id="set-social-facebook" placeholder="https://facebook.com/yourpage"></div>
+              <div class="field"><label>LinkedIn</label><input id="set-social-linkedin" placeholder="https://linkedin.com/company/yourcompany"></div>
+            </div>
+          </div>
           <div style="margin-top:14px">
             <button class="btn btn-primary" onclick="savePricingConfig()">Save company details</button>
           </div>
@@ -7414,18 +7461,36 @@ function renderSettings() {
         <div class="card-body">
           <div class="field" style="max-width:400px">
             <label>Sound for new sale</label>
-            <select id="set-sale-sound" style="font-size:14px">
+            <select id="set-sale-sound" style="font-size:14px" onchange="onSaleSoundChange()">
               <option value="chaching">💰 Cha-ching (cash register) — default</option>
               <option value="bell">🔔 Bell — bright single ring</option>
               <option value="chime">🎵 Chime — two-note descending</option>
               <option value="ding">🛎️ Ding — short high tone</option>
               <option value="pop">💧 Pop — subtle click</option>
+              <option value="custom">📁 Custom (uploaded file)</option>
               <option value="none">🔇 No sound</option>
             </select>
             <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">
               Auto-plays at most once every 5 seconds — won't blast if several orders sync at the same time.
             </div>
           </div>
+
+          <!-- Custom upload panel — only visible when "Custom" is selected -->
+          <div id="set-sound-custom-wrap" style="display:none;margin-top:12px;padding:12px;background:var(--bg-soft);border-radius:8px;max-width:400px">
+            <div style="font-weight:600;font-size:13px;margin-bottom:6px">Custom sound file</div>
+            <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">
+              Upload an MP3, WAV, OGG, or M4A file. Max ~1 MB. Stored locally on this device only — won't sync across other staff devices.
+            </div>
+            <div id="set-sound-custom-current" style="display:none;font-size:12px;padding:8px 12px;background:var(--white);border:1px solid var(--line);border-radius:6px;margin-bottom:8px">
+              <strong style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">Loaded</strong>
+              <div id="set-sound-custom-name" style="font-family:ui-monospace,monospace;font-size:11px;margin-top:2px"></div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+              <input type="file" id="set-sound-custom-file" accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/x-m4a,audio/mp4,.mp3,.wav,.ogg,.m4a" onchange="onCustomSoundUpload(this)" style="font-size:12px;flex:1;min-width:200px">
+              <button class="btn btn-ghost btn-sm" onclick="clearCustomSound()" id="set-sound-custom-clear" style="display:none;color:var(--red)">Remove</button>
+            </div>
+          </div>
+
           <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn btn-outline btn-sm" onclick="previewSelectedSound()">▶ Preview</button>
             <button class="btn btn-primary btn-sm" onclick="saveSaleSound()">Save</button>
@@ -7570,6 +7635,11 @@ async function loadPricingConfig() {
     setVal('set-bankname', r.bankAccountName);
     setVal('set-banksort', r.bankSortCode);
     setVal('set-bankacc', r.bankAccountNumber);
+    // Socials — handles or URLs, all optional
+    setVal('set-social-instagram', r.socialInstagram);
+    setVal('set-social-tiktok',    r.socialTiktok);
+    setVal('set-social-facebook',  r.socialFacebook);
+    setVal('set-social-linkedin',  r.socialLinkedin);
     // Show VAT number field if VAT-registered
     const vatNumWrap = el('set-vatnum-wrap');
     if (vatNumWrap) vatNumWrap.style.display = r.vatRegistered ? '' : 'none';
@@ -7582,6 +7652,8 @@ async function loadPricingConfig() {
     // of backend settings — each computer remembers its own choice.
     const soundDropdown = el('set-sale-sound');
     if (soundDropdown) soundDropdown.value = Sounds.getChoice('sale');
+    // Show / hide custom upload panel based on current choice
+    if (typeof refreshCustomSoundUI === 'function') refreshCustomSoundUI();
   } catch (e) { console.warn('loadPricingConfig:', e); }
 }
 
@@ -7591,13 +7663,100 @@ async function loadPricingConfig() {
 function previewSelectedSound() {
   const dropdown = el('set-sale-sound');
   if (!dropdown) return;
+  if (dropdown.value === 'custom' && !Sounds.getCustom()) {
+    toast('Upload a sound file first', 'warn');
+    return;
+  }
   Sounds.preview(dropdown.value);
 }
 function saveSaleSound() {
   const dropdown = el('set-sale-sound');
   if (!dropdown) return;
+  if (dropdown.value === 'custom' && !Sounds.getCustom()) {
+    toast('Upload a sound file first', 'warn');
+    return;
+  }
   Sounds.setChoice('sale', dropdown.value);
   toast('Saved — new sales will use this sound on this device', 'success');
+}
+
+// Shows / hides the custom upload panel when the dropdown selection changes.
+function onSaleSoundChange() {
+  const dropdown = el('set-sale-sound');
+  if (!dropdown) return;
+  refreshCustomSoundUI();
+}
+
+// Toggle the custom upload panel visibility based on dropdown state,
+// and update the "loaded" indicator + clear-button based on what's stored.
+function refreshCustomSoundUI() {
+  const dropdown = el('set-sale-sound');
+  const wrap = el('set-sound-custom-wrap');
+  if (!dropdown || !wrap) return;
+  wrap.style.display = dropdown.value === 'custom' ? 'block' : 'none';
+  const current = el('set-sound-custom-current');
+  const clearBtn = el('set-sound-custom-clear');
+  const nameEl = el('set-sound-custom-name');
+  const hasCustom = !!Sounds.getCustom();
+  if (current)  current.style.display = hasCustom ? 'block' : 'none';
+  if (clearBtn) clearBtn.style.display = hasCustom ? 'inline-flex' : 'none';
+  if (nameEl)   nameEl.textContent = Sounds.getCustomName() || '';
+}
+
+// Handle file upload from the input. Reads as data URL (base64), validates type
+// + size, stores in localStorage so it persists across sessions on this device.
+async function onCustomSoundUpload(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  // Size check — keep under 1MB raw. Base64 inflates ~33%, so the stored size
+  // ends up around 1.3MB. localStorage typical limit is 5–10MB per origin.
+  const MAX_BYTES = 1_000_000;
+  if (file.size > MAX_BYTES) {
+    toast(`File too big — ${(file.size / 1024 / 1024).toFixed(1)} MB. Max 1 MB. Try shortening the clip or converting to a lower bitrate.`, 'error', 8000);
+    input.value = '';
+    return;
+  }
+  // Type check — be permissive since browsers report these inconsistently
+  const accepted = /^(audio\/|.*\.(mp3|wav|ogg|m4a)$)/i;
+  if (!accepted.test(file.type) && !/\.(mp3|wav|ogg|m4a)$/i.test(file.name)) {
+    toast('Unsupported file type. Use MP3, WAV, OGG, or M4A.', 'error');
+    input.value = '';
+    return;
+  }
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error('Read failed'));
+      reader.readAsDataURL(file);
+    });
+    Sounds.setCustom(dataUrl, file.name);
+    refreshCustomSoundUI();
+    toast(`Loaded "${file.name}" — click Preview to test, then Save.`, 'success', 5000);
+  } catch (e) {
+    // localStorage QuotaExceededError fires if the user has lots of other
+    // data stored. Roll back the file and tell them what's happening.
+    Sounds.setCustom(null);
+    refreshCustomSoundUI();
+    if (String(e).includes('quota') || e.name === 'QuotaExceededError') {
+      toast('Browser storage full. Try a smaller audio file.', 'error', 8000);
+    } else {
+      toast('Failed to load file: ' + e.message, 'error');
+    }
+  }
+}
+
+function clearCustomSound() {
+  if (!confirm('Remove the uploaded sound file?')) return;
+  Sounds.setCustom(null);
+  // If "Custom" was the active choice, fall back to cha-ching
+  if (Sounds.getChoice('sale') === 'custom') Sounds.setChoice('sale', 'chaching');
+  const dropdown = el('set-sale-sound');
+  if (dropdown) dropdown.value = Sounds.getChoice('sale');
+  const fileInput = el('set-sound-custom-file');
+  if (fileInput) fileInput.value = '';
+  refreshCustomSoundUI();
+  toast('Custom sound removed', 'success');
 }
 
 async function savePricingConfig() {
@@ -7619,6 +7778,10 @@ async function savePricingConfig() {
     bankAccountName: getStr('set-bankname'),
     bankSortCode: getStr('set-banksort'),
     bankAccountNumber: getStr('set-bankacc'),
+    socialInstagram: getStr('set-social-instagram'),
+    socialTiktok:    getStr('set-social-tiktok'),
+    socialFacebook:  getStr('set-social-facebook'),
+    socialLinkedin:  getStr('set-social-linkedin'),
   };
   // Strip undefined
   for (const k of Object.keys(payload)) if (payload[k] === undefined) delete payload[k];
