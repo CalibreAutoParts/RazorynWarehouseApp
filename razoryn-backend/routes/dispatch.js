@@ -157,6 +157,83 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// POST /api/dispatch/bulk-mark-dispatched
+// Body: { saleIds: number[], carrier?, trackingNumber?, notes?, pushToChannel? }
+//
+// Bulk-clears a list of orders from the worklist. Designed for the common
+// case of "all 47 of these were shipped on eBay/Shopify weeks before this app
+// existed, mark them all in one click". Defaults to carrier="Already shipped
+// (channel)" with no tracking + no channel push so legacy items are cleared
+// without spamming eBay/Shopify.
+//
+// Cash-on-collection rows in the list are routed to "mark collected" instead
+// (they can't be dispatched). Estimates and already-dispatched rows are skipped
+// with per-row error reporting. Returns counts so the UI can give a useful toast.
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/bulk-mark-dispatched', requireAdmin, async (req, res) => {
+  await ensureDispatchColumns();
+  const ids = Array.isArray(req.body?.saleIds) ? req.body.saleIds : [];
+  if (!ids.length) return res.status(400).json({ error: 'sale_ids_required' });
+
+  const carrier        = (req.body?.carrier || 'Already shipped (channel)').trim();
+  const trackingNumber = (req.body?.trackingNumber || '').trim() || null;
+  const notes          = (req.body?.notes || '').trim() || null;
+  // Default to NO channel push for bulk operations — legacy items have likely
+  // already been marked shipped on the source channel, no need to re-push.
+  const pushToChannel  = req.body?.pushToChannel === true;
+
+  let dispatched = 0, collected = 0, skipped = 0;
+  const errors = [];
+
+  for (const id of ids) {
+    try {
+      const s = await query(`SELECT * FROM sales WHERE id = $1`, [id]);
+      const row = s.rows[0];
+      if (!row) { skipped++; errors.push({ id, reason: 'not_found' }); continue; }
+      if (row.is_estimate) { skipped++; errors.push({ id, reason: 'is_estimate' }); continue; }
+      if (row.dispatched_at || row.collected_at) { skipped++; errors.push({ id, reason: 'already_done' }); continue; }
+
+      if (row.payment_method === 'cash') {
+        // Cash orders → mark collected instead
+        await query(`
+          UPDATE sales SET collected_at = now(), collected_by = $1,
+            dispatch_notes = COALESCE($2, dispatch_notes),
+            status = 'dispatched'
+          WHERE id = $3
+        `, [req.user.id, notes, id]);
+        collected++;
+      } else {
+        // Non-cash → mark dispatched. channel_push_state='na' for bulk operations
+        // unless the caller explicitly opted in to pushToChannel.
+        await query(`
+          UPDATE sales SET
+            dispatched_at = now(), dispatched_by = $1,
+            carrier = $2, tracking_number = $3, dispatch_notes = $4,
+            channel_push_state = $5, channel_push_error = NULL,
+            status = 'dispatched'
+          WHERE id = $6
+        `, [req.user.id, carrier, trackingNumber, notes,
+            pushToChannel ? 'pending' : 'na', id]);
+        dispatched++;
+        // Fire-and-forget channel push only if explicitly requested
+        if (pushToChannel && (row.channel || '').match(/^(shopify|ebay_)/)) {
+          const updated = await query(`SELECT * FROM sales WHERE id = $1`, [id]);
+          setImmediate(() => pushDispatchToChannel(updated.rows[0]).catch(e => console.warn('[dispatch.bulkPush]', e.message)));
+        }
+      }
+    } catch (e) {
+      skipped++;
+      errors.push({ id, reason: e.message });
+    }
+  }
+
+  await audit(req, 'bulk_dispatch', null, null, {
+    requested: ids.length, dispatched, collected, skipped, carrier, pushToChannel,
+  });
+  res.json({ ok: true, requested: ids.length, dispatched, collected, skipped, errors });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
 // POST /api/dispatch/:saleId/mark-dispatched
 // Body: { carrier, trackingNumber, notes, pushToChannel? }
 //
