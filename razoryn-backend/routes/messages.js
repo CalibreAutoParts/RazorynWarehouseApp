@@ -21,25 +21,21 @@ const router = express.Router();
 router.use(requireAuth);
 
 // ──────────────────────────────────────────────────────────────────────────
-// Templates — the source of truth for staff-facing message content.
-// Each template has:
-//   key            — stable identifier used by the UI
-//   label          — what staff see in the dropdown
-//   subject        — email subject line (ignored for eBay/WhatsApp)
-//   body           — message body, supports {variable} substitution
-//   defaultChannel — pre-selects this channel when the template is picked
+// Built-in templates — seeded into the DB on first run. Once seeded, staff
+// can edit subject/body or add their own custom ones via Settings → Message
+// templates. Built-ins cannot be deleted (only "reset to default" restores
+// them); custom ones can.
 //
 // Variables supported in subject + body:
 //   {customer_name}, {first_name}
 //   {invoice}, {payment_reference}, {order_number}
 //   {total}, {subtotal}
 //   {tracking_number}, {carrier}, {tracking_url}
-//   {item_first}, {item_count}
+//   {item_first}, {item_count}, {item_count_extra}
 //   {company_name}, {company_phone}, {company_website}, {company_email}
-//
-// Unsubstituted variables stay in the text so staff notice them before sending.
+//   {review_url}   ← Trustpilot or Google review URL, from settings
 // ──────────────────────────────────────────────────────────────────────────
-const TEMPLATES = [
+const BUILTIN_TEMPLATES = [
   {
     key: 'custom',
     label: 'Custom (blank)',
@@ -192,6 +188,25 @@ Thanks for shopping with us — hope to see you again soon.
 {company_name}`,
     defaultChannel: 'email',
   },
+  {
+    key: 'feedback_request',
+    label: 'Feedback / review request',
+    subject: 'How was your experience with {company_name}?',
+    body:
+`Hi {first_name},
+
+Thanks again for your recent order with us — hope the part fitted well.
+
+If you've got a spare minute, would you mind leaving us a review? It really helps small businesses like ours, and helps other customers find us:
+
+{review_url}
+
+If anything wasn't quite right, please reply to this message first — we'd love a chance to put it right before you score us.
+
+Thanks,
+{company_name}`,
+    defaultChannel: 'email',
+  },
 ];
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -246,6 +261,12 @@ async function buildContext(sale, items, company) {
     company_phone: company.company_phone || '',
     company_website: company.company_website || '',
     company_email: company.company_email || '',
+    // Review URL: picks Trustpilot or Google based on the configured platform.
+    // Falls back to whichever URL is filled in if the picked platform is empty.
+    review_url:
+      company.review_platform === 'google' && company.google_review_url ? company.google_review_url
+      : company.review_platform === 'trustpilot' && company.trustpilot_url ? company.trustpilot_url
+      : company.trustpilot_url || company.google_review_url || '[set review URL in settings]',
   };
 }
 
@@ -268,21 +289,174 @@ async function getCompanySettings() {
 // GET /api/messages/templates/:saleId — list templates with the sale's context
 //   pre-rendered for preview
 // ──────────────────────────────────────────────────────────────────────────
-router.get('/templates', requireAdmin, (req, res) => {
-  res.json({ templates: TEMPLATES.map(t => ({ ...t })) });
+// ──────────────────────────────────────────────────────────────────────────
+// Self-healing migration: message_templates table.
+// Seeded with the built-in templates on first run. After that, staff edits
+// are persisted to the DB. Built-in templates can be edited but not deleted
+// (only "reset to defaults" restores them); custom ones can be deleted.
+// ──────────────────────────────────────────────────────────────────────────
+let _migrationDone = false;
+async function ensureTemplateTable() {
+  if (_migrationDone) return;
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS message_templates (
+        id              SERIAL PRIMARY KEY,
+        key             TEXT UNIQUE NOT NULL,
+        label           TEXT NOT NULL,
+        subject         TEXT NOT NULL DEFAULT '',
+        body            TEXT NOT NULL DEFAULT '',
+        default_channel TEXT NOT NULL DEFAULT 'email',
+        is_builtin      BOOLEAN NOT NULL DEFAULT false,
+        sort_order      INTEGER NOT NULL DEFAULT 0,
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    // Settings columns for the review URLs + default platform
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS trustpilot_url TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS google_review_url TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS review_platform TEXT DEFAULT 'trustpilot'`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS default_country_code TEXT DEFAULT '44'`);
+    // Seed built-in templates if they don't exist. Update key + label + is_builtin
+    // flag but DON'T overwrite subject/body — staff may have edited them.
+    for (let i = 0; i < BUILTIN_TEMPLATES.length; i++) {
+      const t = BUILTIN_TEMPLATES[i];
+      await query(`
+        INSERT INTO message_templates (key, label, subject, body, default_channel, is_builtin, sort_order)
+        VALUES ($1, $2, $3, $4, $5, true, $6)
+        ON CONFLICT (key) DO UPDATE SET label = EXCLUDED.label, is_builtin = true
+      `, [t.key, t.label, t.subject, t.body, t.defaultChannel, i]);
+    }
+    _migrationDone = true;
+  } catch (e) {
+    console.warn('[messages.js] migration warning:', e.message);
+  }
+}
+ensureTemplateTable();
+
+// Fetch all templates from DB, ordered by sort_order then key.
+async function loadTemplates() {
+  await ensureTemplateTable();
+  const r = await query(`SELECT * FROM message_templates ORDER BY sort_order, key`);
+  return r.rows.map(t => ({
+    id: t.id,
+    key: t.key,
+    label: t.label,
+    subject: t.subject || '',
+    body: t.body || '',
+    defaultChannel: t.default_channel || 'email',
+    isBuiltin: !!t.is_builtin,
+    sortOrder: t.sort_order || 0,
+  }));
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// GET /api/messages/templates — list raw templates (for the settings editor)
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/templates', requireAdmin, async (req, res) => {
+  const templates = await loadTemplates();
+  res.json({ templates });
 });
 
-router.get('/templates/:saleId', requireAdmin, async (req, res) => {
+// POST /api/messages/templates — create a new custom template
+router.post('/templates', requireAdmin, async (req, res) => {
+  await ensureTemplateTable();
+  const b = req.body || {};
+  const key = (b.key || '').trim().toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 60);
+  if (!key) return res.status(400).json({ error: 'key_required' });
+  const label = (b.label || '').trim() || 'Unnamed template';
+  const subject = (b.subject || '').toString();
+  const body = (b.body || '').toString();
+  const defaultChannel = ['email','whatsapp','ebay'].includes(b.defaultChannel) ? b.defaultChannel : 'email';
+  try {
+    const r = await query(`
+      INSERT INTO message_templates (key, label, subject, body, default_channel, is_builtin, sort_order, updated_at)
+      VALUES ($1, $2, $3, $4, $5, false, 9999, now())
+      RETURNING *
+    `, [key, label, subject, body, defaultChannel]);
+    await audit(req, 'create_template', null, null, { key });
+    res.json({ ok: true, template: r.rows[0] });
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'key_exists', message: 'A template with this key already exists.' });
+    res.status(500).json({ error: 'create_failed', message: e.message });
+  }
+});
+
+// PATCH /api/messages/templates/:id — update a template (built-in or custom)
+router.patch('/templates/:id', requireAdmin, async (req, res) => {
+  await ensureTemplateTable();
+  const b = req.body || {};
+  const updates = [], params = [];
+  const map = { label: 'label', subject: 'subject', body: 'body', defaultChannel: 'default_channel' };
+  for (const [k, col] of Object.entries(map)) {
+    if (b[k] === undefined) continue;
+    params.push(b[k]);
+    updates.push(`${col} = $${params.length}`);
+  }
+  if (!updates.length) return res.json({ ok: true, message: 'no_changes' });
+  params.push(req.params.id);
+  try {
+    const r = await query(
+      `UPDATE message_templates SET ${updates.join(', ')}, updated_at = now() WHERE id = $${params.length} RETURNING *`,
+      params
+    );
+    if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+    await audit(req, 'update_template', null, null, { id: req.params.id, key: r.rows[0].key });
+    res.json({ ok: true, template: r.rows[0] });
+  } catch (e) {
+    res.status(500).json({ error: 'update_failed', message: e.message });
+  }
+});
+
+// DELETE /api/messages/templates/:id — delete a custom template (built-ins refuse)
+router.delete('/templates/:id', requireAdmin, async (req, res) => {
+  await ensureTemplateTable();
+  const r = await query(`SELECT * FROM message_templates WHERE id = $1`, [req.params.id]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  if (r.rows[0].is_builtin) {
+    return res.status(400).json({ error: 'builtin_cannot_be_deleted', message: 'Built-in templates cannot be deleted. Use Reset to restore the original subject/body.' });
+  }
+  await query(`DELETE FROM message_templates WHERE id = $1`, [req.params.id]);
+  await audit(req, 'delete_template', null, null, { id: req.params.id, key: r.rows[0].key });
+  res.json({ ok: true });
+});
+
+// POST /api/messages/templates/:id/reset — reset a built-in template to the seed
+router.post('/templates/:id/reset', requireAdmin, async (req, res) => {
+  await ensureTemplateTable();
+  const r = await query(`SELECT * FROM message_templates WHERE id = $1`, [req.params.id]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  if (!r.rows[0].is_builtin) return res.status(400).json({ error: 'not_a_builtin' });
+  const seed = BUILTIN_TEMPLATES.find(t => t.key === r.rows[0].key);
+  if (!seed) return res.status(404).json({ error: 'no_seed_found' });
+  const updated = await query(`
+    UPDATE message_templates SET label = $1, subject = $2, body = $3, default_channel = $4, updated_at = now()
+    WHERE id = $5 RETURNING *
+  `, [seed.label, seed.subject, seed.body, seed.defaultChannel, req.params.id]);
+  await audit(req, 'reset_template', null, null, { id: req.params.id, key: r.rows[0].key });
+  res.json({ ok: true, template: updated.rows[0] });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// GET /api/messages/templates-for-sale/:saleId
+// Returns templates with subject + body rendered using this sale's context,
+// plus channel-availability hints. Used by the "Message customer" modal.
+// (Renamed from /templates/:saleId so the bare /templates endpoint can be
+// used by the settings editor without ID confusion.)
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/templates-for-sale/:saleId', requireAdmin, async (req, res) => {
   const s = await query(`SELECT * FROM sales WHERE id = $1`, [req.params.saleId]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   const sale = s.rows[0];
   const items = (await query(`SELECT * FROM sale_items WHERE sale_id = $1 ORDER BY id`, [req.params.saleId])).rows;
   const company = await getCompanySettings();
   const ctx = await buildContext(sale, items, company);
+  const allTemplates = await loadTemplates();
 
-  // For each template, render subject + body so the UI can show a live preview
-  // without having to round-trip on every dropdown selection.
-  const templates = TEMPLATES.map(t => ({
+  // Render subject + body for each template using this sale's context. The UI
+  // shows the rendered text immediately when staff picks a template — no extra
+  // server round-trip.
+  const templates = allTemplates.map(t => ({
     ...t,
     renderedSubject: renderTemplate(t.subject, ctx),
     renderedBody:    renderTemplate(t.body, ctx),
@@ -303,7 +477,7 @@ router.get('/templates/:saleId', requireAdmin, async (req, res) => {
       email: sale.customer_email || '',
       phone: sale.customer_phone || '',
     },
-    context: ctx,  // exposed so the UI can do client-side re-rendering on edits
+    context: ctx,
   });
 });
 
@@ -403,10 +577,19 @@ router.post('/ebay/:saleId', requireAdmin, async (req, res) => {
     const od = await ebay.getOrderDetail(sale.external_order_id, store.code);
     buyerUserId = od?.buyer?.username || null;
   } catch (e) {
-    return res.status(502).json({ error: 'order_lookup_failed', message: e.message });
+    return res.status(502).json({
+      error: 'order_lookup_failed',
+      message: `Couldn't fetch order from eBay to find the buyer's user ID. Usually means the eBay tokens for this store have expired or lack the sell.fulfillment scope. Original error: ${e.message}`,
+    });
   }
-  if (!buyerUserId) return res.status(400).json({ error: 'no_buyer_userid', message: 'Could not resolve the buyer\'s eBay user ID — try again or use a different channel.' });
-  if (!itemId)      return res.status(400).json({ error: 'no_item_id_link', message: 'No eBay ItemID linked for any item in this order. Run "🔗 Force match all" in Listing Mirror first.' });
+  if (!buyerUserId) return res.status(400).json({
+    error: 'no_buyer_userid',
+    message: `eBay returned the order but no buyer username. This can happen for very old orders or once eBay has anonymised the buyer identity (~30 days after the order). Use WhatsApp or email instead if you have those.`,
+  });
+  if (!itemId) return res.status(400).json({
+    error: 'no_item_id_link',
+    message: `No eBay ItemID is linked for any SKU in this order. Open Listing Mirror in the sidebar and click "🔗 Force match all" so the warehouse can link your SKUs to live eBay listings, then retry.`,
+  });
 
   // AddMemberMessageAAQToPartner — sends an "Ask a question" style member message
   // from the seller to the buyer about a specific listing/transaction.
@@ -489,6 +672,13 @@ router.post('/ebay/:saleId', requireAdmin, async (req, res) => {
 // phone-number-normalisation logic is shared. WhatsApp doesn't have a send-API
 // from a non-Business account, so the workflow is "open in WhatsApp Web/app
 // with the message pre-filled, staff hits send manually".
+//
+// Normalisation strategy — order matters:
+//   1. Starts with "+"   → already E.164, strip the "+" and use as-is
+//   2. Starts with "00"  → international prefix (EU/UK convention) → strip
+//   3. Starts with "0"   → local format → strip leading 0, prepend default
+//                          country code from settings (default "44" for UK)
+//   4. Otherwise         → assume already-international, use as-is
 // ──────────────────────────────────────────────────────────────────────────
 router.get('/whatsapp-link/:saleId', requireAdmin, async (req, res) => {
   const s = await query(`SELECT customer_phone FROM sales WHERE id = $1`, [req.params.saleId]);
@@ -496,18 +686,38 @@ router.get('/whatsapp-link/:saleId', requireAdmin, async (req, res) => {
   const phone = (s.rows[0].customer_phone || '').trim();
   if (!phone) return res.status(400).json({ error: 'no_phone' });
 
-  // Normalise to international format with no spaces / dashes / brackets.
-  // UK numbers: "07494589542" → "447494589542"; "+44 7494 589542" → "447494589542"
-  let normalised = phone.replace(/[^\d+]/g, '');
-  if (normalised.startsWith('+')) normalised = normalised.slice(1);
-  else if (normalised.startsWith('0')) normalised = '44' + normalised.slice(1);  // UK assumption
+  // Look up the default country code from settings. Used only as a last resort
+  // when the phone starts with a single "0" (local format).
+  const settings = await query('SELECT default_country_code FROM app_settings WHERE id = 1');
+  const defaultCC = (settings.rows[0]?.default_country_code || '44').replace(/[^\d]/g, '');
+
+  // Strip everything except digits and a single leading "+"
+  let raw = phone.trim();
+  const hasPlus = raw.startsWith('+');
+  let digits = raw.replace(/[^\d]/g, '');
+
+  let normalised;
+  if (hasPlus) {
+    // E.164 input — keep as-is (just drop the +)
+    normalised = digits;
+  } else if (digits.startsWith('00')) {
+    // International prefix — drop the 00
+    normalised = digits.slice(2);
+  } else if (digits.startsWith('0') && digits.length >= 10) {
+    // Looks like local format (e.g. UK 07494589542). Drop the leading 0,
+    // prepend the configured default country code.
+    normalised = defaultCC + digits.slice(1);
+  } else {
+    // Already in international form (e.g. eBay/Shopify may return "447494...")
+    normalised = digits;
+  }
 
   const text = (req.query.body || '').toString();
   const link = `https://wa.me/${normalised}` + (text ? `?text=${encodeURIComponent(text)}` : '');
-  res.json({ ok: true, link, normalisedPhone: normalised });
+  res.json({ ok: true, link, normalisedPhone: normalised, original: phone });
 });
 
 module.exports = router;
-module.exports.TEMPLATES = TEMPLATES;
+module.exports.BUILTIN_TEMPLATES = BUILTIN_TEMPLATES;
 module.exports.buildContext = buildContext;
 module.exports.renderTemplate = renderTemplate;

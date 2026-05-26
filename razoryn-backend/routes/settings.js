@@ -20,6 +20,11 @@ async function ensureSocialColumns() {
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS social_facebook  TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS social_tiktok    TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS social_linkedin  TEXT`);
+    // Review + phone-prefix settings (also touched by routes/messages.js migration)
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS trustpilot_url TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS google_review_url TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS review_platform TEXT DEFAULT 'trustpilot'`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS default_country_code TEXT DEFAULT '44'`);
     _migrationDone = true;
   } catch (e) {
     console.warn('[settings.js] social migration warning:', e.message);
@@ -137,6 +142,12 @@ router.get('/pricing-config', async (req, res) => {
     socialFacebook:  r.social_facebook  || '',
     socialTiktok:    r.social_tiktok    || '',
     socialLinkedin:  r.social_linkedin  || '',
+    // Reviews — used by feedback request templates and the invoice footer
+    trustpilotUrl:   r.trustpilot_url || '',
+    googleReviewUrl: r.google_review_url || '',
+    reviewPlatform:  r.review_platform || 'trustpilot',  // 'trustpilot' | 'google' | 'both'
+    // Phone normalisation default — UK as default but configurable for non-UK
+    defaultCountryCode: r.default_country_code || '44',
   });
 });
 
@@ -167,6 +178,11 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       socialFacebook:  'social_facebook',
       socialTiktok:    'social_tiktok',
       socialLinkedin:  'social_linkedin',
+      // Reviews
+      trustpilotUrl:      'trustpilot_url',
+      googleReviewUrl:    'google_review_url',
+      reviewPlatform:     'review_platform',
+      defaultCountryCode: 'default_country_code',
     };
     const updates = [], params = [];
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {

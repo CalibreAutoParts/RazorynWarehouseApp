@@ -811,6 +811,14 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   .foot{margin-top:30px;padding-top:18px;border-top:1px solid #eee;font-size:10.5px;color:#666;line-height:1.7}
   .foot .cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;margin-bottom:14px}
   .foot .col .h{display:block;color:#111;text-transform:uppercase;font-size:9.5px;letter-spacing:.1em;margin-bottom:5px;font-weight:500}
+
+  /* Review CTA — subtle but noticeable strip just above the foot when a review
+     URL is configured. Star + link layout, brand-coloured accent. */
+  .review-cta{margin-top:18px;padding:12px 16px;background:#fff8e6;border:1px solid #f0d171;border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;font-size:11.5px;color:#5a4400}
+  .review-cta .rc-text{font-weight:500}
+  .review-cta .rc-links{display:flex;gap:10px;flex-wrap:wrap}
+  .review-cta a{display:inline-block;padding:6px 12px;background:#5a4400;color:#fff;border-radius:4px;text-decoration:none;font-weight:600;font-size:11px;letter-spacing:.02em}
+  .review-cta a:hover{background:#3d2e00}
   .terms{font-size:10px;color:#999;text-align:center;line-height:1.7;border-top:1px solid #f0f0f0;padding-top:12px}
 </style></head><body>
 
@@ -969,6 +977,32 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     </a>` : ''}
   </div>
   ` : ''}
+
+  ${(() => {
+    // Review CTA — only renders if at least one review URL is configured.
+    // Picks the platform per the configured preference (Trustpilot/Google/both).
+    const tp = company.trustpilot_url || '';
+    const gg = company.google_review_url || '';
+    const platform = company.review_platform || 'trustpilot';
+    const items = [];
+    if ((platform === 'trustpilot' || platform === 'both') && tp) {
+      items.push({ label: 'Trustpilot', url: tp });
+    }
+    if ((platform === 'google' || platform === 'both') && gg) {
+      items.push({ label: 'Google', url: gg });
+    }
+    // If picked platform was empty, fall back to whichever URL is set
+    if (items.length === 0 && tp) items.push({ label: 'Trustpilot', url: tp });
+    if (items.length === 0 && gg) items.push({ label: 'Google', url: gg });
+    if (items.length === 0) return '';
+    return `
+  <div class="review-cta">
+    <span class="rc-text">Enjoyed your order? A quick review really helps a small business.</span>
+    <span class="rc-links">
+      ${items.map(it => `<a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">★ Review us on ${escapeHtml(it.label)}</a>`).join('')}
+    </span>
+  </div>`;
+  })()}
 
   <div class="foot">
     <div class="cols">
