@@ -317,9 +317,21 @@ router.post('/', requireAdmin, async (req, res) => {
       }
     }
 
-    const vat = +(subtotal * vatRate).toFixed(2);
+    // VAT model: prices in the system match Shopify/eBay listing prices, which
+    // are gross (VAT-INCLUSIVE). subtotal therefore already contains VAT — we
+    // must NOT add it on top. The `vat` column stores the VAT *portion* of the
+    // gross subtotal (for accounting/reporting). Total = subtotal + shipping.
+    //
+    // Policy:
+    //  • Cash on collection → no VAT recorded (£0). Receipt, not an invoice.
+    //  • Bank / Card / Online → if vat_registered, record VAT portion of gross.
+    const isCashSale = paymentMethod === 'cash';
+    const vatChargeable = !isCashSale && vatRegistered;
+    const vat = vatChargeable
+      ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2)  // VAT portion of gross
+      : 0;
     const shipping = parseFloat(b.shipping || 0);
-    const total = +(subtotal + vat + shipping).toFixed(2);
+    const total = +(subtotal + shipping).toFixed(2);  // subtotal IS gross — no VAT added
 
     // Generate identifiers
     const invoiceNumber = isEstimate ? null : await nextInvoiceNumber(c);
@@ -404,12 +416,26 @@ router.post('/:id/convert-to-invoice', requireAdmin, async (req, res) => {
       );
     }
 
+    // Recompute VAT/total in case payment method changed (legacy estimates without one).
+    // Subtotal is always gross-inclusive — total = subtotal + shipping; vat is portion.
+    const settings = await c.query('SELECT vat_rate, vat_registered FROM app_settings WHERE id = 1');
+    const setRow = settings.rows[0] || {};
+    const vatRegistered = !!setRow.vat_registered;
+    const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
+    const isCashSale = paymentMethod === 'cash';
+    const vatChargeable = !isCashSale && vatRegistered;
+    const subtotal = parseFloat(s.rows[0].subtotal);
+    const shipping = parseFloat(s.rows[0].shipping || 0);
+    const vat = vatChargeable ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2) : 0;
+    const total = +(subtotal + shipping).toFixed(2);
+
     const updated = await c.query(`
       UPDATE sales SET
         is_estimate = false, status = 'paid', invoice_number = $1,
-        payment_reference = $2, payment_method = $3, occurred_at = now()
-      WHERE id = $4 RETURNING *`,
-      [invoiceNumber, paymentReference, paymentMethod, req.params.id]);
+        payment_reference = $2, payment_method = $3, occurred_at = now(),
+        vat = $4, total = $5
+      WHERE id = $6 RETURNING *`,
+      [invoiceNumber, paymentReference, paymentMethod, vat, total, req.params.id]);
 
     return { sale: updated.rows[0], items: items.rows };
   });
@@ -492,7 +518,14 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   }
 
   const isCashReceipt = mode === 'receipt' || (sale.payment_method === 'cash' && !isVatRegistered);
-  const docTitle = mode === 'estimate' ? 'ESTIMATE' : isCashReceipt ? 'RECEIPT' : 'INVOICE';
+  // Pro-forma uses the FULL invoice template (1:1 with a real invoice) — just a different
+  // document title and a "not yet paid" notice. Customer needs to recognise it as a
+  // normal invoice they can pay against, not a casual estimate.
+  const isProforma = mode === 'proforma';
+  const docTitle = mode === 'estimate' ? 'ESTIMATE'
+                 : isProforma ? 'PRO FORMA INVOICE'
+                 : isCashReceipt ? 'RECEIPT'
+                 : 'INVOICE';
 
   // Print suppression: empty <title> + @page CSS removes URL/timestamp headers in most browsers.
   // (Browsers still show some headers if user hasn't disabled them in print settings; the user
@@ -582,6 +615,15 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     ${sale.vin_number ? `<div class="addr" style="font-family:ui-monospace,monospace">VIN: ${escapeHtml(sale.vin_number)}</div>` : ''}
   </div>` : ''}
 
+  ${sale.payment_method ? `
+  <div class="customer-block">
+    <div class="label">Payment method</div>
+    <div class="name">${sale.payment_method === 'cash' ? '💰 Cash on collection (VAT-free)'
+                       : sale.payment_method === 'bank' ? '🏦 Bank transfer'
+                       : sale.payment_method === 'card' ? '💳 Card'
+                       : escapeHtml(sale.payment_method)}</div>
+  </div>` : ''}
+
   <table>
     <thead><tr>
       <th>Item</th>
@@ -665,8 +707,15 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
 
   // ----- FULL INVOICE -----
   const logoUrl = (baseUrl || '') + brand.logoUrl;
-  const subtotalNet = isVatRegistered ? (parseFloat(sale.subtotal) / 1.2) : parseFloat(sale.subtotal);
-  const vatAmount = isVatRegistered ? (parseFloat(sale.subtotal) - subtotalNet) : 0;
+  // VAT display rules (everywhere prices are gross-inclusive):
+  //  • Cash sale: NEVER break out VAT. Just show "Subtotal" + "Total" — no VAT line at all.
+  //    User policy is cash is VAT-free. (Even if business is vat_registered, cash is excluded.)
+  //  • Bank / Card / Online (vat_registered): break out the VAT *portion* of the gross subtotal.
+  //  • Bank / Card / Online (not vat_registered): just show "Subtotal" + "Total" — no VAT.
+  const isCashSale = sale.payment_method === 'cash';
+  const showVatBreakdown = isVatRegistered && !isCashSale;
+  const subtotalNet = showVatBreakdown ? (parseFloat(sale.subtotal) / (1 + 0.2)) : parseFloat(sale.subtotal);
+  const vatAmount = showVatBreakdown ? (parseFloat(sale.subtotal) - subtotalNet) : 0;
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title></title>
@@ -684,18 +733,50 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
 
   /* Header — Hyundai-inspired: logo top-left, doctype top-right */
   .top{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:24px;border-bottom:1.5px solid #111;margin-bottom:28px}
-  .top .left img.logo{height:42px;display:block}
-  .top .left .tagline{font-size:10px;color:#888;letter-spacing:.1em;text-transform:uppercase;margin-top:8px;font-weight:500}
+  .top .left img.logo{height:48px;display:block;max-width:200px;object-fit:contain;object-position:left center}
   .top .right{text-align:right}
-  .top .right .doctype{font-size:26px;font-weight:600;letter-spacing:.04em;color:#111;line-height:1}
+  .top .right .doctype{font-size:24px;font-weight:600;letter-spacing:.04em;color:#111;line-height:1.1}
   .top .right .ref{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:#888;margin-top:8px}
   .top .right .order{font-size:11px;color:#666;margin-top:3px}
 
-  /* Address grid */
+  /* Address grid — From + Billed to */
   .addr-grid{display:grid;grid-template-columns:1fr 1fr;gap:36px;padding-bottom:24px;border-bottom:1px solid #eee;margin-bottom:20px}
   .addr-block .lbl{font-size:9.5px;text-transform:uppercase;letter-spacing:.12em;color:#999;font-weight:500;margin-bottom:8px}
   .addr-block .name{font-size:14px;font-weight:600;margin-bottom:4px;color:#111}
-  .addr-block .lines{font-size:12px;color:#555;line-height:1.7}
+  .addr-block .lines{font-size:11.5px;color:#555;line-height:1.65}
+  /* Contact pills — phone / email / website on one line, dot-separated */
+  .addr-block .contact-row{margin-top:6px;font-size:11.5px;color:#555;line-height:1.6}
+  .addr-block .contact-row span:not(:last-child)::after{content:' · ';color:#bbb;margin:0 2px}
+  /* Registration / VAT — small muted line */
+  .addr-block .meta-row{margin-top:6px;font-size:10.5px;color:#999;letter-spacing:.02em}
+  .addr-block .meta-row span:not(:last-child)::after{content:' · ';margin:0 2px}
+  /* Socials — clean horizontal links, only shown when company has socials configured */
+  .addr-block .socials-row{margin-top:10px;display:flex;gap:14px;flex-wrap:wrap;font-size:10.5px}
+  .addr-block .socials-row a{color:#666;text-decoration:none;font-weight:500}
+  .addr-block .socials-row a:hover{color:#111}
+
+  /* Pro-forma notice — colour-coded by payment method.
+     The method gets surfaced in a coloured banner above the From/To so the
+     customer (and Ali's staff during eyeball checks) instantly know how to pay. */
+  .proforma-notice{border-radius:6px;padding:14px 18px;margin-bottom:24px;line-height:1.55}
+  .proforma-notice-head{display:flex;align-items:center;gap:12px;margin-bottom:6px;flex-wrap:wrap}
+  .proforma-notice-tag{font-size:9.5px;font-weight:700;letter-spacing:.12em;background:#111;color:#fff;padding:3px 8px;border-radius:3px}
+  .proforma-notice-method{font-size:14px;font-weight:600}
+  .proforma-notice-body{font-size:12px;line-height:1.6}
+  /* Bank — blue */
+  .proforma-bank{background:#eaf2ff;border:1px solid #b3ccef;color:#1a3c6e}
+  .proforma-bank .proforma-notice-tag{background:#1a3c6e}
+  .proforma-bank .proforma-notice-method{color:#1a3c6e}
+  /* Cash — amber */
+  .proforma-cash{background:#fff8e6;border:1px solid #f0d171;color:#5a4400}
+  .proforma-cash .proforma-notice-tag{background:#5a4400}
+  .proforma-cash .proforma-notice-method{color:#5a4400}
+  /* Card — green */
+  .proforma-card{background:#e8f5e8;border:1px solid #99cc99;color:#1f6b2e}
+  .proforma-card .proforma-notice-tag{background:#1f6b2e}
+  .proforma-card .proforma-notice-method{color:#1f6b2e}
+  /* Unknown / legacy */
+  .proforma-unknown{background:#f5f5f5;border:1px solid #ddd;color:#444}
 
   /* Detail strip */
   .detail-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;padding:14px 18px;background:#fafafa;border:1px solid #eee;border-radius:4px;margin-bottom:24px}
@@ -739,7 +820,6 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     <div class="left">
       <img class="logo" src="${logoUrl}" alt="${escapeHtml(brand.name)}" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
       <div style="display:none;font-size:22px;font-weight:700;letter-spacing:-.02em">${escapeHtml(brand.name)}</div>
-      <div class="tagline">${escapeHtml(brand.tagline || '')}</div>
     </div>
     <div class="right">
       <div class="doctype">${docTitle}</div>
@@ -747,27 +827,63 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     </div>
   </div>
 
+  ${isProforma ? `
+  <div class="proforma-notice proforma-${sale.payment_method || 'unknown'}">
+    <div class="proforma-notice-head">
+      <span class="proforma-notice-tag">PRO FORMA</span>
+      <span class="proforma-notice-method">
+        ${sale.payment_method === 'cash' ? '💰 Payment by Cash on Collection'
+        : sale.payment_method === 'bank' ? '🏦 Payment by Bank Transfer'
+        : sale.payment_method === 'card' ? '💳 Payment by Card'
+        : 'Payment method not specified'}
+      </span>
+    </div>
+    <div class="proforma-notice-body">
+      ${sale.payment_method === 'cash'
+        ? `This is a pro-forma invoice for cash payment on collection. <strong>No VAT applies.</strong> Bring this reference when you collect: <strong>${escapeHtml(sale.payment_reference || '')}</strong>. We'll issue a receipt once payment is received.`
+        : sale.payment_method === 'bank'
+        ? `This is a pro-forma invoice — not a tax invoice. Pay by bank transfer using the details below, quoting reference <strong>${escapeHtml(sale.payment_reference || '')}</strong>. Once payment clears we'll issue the final VAT invoice and dispatch your order.`
+        : `This is a pro-forma invoice — not a tax invoice. Quote reference <strong>${escapeHtml(sale.payment_reference || '')}</strong> when paying. We'll issue a final invoice once payment is received.`}
+    </div>
+  </div>
+  ` : ''}
+
   <div class="addr-grid">
     <div class="addr-block">
       <div class="lbl">From</div>
-      <div class="name">${escapeHtml(company.company_name || brand.name)}</div>
-      <div class="lines">
-        ${escapeHtml(company.company_address || '').replace(/\n/g, '<br>')}<br>
-        ${company.company_phone ? 'Tel: ' + escapeHtml(company.company_phone) + '<br>' : ''}
-        ${company.company_email ? escapeHtml(company.company_email) + '<br>' : ''}
-        ${company.company_website ? escapeHtml(company.company_website) + '<br>' : ''}
-        ${company.company_reg_no ? 'Company Reg Number: ' + escapeHtml(company.company_reg_no) + '<br>' : ''}
-        ${isVatRegistered && company.vat_number ? 'VAT Number: ' + escapeHtml(company.vat_number) : ''}
+      <div class="name">${escapeHtml(company.company_name || brand.fullName || brand.name)}</div>
+      ${company.company_address ? `<div class="lines">${escapeHtml(company.company_address).replace(/\n/g, '<br>')}</div>` : ''}
+      <div class="contact-row">
+        ${company.company_phone ? `<span>${escapeHtml(company.company_phone)}</span>` : ''}
+        ${company.company_email ? `<span>${escapeHtml(company.company_email)}</span>` : ''}
+        ${company.company_website ? `<span>${escapeHtml(company.company_website)}</span>` : ''}
       </div>
+      ${(company.company_reg_no || (isVatRegistered && company.vat_number)) ? `
+        <div class="meta-row">
+          ${company.company_reg_no ? `<span>Co. No. ${escapeHtml(company.company_reg_no)}</span>` : ''}
+          ${isVatRegistered && company.vat_number ? `<span>VAT ${escapeHtml(company.vat_number)}</span>` : ''}
+        </div>
+      ` : ''}
+      <!-- Social media placeholder — rendered when company.socials_* fields are populated.
+           Settings UI will let admin add Instagram / Facebook / TikTok handles. Once set,
+           the placeholder above the foot becomes a row of small icon links. -->
+      ${(company.social_instagram || company.social_facebook || company.social_tiktok || company.social_linkedin) ? `
+        <div class="socials-row">
+          ${company.social_instagram ? `<a href="https://instagram.com/${escapeHtml(company.social_instagram.replace(/^@/,''))}" target="_blank" rel="noopener">Instagram @${escapeHtml(company.social_instagram.replace(/^@/,''))}</a>` : ''}
+          ${company.social_facebook ? `<a href="${escapeHtml(company.social_facebook)}" target="_blank" rel="noopener">Facebook</a>` : ''}
+          ${company.social_tiktok ? `<a href="https://tiktok.com/@${escapeHtml(company.social_tiktok.replace(/^@/,''))}" target="_blank" rel="noopener">TikTok @${escapeHtml(company.social_tiktok.replace(/^@/,''))}</a>` : ''}
+          ${company.social_linkedin ? `<a href="${escapeHtml(company.social_linkedin)}" target="_blank" rel="noopener">LinkedIn</a>` : ''}
+        </div>
+      ` : ''}
     </div>
     <div class="addr-block">
-      <div class="lbl">Billed / Delivered to</div>
+      <div class="lbl">${isProforma ? 'Billed to' : 'Billed / Delivered to'}</div>
       <div class="name">${escapeHtml(billedToName)}</div>
       <div class="lines">
         ${cleanedAddress
           ? escapeHtml(cleanedAddressLines.slice(1).join('\n')).replace(/\n/g, '<br>') + '<br>'
           : '<em style="color:#bbb">No address on file</em><br>'}
-        ${sale.customer_phone ? 'Tel: ' + escapeHtml(sale.customer_phone) + '<br>' : ''}
+        ${sale.customer_phone ? escapeHtml(sale.customer_phone) + '<br>' : ''}
         ${sale.customer_email ? escapeHtml(sale.customer_email) : ''}
       </div>
     </div>
@@ -777,7 +893,14 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     <div class="item"><div class="l">Date</div><div class="v">${escapeHtml(datePretty)}</div></div>
     <div class="item"><div class="l">Channel</div><div class="v">${escapeHtml(channelLabel)}</div></div>
     ${sale.order_number ? `<div class="item"><div class="l">Order No.</div><div class="v" style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(sale.order_number)}</div></div>` : sale.vehicle_reg ? `<div class="item"><div class="l">Vehicle Reg.</div><div class="v">${escapeHtml(sale.vehicle_reg)}</div></div>` : sale.vin_number ? `<div class="item"><div class="l">VIN</div><div class="v" style="font-family:ui-monospace,monospace;font-size:10px">${escapeHtml(sale.vin_number)}</div></div>` : `<div class="item"><div class="l">Status</div><div class="v" style="text-transform:capitalize">${escapeHtml(sale.status || 'paid')}</div></div>`}
-    <div class="item"><div class="l">Payment</div><div class="v">${escapeHtml(paymentLabel)}</div></div>
+    ${
+      // Payment label policy: show ONLY for cash / bank / card (direct sales + pro-formas).
+      // Shopify/eBay channels: the channel name already implies the payment route, and the
+      // redundant "Shopify Payment" / "eBay Payment" label looks like noise — hide entirely.
+      (sale.payment_method === 'cash' || sale.payment_method === 'bank' || sale.payment_method === 'card')
+        ? `<div class="item"><div class="l">Payment</div><div class="v">${escapeHtml(paymentLabel)}</div></div>`
+        : `<div class="item"></div>` /* placeholder keeps the 4-column grid balanced */
+    }
   </div>
 
   ${(sale.vehicle_reg || sale.vin_number) && sale.order_number ? `
@@ -791,13 +914,14 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     <thead><tr>
       <th>Description</th>
       <th class="num" style="width:60px">Qty</th>
-      <th class="num" style="width:110px">Unit ${isVatRegistered ? 'Net' : ''}</th>
-      <th class="num" style="width:110px">Total ${isVatRegistered ? 'Net' : ''}</th>
+      <th class="num" style="width:110px">Unit ${showVatBreakdown ? 'Net' : ''}</th>
+      <th class="num" style="width:110px">Total ${showVatBreakdown ? 'Net' : ''}</th>
     </tr></thead>
     <tbody>
       ${items.map(i => {
-        const unitNet = isVatRegistered ? (parseFloat(i.unit_price) / 1.2) : parseFloat(i.unit_price);
-        const lineNet = isVatRegistered ? (parseFloat(i.line_total) / 1.2) : parseFloat(i.line_total);
+        // Unit prices in the DB are gross. If we're breaking out VAT, divide for the net display.
+        const unitNet = showVatBreakdown ? (parseFloat(i.unit_price) / (1 + 0.2)) : parseFloat(i.unit_price);
+        const lineNet = showVatBreakdown ? (parseFloat(i.line_total) / (1 + 0.2)) : parseFloat(i.line_total);
         return `<tr>
           <td>${escapeHtml(i.title)}<div class="sku">${escapeHtml(i.sku || '')}</div></td>
           <td class="num">${i.qty}</td>
@@ -810,14 +934,14 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
 
   <div class="totals-wrap">
     <div class="totals">
-      ${isVatRegistered ? `
+      ${showVatBreakdown ? `
         <div class="row"><span>Subtotal (Net)</span><span>${fmt(subtotalNet)}</span></div>
         <div class="row"><span>VAT (${company.vat_rate || 20}%)</span><span>${fmt(vatAmount)}</span></div>
       ` : `
-        <div class="row"><span>Subtotal</span><span>${fmt(sale.subtotal)}</span></div>
+        <div class="row"><span>Subtotal${isCashSale ? ' (VAT-free cash sale)' : ''}</span><span>${fmt(sale.subtotal)}</span></div>
       `}
       ${parseFloat(sale.shipping || 0) > 0 ? `<div class="row"><span>Shipping</span><span>${fmt(sale.shipping)}</span></div>` : ''}
-      <div class="grand"><span>TOTAL${isVatRegistered ? ' (incl. VAT)' : ''}</span><span>${fmt(sale.total)}</span></div>
+      <div class="grand"><span>TOTAL${showVatBreakdown ? ' (incl. VAT)' : isCashSale ? ' (no VAT)' : ''}</span><span>${fmt(sale.total)}</span></div>
     </div>
   </div>
 
@@ -859,14 +983,22 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
 </body></html>`;
 }
 
-// GET /api/sales/:id/invoice.html  — print-ready invoice (or estimate, or receipt)
+// GET /api/sales/:id/invoice.html  — print-ready invoice (or estimate, proforma, or receipt)
+// Query: ?proforma=1 forces proforma layout even for paid invoices.
+// Pro-formas use the FULL invoice template (1:1 with a real invoice) but with
+// "PRO FORMA INVOICE" as the document title. The minimal "estimate" layout is
+// kept for legacy estimates that have no payment_method set (pre-Quote-Builder).
 router.get('/:id/invoice.html', requireAdmin, async (req, res) => {
   const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
   if (!s.rows[0]) return res.status(404).send('Not found');
   const sale = s.rows[0];
   const items = (await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id])).rows;
   const company = await getCompanySettings();
-  const mode = sale.is_estimate ? 'estimate'
+  const forceProforma = req.query.proforma === '1' || req.query.proforma === 'true';
+  // Pro-forma = estimate created via Quote Builder (has a payment_method) OR explicit override.
+  const isProforma = forceProforma || (sale.is_estimate && !!sale.payment_method);
+  const mode = isProforma ? 'proforma'
+             : sale.is_estimate ? 'estimate'
              : (sale.payment_method === 'cash' && !company.vat_registered) ? 'receipt'
              : 'invoice';
   const baseUrl = `${req.protocol}://${req.get('host')}`;
@@ -884,11 +1016,17 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
   const items = (await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id])).rows;
   const company = await getCompanySettings();
   const brand = require('../lib/brand');
-  const mode = sale.is_estimate ? 'estimate'
+  // Same proforma detection as the invoice.html route.
+  const isProforma = sale.is_estimate && !!sale.payment_method;
+  const mode = isProforma ? 'proforma'
+             : sale.is_estimate ? 'estimate'
              : (sale.payment_method === 'cash' && !company.vat_registered) ? 'receipt'
              : 'invoice';
   const html = renderInvoiceHtml({ sale, items, company, mode, baseUrl: `${req.protocol}://${req.get('host')}` });
-  const docLabel = mode === 'estimate' ? 'Estimate' : mode === 'receipt' ? 'Receipt' : 'Invoice';
+  const docLabel = mode === 'estimate' ? 'Estimate'
+                 : mode === 'proforma' ? 'Pro-forma invoice'
+                 : mode === 'receipt' ? 'Receipt'
+                 : 'Invoice';
   const subject = `${docLabel} ${sale.invoice_number || sale.payment_reference || ''} — ${brand.name}`;
 
   if (!process.env.RESEND_API_KEY) {
@@ -1028,14 +1166,22 @@ router.patch('/:id/items/:itemId', requireAdmin, async (req, res) => {
       [newTitle, newQty, newUnitPrice, newLineTotal, req.params.itemId]
     );
 
-    // Recompute sale totals from all line items
+    // Recompute sale totals from all line items.
+    // Same VAT model as sale creation: subtotal is gross (VAT-inclusive),
+    // total = subtotal + shipping. VAT column stores the portion, not an addition.
     const tot = await c.query(`SELECT COALESCE(SUM(line_total),0) AS subtotal FROM sale_items WHERE sale_id = $1`, [req.params.id]);
     const newSubtotal = parseFloat(tot.rows[0].subtotal);
-    // Keep the existing VAT proportion (if VAT was 0, keep 0; if it was 20% of old subtotal, keep 20%)
-    const oldSubtotal = parseFloat(old.sale_subtotal);
-    const vatRate = oldSubtotal > 0 ? (parseFloat(old.sale_vat) / oldSubtotal) : 0;
-    const newVat = +(newSubtotal * vatRate).toFixed(2);
-    const newTotal = +(newSubtotal + newVat + parseFloat(old.sale_shipping || 0)).toFixed(2);
+    const saleRow = await c.query(`SELECT payment_method FROM sales WHERE id = $1`, [req.params.id]);
+    const settings = await c.query('SELECT vat_rate, vat_registered FROM app_settings WHERE id = 1');
+    const setRow = settings.rows[0] || {};
+    const vatRegistered = !!setRow.vat_registered;
+    const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
+    const isCashSale = saleRow.rows[0]?.payment_method === 'cash';
+    const vatChargeable = !isCashSale && vatRegistered;
+    const newVat = vatChargeable
+      ? +(newSubtotal - newSubtotal / (1 + vatRate)).toFixed(2)
+      : 0;
+    const newTotal = +(newSubtotal + parseFloat(old.sale_shipping || 0)).toFixed(2);
     await c.query(
       `UPDATE sales SET subtotal = $1, vat = $2, total = $3 WHERE id = $4`,
       [newSubtotal, newVat, newTotal, req.params.id]
@@ -1147,6 +1293,41 @@ router.post('/backfill-ebay-addresses', requireAdmin, async (req, res) => {
   }
   await audit(req, 'backfill_ebay_addresses', null, null, { scanned: rows.length, updated, noAddress, failed });
   res.json({ scanned: rows.length, updated, noAddress, failed, errors: errors.slice(0, 5) });
+});
+
+// POST /api/sales/backfill-vat — one-time corrective sweep for sales where VAT
+// was incorrectly added on top of an already-gross subtotal. Resets every sale
+// to the new model: total = subtotal + shipping; cash sales have zero VAT;
+// other VAT-registered sales have the VAT *portion* of the gross subtotal.
+// Safe to run multiple times — idempotent.
+router.post('/backfill-vat', requireAdmin, async (req, res) => {
+  const settings = await query('SELECT vat_rate, vat_registered FROM app_settings WHERE id = 1');
+  const setRow = settings.rows[0] || {};
+  const vatRegistered = !!setRow.vat_registered;
+  const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
+
+  const all = await query(`SELECT id, subtotal, shipping, vat, total, payment_method FROM sales`);
+  let fixed = 0, alreadyOk = 0;
+  for (const s of all.rows) {
+    const subtotal = parseFloat(s.subtotal || 0);
+    const shipping = parseFloat(s.shipping || 0);
+    const isCashSale = s.payment_method === 'cash';
+    const vatChargeable = !isCashSale && vatRegistered;
+    const correctVat = vatChargeable ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2) : 0;
+    const correctTotal = +(subtotal + shipping).toFixed(2);
+    if (Math.abs(parseFloat(s.vat || 0) - correctVat) < 0.005
+        && Math.abs(parseFloat(s.total || 0) - correctTotal) < 0.005) {
+      alreadyOk++;
+      continue;
+    }
+    await query(
+      `UPDATE sales SET vat = $1, total = $2 WHERE id = $3`,
+      [correctVat, correctTotal, s.id]
+    );
+    fixed++;
+  }
+  await audit(req, 'backfill_vat', null, null, { fixed, alreadyOk });
+  res.json({ ok: true, fixed, alreadyOk, total: all.rows.length });
 });
 
 module.exports = router;
