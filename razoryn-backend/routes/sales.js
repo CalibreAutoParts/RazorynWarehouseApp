@@ -618,7 +618,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   ${sale.payment_method ? `
   <div class="customer-block">
     <div class="label">Payment method</div>
-    <div class="name">${sale.payment_method === 'cash' ? '💰 Cash on collection (VAT-free)'
+    <div class="name">${sale.payment_method === 'cash' ? '💰 Cash on collection'
                        : sale.payment_method === 'bank' ? '🏦 Bank transfer'
                        : sale.payment_method === 'card' ? '💳 Card'
                        : escapeHtml(sale.payment_method)}</div>
@@ -840,7 +840,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     </div>
     <div class="proforma-notice-body">
       ${sale.payment_method === 'cash'
-        ? `This is a pro-forma invoice for cash payment on collection. <strong>No VAT applies.</strong> Bring this reference when you collect: <strong>${escapeHtml(sale.payment_reference || '')}</strong>. We'll issue a receipt once payment is received.`
+        ? `This is a pro-forma invoice for cash payment on collection. Bring this reference when you collect: <strong>${escapeHtml(sale.payment_reference || '')}</strong>. We'll issue a receipt once payment is received.`
         : sale.payment_method === 'bank'
         ? `This is a pro-forma invoice — not a tax invoice. Pay by bank transfer using the details below, quoting reference <strong>${escapeHtml(sale.payment_reference || '')}</strong>. Once payment clears we'll issue the final VAT invoice and dispatch your order.`
         : `This is a pro-forma invoice — not a tax invoice. Quote reference <strong>${escapeHtml(sale.payment_reference || '')}</strong> when paying. We'll issue a final invoice once payment is received.`}
@@ -938,10 +938,10 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
         <div class="row"><span>Subtotal (Net)</span><span>${fmt(subtotalNet)}</span></div>
         <div class="row"><span>VAT (${company.vat_rate || 20}%)</span><span>${fmt(vatAmount)}</span></div>
       ` : `
-        <div class="row"><span>Subtotal${isCashSale ? ' (VAT-free cash sale)' : ''}</span><span>${fmt(sale.subtotal)}</span></div>
+        <div class="row"><span>Subtotal</span><span>${fmt(sale.subtotal)}</span></div>
       `}
       ${parseFloat(sale.shipping || 0) > 0 ? `<div class="row"><span>Shipping</span><span>${fmt(sale.shipping)}</span></div>` : ''}
-      <div class="grand"><span>TOTAL${showVatBreakdown ? ' (incl. VAT)' : isCashSale ? ' (no VAT)' : ''}</span><span>${fmt(sale.total)}</span></div>
+      <div class="grand"><span>TOTAL${showVatBreakdown ? ' (incl. VAT)' : ''}</span><span>${fmt(sale.total)}</span></div>
     </div>
   </div>
 
