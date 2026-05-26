@@ -9,25 +9,31 @@ const router = express.Router();
 router.use(requireAuth);
 
 // ──────────────────────────────────────────────────────────────────────────
-// Self-healing migration — adds the social-media columns to app_settings if
-// they don't exist yet. Runs once on cold boot; idempotent.
+// Self-healing migration — adds columns to app_settings + products that are
+// referenced by this route but might not exist yet on older databases.
+// Idempotent; runs once on cold boot.
 // ──────────────────────────────────────────────────────────────────────────
 let _migrationDone = false;
 async function ensureSocialColumns() {
   if (_migrationDone) return;
   try {
+    // Socials on app_settings
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS social_instagram TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS social_facebook  TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS social_tiktok    TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS social_linkedin  TEXT`);
-    // Review + phone-prefix settings (also touched by routes/messages.js migration)
+    // Reviews + phone-prefix settings (also touched by routes/messages.js migration)
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS trustpilot_url TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS google_review_url TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS review_platform TEXT DEFAULT 'trustpilot'`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS default_country_code TEXT DEFAULT '44'`);
+    // Shopify product handle on products — populated by /import-shopify so
+    // Quote Builder's Shopify link can go direct to /products/{handle}
+    // instead of falling back to a /search?q=SKU URL.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS shopify_handle TEXT`);
     _migrationDone = true;
   } catch (e) {
-    console.warn('[settings.js] social migration warning:', e.message);
+    console.warn('[settings.js] migration warning:', e.message);
   }
 }
 ensureSocialColumns();
@@ -206,6 +212,7 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
 // POST /api/settings/import-shopify (admin) — pull all products from Shopify into the warehouse DB.
 // Upsert by shopify_variant_id (so re-running it is safe and updates titles/prices/images).
 router.post('/import-shopify', requireAdmin, async (req, res) => {
+  await ensureSocialColumns();  // makes sure shopify_handle column exists
   const shopify = require('../services/shopify');
   if (!shopify.isConfigured()) {
     return res.status(400).json({ error: 'shopify_not_configured' });
@@ -219,15 +226,19 @@ router.post('/import-shopify', requireAdmin, async (req, res) => {
           [v.shopify_variant_id, v.sku]
         );
         if (existing.rows.length) {
+          // Existing row — also refresh shopify_handle. The handle is what
+          // Quote Builder uses for direct-link `/products/{handle}` URLs.
           await query(`
             UPDATE products SET
               shopify_product_id = $1, shopify_variant_id = $2, shopify_inventory_id = $3,
-              title = $4, brand = COALESCE($5, brand), model = COALESCE($6, model),
-              barcode = COALESCE($7, barcode),
-              price_shopify = $8, image_url = COALESCE($9, image_url),
-              qty_on_hand = $10, updated_at = now()
-            WHERE id = $11`,
+              shopify_handle = $4,
+              title = $5, brand = COALESCE($6, brand), model = COALESCE($7, model),
+              barcode = COALESCE($8, barcode),
+              price_shopify = $9, image_url = COALESCE($10, image_url),
+              qty_on_hand = $11, updated_at = now()
+            WHERE id = $12`,
             [v.shopify_product_id, v.shopify_variant_id, v.shopify_inventory_id,
+             v.shopify_handle || null,
              v.title, v.brand, v.model, v.barcode,
              v.price_shopify, v.image_url, v.qty_on_hand, existing.rows[0].id]
           );
@@ -236,11 +247,13 @@ router.post('/import-shopify', requireAdmin, async (req, res) => {
           await query(`
             INSERT INTO products
               (sku, title, brand, model, barcode, price_shopify, image_url,
-               qty_on_hand, shopify_product_id, shopify_variant_id, shopify_inventory_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+               qty_on_hand, shopify_product_id, shopify_variant_id, shopify_inventory_id,
+               shopify_handle)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
             [v.sku, v.title, v.brand, v.model, v.barcode,
              v.price_shopify, v.image_url, v.qty_on_hand,
-             v.shopify_product_id, v.shopify_variant_id, v.shopify_inventory_id]
+             v.shopify_product_id, v.shopify_variant_id, v.shopify_inventory_id,
+             v.shopify_handle || null]
           );
           inserted++;
         }
