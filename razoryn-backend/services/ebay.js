@@ -610,6 +610,94 @@ async function dumpOrderXml(orderId, days, storeArg) {
   return xml.replace(/<eBayAuthToken>[^<]*<\/eBayAuthToken>/g, '<eBayAuthToken>***REDACTED***</eBayAuthToken>');
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// CompleteSale — push tracking info back to eBay so the buyer sees the
+// "marked as shipped" notification + carrier/tracking link inside eBay.
+//
+// Called by routes/dispatch.js after staff marks an order dispatched locally.
+// Uses the Trading API CompleteSale call (well-supported, accepts Auth'n'Auth
+// per-store tokens, simpler than the modern Fulfillment API for this case).
+//
+// `opts`:
+//   orderId         — the eBay OrderID from sale.external_order_id
+//   trackingNumber  — tracking number (optional — eBay still accepts "shipped"
+//                     with no tracking, useful for collection couriers)
+//   carrier         — our internal carrier name (e.g. "DPD"); mapped below
+//   shipped         — boolean, default true. Set false to *unmark* shipped.
+//
+// "Already shipped" errors from eBay (error code 16500) are treated as success
+// — the goal state matches, no point bothering the user.
+// ──────────────────────────────────────────────────────────────────────────
+async function completeSale(storeArg, opts = {}) {
+  const { orderId, trackingNumber, carrier, shipped = true } = opts;
+  if (!orderId) throw new Error('orderId required');
+
+  // Map our internal carrier name → eBay's ShippingCarrierUsed enum value.
+  // eBay is fairly permissive (accepts arbitrary strings), but standard names
+  // unlock the buyer-facing "track parcel" link inside the eBay app.
+  // Notably: eBay still uses "Hermes" (the old name); Evri may not be recognised
+  // for tracking-link generation, so we map it back to Hermes for eBay only.
+  const carrierMap = {
+    'Royal Mail':            'Royal Mail',
+    'Parcelforce':           'Parcelforce',
+    'DPD':                   'DPD',
+    'Evri':                  'Hermes',                  // eBay still uses Hermes
+    'UPS':                   'UPS',
+    'DHL':                   'DHL',
+    'FedEx':                 'FedEx',
+    'Tuffnells':             'Tuffnells',
+    'Yodel':                 'Yodel',
+    'APC Overnight':         'APC Overnight',
+    'Other / custom courier': 'Other',
+    'Already shipped (channel)': null,  // shouldn't get here — dispatch route filters this
+  };
+  const ebayCarrier = (carrierMap[carrier] !== undefined ? carrierMap[carrier] : carrier) || 'Other';
+
+  // Build the Shipment block only if we have something to ship with. eBay
+  // accepts Shipped=true with no Shipment node (just marks as posted, no
+  // tracking shown), which is the right behaviour for "I posted it via the
+  // local Post Office and didn't get a tracking number" cases.
+  let shipmentXml = '';
+  if (trackingNumber && shipped) {
+    shipmentXml = `<Shipment>
+      <ShipmentTrackingDetails>
+        <ShipmentTrackingNumber>${escapeXml(trackingNumber)}</ShipmentTrackingNumber>
+        <ShippingCarrierUsed>${escapeXml(ebayCarrier)}</ShippingCarrierUsed>
+      </ShipmentTrackingDetails>
+    </Shipment>`;
+  }
+
+  const bodyInner = `<OrderID>${escapeXml(orderId)}</OrderID>
+    <Shipped>${shipped ? 'true' : 'false'}</Shipped>
+    ${shipmentXml}`;
+
+  let xml;
+  try {
+    xml = await tradingCall('CompleteSale', bodyInner, storeArg);
+  } catch (e) {
+    // tradingCall surfaces HTTP errors. Parse the XML body if present to
+    // distinguish "already shipped" (16500) from genuine failures.
+    const body = e.response?.data || '';
+    if (typeof body === 'string' && body.includes('16500')) {
+      return { ok: true, alreadyShipped: true };
+    }
+    throw e;
+  }
+
+  // Even with HTTP 200, CompleteSale can return Failure inside the XML.
+  // Look for <Ack>Failure</Ack> and the error code.
+  const ack = extractOne(xml, 'Ack') || '';
+  if (ack === 'Success' || ack === 'Warning') {
+    return { ok: true, ack };
+  }
+  // Failure path — extract error details
+  const errCode = extractOne(xml, 'ErrorCode') || 'unknown';
+  const errMsg  = extractOne(xml, 'ShortMessage') || extractOne(xml, 'LongMessage') || 'eBay returned Failure';
+  // 16500 = "Order already shipped" — treat as success since goal state matches
+  if (errCode === '16500') return { ok: true, alreadyShipped: true };
+  throw new Error(`CompleteSale ${ack} [${errCode}]: ${errMsg}`);
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
@@ -622,6 +710,7 @@ module.exports = {
   pushStockForProduct,
   getActiveListings,
   reviseItem,
+  completeSale,
   // Multi-store helpers
   listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary, standalone: !!s.standalone })),
   getPrimaryStore: () => brand.getPrimaryStore(),

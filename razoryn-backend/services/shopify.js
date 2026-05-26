@@ -554,6 +554,102 @@ async function findProductsBySkus(skus) {
   return found;
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// fulfillOrder — push fulfillment + tracking back to Shopify so the customer
+// gets the standard "your order is on its way" email + sees tracking in their
+// account / order status page.
+//
+// Modern Shopify uses the FulfillmentOrders API (the old
+// `/orders/{id}/fulfillments.json` was deprecated 2022-07). Flow:
+//   1. Fetch the open fulfillment orders for the order
+//   2. POST a Fulfillment for each open fulfillment order, attaching tracking
+//
+// `opts`:
+//   orderId        — Shopify order ID from sale.external_order_id
+//   trackingNumber — optional tracking number
+//   carrier        — our internal carrier name (e.g. "DPD"); mapped below
+//   notifyCustomer — default true; sends Shopify's shipped-notification email
+//
+// Already-fulfilled orders are treated as success.
+// ──────────────────────────────────────────────────────────────────────────
+async function fulfillOrder(opts = {}) {
+  const { orderId, trackingNumber, carrier, notifyCustomer = true } = opts;
+  if (!orderId) throw new Error('orderId required');
+
+  // Carrier mapping → Shopify's `tracking_company`. Shopify accepts arbitrary
+  // strings but matches known carrier names to auto-generate the tracking-link
+  // URL in the customer email. See:
+  //   https://help.shopify.com/en/manual/orders/status-tracking/supported-tracking-carriers
+  const carrierMap = {
+    'Royal Mail':             'Royal Mail',
+    'Parcelforce':            'Parcelforce',
+    'DPD':                    'DPD',
+    'Evri':                   'Evri',          // Shopify accepts Evri (renamed from Hermes)
+    'UPS':                    'UPS',
+    'DHL':                    'DHL Express',   // Shopify uses "DHL Express" for UK
+    'FedEx':                  'FedEx',
+    'Tuffnells':              'Tuffnells',
+    'Yodel':                  'Yodel',
+    'APC Overnight':          'APC Overnight',
+    'Other / custom courier': 'Other',
+    'Already shipped (channel)': null,
+  };
+  const shopifyCarrier = carrierMap[carrier] !== undefined ? carrierMap[carrier] : carrier;
+
+  // 1. Get open fulfillment orders for this order
+  let foRes;
+  try {
+    foRes = await shopifyRequest('GET', `/orders/${encodeURIComponent(orderId)}/fulfillment_orders.json`);
+  } catch (e) {
+    if (e.response?.status === 404) {
+      throw new Error(`Shopify order ${orderId} not found`);
+    }
+    throw e;
+  }
+  const fulfillmentOrders = foRes.data?.fulfillment_orders || [];
+  // Only fulfillment orders in 'open' or 'in_progress' state can be fulfilled.
+  // 'closed' = already shipped, 'cancelled' = cancelled. 'scheduled' = future.
+  const fulfillable = fulfillmentOrders.filter(fo =>
+    fo.status === 'open' || fo.status === 'in_progress'
+  );
+  if (fulfillable.length === 0) {
+    // Nothing left to fulfil — order is already shipped or all line items are
+    // in non-shippable states. Match the eBay behaviour: success.
+    return { ok: true, alreadyFulfilled: true, totalFulfillmentOrders: fulfillmentOrders.length };
+  }
+
+  // 2. POST a Fulfillment that covers every open fulfillment order in one go.
+  // The line_items_by_fulfillment_order without explicit line items means
+  // "fulfil everything in this fulfillment order".
+  const payload = {
+    fulfillment: {
+      notify_customer: !!notifyCustomer,
+      line_items_by_fulfillment_order: fulfillable.map(fo => ({
+        fulfillment_order_id: fo.id,
+      })),
+    },
+  };
+  if (trackingNumber || shopifyCarrier) {
+    payload.fulfillment.tracking_info = {};
+    if (trackingNumber)  payload.fulfillment.tracking_info.number  = trackingNumber;
+    if (shopifyCarrier)  payload.fulfillment.tracking_info.company = shopifyCarrier;
+  }
+
+  try {
+    const r = await shopifyRequest('POST', `/fulfillments.json`, { data: payload });
+    return {
+      ok: true,
+      fulfillmentId: r.data?.fulfillment?.id,
+      status: r.data?.fulfillment?.status,
+    };
+  } catch (e) {
+    const msg = e.response?.data?.errors
+      ? JSON.stringify(e.response.data.errors)
+      : e.message;
+    throw new Error(`Shopify fulfillment failed: ${msg}`);
+  }
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
@@ -572,4 +668,5 @@ module.exports = {
   getDeliveryProfiles,
   assignProductToDeliveryProfile,
   debugShopifyAccess,
+  fulfillOrder,
 };
