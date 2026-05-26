@@ -738,12 +738,12 @@
     display: inline-block;
     font-size: 11px;
     font-weight: 600;
-    color: white;
-    background: var(--ink);
+    color: #ffffff;
+    background: var(--brand-primary);
     padding: 4px 14px;
     border-radius: 14px;
     white-space: nowrap;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.25);
     opacity: 0;
     transform: translateY(-4px);
     transition: opacity 0.2s, transform 0.2s, background 0.2s;
@@ -6535,6 +6535,11 @@ function renderSettings() {
             <button class="btn btn-outline" onclick="backfillEbayAddresses()">🏠 Backfill missing eBay addresses</button>
           </div>
           <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+            <div style="font-size:13px;font-weight:600;margin-bottom:4px">Old sales showing wrong totals?</div>
+            <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Recomputes VAT and totals on all existing sales using the corrected gross-inclusive model: total = subtotal + shipping, cash sales are VAT-free. Idempotent — safe to re-run.</div>
+            <button class="btn btn-outline" onclick="backfillVat()">🧮 Recompute VAT on existing sales</button>
+          </div>
+          <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
             <div style="font-size:13px;font-weight:600;margin-bottom:4px">eBay returns &amp; cancellations</div>
             <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Scans your eBay orders for cancellations and refunds and creates Return rows in the Returns tab so staff can review and add photos.</div>
             <button class="btn btn-outline" onclick="syncEbayReturns()">↩️ Pull returns from eBay</button>
@@ -6934,6 +6939,24 @@ async function backfillEbayAddresses() {
     await Store.refresh('sales');
     if (typeof renderSales === 'function' && State.page === 'sales') renderSales();
   } catch (e) {
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// Recompute VAT + total on all existing sales using the corrected gross-inclusive
+// model. Use after the VAT-bug fix is deployed so historical sales reflect the
+// new policy (cash = VAT-free, others = VAT portion of gross, never added on top).
+async function backfillVat() {
+  if (!confirm('Recompute VAT and totals on ALL existing sales.\n\nThe corrected model:\n• Cash sales: zero VAT, total = subtotal + shipping\n• Bank/card/online sales: VAT is the *portion* of the gross subtotal, never added on top\n\nSafe to re-run. Existing line items are not touched.\n\nContinue?')) return;
+  const taskId = Task.start('Recomputing VAT on existing sales');
+  try {
+    const r = await Api.post('/api/sales/backfill-vat');
+    Task.done(taskId, `${r.fixed} fixed, ${r.alreadyOk} OK`);
+    toast(`Recompute done — fixed ${r.fixed} of ${r.total} sales (${r.alreadyOk} already correct).`, 'success', 6000);
+    await Store.refresh('sales');
+    if (typeof renderSales === 'function' && State.page === 'sales') renderSales();
+  } catch (e) {
+    Task.fail(taskId, 'Recompute failed');
     toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
 }
