@@ -70,20 +70,30 @@ function trackingUrlFor(carrier, trackingNumber) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// GET /api/dispatch/outstanding
+// GET /api/dispatch/outstanding?days=10
 // The main worklist. Returns three buckets:
-//   • toShip — paid sales (non-cash) without a dispatched_at
-//   • toCollect — paid cash-on-collection sales without a collected_at
+//   • toShip — paid sales (non-cash) without a dispatched_at, within `days` cutoff
+//   • toCollect — paid cash-on-collection sales without a collected_at, within `days` cutoff
 //   • recent — last 14 days of dispatches/collections, for verification + edit
-// Plus a summary count per bucket for the sidebar badge.
+//
+// `days` (default 10) caps how far back the worklist looks. Sales older than
+// this are assumed to have been handled on the source channel (eBay/Shopify)
+// before this app existed, or otherwise dealt with offline. The cutoff stops
+// pre-app history from cluttering the worklist.
+//
+// We also defensively exclude rows where status='dispatched' even if
+// dispatched_at is null — happens when a sale was synced from eBay/Shopify with
+// a "shipped" status before our dispatch tracking columns existed.
 // ──────────────────────────────────────────────────────────────────────────
 router.get('/outstanding', requireAdmin, async (req, res) => {
   await ensureDispatchColumns();
+  const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 10));
   try {
     // Outstanding orders to ship. Excludes:
     //  • Estimates (no payment yet)
     //  • Cash on collection (those go into the "to collect" bucket)
-    //  • Already-dispatched sales
+    //  • Already-dispatched sales (dispatched_at set OR status = 'dispatched')
+    //  • Sales older than the configured cutoff (default 10 days)
     const toShip = await query(`
       SELECT s.*,
         (SELECT title FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_title,
@@ -93,11 +103,12 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
       FROM sales s
       WHERE s.is_estimate = false
         AND s.dispatched_at IS NULL
-        AND s.payment_method != 'cash'
-        AND s.status NOT IN ('refunded', 'cancelled')
+        AND (s.payment_method IS NULL OR s.payment_method != 'cash')
+        AND s.status NOT IN ('refunded', 'cancelled', 'dispatched')
+        AND s.occurred_at >= now() - ($1 || ' days')::interval
       ORDER BY s.occurred_at ASC
       LIMIT 500
-    `);
+    `, [String(days)]);
 
     const toCollect = await query(`
       SELECT s.*,
@@ -109,10 +120,11 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
       WHERE s.is_estimate = false
         AND s.payment_method = 'cash'
         AND s.collected_at IS NULL
-        AND s.status NOT IN ('refunded', 'cancelled')
+        AND s.status NOT IN ('refunded', 'cancelled', 'dispatched')
+        AND s.occurred_at >= now() - ($1 || ' days')::interval
       ORDER BY s.occurred_at ASC
       LIMIT 500
-    `);
+    `, [String(days)]);
 
     const recent = await query(`
       SELECT s.*,
@@ -132,6 +144,7 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
         recentDispatched: recent.rows.filter(r => r.dispatched_at).length,
         recentCollected: recent.rows.filter(r => r.collected_at).length,
       },
+      cutoffDays: days,
       toShip: toShip.rows,
       toCollect: toCollect.rows,
       recent: recent.rows,
