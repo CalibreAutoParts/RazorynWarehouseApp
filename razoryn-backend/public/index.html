@@ -3973,6 +3973,27 @@ function ebayItemIdForProduct(productId) {
   return link?.ebay_item_id || null;
 }
 
+// Find the linked eBay store_code (and look up its full name from the brand config)
+// for a warehouse product, given mirror_links data. Returns null when unknown
+// (legacy links may not have store_code populated yet — runs hydrate or
+// force-match to backfill them).
+function ebayStoreForProduct(productId) {
+  const list = State.linkStatus?.products || [];
+  const link = list.find(p => String(p.id) === String(productId));
+  if (!link?.store_code) return null;
+  const store = (State.brand?.stores || []).find(s => s.code === link.store_code);
+  return store ? { code: store.code, name: store.name } : { code: link.store_code, name: link.store_code };
+}
+
+// Returns a 3-6 char uppercase abbreviation of an eBay store name for compact
+// display in tables and pills. e.g. "EVBODYPARTS" → "EVBODY", "Evanta Grande"
+// → "EVANTA", "Razoryn" → "RAZOR". Strips spaces/punctuation, truncates to 6.
+function abbreviateStoreName(name) {
+  if (!name) return '?';
+  const clean = String(name).replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  return clean.slice(0, 6) || '?';
+}
+
 // Copy a URL to the clipboard and toast about it. Falls back to a prompt on
 // older browsers that don't expose the Clipboard API.
 async function qbCopyUrl(url, label, note) {
@@ -4083,6 +4104,10 @@ function qbSelectProduct(id) {
   // A method's row is "addable" if no method set yet OR it matches the current method.
   const cashAddable = !pm || pm === 'cash';
   const bankAddable = !pm || pm === 'bank';
+  // Is this product linked to an eBay listing? Used to refine the "no eBay price" warning
+  // — "linked but no price" is a real bug, "not linked at all" is just a workflow nudge.
+  const linkedItemId = ebayItemIdForProduct(p.id);
+  const linkedStore = ebayStoreForProduct(p.id);
 
   el('qb-detail').innerHTML = `
     <div style="height:16px"></div>
@@ -4093,8 +4118,12 @@ function qbSelectProduct(id) {
           <span class="pill ${totalQty(p)>0?'green':'red'}">${totalQty(p)>0 ? totalQty(p) + ' in stock' : 'Out of stock'}</span>
           <span style="color:var(--ink-soft);font-size:13px">${escapeHtml(p.sku)}${p.partNumber ? ' · ' + escapeHtml(p.partNumber) : ''}</span>
           ${p.location ? `<span style="color:var(--ink-soft);font-size:13px">${escapeHtml(p.location)}</span>` : ''}
+          ${linkedItemId ? `<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink);font-weight:600">📦 eBay${linkedStore ? ' · ' + escapeHtml(abbreviateStoreName(linkedStore.name)) : ''}</span>` : ''}
         </div>
-        ${prices.fromShopify ? `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ No eBay price on file — using Shopify price as the basis. Run "Hydrate eBay prices" from Listing Mirror.</div>` : ''}
+        ${prices.fromShopify ? (linkedItemId
+          ? `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ Product is linked to eBay item <strong>${escapeHtml(linkedItemId)}</strong> but no eBay price is on file. Run "Hydrate eBay prices" from Listing Mirror to pull the price now.</div>`
+          : `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ Not linked to an eBay listing yet — using Shopify price as the basis. Link via Listing Mirror → Link Status.</div>`
+        ) : ''}
         <div class="pt-result">
 
           <!-- Cash on collection -->
@@ -5498,7 +5527,19 @@ function renderLinkStatus() {
               <th></th>
             </tr></thead>
             <tbody>
-              ${filtered.slice(0, 200).map(p => `
+              ${filtered.slice(0, 200).map(p => {
+                // Resolve store from store_code (set by force-match / hydrate going forward).
+                // Legacy mirror_links may not have store_code yet — show "?" pill in that
+                // case and tell the user to run force-match or hydrate to backfill.
+                const linkedStore = p.store_code
+                  ? ((State.brand?.stores || []).find(s => s.code === p.store_code) || { code: p.store_code, name: p.store_code })
+                  : null;
+                const storePill = p.ebay_item_id
+                  ? (linkedStore
+                      ? `<span class="pill" style="font-size:9px;background:var(--bg-soft);color:var(--ink);margin-right:4px;font-weight:600">${escapeHtml(abbreviateStoreName(linkedStore.name))}</span>`
+                      : `<span class="pill amber" style="font-size:9px;margin-right:4px" title="Store unknown — run Force match or Hydrate to backfill">?</span>`)
+                  : '';
+                return `
                 <tr>
                   <td><div style="font-weight:500">${escapeHtml(p.title || '')}</div></td>
                   <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(p.sku || '')}</td>
@@ -5507,7 +5548,7 @@ function renderLinkStatus() {
                     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">No link</span>'}
                   </td>
                   <td>${p.ebay_item_id
-                    ? `<span class="pill green" style="font-size:10px">✓ Linked</span><div style="font-family:ui-monospace,monospace;font-size:10px;margin-top:2px"><a href="https://www.ebay.co.uk/itm/${escapeAttr(p.ebay_item_id)}" target="_blank" rel="noopener" style="color:var(--brand-primary);text-decoration:none">${escapeHtml(p.ebay_item_id)} ↗</a></div>`
+                    ? `${storePill}<span class="pill green" style="font-size:10px">✓ Linked</span><div style="font-family:ui-monospace,monospace;font-size:10px;margin-top:2px"><a href="https://www.ebay.co.uk/itm/${escapeAttr(p.ebay_item_id)}" target="_blank" rel="noopener" style="color:var(--brand-primary);text-decoration:none">${escapeHtml(p.ebay_item_id)} ↗</a></div>`
                     : '<span class="pill amber" style="font-size:10px">⚠ Not linked</span>'}
                   </td>
                   <td style="white-space:nowrap">
@@ -5515,10 +5556,11 @@ function renderLinkStatus() {
                     ${p.ebay_item_id ? `<button class="btn btn-ghost btn-sm" onclick="unlinkEbay('${escapeAttr(p.ebay_item_id)}')" title="Remove link" style="color:var(--red)">✕</button>` : ''}
                   </td>
                 </tr>
-              `).join('')}
+              `; }).join('')}
             </tbody>
           </table>
         </div>
+        ${data.summary?.linkedNoStoreCode > 0 ? `<div style="padding:10px;background:var(--amber-light);color:var(--amber);font-size:12px;border-radius:6px;margin-top:8px"><strong>${data.summary.linkedNoStoreCode}</strong> linked product${data.summary.linkedNoStoreCode === 1 ? '' : 's'} ${data.summary.linkedNoStoreCode === 1 ? 'has' : 'have'} unknown eBay store (legacy). Run <strong>Force match</strong> or <strong>Hydrate eBay prices</strong> to backfill — the next scan auto-detects each item's store.</div>` : ''}
         ${filtered.length > 200 ? `<div style="padding:10px;text-align:center;font-size:12px;color:var(--ink-soft)">Showing first 200 of ${filtered.length}. Use search to narrow down.</div>` : ''}
       </div>
     `}
