@@ -1662,17 +1662,153 @@ function notifyNewSale(sale) {
   } catch (e) {}
   // Vibrate (mobile)
   try { if ('vibrate' in navigator) navigator.vibrate([100, 50, 100]); } catch (e) {}
-  // Play a short ping sound
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.connect(g); g.connect(ctx.destination);
-    o.frequency.value = 880; g.gain.value = 0.1;
-    o.start(); o.stop(ctx.currentTime + 0.15);
-  } catch (e) {}
+  // Play the user's chosen sale sound — debounced to avoid blasting when several
+  // orders arrive in the same polling cycle.
+  Sounds.playForSale();
   toast(title + ' · ' + body, 'success');
 }
+
+/* ==========================================================
+   SOUND MODULE
+   ==========================================================
+   Synthesizes notification sounds with the Web Audio API — no audio files to
+   ship. Configurable per-device via localStorage so each workstation can have
+   its own preference (the warehouse computer wants loud cha-ching; mobile staff
+   want something subtle).
+
+   Sounds:
+     • chaching  — Etsy/eBay-style cash register two-tone bell. Default for sales.
+     • bell      — single bell ring with bright shimmer.
+     • chime     — two-note descending chime.
+     • ding      — single high "ding".
+     • pop       — subtle click.
+     • none      — silent.
+
+   The AudioContext is created lazily on first play because browsers require a
+   user gesture before they'll let audio start. The login click satisfies this,
+   so by the time the polling timer fires for new sales, audio is ready.
+
+   Debounce: at most one play per ~5 seconds per sound type. Stops the situation
+   where 4 orders sync at once and the browser plays cha-ching x4 over each other.
+*/
+const Sounds = {
+  _ctx: null,
+  _lastPlay: {},
+  _getCtx() {
+    if (!this._ctx) {
+      try { this._ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) { return null; }
+    }
+    // Browser may suspend the context if the page lost focus — resume it.
+    if (this._ctx.state === 'suspended') this._ctx.resume().catch(() => {});
+    return this._ctx;
+  },
+
+  // Get the user's chosen sound for a category, with a sane default.
+  getChoice(category) {
+    return localStorage.getItem(`rwh_sound_${category}`) || (category === 'sale' ? 'chaching' : 'ding');
+  },
+  setChoice(category, name) {
+    if (name === 'chaching' && category === 'sale') localStorage.removeItem(`rwh_sound_${category}`);
+    else localStorage.setItem(`rwh_sound_${category}`, name);
+  },
+
+  // The main public API. Plays the sound a user has chosen for `category`.
+  // Debounced so rapid-fire calls don't stack.
+  playForSale() { this._playDebounced('sale'); },
+
+  _playDebounced(category) {
+    const name = this.getChoice(category);
+    if (name === 'none') return;
+    const now = Date.now();
+    if (this._lastPlay[category] && now - this._lastPlay[category] < 5000) return;
+    this._lastPlay[category] = now;
+    this.play(name);
+  },
+
+  // Force-play (used by the Settings page "Preview" button — bypasses debounce).
+  preview(name) {
+    if (name === 'none') return;
+    this.play(name);
+  },
+
+  play(name) {
+    const ctx = this._getCtx();
+    if (!ctx) return;
+    const fn = this._synths[name];
+    if (typeof fn === 'function') fn(ctx, ctx.currentTime);
+  },
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Synthesis helpers — these run on the AudioContext clock so timings stay tight.
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // Generic note player. ADSR-ish envelope: snap attack, exponential decay.
+  // `type` = oscillator wave; `gain` = peak volume (0–1).
+  _note(ctx, freq, startTime, duration, gain = 0.2, type = 'sine') {
+    const osc = ctx.createOscillator();
+    const env = ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    osc.connect(env);
+    env.connect(ctx.destination);
+    env.gain.setValueAtTime(0, startTime);
+    env.gain.linearRampToValueAtTime(gain, startTime + 0.008);   // ~8 ms attack
+    env.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+    osc.start(startTime);
+    osc.stop(startTime + duration + 0.05);
+  },
+
+  _synths: {
+    // Cha-ching — cash register, the headline sound. Built from two phases:
+    //   1. "cha"   — a quick percussive lower note (square + triangle blend)
+    //   2. "ching" — a bell-like cluster of inharmonic partials with long decay
+    //                Inharmonicity (1.5x, 2.4x, 5.4x) gives the metallic bell timbre
+    //                that pure-harmonic tones lack.
+    chaching(ctx, t0) {
+      // Phase 1: "cha" — bright punchy mid note
+      Sounds._note(ctx, 660,  t0,        0.10, 0.18, 'square');
+      Sounds._note(ctx, 990,  t0,        0.08, 0.10, 'triangle');
+      // Phase 2: "ching" — bell cluster starts ~60ms after the cha
+      const t1 = t0 + 0.07;
+      Sounds._note(ctx, 1320, t1, 0.7, 0.18, 'sine');      // fundamental
+      Sounds._note(ctx, 1980, t1, 0.6, 0.12, 'sine');      // 1.5x — perfect fifth
+      Sounds._note(ctx, 3168, t1, 0.5, 0.08, 'sine');      // 2.4x — inharmonic shimmer
+      Sounds._note(ctx, 7128, t1, 0.4, 0.04, 'sine');      // 5.4x — bell sparkle
+      // Tiny shimmer at the very end: a quick high tinkle
+      Sounds._note(ctx, 2640, t1 + 0.12, 0.35, 0.06, 'sine');
+    },
+
+    // Bell — single bright bell ring. Same bell-partial recipe but no cha phase.
+    bell(ctx, t0) {
+      Sounds._note(ctx, 1568, t0, 0.9, 0.20, 'sine');
+      Sounds._note(ctx, 2352, t0, 0.8, 0.14, 'sine');
+      Sounds._note(ctx, 3763, t0, 0.6, 0.09, 'sine');
+      Sounds._note(ctx, 8467, t0, 0.4, 0.04, 'sine');
+    },
+
+    // Chime — two-note descending, classic notification.
+    chime(ctx, t0) {
+      Sounds._note(ctx, 1318, t0,        0.45, 0.18, 'sine');  // E6
+      Sounds._note(ctx, 988,  t0 + 0.15, 0.55, 0.18, 'sine');  // B5
+    },
+
+    // Ding — single bright high note, the existing sound's spiritual successor.
+    ding(ctx, t0) {
+      Sounds._note(ctx, 1760, t0, 0.35, 0.18, 'sine');  // A6
+      Sounds._note(ctx, 2640, t0, 0.30, 0.08, 'sine');  // E7 sparkle
+    },
+
+    // Pop — subtle, short, no bell quality. For environments where loud is rude.
+    pop(ctx, t0) {
+      Sounds._note(ctx, 540, t0, 0.06, 0.18, 'sine');
+      Sounds._note(ctx, 880, t0, 0.04, 0.10, 'triangle');
+    },
+  },
+};
+// Make sure AudioContext is created on the first user gesture, so it's ready
+// when the polling timer fires later. Any click anywhere in the document does it.
+window.addEventListener('click', () => { Sounds._getCtx(); }, { once: true, capture: true });
 
 function bindHeader() {
   document.getElementById('logout-btn').addEventListener('click', async () => {
@@ -7271,6 +7407,33 @@ function renderSettings() {
       </div>
 
       <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>🔔 Notification sounds</h3>
+          <div class="card-desc">Plays a sound when a new sale comes in. Setting is per-device — different workstations can have different preferences.</div>
+        </div>
+        <div class="card-body">
+          <div class="field" style="max-width:400px">
+            <label>Sound for new sale</label>
+            <select id="set-sale-sound" style="font-size:14px">
+              <option value="chaching">💰 Cha-ching (cash register) — default</option>
+              <option value="bell">🔔 Bell — bright single ring</option>
+              <option value="chime">🎵 Chime — two-note descending</option>
+              <option value="ding">🛎️ Ding — short high tone</option>
+              <option value="pop">💧 Pop — subtle click</option>
+              <option value="none">🔇 No sound</option>
+            </select>
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">
+              Auto-plays at most once every 5 seconds — won't blast if several orders sync at the same time.
+            </div>
+          </div>
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-outline btn-sm" onclick="previewSelectedSound()">▶ Preview</button>
+            <button class="btn btn-primary btn-sm" onclick="saveSaleSound()">Save</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>Sync cursor (advanced)</h3><div class="card-desc">If you've missed orders, rewind the sync cursor to re-pull them.</div></div>
         <div class="card-body">
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -7415,7 +7578,26 @@ async function loadPricingConfig() {
       vatReg.addEventListener('change', () => { vatNumWrap.style.display = vatReg.checked ? '' : 'none'; });
     }
     State.pricingConfig = r;
+    // Hydrate the per-device sound preference from localStorage. Independent
+    // of backend settings — each computer remembers its own choice.
+    const soundDropdown = el('set-sale-sound');
+    if (soundDropdown) soundDropdown.value = Sounds.getChoice('sale');
   } catch (e) { console.warn('loadPricingConfig:', e); }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Notification sound preference (Settings page)
+// ──────────────────────────────────────────────────────────────────────────
+function previewSelectedSound() {
+  const dropdown = el('set-sale-sound');
+  if (!dropdown) return;
+  Sounds.preview(dropdown.value);
+}
+function saveSaleSound() {
+  const dropdown = el('set-sale-sound');
+  if (!dropdown) return;
+  Sounds.setChoice('sale', dropdown.value);
+  toast('Saved — new sales will use this sound on this device', 'success');
 }
 
 async function savePricingConfig() {
