@@ -4258,6 +4258,7 @@ function renderSales() {
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
           <button class="btn btn-ghost btn-sm" onclick="printSingleInvoice('${s.id}')" title="Open invoice in new tab to print or save as PDF">🖨</button>
           <button class="btn btn-ghost btn-sm" onclick="emailSingleInvoice('${s.id}')" title="Email this invoice to the customer">✉</button>
+          <button class="btn btn-ghost btn-sm" onclick="openMessageModal('${s.id}')" title="Message the customer (email / eBay / WhatsApp)">💬</button>
           <button class="btn btn-ghost btn-sm" onclick="openEditSale('${s.id}')" title="Edit customer / reg / VIN / notes">✏️</button>
           ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Mark payment received → decrements stock, generates paid invoice using locked payment method" style="color:var(--green)">✓ Mark paid</button>` : ''}
           ${dispatchBtn}
@@ -4422,6 +4423,195 @@ async function emailSingleInvoice(id) {
     } else {
       toast('Email failed: ' + (e.data?.message || e.message), 'error');
     }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// MESSAGE CUSTOMER — modal with email / eBay / WhatsApp tabs + templates
+// ──────────────────────────────────────────────────────────────────────────
+async function openMessageModal(saleId) {
+  // Load templates with sale context pre-rendered. This single round-trip gives
+  // us the template list, sale's channel availability, and the rendered preview.
+  let data;
+  try {
+    data = await Api.get(`/api/messages/templates/${saleId}`);
+  } catch (e) {
+    toast('Failed to load templates: ' + (e.data?.message || e.message), 'error');
+    return;
+  }
+  // Stash everything on State so the helpers can find it without props-drilling
+  State.messageModal = {
+    saleId,
+    templates: data.templates,
+    channels: data.channels,
+    customer: data.customer,
+    context: data.context,
+    // Pick a default template that has rendered content
+    selectedKey: data.templates.find(t => t.key === 'custom')?.key || 'custom',
+    // Pick a default channel — first available in priority order
+    selectedChannel: data.channels.email    ? 'email'
+                   : data.channels.whatsapp ? 'whatsapp'
+                   : data.channels.ebay     ? 'ebay'
+                   : 'email',
+  };
+
+  modal({
+    title: 'Message customer',
+    body: messageModalBody(),
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Send', primary: true, onClick: () => sendMessage() },
+    ],
+  });
+  // Wire up the post-render listeners (modal innerHTML is set after this returns)
+  setTimeout(wireMessageModal, 0);
+}
+
+// Generates the inner body HTML — re-renderable for tab/template changes
+function messageModalBody() {
+  const m = State.messageModal;
+  const tpl = m.templates.find(t => t.key === m.selectedKey) || m.templates[0];
+  const channelTab = (id, icon, label, available) => `
+    <button class="msg-tab${m.selectedChannel === id ? ' active' : ''}"
+            onclick="selectMessageChannel('${id}')"
+            ${available ? '' : 'disabled title="No '+id+' contact info on this order"'}
+            style="padding:8px 14px;font-size:13px;border:none;background:${m.selectedChannel === id ? 'var(--brand-primary)' : 'var(--bg-soft)'};color:${m.selectedChannel === id ? 'white' : (available ? 'var(--ink)' : 'var(--ink-soft)')};border-radius:6px;cursor:${available?'pointer':'not-allowed'};opacity:${available?'1':'.5'};font-weight:500">
+      ${icon} ${label}
+    </button>`;
+
+  // Channel-specific recipient line
+  let recipientLine = '';
+  if (m.selectedChannel === 'email') {
+    recipientLine = `<div class="field"><label>To (email)</label><input id="msg-to" value="${escapeAttr(m.customer.email)}" placeholder="customer@example.com"></div>`;
+  } else if (m.selectedChannel === 'whatsapp') {
+    recipientLine = `<div class="field"><label>To (WhatsApp)</label><input id="msg-to" value="${escapeAttr(m.customer.phone)}" placeholder="+44 7494 589542"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Will open WhatsApp Web/app with the message pre-filled — hit Send there.</div></div>`;
+  } else if (m.selectedChannel === 'ebay') {
+    recipientLine = `<div class="field"><label>To (eBay buyer)</label><input value="${escapeAttr(m.customer.name || 'eBay buyer')}" disabled style="background:var(--bg-soft)"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Looks up the buyer's eBay ID at send time and posts via the Trading API.</div></div>`;
+  }
+
+  return `
+    <!-- Channel tabs -->
+    <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
+      ${channelTab('email',    '✉',  'Email',    m.channels.email)}
+      ${channelTab('whatsapp', '💬', 'WhatsApp', m.channels.whatsapp)}
+      ${channelTab('ebay',     '🟦', 'eBay',     m.channels.ebay)}
+    </div>
+
+    <!-- Template picker -->
+    <div class="field">
+      <label>Template</label>
+      <select id="msg-template" onchange="selectMessageTemplate(this.value)">
+        ${m.templates.map(t => `<option value="${escapeAttr(t.key)}" ${t.key === m.selectedKey ? 'selected' : ''}>${escapeHtml(t.label)}</option>`).join('')}
+      </select>
+    </div>
+
+    ${recipientLine}
+
+    ${m.selectedChannel === 'email' ? `
+      <div class="field"><label>Subject</label><input id="msg-subject" value="${escapeAttr(tpl.renderedSubject || '')}"></div>
+    ` : ''}
+
+    <div class="field">
+      <label>Message</label>
+      <textarea id="msg-body" rows="10" style="font-family:inherit;font-size:13px;line-height:1.5">${escapeHtml(tpl.renderedBody || '')}</textarea>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">
+        Variables in {curly_braces} are auto-filled from the order. You can edit anything before sending.
+      </div>
+    </div>
+  `;
+}
+
+// Wire up listeners after the modal mounts. Currently nothing to attach
+// beyond the inline onclick / onchange — kept for future hook-in.
+function wireMessageModal() {
+  // Auto-focus the body so staff can start editing immediately
+  const ta = el('msg-body');
+  if (ta) ta.focus();
+}
+
+function selectMessageChannel(channel) {
+  const m = State.messageModal;
+  if (!m) return;
+  // Don't switch to a disabled channel
+  if (!m.channels[channel]) return;
+  m.selectedChannel = channel;
+  // Re-render the body with the new channel layout
+  const body = el('modal-body');
+  if (body) body.innerHTML = messageModalBody();
+}
+
+function selectMessageTemplate(key) {
+  const m = State.messageModal;
+  if (!m) return;
+  m.selectedKey = key;
+  // If the picked template suggests a different channel, switch to it (if available)
+  const tpl = m.templates.find(t => t.key === key);
+  if (tpl?.defaultChannel && m.channels[tpl.defaultChannel] && m.selectedChannel !== tpl.defaultChannel) {
+    m.selectedChannel = tpl.defaultChannel;
+  }
+  const body = el('modal-body');
+  if (body) body.innerHTML = messageModalBody();
+}
+
+async function sendMessage() {
+  const m = State.messageModal;
+  if (!m) return;
+  const body = (el('msg-body')?.value || '').trim();
+  if (!body) { toast('Write a message first', 'warn'); return; }
+
+  if (m.selectedChannel === 'email') {
+    const to = (el('msg-to')?.value || '').trim();
+    const subject = (el('msg-subject')?.value || '').trim();
+    if (!to)      { toast('Email address required', 'warn'); return; }
+    if (!subject) { toast('Subject required', 'warn'); return; }
+    const taskId = Task.start('Sending email');
+    try {
+      await Api.post(`/api/messages/email/${m.saleId}`, { to, subject, body, templateKey: m.selectedKey });
+      Task.done(taskId, 'Sent');
+      toast(`Email sent to ${to}`, 'success');
+      closeModal();
+    } catch (e) {
+      Task.fail(taskId, 'Failed');
+      toast('Send failed: ' + (e.data?.message || e.message), 'error');
+    }
+    return;
+  }
+
+  if (m.selectedChannel === 'whatsapp') {
+    // No backend send — just fetch the normalised wa.me link and open it.
+    try {
+      const r = await Api.get(`/api/messages/whatsapp-link/${m.saleId}?body=${encodeURIComponent(body)}`);
+      const w = window.open(r.link, '_blank');
+      if (!w) {
+        toast('Pop-up blocked — allow pop-ups, then try again', 'error');
+        return;
+      }
+      toast('Opened WhatsApp — hit Send there to deliver', 'success', 6000);
+      closeModal();
+    } catch (e) {
+      toast('Failed: ' + (e.data?.message || e.message), 'error');
+    }
+    return;
+  }
+
+  if (m.selectedChannel === 'ebay') {
+    const subject = (el('msg-subject')?.value || '').trim() || 'Update on your order';
+    const taskId = Task.start('Sending eBay message');
+    try {
+      await Api.post(`/api/messages/ebay/${m.saleId}`, { subject, body, templateKey: m.selectedKey });
+      Task.done(taskId, 'Sent');
+      toast('eBay message sent', 'success');
+      closeModal();
+    } catch (e) {
+      Task.fail(taskId, 'Failed');
+      // Special errors with actionable messages
+      if (e.data?.error === 'no_item_id_link') {
+        toast('No eBay ItemID linked for any item in this order. Run "🔗 Force match all" in Listing Mirror, then retry.', 'error', 8000);
+      } else {
+        toast('Send failed: ' + (e.data?.message || e.message), 'error');
+      }
+    }
+    return;
   }
 }
 
