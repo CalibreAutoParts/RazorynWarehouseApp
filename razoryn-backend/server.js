@@ -74,6 +74,7 @@ app.use('/api/settings',     require('./routes/settings'));
 app.use('/api/listings',     require('./routes/listings'));
 app.use('/api/notes',        require('./routes/notes'));
 app.use('/api/brand',        require('./routes/brand'));
+app.use('/api/dispatch',     require('./routes/dispatch'));
 
 // ---------- Static: PWA ----------
 app.use(express.static(path.join(__dirname, 'public'), {
