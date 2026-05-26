@@ -10,6 +10,49 @@ const router = express.Router();
 
 router.use(requireAuth);
 
+// ──────────────────────────────────────────────────────────────────────────
+// Self-healing migration: adds the store_code column to mirror_links if it
+// doesn't already exist. Lets us track which eBay account each link belongs
+// to (e.g. EVBODYPARTS vs Evanta) without requiring a separate migration
+// step. Runs on every cold boot — ALTER TABLE IF NOT EXISTS is idempotent.
+// ──────────────────────────────────────────────────────────────────────────
+let _migrationDone = false;
+async function ensureMirrorLinksColumns() {
+  if (_migrationDone) return;
+  try {
+    await query(`ALTER TABLE mirror_links ADD COLUMN IF NOT EXISTS store_code TEXT`);
+    _migrationDone = true;
+  } catch (e) {
+    console.warn('[listings.js] mirror_links migration warning:', e.message);
+  }
+}
+ensureMirrorLinksColumns();
+
+// Pulls active listings from every configured eBay store, including ones
+// flagged as `standalone`. Used for diagnostics, manual link enrichment,
+// and store-code detection on legacy mirror_links rows.
+// Returns a flat array of listing objects, each tagged with `storeCode`.
+async function getAllListingsAcrossStores() {
+  const stores = ebay.listStores().filter(s => s.hasToken);
+  let all = [];
+  for (const s of stores) {
+    try {
+      const part = await ebay.getActiveListings(s.code);
+      all = all.concat(part);
+    } catch (e) {
+      console.warn(`[listings.js] store=${s.code} fetch failed: ${e.message}`);
+    }
+  }
+  return all;
+}
+
+// Build a fast itemId → listing lookup map from a listing array.
+function indexByItemId(listings) {
+  const map = new Map();
+  for (const l of listings) map.set(String(l.itemId), l);
+  return map;
+}
+
 // GET /api/listings/debug-ebay-returns
 // Hits the Post-Order Returns API and dumps whatever eBay returns.
 // Useful to verify the AuthToken has access to the returns endpoint.
@@ -44,10 +87,11 @@ router.get('/debug-ebay-order', requireAdmin, async (req, res) => {
 // Used by the "Link Status" tab to show what's linked vs. orphan products and
 // listings, and to manually create or break a mirror link.
 router.get('/link-status', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
   const { rows: products } = await query(`
     SELECT p.id, p.sku, p.title, p.barcode, p.part_number,
            p.shopify_product_id, p.shopify_inventory_id,
-           ml.ebay_item_id, ml.last_synced_sku, ml.last_synced_title, ml.last_mirrored_at
+           ml.ebay_item_id, ml.store_code, ml.last_synced_sku, ml.last_synced_title, ml.last_mirrored_at
     FROM products p
     LEFT JOIN mirror_links ml ON ml.shopify_product_id::text = p.shopify_product_id
     WHERE p.active = true
@@ -55,7 +99,7 @@ router.get('/link-status', requireAdmin, async (req, res) => {
     LIMIT 1000
   `);
   const { rows: orphanMirrors } = await query(`
-    SELECT ml.ebay_item_id, ml.shopify_product_id, ml.last_synced_sku, ml.last_synced_title, ml.last_mirrored_at
+    SELECT ml.ebay_item_id, ml.shopify_product_id, ml.store_code, ml.last_synced_sku, ml.last_synced_title, ml.last_mirrored_at
     FROM mirror_links ml
     LEFT JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text
     WHERE p.id IS NULL
@@ -67,6 +111,7 @@ router.get('/link-status', requireAdmin, async (req, res) => {
     linkedShopify: products.filter(p => p.shopify_product_id).length,
     linkedEbay: products.filter(p => p.ebay_item_id).length,
     linkedBoth: products.filter(p => p.shopify_product_id && p.ebay_item_id).length,
+    linkedNoStoreCode: products.filter(p => p.ebay_item_id && !p.store_code).length,
     orphan: products.filter(p => !p.shopify_product_id && !p.ebay_item_id).length,
     orphanMirrors: orphanMirrors.length,
   };
@@ -74,21 +119,60 @@ router.get('/link-status', requireAdmin, async (req, res) => {
 });
 
 // POST /api/listings/link-status/link
+// Creates a mirror_links row. When possible we ALSO fetch the live eBay
+// listing to populate the store_code AND immediately update the warehouse
+// product's price_ebay — so linking is a one-stop operation, not a "link
+// now, hydrate later" two-step. Caller may pass storeCode if they already
+// know it (Listing Mirror page does); otherwise we detect by scanning all
+// stores' active listings.
 router.post('/link-status/link', requireAdmin, async (req, res) => {
-  const { productId, ebayItemId, shopifyProductId } = req.body || {};
+  await ensureMirrorLinksColumns();
+  const { productId, ebayItemId, shopifyProductId, storeCode: storeCodeHint } = req.body || {};
   if (!ebayItemId) return res.status(400).json({ error: 'ebay_item_id_required' });
-  const p = await query(`SELECT shopify_product_id, sku, title FROM products WHERE id = $1`, [productId]);
+  const p = await query(`SELECT id, shopify_product_id, sku, title FROM products WHERE id = $1`, [productId]);
   if (!p.rows[0]) return res.status(404).json({ error: 'product_not_found' });
   const spId = shopifyProductId || p.rows[0].shopify_product_id;
   if (!spId) return res.status(400).json({ error: 'no_shopify_product_id', message: 'Product has no Shopify product_id. Sync from Shopify first.' });
+
+  // Try to look up the live listing — gives us store_code and live price.
+  // Fail open if eBay isn't configured or the item isn't found; the link still
+  // gets saved, just without enrichment.
+  let listing = null;
+  let detectedStoreCode = storeCodeHint || null;
+  if (ebay.isConfigured()) {
+    try {
+      const all = await getAllListingsAcrossStores();
+      const map = indexByItemId(all);
+      listing = map.get(String(ebayItemId)) || null;
+      if (listing && !detectedStoreCode) detectedStoreCode = listing.storeCode;
+    } catch (e) {
+      console.warn('[link] enrichment fetch failed:', e.message);
+    }
+  }
+
   await query(
-    `INSERT INTO mirror_links (ebay_item_id, shopify_product_id, last_mirrored_at, last_synced_sku, last_synced_title)
-     VALUES ($1, $2, now(), $3, $4)
-     ON CONFLICT (ebay_item_id) DO UPDATE SET shopify_product_id = EXCLUDED.shopify_product_id, last_mirrored_at = now()`,
-    [String(ebayItemId), spId, p.rows[0].sku, p.rows[0].title]
+    `INSERT INTO mirror_links (ebay_item_id, shopify_product_id, store_code, last_mirrored_at, last_synced_sku, last_synced_title)
+     VALUES ($1, $2, $3, now(), $4, $5)
+     ON CONFLICT (ebay_item_id) DO UPDATE
+       SET shopify_product_id = EXCLUDED.shopify_product_id,
+           store_code = COALESCE(EXCLUDED.store_code, mirror_links.store_code),
+           last_mirrored_at = now()`,
+    [String(ebayItemId), spId, detectedStoreCode || null, p.rows[0].sku, p.rows[0].title]
   );
-  await audit(req, 'create_mirror_link', 'product', productId, { ebayItemId, shopifyProductId: spId });
-  res.json({ ok: true });
+
+  // If we have the live listing, also bump price_ebay on the warehouse product
+  // so the quote builder + invoices reflect reality immediately.
+  let priceUpdated = false;
+  if (listing && listing.priceEbay > 0) {
+    await query(
+      `UPDATE products SET price_ebay = $1, updated_at = now() WHERE id = $2`,
+      [listing.priceEbay, p.rows[0].id]
+    );
+    priceUpdated = true;
+  }
+
+  await audit(req, 'create_mirror_link', 'product', productId, { ebayItemId, shopifyProductId: spId, storeCode: detectedStoreCode, priceUpdated });
+  res.json({ ok: true, storeCode: detectedStoreCode, priceUpdated, livePrice: listing?.priceEbay || null });
 });
 
 router.post('/link-status/unlink', requireAdmin, async (req, res) => {
@@ -101,11 +185,14 @@ router.post('/link-status/unlink', requireAdmin, async (req, res) => {
 
 // POST /api/listings/link-status/force-match
 // Auto-link by SKU + part-number + title-token fuzzy matching. Pulls listings from
-// every eBay store the brand has configured and aggregates the results.
+// every eBay store the brand has configured and aggregates the results. Each
+// successful match ALSO stores the source store_code in mirror_links and
+// bumps the warehouse product's price_ebay so no separate hydrate is needed.
 router.post('/link-status/force-match', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
   if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
   const sync = require('../services/sync');
-  const stores = ebay.listStores().filter(s => s.hasToken && !s.standalone);
+  const stores = ebay.listStores().filter(s => s.hasToken);
 
   let allListings = [];
   for (const s of stores) {
@@ -117,11 +204,32 @@ router.post('/link-status/force-match', requireAdmin, async (req, res) => {
     }
   }
 
-  let matched = 0, alreadyLinked = 0, noMatch = 0;
+  let matched = 0, alreadyLinked = 0, noMatch = 0, pricesUpdated = 0, storeCodesBackfilled = 0;
   const matches = [];
   for (const l of allListings) {
-    const existing = await query(`SELECT 1 FROM mirror_links WHERE ebay_item_id = $1`, [String(l.itemId)]);
-    if (existing.rows[0]) { alreadyLinked++; continue; }
+    // If link already exists, take this opportunity to backfill store_code
+    // and price on legacy rows that pre-date the per-store tracking.
+    const existing = await query(`SELECT store_code FROM mirror_links WHERE ebay_item_id = $1`, [String(l.itemId)]);
+    if (existing.rows[0]) {
+      alreadyLinked++;
+      if (!existing.rows[0].store_code && l.storeCode) {
+        await query(`UPDATE mirror_links SET store_code = $1 WHERE ebay_item_id = $2`, [l.storeCode, String(l.itemId)]);
+        storeCodesBackfilled++;
+      }
+      // Also backfill price_ebay via mirror_links → product join, if missing
+      if (l.priceEbay > 0) {
+        const upd = await query(
+          `UPDATE products p SET price_ebay = $1, updated_at = now()
+           FROM mirror_links ml
+           WHERE ml.ebay_item_id = $2 AND ml.shopify_product_id::text = p.shopify_product_id
+             AND (p.price_ebay IS NULL OR p.price_ebay <= 0)
+           RETURNING p.id`,
+          [l.priceEbay, String(l.itemId)]
+        );
+        if (upd.rows.length) pricesUpdated += upd.rows.length;
+      }
+      continue;
+    }
 
     let product = null;
     if (l.sku) {
@@ -148,41 +256,41 @@ router.post('/link-status/force-match', requireAdmin, async (req, res) => {
     if (!product || !product.shopify_product_id) { noMatch++; continue; }
 
     await query(
-      `INSERT INTO mirror_links (ebay_item_id, shopify_product_id, last_mirrored_at, last_synced_sku, last_synced_title)
-       VALUES ($1, $2, now(), $3, $4)
+      `INSERT INTO mirror_links (ebay_item_id, shopify_product_id, store_code, last_mirrored_at, last_synced_sku, last_synced_title)
+       VALUES ($1, $2, $3, now(), $4, $5)
        ON CONFLICT (ebay_item_id) DO NOTHING`,
-      [String(l.itemId), product.shopify_product_id, l.sku || product.sku, l.title]
+      [String(l.itemId), product.shopify_product_id, l.storeCode || null, l.sku || product.sku, l.title]
     );
+    // Update product price_ebay if we have a positive eBay price
+    if (l.priceEbay > 0) {
+      await query(
+        `UPDATE products SET price_ebay = $1, updated_at = now() WHERE id = $2`,
+        [l.priceEbay, product.id]
+      );
+      pricesUpdated++;
+    }
     matched++;
     if (matches.length < 20) matches.push({ ebayItemId: l.itemId, productId: product.id, sku: product.sku, title: l.title, store: l.storeCode });
   }
-  await audit(req, 'force_match_links', null, null, { matched, alreadyLinked, noMatch, stores: stores.map(s => s.code) });
-  res.json({ scanned: allListings.length, matched, alreadyLinked, noMatch, sample: matches, stores: stores.map(s => s.code) });
+  await audit(req, 'force_match_links', null, null, { matched, alreadyLinked, noMatch, pricesUpdated, storeCodesBackfilled, stores: stores.map(s => s.code) });
+  res.json({ scanned: allListings.length, matched, alreadyLinked, noMatch, pricesUpdated, storeCodesBackfilled, sample: matches, stores: stores.map(s => s.code) });
 });
 
 // POST /api/listings/hydrate-ebay-prices
-// Pull live eBay listings, then update products.price_ebay for any matching SKUs.
-// Useful when products were imported from Shopify but their eBay price is blank,
-// causing phone-pricing quotes to show £0.
-// POST /api/listings/hydrate-ebay-prices
-// Pull live eBay listings, then update products.price_ebay for any matching products.
-//
-// PRIOR BUG: This used to match purely by `WHERE sku = $1`. That fails when:
-//  - The eBay listing has no SKU set (common on older listings)
-//  - The SKU on eBay is formatted differently (spaces, dashes, case)
-// Result: phone pricing showed many items "pulled from Shopify" because price_ebay
-// was null, even though the listing was already linked via mirror_links.
-//
-// FIX: Try three strategies in order, falling through to the next if no match:
-//   A) mirror_links — most reliable since the link is explicit
-//   B) Exact SKU match
-//   C) Normalised SKU (uppercase, strip non-alphanumeric)
-// Returns a detailed breakdown so the user can see which strategies fired.
+// Pull live eBay listings, then update products.price_ebay using three
+// matching strategies, in order of reliability:
+//   1. mirror_links — explicit linking (ebay_item_id ↔ shopify_product_id)
+//      A linked product is the most reliable signal; we trust this even if
+//      the SKUs disagree (e.g. SKU drift between Shopify + eBay).
+//   2. Exact SKU — products.sku === listing.sku
+//   3. Normalised SKU — uppercased, alphanumeric-only
+// We also opportunistically backfill mirror_links.store_code for legacy
+// entries that don't have one yet, using the listing's storeCode.
 router.post('/hydrate-ebay-prices', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
   if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
   try {
-    // 1) Pull active listings from every configured eBay store
-    const stores = ebay.listStores().filter(s => s.hasToken && !s.standalone);
+    const stores = ebay.listStores().filter(s => s.hasToken);
     let allListings = [];
     for (const s of stores) {
       try {
@@ -191,78 +299,88 @@ router.post('/hydrate-ebay-prices', requireAdmin, async (req, res) => {
       } catch (e) { console.warn(`[hydrate-ebay-prices] store=${s.code} failed: ${e.message}`); }
     }
 
-    // 2) Pre-load mirror_links into an in-memory map. One query instead of N.
-    const linksResult = await query(`SELECT ebay_item_id, shopify_product_id FROM mirror_links`);
-    const linkMap = {};
-    for (const row of linksResult.rows) {
-      linkMap[String(row.ebay_item_id)] = row.shopify_product_id;
-    }
+    // Pre-load mirror_links — used for strategy 1.
+    const linksRes = await query(`SELECT ebay_item_id, shopify_product_id, store_code FROM mirror_links`);
+    const linkByItemId = new Map();
+    for (const r of linksRes.rows) linkByItemId.set(String(r.ebay_item_id), r);
 
-    let updated = 0;
     let matchedViaLink = 0, matchedViaSku = 0, matchedViaNormalizedSku = 0;
-    let unmatched = 0, zeroPrice = 0;
+    let storeCodesBackfilled = 0;
+    let zeroPrice = 0, unmatched = 0;
     const unmatchedSample = [];
 
-    for (const l of allListings) {
-      const ebayPrice = parseFloat(l.priceEbay) || 0;
-      if (ebayPrice <= 0) { zeroPrice++; continue; }
-
-      let productId = null;
-
-      // Strategy A — mirror_links (most reliable, handles listings without SKU on eBay)
-      const linkedShopifyId = linkMap[String(l.itemId)];
-      if (linkedShopifyId) {
-        const r = await query(
-          `SELECT id FROM products WHERE shopify_product_id = $1 LIMIT 1`,
-          [linkedShopifyId]
-        );
-        if (r.rows[0]) { productId = r.rows[0].id; matchedViaLink++; }
-      }
-
-      // Strategy B — exact SKU match
-      if (!productId && l.sku) {
-        const r = await query(`SELECT id FROM products WHERE sku = $1 LIMIT 1`, [l.sku]);
-        if (r.rows[0]) { productId = r.rows[0].id; matchedViaSku++; }
-      }
-
-      // Strategy C — normalised SKU (case + punctuation tolerant)
-      if (!productId && l.sku) {
-        const norm = l.sku.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-        if (norm.length >= 5) {
-          const r = await query(
-            `SELECT id FROM products WHERE REGEXP_REPLACE(UPPER(sku), '[^A-Z0-9]', '', 'g') = $1 LIMIT 1`,
-            [norm]
-          );
-          if (r.rows[0]) { productId = r.rows[0].id; matchedViaNormalizedSku++; }
-        }
-      }
-
-      if (productId) {
-        await query(`UPDATE products SET price_ebay = $1 WHERE id = $2`, [ebayPrice, productId]);
-        updated++;
-      } else {
-        unmatched++;
-        if (unmatchedSample.length < 10) {
-          unmatchedSample.push({
-            itemId: l.itemId,
-            sku: l.sku || '(no sku)',
-            title: (l.title || '').slice(0, 60),
-            price: ebayPrice,
-            store: l.storeCode || null,
-          });
-        }
-      }
+    // Helper: update product.price_ebay for a given product id (by p.id)
+    async function bumpPriceById(productId, ebayPrice) {
+      const r = await query(
+        `UPDATE products SET price_ebay = $1, updated_at = now()
+         WHERE id = $2 AND $1::numeric > 0
+         RETURNING id`,
+        [ebayPrice, productId]
+      );
+      return r.rows.length;
     }
 
+    for (const l of allListings) {
+      const ebayPrice = l.priceEbay || 0;
+      if (ebayPrice <= 0) { zeroPrice++; continue; }
+
+      // Backfill store_code on any matching mirror_link that's missing one
+      const link = linkByItemId.get(String(l.itemId));
+      if (link && !link.store_code && l.storeCode) {
+        await query(
+          `UPDATE mirror_links SET store_code = $1 WHERE ebay_item_id = $2`,
+          [l.storeCode, String(l.itemId)]
+        );
+        storeCodesBackfilled++;
+        link.store_code = l.storeCode;
+      }
+
+      // Strategy 1: mirror_links → join to products via shopify_product_id
+      if (link) {
+        const r = await query(
+          `UPDATE products SET price_ebay = $1, updated_at = now()
+           WHERE shopify_product_id::text = $2 AND $1::numeric > 0
+           RETURNING id`,
+          [ebayPrice, String(link.shopify_product_id)]
+        );
+        if (r.rows.length) { matchedViaLink += r.rows.length; continue; }
+      }
+
+      // Strategy 2: exact SKU match
+      if (l.sku) {
+        const r = await query(
+          `UPDATE products SET price_ebay = $1, updated_at = now() WHERE sku = $2 AND $1::numeric > 0 RETURNING id`,
+          [ebayPrice, l.sku]
+        );
+        if (r.rows.length) { matchedViaSku += r.rows.length; continue; }
+
+        // Strategy 3: normalised SKU (uppercase alphanumeric only)
+        const norm = String(l.sku).replace(/[^A-Z0-9]/gi, '').toUpperCase();
+        if (norm.length >= 4) {
+          const r2 = await query(
+            `UPDATE products SET price_ebay = $1, updated_at = now()
+             WHERE REGEXP_REPLACE(UPPER(sku), '[^A-Z0-9]', '', 'g') = $2 AND $1::numeric > 0
+             RETURNING id`,
+            [ebayPrice, norm]
+          );
+          if (r2.rows.length) { matchedViaNormalizedSku += r2.rows.length; continue; }
+        }
+      }
+
+      unmatched++;
+      if (unmatchedSample.length < 20) unmatchedSample.push({ itemId: l.itemId, sku: l.sku, title: (l.title || '').slice(0, 80), price: ebayPrice, store: l.storeCode });
+    }
+
+    const totalUpdated = matchedViaLink + matchedViaSku + matchedViaNormalizedSku;
     res.json({
       ok: true,
       listingsFound: allListings.length,
-      updated,
-      matchedViaLink,
-      matchedViaSku,
-      matchedViaNormalizedSku,
-      unmatched,
+      updated: totalUpdated,
+      productsUpdated: totalUpdated, // legacy alias kept for old frontends
+      matchedViaLink, matchedViaSku, matchedViaNormalizedSku,
+      storeCodesBackfilled,
       zeroPrice,
+      unmatched,
       unmatchedSample,
       stores: stores.map(s => s.code),
     });
@@ -272,29 +390,82 @@ router.post('/hydrate-ebay-prices', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/listings/ebay-price-coverage
-// Diagnostic: how many products have eBay prices vs not. Used by the Phone
-// Pricing page to show a "X of Y products have eBay prices" banner so staff
-// know when quotes might be falling back to Shopify prices.
+// GET /api/listings/ebay-price-coverage — diagnostic. Counts how many products
+// have price_ebay set, and lists the linked-but-missing ones so staff can see
+// at a glance what's left to fix.
 router.get('/ebay-price-coverage', requireAdmin, async (req, res) => {
-  const totals = await query(`
-    SELECT
-      COUNT(*)::int AS total,
-      COUNT(*) FILTER (WHERE price_ebay IS NOT NULL AND price_ebay::numeric > 0)::int AS with_ebay_price,
-      COUNT(*) FILTER (WHERE price_shopify IS NOT NULL AND price_shopify::numeric > 0)::int AS with_shopify_price,
-      COUNT(*) FILTER (WHERE shopify_product_id IS NOT NULL)::int AS linked_to_shopify,
-      COUNT(*) FILTER (WHERE (price_ebay IS NULL OR price_ebay::numeric = 0) AND shopify_product_id IS NOT NULL)::int AS linked_no_ebay_price
-    FROM products
-  `);
-  const missing = await query(`
-    SELECT id, sku, title, price_shopify
-    FROM products
-    WHERE (price_ebay IS NULL OR price_ebay::numeric = 0)
-      AND shopify_product_id IS NOT NULL
-    ORDER BY title
-    LIMIT 50
-  `);
-  res.json({ totals: totals.rows[0], missingSample: missing.rows });
+  try {
+    const totals = await query(`
+      SELECT
+        COUNT(*) FILTER (WHERE active) AS total,
+        COUNT(*) FILTER (WHERE active AND price_ebay IS NOT NULL AND price_ebay > 0) AS with_ebay_price,
+        COUNT(*) FILTER (WHERE active AND price_shopify IS NOT NULL AND price_shopify > 0) AS with_shopify_price,
+        COUNT(*) FILTER (WHERE active AND shopify_product_id IS NOT NULL) AS linked_to_shopify
+      FROM products
+    `);
+    const missing = await query(`
+      SELECT p.id, p.sku, p.title, p.price_shopify, ml.ebay_item_id, ml.store_code
+      FROM products p
+      LEFT JOIN mirror_links ml ON ml.shopify_product_id::text = p.shopify_product_id
+      WHERE p.active = true AND (p.price_ebay IS NULL OR p.price_ebay <= 0)
+      ORDER BY ml.ebay_item_id NULLS LAST, p.id DESC
+      LIMIT 50
+    `);
+    res.json({
+      totals: {
+        ...totals.rows[0],
+        linked_no_ebay_price: missing.rows.filter(r => r.ebay_item_id).length,
+      },
+      missingSample: missing.rows,
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'coverage_failed', message: e.message });
+  }
+});
+
+// GET /api/listings/debug-product?sku=... — pinpoints why a specific product
+// isn't getting an eBay price. Returns the product, its mirror_link (if any),
+// and whether any active eBay listing matches by SKU or item_id.
+router.get('/debug-product', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
+  const { sku, productId } = req.query;
+  if (!sku && !productId) return res.status(400).json({ error: 'sku_or_productId_required' });
+  try {
+    const where = productId ? `id = $1` : `LOWER(sku) = LOWER($1)`;
+    const param = productId || sku;
+    const pRes = await query(
+      `SELECT id, sku, title, price_shopify, price_ebay, shopify_product_id, active
+       FROM products WHERE ${where} LIMIT 1`, [param]
+    );
+    const product = pRes.rows[0];
+    if (!product) return res.json({ found: false });
+
+    const linkRes = await query(
+      `SELECT ebay_item_id, store_code, last_mirrored_at, last_synced_sku
+       FROM mirror_links WHERE shopify_product_id::text = $1`,
+      [String(product.shopify_product_id)]
+    );
+    const mirrorLink = linkRes.rows[0] || null;
+
+    // If eBay is configured, also check live listings for matches
+    let ebayMatches = { byItemId: null, bySku: null };
+    if (ebay.isConfigured()) {
+      const all = await getAllListingsAcrossStores();
+      if (mirrorLink) {
+        ebayMatches.byItemId = all.find(l => String(l.itemId) === String(mirrorLink.ebay_item_id))
+          ? { found: true, store: all.find(l => String(l.itemId) === String(mirrorLink.ebay_item_id)).storeCode,
+              price: all.find(l => String(l.itemId) === String(mirrorLink.ebay_item_id)).priceEbay }
+          : { found: false };
+      }
+      const skuHit = all.find(l => l.sku === product.sku);
+      if (skuHit) ebayMatches.bySku = { found: true, itemId: skuHit.itemId, store: skuHit.storeCode, price: skuHit.priceEbay };
+      else ebayMatches.bySku = { found: false };
+    }
+
+    res.json({ found: true, product, mirrorLink, ebayMatches });
+  } catch (e) {
+    res.status(500).json({ error: 'debug_failed', message: e.message });
+  }
 });
 
 // Diagnostic
@@ -320,7 +491,7 @@ router.get('/sku-mismatches', requireAdmin, async (req, res) => {
     if (!links.rows.length) return res.json({ checked: 0, mismatches: [] });
 
     // 1) Pull live eBay SKUs across all stores (only for our mirrored items)
-    const stores = ebay.listStores().filter(s => s.hasToken && !s.standalone);
+    const stores = ebay.listStores().filter(s => s.hasToken);
     let ebayListings = [];
     for (const s of stores) {
       try {
@@ -413,7 +584,7 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
     });
   }
   try {
-    const stores = ebay.listStores().filter(s => s.hasToken && !s.standalone);
+    const stores = ebay.listStores().filter(s => s.hasToken);
     let listings = [];
     for (const s of stores) {
       try {
