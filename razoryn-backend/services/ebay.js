@@ -874,15 +874,33 @@ async function getRateLimits(apiContext = 'tradingapi') {
     timeout: 20000,
   });
   // Response shape: { rateLimits: [{ apiContext, apiName, apiVersion, resources: [{ name, rates: [{ count, limit, reset, timeWindow }] }] }] }
-  // Flatten to a per-method array similar to the old GetAPIAccessRules shape.
+  // Flatten to a per-method array.
+  //
+  // FIELD-NAME GOTCHA: eBay's Analytics API has inconsistent field naming across
+  // docs and versions — some payloads return `remaining` (the API-spec-documented
+  // name in recent docs), others return `count` (older docs). Whichever is
+  // returned represents the calls *remaining* in the period, not used.
+  // Additionally, for call-names that have never been hit today, the field can
+  // be omitted entirely or returned as null — in which case the safe assumption
+  // is "no usage" (remaining = limit), not "fully exhausted" (remaining = 0).
+  // Falling for "remaining = 0 when omitted" would falsely show 100% used for
+  // every call you don't use that day.
   const out = [];
   for (const api of (r.data?.rateLimits || [])) {
     for (const resource of (api.resources || [])) {
       const rate = (resource.rates && resource.rates[0]) || {};
-      // `count` = calls remaining, `limit` = total allowed, `reset` = ISO timestamp
-      // when the counter resets. We invert "remaining" into "used" for legacy compat.
-      const limit = parseInt(rate.limit || 0);
-      const remaining = parseInt(rate.count || 0);
+      const limit = parseInt(rate.limit) || 0;
+      let remaining;
+      if (rate.remaining !== undefined && rate.remaining !== null) {
+        remaining = parseInt(rate.remaining);
+      } else if (rate.count !== undefined && rate.count !== null) {
+        remaining = parseInt(rate.count);
+      } else {
+        // Field missing entirely → eBay omits it for unused call-names.
+        // Treat as "no calls made today" (remaining = limit).
+        remaining = limit;
+      }
+      if (!Number.isFinite(remaining)) remaining = limit;
       out.push({
         callName: resource.name || api.apiName || 'unknown',
         apiContext: api.apiContext,
@@ -891,7 +909,10 @@ async function getRateLimits(apiContext = 'tradingapi') {
         dailyUsage: Math.max(0, limit - remaining),
         dailyRemaining: remaining,
         resetAt: rate.reset || null,
-        timeWindow: parseInt(rate.timeWindow || 0),
+        timeWindow: parseInt(rate.timeWindow) || 0,
+        // Raw rate object for debugging — visible in the test-connection modal
+        // so we can confirm which field name eBay is actually using today.
+        _raw: rate,
       });
     }
   }
