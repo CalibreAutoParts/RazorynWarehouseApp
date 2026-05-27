@@ -7192,6 +7192,7 @@ async function forceMatchLinks() {
 // "rate limit" case and shows quota usage + reset-time guidance instead of the
 // generic "refresh your token" advice (which wouldn't help for a quota issue).
 function showEbayErrorsModal(storeErrors, fullResponse, quota) {
+  const quotaError = fullResponse?.quotaError;
   // Detect rate-limit specifically — those need different guidance entirely.
   const isRateLimit = storeErrors.some(e =>
     (e.reason === 'rate_limit') ||
@@ -7211,7 +7212,7 @@ function showEbayErrorsModal(storeErrors, fullResponse, quota) {
       Your eBay developer app has hit its daily Trading API quota for one or more call-names. The quota is <strong>per-app</strong> (shared across all stores using the same <code>EBAY_CLIENT_ID</code>), not per-store.<br><br>
       <strong>Three options:</strong><br>
       1. <strong>Wait</strong> — daily counters reset at midnight Pacific Time (≈ 8am UK winter / 7am UK BST summer). Don't run Force match / Hydrate again until then.<br>
-      2. <strong>Apply for higher limits</strong> at <a href="https://developer.ebay.com/marketplace/risk-and-compliance/static/compatible-application-check.html" target="_blank" rel="noopener" style="color:var(--brand-primary)">eBay Compatible Application Check</a>. Takes a few days; one-time process.<br>
+      2. <strong>Apply for higher limits</strong> via the <a href="https://developer.ebay.com/develop/apis/general/application-growth-check" target="_blank" rel="noopener" style="color:var(--brand-primary)"><strong>Application Growth Check</strong></a> form (free, 3-5 business days, default cap bumps to ~1.5M calls/day after approval).<br>
       3. <strong>Use a different App</strong> for one of your stores so they don't share quota (only worth it if you have two distinct eBay developer accounts).
     </div>
   ` : `
@@ -7233,7 +7234,7 @@ function showEbayErrorsModal(storeErrors, fullResponse, quota) {
           : 'One or more eBay stores returned errors. <strong>The scan completed but no listings were fetched from these stores</strong> — that\'s why you saw "0 listings".'}
       </div>
       ${rows}
-      ${quota && quota.length ? renderQuotaTable(quota) : ''}
+      ${(quota && quota.length) || quotaError ? renderQuotaTable(quota, quotaError) : ''}
       ${remediation}
     `,
     actions: [
@@ -7261,10 +7262,11 @@ async function testEbayConnection() {
     const passed = (r.results || []).filter(x => x.ok);
     if (failed.length === 0) {
       Task.done(taskId, `All ${passed.length} store${passed.length === 1 ? '' : 's'} OK`);
-      // If we got quota data, show it in the success modal too — useful to
-      // know how close to the cap you are even when things are working.
-      if (r.quota && r.quota.length) {
-        showQuotaModal(r.quota, passed);
+      // Always show the quota modal — even when stores test OK you might be 1
+      // call away from the cap, and seeing the actual usage table tells you
+      // whether to proceed with Hydrate / Force match or wait for the reset.
+      if ((r.quota && r.quota.length) || r.quotaError) {
+        showQuotaModal(r.quota, passed, r.quotaError);
       } else {
         const summary = passed.map(p => `✓ ${p.name}: ${p.sampleCount} active listings`).join('\n');
         toast(summary || 'All stores responding.', 'success', 8000);
@@ -7282,7 +7284,20 @@ async function testEbayConnection() {
 
 // Renders the quota table — used both standalone (success path) and inside
 // the errors modal (when a rate-limit error fires).
-function renderQuotaTable(quota) {
+function renderQuotaTable(quota, quotaError) {
+  // If quota fetch itself failed, show that as a fallback hint
+  if ((!quota || !quota.length) && quotaError) {
+    return `
+      <div style="margin-top:14px;padding:12px;background:var(--bg-soft);border-radius:8px;font-size:12px;line-height:1.6">
+        <div style="font-weight:600;margin-bottom:6px">⚠ Couldn't fetch quota data automatically</div>
+        <div style="color:var(--ink-soft);font-family:ui-monospace,monospace;font-size:11px;padding:6px 8px;background:var(--white);border-radius:4px;margin-bottom:8px;word-break:break-word">${escapeHtml(quotaError)}</div>
+        <div>You can still check your quotas manually in the eBay developer portal:</div>
+        <ul style="margin:6px 0 0 0;padding-left:20px">
+          <li><a href="https://developer.ebay.com/my/application/check" target="_blank" rel="noopener" style="color:var(--brand-primary)">developer.ebay.com → My Application → App Check / API Reports</a></li>
+        </ul>
+      </div>
+    `;
+  }
   if (!quota || !quota.length) return '';
   const rows = quota.map(q => {
     const name = q.callName || '— total —';
@@ -7299,7 +7314,7 @@ function renderQuotaTable(quota) {
   }).join('');
   return `
     <div style="margin-top:14px">
-      <div style="font-weight:600;font-size:13px;margin-bottom:8px">📊 Today's eBay API quota usage</div>
+      <div style="font-weight:600;font-size:13px;margin-bottom:8px">📊 Today's eBay API quota usage (Trading API)</div>
       <table style="width:100%;border-collapse:collapse;font-size:12px;background:var(--bg-soft);border-radius:6px;overflow:hidden">
         <thead><tr style="background:var(--white);font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">
           <th style="padding:8px 10px;text-align:left">Call name</th>
@@ -7310,7 +7325,8 @@ function renderQuotaTable(quota) {
         <tbody>${rows}</tbody>
       </table>
       <div style="font-size:11px;color:var(--ink-soft);margin-top:8px;line-height:1.5">
-        Quota is per-eBay-App (shared across all your stores). Daily counter resets at midnight Pacific Time (≈ 8am UK winter / 7am BST summer). To raise the limit permanently, apply for the <a href="https://developer.ebay.com/marketplace/risk-and-compliance/static/compatible-application-check.html" target="_blank" rel="noopener" style="color:var(--brand-primary)">Compatible Application Check</a>.
+        Quota is per-eBay-App (shared across all your stores). Daily counter resets at midnight Pacific Time (≈ 8am UK winter / 7am BST summer).
+        To raise the limit permanently, apply for an <a href="https://developer.ebay.com/develop/apis/general/application-growth-check" target="_blank" rel="noopener" style="color:var(--brand-primary)"><strong>Application Growth Check</strong></a> in the eBay developer portal (free, takes 3-5 business days, default bumped to ~1.5M calls/day).
       </div>
     </div>
   `;
@@ -7318,14 +7334,14 @@ function renderQuotaTable(quota) {
 
 // Shows quota for the "all stores OK" path — gives the user visibility into
 // where they're standing on the cap even when things are working.
-function showQuotaModal(quota, passed) {
+function showQuotaModal(quota, passed, quotaError) {
   const sample = passed.map(p => `<div style="font-size:12px;color:var(--ink-soft)">✓ ${escapeHtml(p.name)}: ${p.sampleCount} active listings</div>`).join('');
   modal({
     title: '✓ eBay connection OK',
     body: `
       <div style="font-size:13px;line-height:1.6;margin-bottom:12px">All configured stores responded successfully.</div>
       ${sample}
-      ${renderQuotaTable(quota)}
+      ${renderQuotaTable(quota, quotaError)}
     `,
     actions: [{ label: 'Close', primary: true, onClick: closeModal }],
   });
