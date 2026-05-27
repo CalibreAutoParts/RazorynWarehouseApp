@@ -821,41 +821,81 @@ async function addItem(storeArg, opts = {}) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// GetAPIAccessRules — read the App's current eBay Trading API quota for
-// each call-name, including how many calls have been made today and how
-// many remain. Useful for diagnosing "exceeded usage limit" errors — you
-// can see exactly which call hit the cap.
+// getRateLimits — query the eBay Developer Analytics API for the App's
+// current API call quotas + usage. Per-app (EBAY_CLIENT_ID), not per-store.
 //
-// Note: quota is per-App (EBAY_CLIENT_ID), NOT per-store. All your stores
-// using the same App share the same quota. Calling it with any store's
-// token returns the same data.
+// History: this used to be GetAPIAccessRules in the Trading API. eBay
+// decommissioned that call on March 10, 2023. Replacement is the Developer
+// Analytics REST API, which uses an OAuth client_credentials access token —
+// no user token / refresh token required. Just CLIENT_ID + CLIENT_SECRET.
+//
+// Endpoint: GET https://api.ebay.com/developer/analytics/v1_beta/rate_limit/
+// Scope:    https://api.ebay.com/oauth/api_scope
+//
+// Note: rate-limit fetches themselves do NOT count against the Trading API
+// daily quota — they're on a separate plane — so this is safe to call even
+// when you're already over the cap.
+//
+// Returns a flattened array shaped to match the old GetAPIAccessRules format,
+// so existing callers in routes/listings.js don't need to change much.
 // ──────────────────────────────────────────────────────────────────────────
-async function getApiAccessRules(storeArg) {
-  if (!isConfigured(storeArg)) throw new Error('not_configured');
-  const xml = await tradingCall('GetAPIAccessRules', '', storeArg);
-  const ack = extractOne(xml, 'Ack') || '';
-  if (ack !== 'Success' && ack !== 'Warning') {
-    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
-    throw new Error('eBay error: ' + decodeEntities(err));
+let _appOAuthCache = { token: null, expiresAt: 0 };
+async function getAppOAuthToken() {
+  if (!CLIENT_ID || !CLIENT_SECRET) {
+    throw new Error('EBAY_CLIENT_ID / EBAY_CLIENT_SECRET not set — cannot generate app-level OAuth token');
   }
-  // The response contains an APIAccessRule per call-name. Pull a few useful ones.
-  const ruleXmls = extractAll(xml, 'APIAccessRule');
-  const rules = [];
-  for (const r of ruleXmls) {
-    const callName = extractOne(r, 'CallName') || '';
-    if (!callName) continue;
-    rules.push({
-      callName,
-      dailyHardLimit:  parseInt(extractOne(r, 'DailyHardLimit')  || '0') || 0,
-      dailySoftLimit:  parseInt(extractOne(r, 'DailySoftLimit')  || '0') || 0,
-      dailyUsage:      parseInt(extractOne(r, 'DailyUsage')      || '0') || 0,
-      hourlyHardLimit: parseInt(extractOne(r, 'HourlyHardLimit') || '0') || 0,
-      hourlyUsage:     parseInt(extractOne(r, 'HourlyUsage')     || '0') || 0,
-      // PeriodicStartOfPeriod / PeriodicUsage available too but most readers
-      // only care about daily + hourly.
-    });
+  if (_appOAuthCache.token && Date.now() < _appOAuthCache.expiresAt - 60_000) return _appOAuthCache.token;
+  const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
+  const r = await axios.post(
+    `${BASE}/identity/v1/oauth2/token`,
+    new URLSearchParams({
+      grant_type: 'client_credentials',
+      scope: 'https://api.ebay.com/oauth/api_scope',
+    }),
+    {
+      headers: {
+        Authorization: `Basic ${creds}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      timeout: 15000,
+    }
+  );
+  _appOAuthCache.token = r.data.access_token;
+  _appOAuthCache.expiresAt = Date.now() + (r.data.expires_in * 1000);
+  return _appOAuthCache.token;
+}
+
+async function getRateLimits(apiContext = 'tradingapi') {
+  const token = await getAppOAuthToken();
+  const url = `${BASE}/developer/analytics/v1_beta/rate_limit/` +
+    (apiContext ? `?api_context=${encodeURIComponent(apiContext)}` : '');
+  const r = await axios.get(url, {
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    timeout: 20000,
+  });
+  // Response shape: { rateLimits: [{ apiContext, apiName, apiVersion, resources: [{ name, rates: [{ count, limit, reset, timeWindow }] }] }] }
+  // Flatten to a per-method array similar to the old GetAPIAccessRules shape.
+  const out = [];
+  for (const api of (r.data?.rateLimits || [])) {
+    for (const resource of (api.resources || [])) {
+      const rate = (resource.rates && resource.rates[0]) || {};
+      // `count` = calls remaining, `limit` = total allowed, `reset` = ISO timestamp
+      // when the counter resets. We invert "remaining" into "used" for legacy compat.
+      const limit = parseInt(rate.limit || 0);
+      const remaining = parseInt(rate.count || 0);
+      out.push({
+        callName: resource.name || api.apiName || 'unknown',
+        apiContext: api.apiContext,
+        apiName: api.apiName,
+        dailyHardLimit: limit,
+        dailyUsage: Math.max(0, limit - remaining),
+        dailyRemaining: remaining,
+        resetAt: rate.reset || null,
+        timeWindow: parseInt(rate.timeWindow || 0),
+      });
+    }
   }
-  return rules;
+  return out;
 }
 
 module.exports = {
@@ -872,7 +912,7 @@ module.exports = {
   reviseItem,
   completeSale,
   addItem,
-  getApiAccessRules,
+  getRateLimits,
   // Multi-store helpers
   listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary, standalone: !!s.standalone, disabled: !!s.disabled, disabledReason: s.disabledReason || null })),
   getPrimaryStore: () => brand.getPrimaryStore(),
