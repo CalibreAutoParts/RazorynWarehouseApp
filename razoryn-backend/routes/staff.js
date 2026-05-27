@@ -8,10 +8,27 @@ const { audit } = require('../middleware/audit');
 const router = express.Router();
 router.use(requireAuth, requireAdmin);
 
+// Default permissions for a freshly-created warehouse-role user.
+// Per the agreed scope, warehouse staff are warehouse operatives — they need
+// access to the operational pages (inventory, stock check, locations, returns,
+// dispatch) and nothing else. Sales / pricing / KB / schedule / videos are
+// admin-only management functions.
+//
+// An admin CAN override these on a per-user basis from the Staff & Access page
+// if they want (e.g. give a senior warehouse lead access to schedule). The
+// defaults are conservative; toggles are explicit.
 const DEFAULT_PERMS = {
-  inventory: true, scan: true, locations: true, returns: true,
-  sales: false, pricing: false, kb: true, kbSensitive: false,
-  schedule: true, videos: true,
+  inventory: true,
+  scan: true,
+  locations: true,
+  returns: true,
+  dispatch: true,
+  sales: false,
+  pricing: false,
+  kb: false,
+  kbSensitive: false,
+  schedule: false,
+  videos: false,
 };
 
 // GET /api/staff
