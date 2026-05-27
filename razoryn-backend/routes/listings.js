@@ -831,6 +831,30 @@ router.get('/test-ebay-connection', requireAdmin, async (req, res) => {
   const ebay = require('../services/ebay');
   const stores = ebay.listStores();
   const results = [];
+  // Try fetching the App-level quota usage too. It's per-App so we only need
+  // ONE store's token to call it; first usable store wins. If every store
+  // fails this call, we'll see that in the quotaError field.
+  let quota = null;
+  let quotaError = null;
+  for (const s of stores) {
+    if (s.disabled || !s.hasToken) continue;
+    try {
+      const allRules = await ebay.getApiAccessRules(s.code);
+      // Filter to the rules most useful for diagnosing this app's behaviour.
+      // Empty CallName is the "all calls" aggregate row eBay returns.
+      const interesting = ['', 'GetMyeBaySelling', 'GetItem', 'GetOrders', 'ReviseItem', 'AddItem', 'CompleteSale', 'AddMemberMessageAAQToPartner'];
+      quota = allRules
+        .filter(r => interesting.includes(r.callName))
+        .map(r => ({
+          ...r,
+          dailyRemaining: r.dailyHardLimit > 0 ? Math.max(0, r.dailyHardLimit - r.dailyUsage) : null,
+          hourlyRemaining: r.hourlyHardLimit > 0 ? Math.max(0, r.hourlyHardLimit - r.hourlyUsage) : null,
+        }));
+      break;
+    } catch (e) {
+      quotaError = e.message;
+    }
+  }
   for (const s of stores) {
     const result = { store: s.code, name: s.name, hasToken: !!s.hasToken, disabled: !!s.disabled };
     if (s.disabled) {
@@ -860,9 +884,17 @@ router.get('/test-ebay-connection', requireAdmin, async (req, res) => {
       result.ok = false;
       result.reason = 'api_error';
       result.error = e.message;
-      // Surface human-readable likely-causes from the raw eBay error
+      // Surface human-readable likely-causes from the raw eBay error.
+      // Order matters: rate-limit detection must run BEFORE "expired" matching
+      // because eBay's rate-limit message contains the word "exceeded" which
+      // could otherwise be misread as a generic error.
       const msg = (e.message || '').toLowerCase();
-      if (msg.includes('auth') || msg.includes('token') || msg.includes('expired') || msg.includes('invalid') || msg.includes('iaf') || msg.includes('17470') || msg.includes('931') || msg.includes('932')) {
+      if (msg.includes('usage limit') || msg.includes('exceeded usage') || msg.includes('call limit') || msg.includes('getapiaccessrules') || msg.includes('21917')) {
+        // eBay's daily Trading API quota — per-App (EBAY_CLIENT_ID), not per-store.
+        // Default for new apps is 5,000 calls/day per call-name; resets midnight Pacific Time.
+        result.reason = 'rate_limit';
+        result.likelyCause = `eBay app has hit its daily API call quota for this call type. The quota is PER-APP (shared by all your stores using the same EBAY_CLIENT_ID), and resets at midnight Pacific Time (≈ 8am UK winter / 7am UK BST). To increase the limit permanently, apply for the Compatible Application Check at developer.ebay.com → My Account → Compatible Application.`;
+      } else if (msg.includes('auth') || msg.includes('token') || msg.includes('expired') || msg.includes('invalid') || msg.includes('iaf') || msg.includes('17470') || msg.includes('931') || msg.includes('932')) {
         result.likelyCause = 'Token expired or invalid. Generate a fresh user token at https://developer.ebay.com/my/auth/?env=production and update the Railway env var.';
       } else if (msg.includes('scope') || msg.includes('21916')) {
         result.likelyCause = 'Token lacks the right scope. Regenerate with at least the Trading API access.';
@@ -874,7 +906,7 @@ router.get('/test-ebay-connection', requireAdmin, async (req, res) => {
     }
     results.push(result);
   }
-  res.json({ results });
+  res.json({ results, quota, quotaError });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
