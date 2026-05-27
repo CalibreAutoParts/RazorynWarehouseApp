@@ -6741,6 +6741,8 @@ function renderLinkStatus() {
   const data = State.linkStatus;
   if (!data) return;
   const filter = State.linkFilter || 'unlinked';
+  // Fire the stores-status fetch (async, separate request — repaints when done)
+  refreshLinkMirrorStoresStatus();
   const products = data.products || [];
   let filtered;
   if (filter === 'linked') filtered = products.filter(p => p.shopify_product_id && p.ebay_item_id);
@@ -6767,6 +6769,7 @@ function renderLinkStatus() {
 
     <div class="card" style="margin-bottom:14px">
       <div class="card-body">
+        <div id="lm-stores-status" style="margin-bottom:10px"></div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
           <button class="btn btn-primary" onclick="forceMatchLinks()" title="Pull active eBay listings and auto-match by SKU + barcode + title token">🔗 Force match all</button>
           <input id="links-search" placeholder="Search by SKU, title or part #…" oninput="debouncedLinkSearch(this.value)" value="${escapeAttr(State.linkSearch || '')}" style="flex:1;min-width:220px">
@@ -7036,6 +7039,74 @@ async function unlinkEbay(ebayItemId) {
     toast('Unlinked', 'success');
     await loadLinkStatus();
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// Fetches the configured eBay stores' status (token / disabled state) and
+// paints a banner into #lm-stores-status. Disabled stores get an explicit
+// note + a "Clean up its old links" button. Idempotent — safe to call on
+// every re-render.
+async function refreshLinkMirrorStoresStatus() {
+  const slot = el('lm-stores-status');
+  if (!slot) return;
+  try {
+    const r = await Api.get('/api/listings/stores');
+    const stores = r.stores || [];
+    const disabled = stores.filter(s => s.disabled);
+    const active   = stores.filter(s => !s.disabled && s.hasToken);
+    const noToken  = stores.filter(s => !s.disabled && !s.hasToken);
+    let html = '';
+    if (disabled.length) {
+      html += `
+        <div style="background:#fff8e6;border:1px solid #f0d171;color:#5a4400;padding:10px 14px;border-radius:6px;font-size:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <div style="font-size:18px">⏸</div>
+          <div style="flex:1;min-width:220px">
+            <strong>Store${disabled.length === 1 ? '' : 's'} disabled:</strong> ${disabled.map(s => escapeHtml(s.name)).join(', ')}.
+            All linking, syncing and force-matching skips ${disabled.length === 1 ? 'this store' : 'these stores'} until re-enabled.
+            Re-enable by removing the store code from the <code>EBAY_STORE_DISABLED</code> env var in Railway, then redeploy.
+          </div>
+          <button class="btn btn-outline btn-sm" onclick="cleanupDisabledStoreLinks()" title="Delete mirror_links rows pointing to disabled stores">🗑 Clean stale links</button>
+        </div>
+      `;
+    }
+    if (noToken.length) {
+      html += `
+        <div style="background:#fee;border:1px solid #faa;color:#900;padding:8px 12px;border-radius:6px;font-size:12px;margin-top:6px">
+          <strong>Store${noToken.length === 1 ? '' : 's'} with no token:</strong> ${noToken.map(s => escapeHtml(s.name)).join(', ')} — set the auth env var in Railway.
+        </div>
+      `;
+    }
+    if (active.length && !disabled.length && !noToken.length) {
+      html += `<div style="font-size:11px;color:var(--ink-soft)">Active stores: ${active.map(s => escapeHtml(s.name)).join(', ')}.</div>`;
+    } else if (active.length) {
+      html += `<div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Active: ${active.map(s => escapeHtml(s.name)).join(', ')}.</div>`;
+    }
+    slot.innerHTML = html;
+  } catch (e) {
+    slot.innerHTML = '';  // silent fail — non-critical
+  }
+}
+
+// Deletes mirror_links rows that point to currently-disabled stores. Used to
+// clean up after disabling a store (e.g. Evanta) so the listing-mirror counts
+// reflect reality. Safe to re-run.
+async function cleanupDisabledStoreLinks() {
+  if (!confirm('Delete mirror_links rows that point to disabled eBay stores?\n\nThis is safe to do — after re-enabling a store and running Force match, the links will be re-created from the live eBay listings.')) return;
+  const taskId = Task.start('Cleaning up disabled-store links…');
+  try {
+    const r = await Api.post('/api/listings/cleanup-disabled-store-links');
+    Task.done(taskId, `${r.deleted} deleted`);
+    if (r.deleted === 0) {
+      toast(r.message || 'Nothing to clean — no disabled stores or no stale links.', 'info');
+    } else {
+      toast(`✓ Cleaned ${r.deleted} stale link${r.deleted === 1 ? '' : 's'} from ${r.disabledStores.join(', ')}`, 'success');
+      // Reload listing mirror so the counts reflect the cleanup
+      try { await loadLinkStatus?.(); } catch (e) {}
+      renderLinkStatus();
+    }
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Cleanup failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 async function forceMatchLinks() {
@@ -8003,6 +8074,50 @@ function renderSettings() {
         </div>
       </div>
 
+      <!-- Brand logo upload — overrides the static /logo.png for invoices + topbar -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>🖼️ Brand logo</h3>
+          <div class="card-desc">Upload a PNG/JPG/SVG used on every invoice, the app topbar, and email previews. Max 500 KB. When not set, the brand's bundled default logo is used.</div>
+        </div>
+        <div class="card-body">
+          <div id="logo-current-wrap" style="display:none;margin-bottom:12px;padding:14px;background:var(--bg-soft);border-radius:8px">
+            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Current logo</div>
+            <img id="logo-current-img" src="" alt="Current logo" style="max-height:80px;max-width:300px;background:var(--white);padding:8px;border:1px solid var(--line);border-radius:6px;display:block">
+            <div id="logo-current-name" style="font-size:11px;color:var(--ink-soft);margin-top:6px;font-family:ui-monospace,monospace"></div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input type="file" id="logo-upload-file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml,.png,.jpg,.jpeg,.gif,.webp,.svg" onchange="onLogoUpload(this)" style="font-size:12px">
+            <button class="btn btn-ghost btn-sm" id="logo-remove-btn" onclick="deleteUploadedLogo()" style="display:none;color:var(--red)">Remove logo</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Monthly stock-check reminder -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>📋 Monthly stock-take reminder</h3>
+          <div class="card-desc">Pops a sticky banner on the dashboard once a month on the day you pick, so a physical stock-take doesn't get forgotten. Dismiss it once and it won't show again until next month.</div>
+        </div>
+        <div class="card-body">
+          <label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:10px">
+            <input type="checkbox" id="set-stockcheck-enabled">
+            Enable monthly stock-take reminder
+          </label>
+          <div class="field" style="max-width:240px">
+            <label>Day of month</label>
+            <select id="set-stockcheck-day">
+              <option value="">— pick a day —</option>
+              ${Array.from({length: 31}, (_, i) => i + 1).map(d => `<option value="${d}">${d}${['st','nd','rd'][d-1] || (d>=4&&d<=20?'th':['st','nd','rd'][((d%10)-1)] || 'th')} of the month</option>`).join('')}
+            </select>
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">For months without that day (e.g. picking the 31st in February), the banner fires on the last day of that month instead.</div>
+          </div>
+          <div style="margin-top:14px">
+            <button class="btn btn-primary btn-sm" onclick="saveStockCheckReminder()">Save reminder</button>
+          </div>
+        </div>
+      </div>
+
       <!-- eBay listing defaults — pre-fills the Create-on-eBay modal -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-head">
@@ -8289,6 +8404,11 @@ async function loadPricingConfig() {
     if (typeof renderSoundEventRows === 'function' && el('sound-event-rows')) renderSoundEventRows();
     // Hydrate the eBay listing defaults card
     if (typeof hydrateEbayDefaults === 'function' && el('set-ebay-cat')) hydrateEbayDefaults(r);
+    // Hydrate the logo card + apply uploaded logo to topbar everywhere
+    if (typeof hydrateLogoUI === 'function') hydrateLogoUI(r);
+    // Hydrate stock-check reminder card + fire today's reminder if due
+    if (typeof hydrateStockCheckUI === 'function' && el('set-stockcheck-enabled')) hydrateStockCheckUI(r);
+    if (typeof checkStockTakeReminder === 'function') checkStockTakeReminder();
     // Load message templates for the editor card
     if (typeof loadTemplatesEditor === 'function' && el('templates-list')) loadTemplatesEditor();
   } catch (e) { console.warn('loadPricingConfig:', e); }
@@ -8528,6 +8648,174 @@ async function saveEbayListingDefaults() {
   } catch (e) {
     toast('Save failed: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// LOGO UPLOAD — base64 data URL stored in app_settings.
+// File is read client-side as data URL, validated, then POSTed to the
+// backend which stores it. Same data URL is then used inline on invoices
+// (no follow-up HTTP request from the print/email template).
+// ──────────────────────────────────────────────────────────────────────────
+function hydrateLogoUI(cfg) {
+  const wrap = el('logo-current-wrap');
+  const img = el('logo-current-img');
+  const nameEl = el('logo-current-name');
+  const removeBtn = el('logo-remove-btn');
+  if (!wrap || !img) return;
+  if (cfg.logoDataUrl) {
+    img.src = cfg.logoDataUrl;
+    if (nameEl) nameEl.textContent = cfg.logoFilename || '';
+    wrap.style.display = '';
+    if (removeBtn) removeBtn.style.display = '';
+  } else {
+    wrap.style.display = 'none';
+    if (removeBtn) removeBtn.style.display = 'none';
+  }
+  // Topbar logo — swap to the uploaded one if present, on EVERY page
+  applyTopbarLogo(cfg.logoDataUrl);
+}
+
+// Look for the topbar logo image and swap its src. Safe to call multiple times.
+function applyTopbarLogo(dataUrl) {
+  if (!dataUrl) return;
+  document.querySelectorAll('img.topbar-logo, .topbar img, .sidebar-logo img, img[data-app-logo]').forEach(img => {
+    img.src = dataUrl;
+  });
+}
+
+async function onLogoUpload(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  // Size cap: 500KB raw. Base64 inflates ~33%, so the stored data URL is
+  // ~700KB — safe to inline in every invoice without bloating things.
+  const MAX_BYTES = 500_000;
+  if (file.size > MAX_BYTES) {
+    toast(`File too big — ${(file.size / 1024).toFixed(0)} KB. Max 500 KB. Try resizing or compressing the image.`, 'error', 8000);
+    input.value = '';
+    return;
+  }
+  // Type check — be permissive since browsers report MIME types inconsistently
+  if (!/^image\//.test(file.type) && !/\.(png|jpe?g|gif|webp|svg)$/i.test(file.name)) {
+    toast('Unsupported file type. Use PNG, JPG, GIF, WEBP, or SVG.', 'error');
+    input.value = '';
+    return;
+  }
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error('Read failed'));
+      reader.readAsDataURL(file);
+    });
+    const r = await Api.post('/api/settings/logo', { dataUrl, filename: file.name });
+    toast(`Logo uploaded (${r.sizeKb} KB)`, 'success');
+    // Refresh cached config + UI
+    State.pricingConfig = await Api.get('/api/settings/pricing-config');
+    hydrateLogoUI(State.pricingConfig);
+    input.value = '';
+  } catch (e) {
+    const msg = e.data?.message || e.message || 'Unknown error';
+    toast('Upload failed: ' + msg, 'error');
+    input.value = '';
+  }
+}
+
+async function deleteUploadedLogo() {
+  if (!confirm('Remove the uploaded logo? The brand-default logo will be used instead.')) return;
+  try {
+    await Api.delete('/api/settings/logo');
+    toast('Logo removed', 'success');
+    State.pricingConfig = await Api.get('/api/settings/pricing-config');
+    hydrateLogoUI(State.pricingConfig);
+  } catch (e) {
+    toast('Remove failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// STOCK-CHECK REMINDER — once-per-month banner on the dashboard.
+// Backend stores the day-of-month + enabled flag. Frontend checks every
+// time the app boots / refreshes whether today is the configured day, and
+// fires the banner if the user hasn't already dismissed it this month
+// (tracked per-device in localStorage: rwh_stockcheck_dismissed_YYYY-MM).
+// ──────────────────────────────────────────────────────────────────────────
+function hydrateStockCheckUI(cfg) {
+  const cb = el('set-stockcheck-enabled');
+  const day = el('set-stockcheck-day');
+  if (cb) cb.checked = !!cfg.stockCheckEnabled;
+  if (day) day.value = cfg.stockCheckDay ? String(cfg.stockCheckDay) : '';
+}
+
+async function saveStockCheckReminder() {
+  const enabled = !!el('set-stockcheck-enabled')?.checked;
+  const dayStr = (el('set-stockcheck-day')?.value || '').trim();
+  const day = parseInt(dayStr);
+  if (enabled && (!Number.isFinite(day) || day < 1 || day > 31)) {
+    toast('Pick a day of the month (1–31) before enabling', 'warn'); return;
+  }
+  try {
+    await Api.post('/api/settings/pricing-config', {
+      stockCheckEnabled: enabled,
+      stockCheckDay: enabled ? day : null,
+    });
+    toast(enabled ? `Stock-take reminder set for day ${day} of each month` : 'Stock-take reminder disabled', 'success');
+    State.pricingConfig = await Api.get('/api/settings/pricing-config');
+  } catch (e) {
+    toast('Save failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// Check whether the stock-take reminder should fire today. Called on every
+// app boot + page route change. The banner is rendered into a fixed slot at
+// the top of the dashboard; dismissing it stores the current YYYY-MM in
+// localStorage so it doesn't re-fire this month.
+//
+// Edge case: user picks day 31 but the current month only has 28/29/30 days.
+// We fire the banner on the LAST day of the month in that case, so an
+// "always on the 31st" reminder still hits every month.
+function checkStockTakeReminder() {
+  const cfg = State.pricingConfig;
+  if (!cfg?.stockCheckEnabled || !cfg.stockCheckDay) return;
+  const now = new Date();
+  const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const dismissedKey = `rwh_stockcheck_dismissed_${monthKey}`;
+  if (localStorage.getItem(dismissedKey)) return;
+  // Days in current month — last-day-of-month trick using day 0 of the next month
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  // Effective trigger day = min(configured day, days-in-month)
+  const triggerDay = Math.min(cfg.stockCheckDay, daysInMonth);
+  if (now.getDate() < triggerDay) return;
+  // Today is on or past the trigger day for this month — show the banner.
+  // (We show on or past, not just exactly equal, so a person who only opens
+  // the app a few times a week doesn't miss the reminder if they skip the day.)
+  showStockTakeBanner(cfg.stockCheckDay, monthKey, dismissedKey);
+}
+
+function showStockTakeBanner(day, monthKey, dismissedKey) {
+  // Avoid duplicate banners if already rendered
+  if (document.getElementById('stocktake-banner')) return;
+  const banner = document.createElement('div');
+  banner.id = 'stocktake-banner';
+  banner.style.cssText = 'background:#fff8e6;border:1px solid #f0d171;color:#5a4400;padding:14px 18px;border-radius:8px;margin:0 0 16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:13px;line-height:1.5';
+  banner.innerHTML = `
+    <div style="font-size:22px">📋</div>
+    <div style="flex:1;min-width:200px">
+      <strong>Monthly stock-take reminder</strong>
+      <div style="font-size:12px;margin-top:2px;color:#7a5a00">You scheduled a physical stock check for day ${day} of each month. Time to walk the warehouse and verify counts against the system.</div>
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="routeTo('inventory'); dismissStockTakeBanner('${dismissedKey}');" style="background:#5a4400;color:#fff;border:0">Go to Inventory</button>
+    <button class="btn btn-ghost btn-sm" onclick="dismissStockTakeBanner('${dismissedKey}')" style="color:#5a4400">Dismiss for this month</button>
+  `;
+  // Insert at the top of the main content area. The dashboard has an outer
+  // container — we just prepend.
+  const main = document.querySelector('.main, main, #content, #app-content, .content') || document.body;
+  main.insertBefore(banner, main.firstChild);
+}
+
+function dismissStockTakeBanner(dismissedKey) {
+  localStorage.setItem(dismissedKey, new Date().toISOString());
+  const b = document.getElementById('stocktake-banner');
+  if (b) b.remove();
 }
 
 // ──────────────────────────────────────────────────────────────────────────
