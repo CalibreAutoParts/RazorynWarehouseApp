@@ -73,10 +73,36 @@ const active = brand || BRANDS.razoryn;
 // Resolve each store's token at import time so callers can do
 // `brand.stores[0].token` instead of re-reading env every call. A missing token
 // is logged but doesn't throw — useful for dev environments without all creds.
+//
+// EBAY_STORE_DISABLED (env var) — comma-separated list of store codes to disable
+// at boot. The store entry is kept (so the rest of the codebase doesn't crash
+// looking it up) but its token is nulled out so `s.hasToken` is false. Every
+// listing/sync/match endpoint already filters by `.hasToken`, so a disabled
+// store becomes a no-op everywhere automatically.
+//
+// Example: EBAY_STORE_DISABLED=evantagrande temporarily disables Calibre's
+// Evanta Grande store so all linking/syncing happens against EVBODYPARTS only.
+// To re-enable, remove the env var (or remove the code from the list) and
+// redeploy.
+const disabledList = (process.env.EBAY_STORE_DISABLED || '')
+  .toLowerCase()
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
 for (const s of active.stores) {
-  s.token = process.env[s.tokenEnv] || null;
-  if (!s.token) {
-    console.warn(`[brand] Store "${s.code}" has no token (${s.tokenEnv} not set).`);
+  const rawToken = process.env[s.tokenEnv] || null;
+  if (disabledList.includes(s.code)) {
+    s.token = null;
+    s.disabled = true;
+    s.disabledReason = `EBAY_STORE_DISABLED env var includes "${s.code}"`;
+    console.warn(`[brand] Store "${s.code}" is DISABLED (token suppressed at boot).`);
+  } else {
+    s.token = rawToken;
+    s.disabled = false;
+    if (!rawToken) {
+      console.warn(`[brand] Store "${s.code}" has no token (${s.tokenEnv} not set).`);
+    }
   }
 }
 
