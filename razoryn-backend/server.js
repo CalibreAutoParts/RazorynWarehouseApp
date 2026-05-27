@@ -76,6 +76,7 @@ app.use('/api/notes',        require('./routes/notes'));
 app.use('/api/brand',        require('./routes/brand'));
 app.use('/api/dispatch',     require('./routes/dispatch'));
 app.use('/api/messages',     require('./routes/messages'));
+app.use('/api/customers',    require('./routes/customers'));
 // Public logo serving — mounted at /public-logo (NOT /api/settings) so it
 // completely bypasses the auth middleware that the settings router applies
 // to its whole namespace. Used by <img src="/public-logo"> in invoice HTML
