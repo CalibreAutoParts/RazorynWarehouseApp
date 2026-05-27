@@ -820,6 +820,44 @@ async function addItem(storeArg, opts = {}) {
   throw new Error(`AddItem ${ack} [${errCode}]: ${errMsg}`);
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// GetAPIAccessRules — read the App's current eBay Trading API quota for
+// each call-name, including how many calls have been made today and how
+// many remain. Useful for diagnosing "exceeded usage limit" errors — you
+// can see exactly which call hit the cap.
+//
+// Note: quota is per-App (EBAY_CLIENT_ID), NOT per-store. All your stores
+// using the same App share the same quota. Calling it with any store's
+// token returns the same data.
+// ──────────────────────────────────────────────────────────────────────────
+async function getApiAccessRules(storeArg) {
+  if (!isConfigured(storeArg)) throw new Error('not_configured');
+  const xml = await tradingCall('GetAPIAccessRules', '', storeArg);
+  const ack = extractOne(xml, 'Ack') || '';
+  if (ack !== 'Success' && ack !== 'Warning') {
+    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+    throw new Error('eBay error: ' + decodeEntities(err));
+  }
+  // The response contains an APIAccessRule per call-name. Pull a few useful ones.
+  const ruleXmls = extractAll(xml, 'APIAccessRule');
+  const rules = [];
+  for (const r of ruleXmls) {
+    const callName = extractOne(r, 'CallName') || '';
+    if (!callName) continue;
+    rules.push({
+      callName,
+      dailyHardLimit:  parseInt(extractOne(r, 'DailyHardLimit')  || '0') || 0,
+      dailySoftLimit:  parseInt(extractOne(r, 'DailySoftLimit')  || '0') || 0,
+      dailyUsage:      parseInt(extractOne(r, 'DailyUsage')      || '0') || 0,
+      hourlyHardLimit: parseInt(extractOne(r, 'HourlyHardLimit') || '0') || 0,
+      hourlyUsage:     parseInt(extractOne(r, 'HourlyUsage')     || '0') || 0,
+      // PeriodicStartOfPeriod / PeriodicUsage available too but most readers
+      // only care about daily + hourly.
+    });
+  }
+  return rules;
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
@@ -834,6 +872,7 @@ module.exports = {
   reviseItem,
   completeSale,
   addItem,
+  getApiAccessRules,
   // Multi-store helpers
   listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary, standalone: !!s.standalone, disabled: !!s.disabled, disabledReason: s.disabledReason || null })),
   getPrimaryStore: () => brand.getPrimaryStore(),
