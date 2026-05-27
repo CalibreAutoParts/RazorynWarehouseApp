@@ -654,6 +654,27 @@ async function fulfillOrder(opts = {}) {
   }
 }
 
+// Fetch a single Shopify product with its full description + all images.
+// Used by the Shopify→eBay listing creator to enrich the eBay listing with
+// content we don't store locally (HTML description, secondary images).
+async function getShopifyProductFull(shopifyProductId) {
+  if (!shopifyProductId) throw new Error('shopifyProductId required');
+  const r = await shopifyRequest('GET', `/products/${encodeURIComponent(shopifyProductId)}.json`);
+  const p = r.data?.product;
+  if (!p) throw new Error('Shopify returned no product');
+  return {
+    id: String(p.id),
+    title: p.title,
+    handle: p.handle,
+    description: p.body_html || '',
+    vendor: p.vendor,
+    productType: p.product_type,
+    tags: p.tags,
+    imageUrls: (p.images || []).map(img => img.src).filter(Boolean),
+    primaryImage: p.image?.src || (p.images?.[0]?.src) || null,
+  };
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
@@ -673,4 +694,5 @@ module.exports = {
   assignProductToDeliveryProfile,
   debugShopifyAccess,
   fulfillOrder,
+  getShopifyProductFull,
 };

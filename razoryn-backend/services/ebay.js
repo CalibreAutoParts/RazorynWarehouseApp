@@ -698,6 +698,128 @@ async function completeSale(storeArg, opts = {}) {
   throw new Error(`CompleteSale ${ack} [${errCode}]: ${errMsg}`);
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// addItem — create a new fixed-price listing on eBay using the Trading API
+// AddItem call. Uses per-store Auth'n'Auth tokens so it works for both
+// Razoryn (OAuth fallback) and Calibre's two stores.
+//
+// `opts`:
+//   sku              — required, the SKU to set on the eBay listing
+//   title            — required, eBay limits to 80 characters; we truncate
+//   description      — HTML or plain text, shown in the listing body
+//   categoryId       — required, eBay PrimaryCategory ID (numeric string)
+//   conditionId      — required: 1000=New, 1500=New other, 3000=Used, etc.
+//   price            — listing price (number)
+//   quantity         — stock to list (integer)
+//   currency         — defaults to GBP
+//   imageUrls        — array of public image URLs; eBay scrapes them
+//   businessPolicies — { paymentId, shippingId, returnId }
+//   location         — { country: 'GB', postalCode, city }
+//   itemSpecifics    — array of { name, value } pairs (Brand, MPN, etc.)
+//   brand            — optional convenience param, auto-adds to itemSpecifics
+//   mpn              — optional, auto-adds Manufacturer Part Number specific
+//
+// Returns: { ok: true, itemId, fees? } on success
+// ──────────────────────────────────────────────────────────────────────────
+async function addItem(storeArg, opts = {}) {
+  const {
+    sku, title, description = '', categoryId, conditionId = 1000,
+    price, quantity = 1, currency = 'GBP',
+    imageUrls = [], businessPolicies = {}, location = {},
+    itemSpecifics = [], brand, mpn,
+  } = opts;
+
+  if (!sku)        throw new Error('sku required');
+  if (!title)      throw new Error('title required');
+  if (!categoryId) throw new Error('categoryId required');
+  if (price == null || isNaN(parseFloat(price))) throw new Error('valid price required');
+
+  // eBay title limit is 80 characters. Truncate cleanly at a word boundary
+  // if possible, else hard-cut.
+  let cleanTitle = String(title).replace(/\s+/g, ' ').trim();
+  if (cleanTitle.length > 80) {
+    const truncated = cleanTitle.slice(0, 80);
+    const lastSpace = truncated.lastIndexOf(' ');
+    cleanTitle = lastSpace > 60 ? truncated.slice(0, lastSpace) : truncated;
+  }
+
+  // Auto-add Brand and MPN to item specifics if supplied separately, dedupe
+  // by name so the user-provided list wins.
+  const specsByName = new Map();
+  for (const s of itemSpecifics) if (s.name && s.value) specsByName.set(s.name, String(s.value));
+  if (brand && !specsByName.has('Brand')) specsByName.set('Brand', String(brand));
+  if (mpn   && !specsByName.has('Manufacturer Part Number')) specsByName.set('Manufacturer Part Number', String(mpn));
+
+  // Build ItemSpecifics XML — required for most parts/accessories categories.
+  const itemSpecificsXml = specsByName.size > 0
+    ? `<ItemSpecifics>${[...specsByName.entries()].map(([name, value]) =>
+        `<NameValueList><Name>${escapeXml(name)}</Name><Value>${escapeXml(value)}</Value></NameValueList>`
+      ).join('')}</ItemSpecifics>`
+    : '';
+
+  // PictureDetails — eBay-hosted images. Using PictureURL with public URLs is
+  // the simplest path: eBay fetches and hosts them. Max 12 URLs.
+  const pictureXml = imageUrls.length
+    ? `<PictureDetails>${imageUrls.slice(0, 12).map(u => `<PictureURL>${escapeXml(u)}</PictureURL>`).join('')}</PictureDetails>`
+    : '';
+
+  // Business policy IDs — eBay strongly recommends these over inline shipping
+  // / payment / return blocks. If the seller hasn't enabled business policies,
+  // the call returns an error code and the user can re-run with inline blocks.
+  const policiesXml = (businessPolicies.paymentId || businessPolicies.shippingId || businessPolicies.returnId)
+    ? `<SellerProfiles>
+         ${businessPolicies.paymentId  ? `<SellerPaymentProfile><PaymentProfileID>${escapeXml(businessPolicies.paymentId)}</PaymentProfileID></SellerPaymentProfile>` : ''}
+         ${businessPolicies.shippingId ? `<SellerShippingProfile><ShippingProfileID>${escapeXml(businessPolicies.shippingId)}</ShippingProfileID></SellerShippingProfile>` : ''}
+         ${businessPolicies.returnId   ? `<SellerReturnProfile><ReturnProfileID>${escapeXml(businessPolicies.returnId)}</ReturnProfileID></SellerReturnProfile>` : ''}
+       </SellerProfiles>`
+    : '';
+
+  const country    = location.country || 'GB';
+  const postalCode = location.postalCode || '';
+  const city       = location.city || '';
+
+  // AddItem XML body. ListingDuration GTC = Good Till Cancelled, the standard
+  // for fixed-price listings. DispatchTimeMax=1 means we ship within 1 business day.
+  const bodyInner = `
+    <Item>
+      <Title>${escapeXml(cleanTitle)}</Title>
+      <Description><![CDATA[${description || cleanTitle}]]></Description>
+      <PrimaryCategory><CategoryID>${escapeXml(categoryId)}</CategoryID></PrimaryCategory>
+      <StartPrice currencyID="${escapeXml(currency)}">${parseFloat(price).toFixed(2)}</StartPrice>
+      <Quantity>${parseInt(quantity) || 1}</Quantity>
+      <SKU>${escapeXml(sku)}</SKU>
+      <ConditionID>${parseInt(conditionId) || 1000}</ConditionID>
+      <Country>${escapeXml(country)}</Country>
+      <Currency>${escapeXml(currency)}</Currency>
+      ${postalCode ? `<PostalCode>${escapeXml(postalCode)}</PostalCode>` : ''}
+      ${city ? `<Location>${escapeXml(city)}</Location>` : ''}
+      <ListingType>FixedPriceItem</ListingType>
+      <ListingDuration>GTC</ListingDuration>
+      <DispatchTimeMax>1</DispatchTimeMax>
+      ${pictureXml}
+      ${itemSpecificsXml}
+      ${policiesXml}
+    </Item>`;
+
+  let xml;
+  try {
+    xml = await tradingCall('AddItem', bodyInner, storeArg);
+  } catch (e) {
+    const body = e.response?.data || '';
+    throw new Error(`AddItem HTTP error: ${e.message}${typeof body === 'string' && body.includes('<ShortMessage>') ? ' / ' + (body.match(/<ShortMessage>([^<]+)<\/ShortMessage>/)?.[1] || '') : ''}`);
+  }
+
+  const ack = extractOne(xml, 'Ack') || '';
+  if (ack === 'Success' || ack === 'Warning') {
+    const itemId = extractOne(xml, 'ItemID');
+    return { ok: true, ack, itemId, fees: extractOne(xml, 'Fee') };
+  }
+  // Failure — return the most useful error code + message
+  const errCode = extractOne(xml, 'ErrorCode') || 'unknown';
+  const errMsg  = extractOne(xml, 'ShortMessage') || extractOne(xml, 'LongMessage') || 'eBay returned Failure';
+  throw new Error(`AddItem ${ack} [${errCode}]: ${errMsg}`);
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
@@ -711,6 +833,7 @@ module.exports = {
   getActiveListings,
   reviseItem,
   completeSale,
+  addItem,
   // Multi-store helpers
   listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary, standalone: !!s.standalone })),
   getPrimaryStore: () => brand.getPrimaryStore(),
