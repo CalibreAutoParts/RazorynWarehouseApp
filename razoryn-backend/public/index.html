@@ -1617,6 +1617,16 @@ function enterApp() {
   } catch (e) {}
 
   let lastSalesIds = new Set((State.sales || []).map(s => s.id));
+  // Returns tracking — { id → status } so we can detect both new returns *and*
+  // status transitions (e.g. an open return becoming closed). On first poll we
+  // just snapshot to avoid replaying historical changes as notifications.
+  let lastReturnsState = new Map((State.returns || []).map(r => [r.id, r.status]));
+  // Low-stock tracking — set of product IDs already known to be ≤ threshold.
+  // Only fire the alert when a product *crosses* from healthy → low, not every
+  // time we re-paint the list with the same products in the low bucket.
+  let lastLowStockIds = new Set(
+    (State.products || []).filter(p => (p.qtyOnHand ?? p.qty_on_hand ?? 0) <= (p.lowThresh ?? p.low_stock_threshold ?? 3)).map(p => p.id)
+  );
   window._rznRefreshTimer = setInterval(async () => {
     if (!State.user || document.hidden) return;
     try {
@@ -1633,6 +1643,38 @@ function enterApp() {
         lastSalesIds = currentIds;
       }
       if (State.page === 'returns') await Store.refresh('returns');
+      else { try { await Store.refresh('returns'); } catch (e) {} }  // background refresh so return notifications can fire from any page
+      // Returns detection — runs on every poll (regardless of current page)
+      // when returns data is in State. Two events fired:
+      //   • Brand-new return ID → "new return" sound
+      //   • Existing return's status flipped from open-ish to closed → "return closed"
+      if (Array.isArray(State.returns) && lastReturnsState.size > 0) {
+        const closedStatuses = new Set(['closed', 'resolved', 'completed', 'cancelled']);
+        for (const r of State.returns) {
+          const prev = lastReturnsState.get(r.id);
+          if (prev === undefined) {
+            // Brand-new return that wasn't here last poll
+            notifyNewReturn(r);
+          } else if (prev !== r.status && closedStatuses.has(String(r.status || '').toLowerCase()) && !closedStatuses.has(String(prev || '').toLowerCase())) {
+            // Status transitioned into a closed-ish state
+            notifyReturnClosed(r);
+          }
+        }
+      }
+      lastReturnsState = new Map((State.returns || []).map(r => [r.id, r.status]));
+      // Low-stock detection — when a product crosses from healthy → at-or-below
+      // its threshold. Fires once per crossing; if it stays low we don't re-alarm.
+      if (Array.isArray(State.products)) {
+        const currentLow = new Set(
+          State.products.filter(p => (p.qtyOnHand ?? p.qty_on_hand ?? 0) <= (p.lowThresh ?? p.low_stock_threshold ?? 3)).map(p => p.id)
+        );
+        const newlyLow = [...currentLow].filter(id => !lastLowStockIds.has(id));
+        if (newlyLow.length && lastLowStockIds.size > 0) {
+          // Aggregate notification — one toast + one sound for the batch
+          notifyLowStock(newlyLow);
+        }
+        lastLowStockIds = currentLow;
+      }
       if (State.page === 'schedule') await Store.refresh('schedule');
       // Repaint the current page so changes are visible
       const repaintMap = {
@@ -1648,6 +1690,58 @@ function enterApp() {
       // silent — surfacing every poll failure would be noisy
     }
   }, 60_000);
+}
+
+// New-return notification — fires when a return record appears in State.returns
+// that we didn't see on the previous poll. Plays the user's "new return" sound.
+function notifyNewReturn(returnRow) {
+  const sku = returnRow.sku || returnRow.product_sku || '';
+  const reason = returnRow.reason || returnRow.reason_code || 'reason unspecified';
+  const title = 'New return opened';
+  const body = sku ? `${sku} · ${reason}` : reason;
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      const n = new Notification(title, { body, icon: '/logo.png', tag: 'return-' + returnRow.id });
+      n.onclick = () => { window.focus(); routeTo('returns'); };
+    }
+  } catch (e) {}
+  Sounds.playForReturn();
+  toast(`${title} · ${body}`, 'warn');
+}
+
+// Return-closed notification — fires when an existing return transitions to a
+// closed/resolved status. Lower-urgency sound by default (pop).
+function notifyReturnClosed(returnRow) {
+  const sku = returnRow.sku || returnRow.product_sku || '';
+  const title = 'Return closed';
+  const body = sku ? `${sku} · ${returnRow.status}` : returnRow.status;
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, { body, icon: '/logo.png', tag: 'return-closed-' + returnRow.id });
+    }
+  } catch (e) {}
+  Sounds.playForReturnClosed();
+  toast(`${title} · ${body}`, 'success');
+}
+
+// Low-stock notification — one alert covering all the items that just crossed
+// the threshold in this poll cycle (avoids spamming when several drop together).
+function notifyLowStock(productIds) {
+  const products = (State.products || []).filter(p => productIds.includes(p.id));
+  const first = products[0];
+  if (!first) return;
+  const title = products.length === 1 ? 'Low stock alert' : `Low stock: ${products.length} items`;
+  const body = products.length === 1
+    ? `${first.sku || ''} — ${first.title || ''}`.trim().replace(/^—\s*/, '')
+    : `${first.sku || first.title}${products.length > 1 ? ' + ' + (products.length - 1) + ' more' : ''}`;
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      const n = new Notification(title, { body, icon: '/logo.png', tag: 'lowstock-' + Date.now() });
+      n.onclick = () => { window.focus(); routeTo('inventory'); };
+    }
+  } catch (e) {}
+  Sounds.playForLowStock();
+  toast(`${title} · ${body}`, 'warn');
 }
 
 function notifyNewSale(sale) {
@@ -1745,6 +1839,9 @@ const Sounds = {
   getCustomName() { return localStorage.getItem('rwh_sound_custom_name'); },
 
   playForSale() { this._playDebounced('sale'); },
+  playForReturn() { this._playDebounced('return'); },
+  playForLowStock() { this._playDebounced('low_stock'); },
+  playForReturnClosed() { this._playDebounced('return_closed'); },
 
   _playDebounced(category) {
     const name = this.getChoice(category);
@@ -6610,6 +6707,36 @@ async function loadLinkStatus() {
   }
 }
 
+// Debounced search-input handler for Listing Mirror.
+// The old `oninput="State.linkSearch = this.value; renderLinkStatus()"` pattern
+// re-rendered the entire section synchronously on every keystroke, which blew
+// away the live <input> element and lost focus + caret position. Result: staff
+// had to click the input again after every single character.
+//
+// Fix: update State immediately, debounce the re-render by 200ms, then
+// restore focus + caret position after the re-render completes. The user can
+// type continuously without the input losing focus mid-burst.
+let _linkSearchTimer;
+function debouncedLinkSearch(value) {
+  State.linkSearch = value;
+  // Remember whether we currently have focus + where the caret is, so we can
+  // restore both after the destructive re-render.
+  const currentEl = document.getElementById('links-search');
+  const wasFocused = document.activeElement === currentEl;
+  const caret = currentEl ? currentEl.selectionStart : null;
+  clearTimeout(_linkSearchTimer);
+  _linkSearchTimer = setTimeout(() => {
+    renderLinkStatus();
+    if (wasFocused) {
+      const fresh = document.getElementById('links-search');
+      if (fresh) {
+        fresh.focus();
+        try { fresh.setSelectionRange(caret ?? fresh.value.length, caret ?? fresh.value.length); } catch (e) {}
+      }
+    }
+  }, 200);
+}
+
 function renderLinkStatus() {
   const data = State.linkStatus;
   if (!data) return;
@@ -6642,7 +6769,7 @@ function renderLinkStatus() {
       <div class="card-body">
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
           <button class="btn btn-primary" onclick="forceMatchLinks()" title="Pull active eBay listings and auto-match by SKU + barcode + title token">🔗 Force match all</button>
-          <input id="links-search" placeholder="Search by SKU, title or part #…" oninput="State.linkSearch = this.value; renderLinkStatus()" value="${escapeAttr(State.linkSearch || '')}" style="flex:1;min-width:220px">
+          <input id="links-search" placeholder="Search by SKU, title or part #…" oninput="debouncedLinkSearch(this.value)" value="${escapeAttr(State.linkSearch || '')}" style="flex:1;min-width:220px">
         </div>
       </div>
     </div>
@@ -6693,7 +6820,8 @@ function renderLinkStatus() {
                     : '<span class="pill amber" style="font-size:10px">⚠ Not linked</span>'}
                   </td>
                   <td style="white-space:nowrap">
-                    ${!p.ebay_item_id ? `<button class="btn btn-outline btn-sm" onclick="openLinkProductToEbay(${p.id})">🔗 Link to eBay</button>` : ''}
+                    ${!p.ebay_item_id && p.shopify_product_id ? `<button class="btn btn-primary btn-sm" onclick="openCreateEbayListing(${p.id})" title="Create a new eBay listing using this product's Shopify data" style="margin-right:4px">+ Create on eBay</button>` : ''}
+                    ${!p.ebay_item_id ? `<button class="btn btn-outline btn-sm" onclick="openLinkProductToEbay(${p.id})" title="Link to an EXISTING eBay listing (use this if you already created the listing manually)">🔗 Link existing</button>` : ''}
                     ${p.ebay_item_id ? `<button class="btn btn-ghost btn-sm" onclick="unlinkEbay('${escapeAttr(p.ebay_item_id)}')" title="Remove link" style="color:var(--red)">✕</button>` : ''}
                   </td>
                 </tr>
@@ -6730,6 +6858,139 @@ function renderOrphanMirrors(orphans) {
         </table>
       </div>
     </div>`;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// CREATE eBay listing — opens a modal that pre-fills from the product's
+// Shopify data + saved defaults, then POSTs to /api/listings/create-ebay.
+//
+// Required fields (gathered from settings or per-listing override):
+//   • storeCode  — auto-picked for single-store brands; dropdown otherwise
+//   • categoryId — eBay numeric category, pre-filled from settings default
+//   • condition  — dropdown (New / New other / Used / etc.)
+//   • price      — defaults to the product's Shopify price
+//   • quantity   — defaults to qty_on_hand
+//   • title      — defaults to product title, editable (80-char limit)
+//
+// Business policies + location come from settings — the modal shows a hint
+// pointing the user to Settings if any are missing.
+// ──────────────────────────────────────────────────────────────────────────
+async function openCreateEbayListing(productId) {
+  const product = State.linkStatus?.products.find(p => p.id === productId);
+  if (!product) { toast('Product not found in list', 'error'); return; }
+
+  // Pull the latest pricing config so defaults reflect what's saved.
+  let cfg = State.pricingConfig;
+  if (!cfg) {
+    try { cfg = await Api.get('/api/settings/pricing-config'); State.pricingConfig = cfg; } catch (e) { cfg = {}; }
+  }
+
+  const stores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
+  const defaultStoreCode = stores.find(s => s.primary)?.code || stores[0]?.code || '';
+  const policies = cfg.ebayPerStorePolicies?.[defaultStoreCode] || {};
+  const policiesConfigured = !!(policies.payment || cfg.ebayPolicyPayment) || !!(policies.shipping || cfg.ebayPolicyShipping);
+
+  const storeSelector = stores.length > 1 ? `
+    <div class="field"><label>eBay store</label>
+      <select id="ce-store">
+        ${stores.map(s => `<option value="${escapeAttr(s.code)}" ${s.code === defaultStoreCode ? 'selected' : ''}>${escapeHtml(s.name)}${s.primary ? ' (primary)' : ''}</option>`).join('')}
+      </select>
+    </div>
+  ` : `<input type="hidden" id="ce-store" value="${escapeAttr(defaultStoreCode)}">`;
+
+  // Suggest price: use the row's shopify_price if available, else current price.
+  // Strip currency symbols if the row already has gbp-formatted text.
+  const suggestedPrice = (product.shopify_price || product.price_shopify || 0).toString().replace(/[^\d.]/g, '') || '';
+
+  modal({
+    title: 'Create eBay listing',
+    body: `
+      <div style="font-size:13px;background:var(--bg-soft);padding:10px 12px;border-radius:6px;margin-bottom:12px">
+        <div><strong>${escapeHtml(product.title || product.sku)}</strong></div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:2px;font-family:ui-monospace,monospace">${escapeHtml(product.sku)}</div>
+      </div>
+      ${storeSelector}
+      <div class="field">
+        <label>Title (max 80 chars) <span id="ce-title-count" style="font-size:11px;color:var(--ink-soft);float:right">0/80</span></label>
+        <input id="ce-title" maxlength="80" value="${escapeAttr((product.title || '').slice(0, 80))}" oninput="el('ce-title-count').textContent = this.value.length + '/80'">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field">
+          <label>Category ID *</label>
+          <input id="ce-category" value="${escapeAttr(cfg.ebayDefaultCategoryId || '')}" placeholder="e.g. 33744">
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">eBay numeric category. Look up on <a href="https://www.isoldwhat.com" target="_blank" rel="noopener" style="color:var(--brand-primary)">isoldwhat.com</a> or copy from a similar live listing.</div>
+        </div>
+        <div class="field">
+          <label>Condition *</label>
+          <select id="ce-condition">
+            <option value="1000" ${(cfg.ebayDefaultConditionId || '1000') === '1000' ? 'selected' : ''}>New</option>
+            <option value="1500" ${cfg.ebayDefaultConditionId === '1500' ? 'selected' : ''}>New other (open box)</option>
+            <option value="1750" ${cfg.ebayDefaultConditionId === '1750' ? 'selected' : ''}>New with defects</option>
+            <option value="2000" ${cfg.ebayDefaultConditionId === '2000' ? 'selected' : ''}>Refurbished — Manufacturer</option>
+            <option value="2500" ${cfg.ebayDefaultConditionId === '2500' ? 'selected' : ''}>Refurbished — Seller</option>
+            <option value="3000" ${cfg.ebayDefaultConditionId === '3000' ? 'selected' : ''}>Used</option>
+            <option value="7000" ${cfg.ebayDefaultConditionId === '7000' ? 'selected' : ''}>For parts / not working</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field"><label>Price (£)</label><input id="ce-price" type="number" step="0.01" min="0" value="${escapeAttr(suggestedPrice)}"></div>
+        <div class="field"><label>Quantity</label><input id="ce-qty" type="number" min="1" step="1" value="${escapeAttr(product.qty_on_hand || 1)}"></div>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0">
+        <input type="checkbox" id="ce-use-shopify-desc" checked>
+        Use Shopify description (richer content, ~1 sec slower)
+      </label>
+      ${policiesConfigured ? '' : `
+        <div style="font-size:12px;padding:10px;background:#fff8e6;border:1px solid #f0d171;border-radius:6px;color:#5a4400;margin-top:8px">
+          <strong>⚠ No business policies set</strong> for ${escapeHtml(stores.length > 1 ? 'this store' : 'eBay')}. The listing will likely fail because eBay requires payment / shipping / return policies. Set them in Settings → eBay listing defaults first.
+        </div>
+      `}
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Create listing', primary: true, onClick: () => submitCreateEbayListing(productId) },
+    ],
+  });
+}
+
+async function submitCreateEbayListing(productId) {
+  const storeCode = el('ce-store')?.value;
+  const title     = (el('ce-title')?.value || '').trim();
+  const categoryId = (el('ce-category')?.value || '').trim();
+  const conditionId = el('ce-condition')?.value;
+  const price     = parseFloat(el('ce-price')?.value);
+  const quantity  = parseInt(el('ce-qty')?.value);
+  const useShopifyDescription = !!el('ce-use-shopify-desc')?.checked;
+
+  if (!storeCode)   { toast('Pick a store', 'warn'); return; }
+  if (!title)       { toast('Title required', 'warn'); return; }
+  if (!categoryId)  { toast('Category ID required', 'warn'); return; }
+  if (!price || isNaN(price)) { toast('Valid price required', 'warn'); return; }
+
+  const taskId = Task.start('Creating eBay listing…');
+  try {
+    const r = await Api.post('/api/listings/create-ebay', {
+      productId, storeCode, categoryId, conditionId,
+      price, quantity, titleOverride: title, useShopifyDescription,
+    });
+    Task.done(taskId, 'Listed');
+    closeModal();
+    toast(`✓ Created on eBay — ItemID ${r.itemId}`, 'success', 8000);
+    // Reload listing mirror to reflect the new link
+    if (typeof refreshLinkStatus === 'function') await refreshLinkStatus();
+    else if (typeof renderLinkStatus === 'function') renderLinkStatus();
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    const msg = e.data?.message || e.message || 'Unknown error';
+    if (msg.includes('Insufficient permissions') || msg.includes('21916')) {
+      toast('Insufficient eBay permissions. Token may have expired or lacks the right scopes. Check Railway env vars.', 'error', 10000);
+    } else if (msg.includes('SellerProfile') || msg.includes('20596') || msg.includes('20597') || msg.includes('20598')) {
+      toast('Business policy IDs invalid or seller not opted into business policies. Configure in Settings → eBay listing defaults.', 'error', 10000);
+    } else {
+      toast('Create failed: ' + msg, 'error', 10000);
+    }
+  }
 }
 
 function openLinkProductToEbay(productId) {
@@ -7688,6 +7949,112 @@ function renderSettings() {
         </div>
       </div>
 
+      <!-- eBay listing defaults -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>🛒 eBay listing defaults</h3>
+          <div class="card-desc">Pre-fill values for the "+ Create on eBay" button in Listing Mirror. Business policy IDs are <strong>required</strong> for eBay to accept new listings — get them from <a href="https://www.bizpolicy.ebay.co.uk/businesspolicy/manage" target="_blank" rel="noopener" style="color:var(--brand-primary)">eBay Business Policies</a>.</div>
+        </div>
+        <div class="card-body">
+          <div style="padding:14px;background:var(--bg-soft);border-radius:8px;margin-bottom:14px">
+            <div style="font-weight:600;margin-bottom:8px">Defaults</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <div class="field">
+                <label>Default category ID</label>
+                <input id="set-ebay-category" placeholder="e.g. 33744">
+                <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Numeric eBay category. Look up on <a href="https://www.isoldwhat.com" target="_blank" rel="noopener">isoldwhat.com</a>.</div>
+              </div>
+              <div class="field">
+                <label>Default condition</label>
+                <select id="set-ebay-condition">
+                  <option value="1000">New</option>
+                  <option value="1500">New other (open box)</option>
+                  <option value="1750">New with defects</option>
+                  <option value="2000">Refurbished — Manufacturer</option>
+                  <option value="2500">Refurbished — Seller</option>
+                  <option value="3000">Used</option>
+                  <option value="7000">For parts / not working</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div style="padding:14px;background:var(--bg-soft);border-radius:8px;margin-bottom:14px">
+            <div style="font-weight:600;margin-bottom:8px">Listing location</div>
+            <div style="display:grid;grid-template-columns:80px 1fr 1fr;gap:10px">
+              <div class="field"><label>Country</label><input id="set-ebay-country" placeholder="GB" maxlength="2"></div>
+              <div class="field"><label>City / town</label><input id="set-ebay-city" placeholder="Watford"></div>
+              <div class="field"><label>Postcode</label><input id="set-ebay-postcode" placeholder="WD24 4QU"></div>
+            </div>
+          </div>
+
+          <div style="padding:14px;background:var(--bg-soft);border-radius:8px">
+            <div style="font-weight:600;margin-bottom:4px">Business policies</div>
+            <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">eBay requires each new listing to reference saved Payment, Shipping (fulfillment), and Return policies. Find the IDs in <a href="https://www.bizpolicy.ebay.co.uk/businesspolicy/manage" target="_blank" rel="noopener" style="color:var(--brand-primary)">eBay Seller Hub → Business Policies</a> — each policy detail page shows the numeric ID in the URL.</div>
+            <div id="set-ebay-policies-wrap">
+              <!-- Brand-wide defaults — populated by the JS helper.
+                   Per-store overrides are added below if the brand has multiple stores. -->
+            </div>
+          </div>
+
+          <div style="margin-top:14px">
+            <button class="btn btn-primary" onclick="savePricingConfig()">Save eBay defaults</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- eBay listing defaults — pre-fills the Create-on-eBay modal -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>🟦 eBay listing defaults</h3>
+          <div class="card-desc">Default values used by the "+ Create on eBay" button in Listing Mirror. Save once and the modal pre-fills these every time so you don't retype them.</div>
+        </div>
+        <div class="card-body">
+          <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px"><strong>Business policy IDs</strong> come from eBay seller hub → Account → Business policies. They're required — without them eBay rejects new listings. <a href="https://www.ebay.co.uk/sh/settings/business-policies" target="_blank" rel="noopener" style="color:var(--brand-primary)">Open eBay Business Policies ↗</a></div>
+
+          <!-- Brand-wide policy fallback (or single-store brand) -->
+          <div id="ebay-policy-default-block" style="padding:12px;background:var(--bg-soft);border-radius:8px;margin-bottom:10px">
+            <div style="font-weight:600;font-size:13px;margin-bottom:8px">Default policies <span id="ebay-policy-default-suffix" style="font-weight:400;color:var(--ink-soft);font-size:11px"></span></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+              <div class="field"><label>Payment ID</label><input id="set-ebay-policy-payment" placeholder="e.g. 268523456012"></div>
+              <div class="field"><label>Shipping ID</label><input id="set-ebay-policy-shipping" placeholder="e.g. 268523456013"></div>
+              <div class="field"><label>Return ID</label><input id="set-ebay-policy-return" placeholder="e.g. 268523456014"></div>
+            </div>
+          </div>
+
+          <!-- Per-store overrides — rendered for multi-store brands only -->
+          <div id="ebay-per-store-policies" style="display:none"></div>
+
+          <div style="margin-top:12px;padding:12px;background:var(--bg-soft);border-radius:8px">
+            <div style="font-weight:600;font-size:13px;margin-bottom:8px">Listing defaults</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <div class="field"><label>Default category ID</label><input id="set-ebay-cat" placeholder="e.g. 33744"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Most-used category. Per-listing override in the modal. Look up at <a href="https://www.isoldwhat.com" target="_blank" rel="noopener" style="color:var(--brand-primary)">isoldwhat.com</a>.</div></div>
+              <div class="field"><label>Default condition</label>
+                <select id="set-ebay-cond">
+                  <option value="1000">New</option>
+                  <option value="1500">New other (open box)</option>
+                  <option value="1750">New with defects</option>
+                  <option value="2000">Refurbished — Manufacturer</option>
+                  <option value="2500">Refurbished — Seller</option>
+                  <option value="3000">Used</option>
+                  <option value="7000">For parts / not working</option>
+                </select>
+              </div>
+            </div>
+            <div style="font-weight:600;font-size:13px;margin:14px 0 8px">Item location (where it ships from)</div>
+            <div style="display:grid;grid-template-columns:80px 1fr 1fr;gap:8px">
+              <div class="field"><label>Country</label><input id="set-ebay-loc-country" value="GB" maxlength="2" style="text-transform:uppercase"></div>
+              <div class="field"><label>Postcode</label><input id="set-ebay-loc-postcode" placeholder="e.g. WD24 7TE"></div>
+              <div class="field"><label>City / Town</label><input id="set-ebay-loc-city" placeholder="e.g. Watford"></div>
+            </div>
+          </div>
+
+          <div style="margin-top:14px">
+            <button class="btn btn-primary" onclick="saveEbayListingDefaults()">Save eBay defaults</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Message templates editor -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-head">
@@ -7719,30 +8086,24 @@ function renderSettings() {
       <div class="card" style="margin-bottom:16px">
         <div class="card-head">
           <h3>🔔 Notification sounds</h3>
-          <div class="card-desc">Plays a sound when a new sale comes in. Setting is per-device — different workstations can have different preferences.</div>
+          <div class="card-desc">Different sounds for different events so you can recognise what's happening without looking. Per-device — each workstation remembers its own preference.</div>
         </div>
         <div class="card-body">
-          <div class="field" style="max-width:400px">
-            <label>Sound for new sale</label>
-            <select id="set-sale-sound" style="font-size:14px" onchange="onSaleSoundChange()">
-              <option value="chaching">💰 Cha-ching (cash register) — default</option>
-              <option value="bell">🔔 Bell — bright single ring</option>
-              <option value="chime">🎵 Chime — two-note descending</option>
-              <option value="ding">🛎️ Ding — short high tone</option>
-              <option value="pop">💧 Pop — subtle click</option>
-              <option value="custom">📁 Custom (uploaded file)</option>
-              <option value="none">🔇 No sound</option>
-            </select>
-            <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">
-              Auto-plays at most once every 5 seconds — won't blast if several orders sync at the same time.
-            </div>
+          <div style="font-size:11px;color:var(--ink-soft);margin-bottom:14px">
+            Auto-plays at most once every 5 seconds per event category — won't blast if several alerts fire together.
           </div>
 
-          <!-- Custom upload panel — only visible when "Custom" is selected -->
-          <div id="set-sound-custom-wrap" style="display:none;margin-top:12px;padding:12px;background:var(--bg-soft);border-radius:8px;max-width:400px">
-            <div style="font-weight:600;font-size:13px;margin-bottom:6px">Custom sound file</div>
+          <!-- The four event rows are generated by the JS helper. Each row gives
+               the user a dropdown + preview button. Custom uploads share a single
+               file across categories (one upload, picked separately per event). -->
+          <div id="sound-event-rows" style="display:flex;flex-direction:column;gap:14px"></div>
+
+          <!-- Custom upload panel — shared across all event categories.
+               Visible when ANY event has "Custom" selected. -->
+          <div id="set-sound-custom-wrap" style="display:none;margin-top:18px;padding:12px;background:var(--bg-soft);border-radius:8px;max-width:520px">
+            <div style="font-weight:600;font-size:13px;margin-bottom:6px">Custom sound file (shared across all events)</div>
             <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">
-              Upload an MP3, WAV, OGG, or M4A file. Max ~1 MB. Stored locally on this device only — won't sync across other staff devices.
+              Upload an MP3, WAV, OGG, or M4A file. Max ~1 MB. Stored locally on this device only — won't sync across other staff devices. The same uploaded file is used by any event you've set to "Custom".
             </div>
             <div id="set-sound-custom-current" style="display:none;font-size:12px;padding:8px 12px;background:var(--white);border:1px solid var(--line);border-radius:6px;margin-bottom:8px">
               <strong style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">Loaded</strong>
@@ -7754,9 +8115,8 @@ function renderSettings() {
             </div>
           </div>
 
-          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn btn-outline btn-sm" onclick="previewSelectedSound()">▶ Preview</button>
-            <button class="btn btn-primary btn-sm" onclick="saveSaleSound()">Save</button>
+          <div style="margin-top:14px">
+            <button class="btn btn-primary btn-sm" onclick="saveSoundPrefs()">Save all sounds</button>
           </div>
         </div>
       </div>
@@ -7908,6 +8268,13 @@ async function loadPricingConfig() {
     setVal('set-google-review-url', r.googleReviewUrl);
     setVal('set-review-platform',   r.reviewPlatform || 'trustpilot');
     setVal('set-default-cc',        r.defaultCountryCode || '44');
+    // eBay listing defaults
+    setVal('set-ebay-category',  r.ebayDefaultCategoryId  || '');
+    setVal('set-ebay-condition', r.ebayDefaultConditionId || '1000');
+    setVal('set-ebay-country',   r.ebayLocationCountry    || 'GB');
+    setVal('set-ebay-city',      r.ebayLocationCity       || '');
+    setVal('set-ebay-postcode',  r.ebayLocationPostcode   || '');
+    renderEbayPolicies(r);
     // Show VAT number field if VAT-registered
     const vatNumWrap = el('set-vatnum-wrap');
     if (vatNumWrap) vatNumWrap.style.display = r.vatRegistered ? '' : 'none';
@@ -7916,12 +8283,12 @@ async function loadPricingConfig() {
       vatReg.addEventListener('change', () => { vatNumWrap.style.display = vatReg.checked ? '' : 'none'; });
     }
     State.pricingConfig = r;
-    // Hydrate the per-device sound preference from localStorage. Independent
-    // of backend settings — each computer remembers its own choice.
-    const soundDropdown = el('set-sale-sound');
-    if (soundDropdown) soundDropdown.value = Sounds.getChoice('sale');
-    // Show / hide custom upload panel based on current choice
-    if (typeof refreshCustomSoundUI === 'function') refreshCustomSoundUI();
+    // Hydrate the per-device sound preferences from localStorage by re-rendering
+    // the event-rows. Independent of backend settings — each computer remembers
+    // its own choices.
+    if (typeof renderSoundEventRows === 'function' && el('sound-event-rows')) renderSoundEventRows();
+    // Hydrate the eBay listing defaults card
+    if (typeof hydrateEbayDefaults === 'function' && el('set-ebay-cat')) hydrateEbayDefaults(r);
     // Load message templates for the editor card
     if (typeof loadTemplatesEditor === 'function' && el('templates-list')) loadTemplatesEditor();
   } catch (e) { console.warn('loadPricingConfig:', e); }
@@ -7930,40 +8297,96 @@ async function loadPricingConfig() {
 // ──────────────────────────────────────────────────────────────────────────
 // Notification sound preference (Settings page)
 // ──────────────────────────────────────────────────────────────────────────
-function previewSelectedSound() {
-  const dropdown = el('set-sale-sound');
-  if (!dropdown) return;
-  if (dropdown.value === 'custom' && !Sounds.getCustom()) {
-    toast('Upload a sound file first', 'warn');
-    return;
-  }
-  Sounds.preview(dropdown.value);
-}
-function saveSaleSound() {
-  const dropdown = el('set-sale-sound');
-  if (!dropdown) return;
-  if (dropdown.value === 'custom' && !Sounds.getCustom()) {
-    toast('Upload a sound file first', 'warn');
-    return;
-  }
-  Sounds.setChoice('sale', dropdown.value);
-  toast('Saved — new sales will use this sound on this device', 'success');
+// ──────────────────────────────────────────────────────────────────────────
+// Notification sounds — per-event preferences.
+// Each event category gets its own dropdown so the user can recognise what's
+// happening without looking at the screen. All choices are per-device
+// (localStorage), with one shared "custom" upload that any event can use.
+// ──────────────────────────────────────────────────────────────────────────
+const SOUND_EVENTS = [
+  { key: 'sale',          label: 'New sale',                desc: 'A new order has arrived (eBay, Shopify, or manual).', defaultName: 'chaching' },
+  { key: 'return',        label: 'New return',              desc: 'A new eBay return request has been opened.',          defaultName: 'chime' },
+  { key: 'return_closed', label: 'Return closed',           desc: 'A return case has been resolved / closed.',           defaultName: 'pop' },
+  { key: 'low_stock',     label: 'Low / out of stock',      desc: 'A SKU has dropped to its low-stock threshold or zero.', defaultName: 'bell' },
+];
+
+// Choices the user can pick from. Same list for every event.
+const SOUND_OPTIONS = [
+  { value: 'chaching', label: '💰 Cha-ching (cash register)' },
+  { value: 'bell',     label: '🔔 Bell — bright single ring' },
+  { value: 'chime',    label: '🎵 Chime — two-note descending' },
+  { value: 'ding',     label: '🛎️ Ding — short high tone' },
+  { value: 'pop',      label: '💧 Pop — subtle click' },
+  { value: 'custom',   label: '📁 Custom (uploaded file)' },
+  { value: 'none',     label: '🔇 No sound' },
+];
+
+// Build a select-dropdown for one event category. The current saved choice
+// is pre-selected; if the user hasn't saved one yet, the per-event default
+// from SOUND_EVENTS is used (cha-ching for sale, bell for low-stock, etc.).
+function renderSoundEventRows() {
+  const wrap = el('sound-event-rows');
+  if (!wrap) return;
+  wrap.innerHTML = SOUND_EVENTS.map(ev => {
+    const current = localStorage.getItem(`rwh_sound_${ev.key}`) || ev.defaultName;
+    const options = SOUND_OPTIONS.map(o =>
+      `<option value="${o.value}" ${o.value === current ? 'selected' : ''}>${escapeHtml(o.label)}</option>`
+    ).join('');
+    return `
+      <div class="field" style="margin:0">
+        <label>${escapeHtml(ev.label)}</label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select class="sound-event-select" data-event="${ev.key}" onchange="onSoundEventChange()" style="font-size:14px;flex:1;min-width:240px">${options}</select>
+          <button class="btn btn-outline btn-sm" onclick="previewSoundFor('${ev.key}')">▶ Preview</button>
+        </div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">${escapeHtml(ev.desc)}</div>
+      </div>
+    `;
+  }).join('');
+  refreshCustomSoundUI();  // show/hide custom upload panel based on whether any row picked "custom"
 }
 
-// Shows / hides the custom upload panel when the dropdown selection changes.
-function onSaleSoundChange() {
-  const dropdown = el('set-sale-sound');
-  if (!dropdown) return;
+// Preview the dropdown's *currently selected* value (which may not yet be saved).
+function previewSoundFor(eventKey) {
+  const select = document.querySelector(`.sound-event-select[data-event="${eventKey}"]`);
+  if (!select) return;
+  if (select.value === 'custom' && !Sounds.getCustom()) {
+    toast('Upload a sound file first', 'warn');
+    return;
+  }
+  Sounds.preview(select.value);
+}
+
+// Save every event row's selection in one go.
+function saveSoundPrefs() {
+  const customNeeded = [];
+  document.querySelectorAll('.sound-event-select').forEach(sel => {
+    if (sel.value === 'custom') customNeeded.push(sel.dataset.event);
+  });
+  if (customNeeded.length && !Sounds.getCustom()) {
+    toast('Upload a sound file first — at least one event is set to Custom', 'warn');
+    return;
+  }
+  document.querySelectorAll('.sound-event-select').forEach(sel => {
+    Sounds.setChoice(sel.dataset.event, sel.value);
+  });
+  toast('Notification sounds saved on this device', 'success');
+}
+
+// Triggered when any dropdown changes — re-evaluates whether the custom upload
+// panel should be visible (any row set to "custom" → show it).
+function onSoundEventChange() {
   refreshCustomSoundUI();
 }
 
-// Toggle the custom upload panel visibility based on dropdown state,
-// and update the "loaded" indicator + clear-button based on what's stored.
+// Show the custom upload panel if ANY event row is set to "custom". Update the
+// "loaded" indicator + clear-button based on whether a file is currently stored.
 function refreshCustomSoundUI() {
-  const dropdown = el('set-sale-sound');
   const wrap = el('set-sound-custom-wrap');
-  if (!dropdown || !wrap) return;
-  wrap.style.display = dropdown.value === 'custom' ? 'block' : 'none';
+  if (!wrap) return;
+  const anyCustom = !!document.querySelector('.sound-event-select[data-event] option:checked[value="custom"]')
+    || Array.from(document.querySelectorAll('.sound-event-select')).some(s => s.value === 'custom');
+  wrap.style.display = anyCustom ? 'block' : 'none';
   const current = el('set-sound-custom-current');
   const clearBtn = el('set-sound-custom-clear');
   const nameEl = el('set-sound-custom-name');
@@ -8002,10 +8425,9 @@ async function onCustomSoundUpload(input) {
     });
     Sounds.setCustom(dataUrl, file.name);
     refreshCustomSoundUI();
-    toast(`Loaded "${file.name}" — click Preview to test, then Save.`, 'success', 5000);
+    toast(`Loaded "${file.name}" — click Preview on any event to test.`, 'success', 5000);
   } catch (e) {
-    // localStorage QuotaExceededError fires if the user has lots of other
-    // data stored. Roll back the file and tell them what's happening.
+    // localStorage QuotaExceededError fires if the user has lots of other data stored.
     Sounds.setCustom(null);
     refreshCustomSoundUI();
     if (String(e).includes('quota') || e.name === 'QuotaExceededError') {
@@ -8017,16 +8439,95 @@ async function onCustomSoundUpload(input) {
 }
 
 function clearCustomSound() {
-  if (!confirm('Remove the uploaded sound file?')) return;
+  if (!confirm('Remove the uploaded sound file? Any events set to Custom will fall back to their default.')) return;
   Sounds.setCustom(null);
-  // If "Custom" was the active choice, fall back to cha-ching
-  if (Sounds.getChoice('sale') === 'custom') Sounds.setChoice('sale', 'chaching');
-  const dropdown = el('set-sale-sound');
-  if (dropdown) dropdown.value = Sounds.getChoice('sale');
+  // For any event still set to custom, fall back to that event's default sound
+  SOUND_EVENTS.forEach(ev => {
+    if (Sounds.getChoice(ev.key) === 'custom') Sounds.setChoice(ev.key, ev.defaultName);
+  });
+  renderSoundEventRows();
   const fileInput = el('set-sound-custom-file');
   if (fileInput) fileInput.value = '';
-  refreshCustomSoundUI();
   toast('Custom sound removed', 'success');
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// eBay listing defaults — Settings card UI helpers.
+// Hydrates from the same /pricing-config payload used by everything else, and
+// renders per-store policy override rows for multi-store brands (Calibre).
+// ──────────────────────────────────────────────────────────────────────────
+function hydrateEbayDefaults(cfg) {
+  // Brand-wide / default-store policies
+  const setVal = (id, val) => { const e = el(id); if (e) e.value = val || ''; };
+  setVal('set-ebay-policy-payment',  cfg.ebayPolicyPayment);
+  setVal('set-ebay-policy-shipping', cfg.ebayPolicyShipping);
+  setVal('set-ebay-policy-return',   cfg.ebayPolicyReturn);
+  setVal('set-ebay-cat',             cfg.ebayDefaultCategoryId);
+  setVal('set-ebay-loc-country',     cfg.ebayLocationCountry || 'GB');
+  setVal('set-ebay-loc-postcode',    cfg.ebayLocationPostcode);
+  setVal('set-ebay-loc-city',        cfg.ebayLocationCity);
+  const condSel = el('set-ebay-cond');
+  if (condSel) condSel.value = cfg.ebayDefaultConditionId || '1000';
+
+  // Per-store overrides — only render if the brand has more than one eBay store
+  const stores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
+  const wrap = el('ebay-per-store-policies');
+  const defaultSuffix = el('ebay-policy-default-suffix');
+  if (!wrap) return;
+  if (stores.length <= 1) {
+    wrap.style.display = 'none';
+    if (defaultSuffix) defaultSuffix.textContent = '';
+    return;
+  }
+  // Multi-store: relabel "Default" card as fallback, render per-store rows below
+  if (defaultSuffix) defaultSuffix.textContent = '(fallback if a store row is empty)';
+  wrap.style.display = '';
+  const perStore = cfg.ebayPerStorePolicies || {};
+  wrap.innerHTML = stores.map(s => {
+    const pol = perStore[s.code] || {};
+    return `
+      <div style="padding:12px;background:var(--bg-soft);border-radius:8px;margin-bottom:10px">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px">${escapeHtml(s.name)} ${s.primary ? '<span style="font-size:10px;color:var(--ink-soft);font-weight:400">(primary)</span>' : ''}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+          <div class="field"><label>Payment ID</label><input class="ps-pay"  data-store="${escapeAttr(s.code)}" value="${escapeAttr(pol.payment  || '')}" placeholder="leave empty to use default"></div>
+          <div class="field"><label>Shipping ID</label><input class="ps-ship" data-store="${escapeAttr(s.code)}" value="${escapeAttr(pol.shipping || '')}" placeholder="leave empty to use default"></div>
+          <div class="field"><label>Return ID</label><input class="ps-ret"  data-store="${escapeAttr(s.code)}" value="${escapeAttr(pol.return   || '')}" placeholder="leave empty to use default"></div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function saveEbayListingDefaults() {
+  const getStr = id => (el(id)?.value || '').trim();
+  // Gather per-store policy overrides (multi-store brands only)
+  const perStore = {};
+  document.querySelectorAll('#ebay-per-store-policies input[data-store]').forEach(inp => {
+    const code = inp.dataset.store;
+    if (!perStore[code]) perStore[code] = {};
+    if (inp.classList.contains('ps-pay'))  perStore[code].payment  = inp.value.trim();
+    if (inp.classList.contains('ps-ship')) perStore[code].shipping = inp.value.trim();
+    if (inp.classList.contains('ps-ret'))  perStore[code].return   = inp.value.trim();
+  });
+  const payload = {
+    ebayPolicyPayment:      getStr('set-ebay-policy-payment'),
+    ebayPolicyShipping:     getStr('set-ebay-policy-shipping'),
+    ebayPolicyReturn:       getStr('set-ebay-policy-return'),
+    ebayDefaultCategoryId:  getStr('set-ebay-cat'),
+    ebayDefaultConditionId: getStr('set-ebay-cond'),
+    ebayLocationCountry:    getStr('set-ebay-loc-country').toUpperCase() || 'GB',
+    ebayLocationPostcode:   getStr('set-ebay-loc-postcode'),
+    ebayLocationCity:       getStr('set-ebay-loc-city'),
+  };
+  if (Object.keys(perStore).length) payload.ebayPerStorePolicies = perStore;
+  try {
+    await Api.post('/api/settings/pricing-config', payload);
+    toast('eBay defaults saved', 'success');
+    // Refresh the cached config so the Create-eBay modal picks them up immediately
+    State.pricingConfig = await Api.get('/api/settings/pricing-config');
+  } catch (e) {
+    toast('Save failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -8198,7 +8699,27 @@ async function savePricingConfig() {
     googleReviewUrl:     getStr('set-google-review-url'),
     reviewPlatform:      getStr('set-review-platform'),
     defaultCountryCode:  getStr('set-default-cc'),
+    // eBay listing defaults
+    ebayDefaultCategoryId:  getStr('set-ebay-category'),
+    ebayDefaultConditionId: getStr('set-ebay-condition'),
+    ebayLocationCountry:    getStr('set-ebay-country'),
+    ebayLocationCity:       getStr('set-ebay-city'),
+    ebayLocationPostcode:   getStr('set-ebay-postcode'),
+    ebayPolicyPayment:      getStr('set-ebay-pol-payment'),
+    ebayPolicyShipping:     getStr('set-ebay-pol-shipping'),
+    ebayPolicyReturn:       getStr('set-ebay-pol-return'),
   };
+  // Collect per-store policies (multi-store brands only). Inputs are named
+  // set-ebay-pol-{storeCode}-{kind}; absent if the brand has only one store.
+  const perStore = {};
+  document.querySelectorAll('[data-ebay-policy-input]').forEach(inp => {
+    const store = inp.dataset.storeCode;
+    const kind  = inp.dataset.policyKind;
+    if (!store || !kind) return;
+    perStore[store] = perStore[store] || {};
+    perStore[store][kind] = inp.value;
+  });
+  if (Object.keys(perStore).length) payload.ebayPerStorePolicies = perStore;
   // Strip undefined
   for (const k of Object.keys(payload)) if (payload[k] === undefined) delete payload[k];
   try {
@@ -8211,6 +8732,53 @@ async function savePricingConfig() {
   } catch (e) {
     toast('Save failed: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+// Render the business-policy inputs block. For single-store brands, only the
+// brand-wide defaults are shown. For multi-store brands (Calibre's two eBay
+// accounts), per-store override sections are added below the defaults — empty
+// values fall through to the brand-wide ones at create-listing time.
+function renderEbayPolicies(cfg) {
+  const wrap = el('set-ebay-policies-wrap');
+  if (!wrap) return;
+  const stores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
+
+  const policyRow = (idPrefix, ds = {}, opts = {}) => `
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;${opts.style || ''}">
+      <div class="field"><label>Payment policy ID</label><input id="${idPrefix}-payment" ${ds.payment ? `data-ebay-policy-input data-store-code="${escapeAttr(ds.storeCode)}" data-policy-kind="payment"` : ''} placeholder="e.g. 1234567890" value="${escapeAttr(ds.payment || '')}"></div>
+      <div class="field"><label>Shipping policy ID</label><input id="${idPrefix}-shipping" ${ds.shipping ? `data-ebay-policy-input data-store-code="${escapeAttr(ds.storeCode)}" data-policy-kind="shipping"` : ''} placeholder="e.g. 1234567891" value="${escapeAttr(ds.shipping || '')}"></div>
+      <div class="field"><label>Return policy ID</label><input id="${idPrefix}-return" ${ds.returnPolicy ? `data-ebay-policy-input data-store-code="${escapeAttr(ds.storeCode)}" data-policy-kind="return"` : ''} placeholder="e.g. 1234567892" value="${escapeAttr(ds.returnPolicy || '')}"></div>
+    </div>`;
+
+  // Brand-wide defaults — always shown, used as fallback when per-store IDs are empty.
+  let html = `
+    <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px"><strong>Brand-wide default</strong> — used when a store doesn't have its own policies set.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      <div class="field"><label>Payment policy ID</label><input id="set-ebay-pol-payment" placeholder="e.g. 1234567890" value="${escapeAttr(cfg.ebayPolicyPayment || '')}"></div>
+      <div class="field"><label>Shipping policy ID</label><input id="set-ebay-pol-shipping" placeholder="e.g. 1234567891" value="${escapeAttr(cfg.ebayPolicyShipping || '')}"></div>
+      <div class="field"><label>Return policy ID</label><input id="set-ebay-pol-return" placeholder="e.g. 1234567892" value="${escapeAttr(cfg.ebayPolicyReturn || '')}"></div>
+    </div>`;
+
+  // Per-store overrides — only render the section if the brand has 2+ stores.
+  if (stores.length > 1) {
+    html += `<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line)">`;
+    html += `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px"><strong>Per-store overrides</strong> — each eBay store can have its own policy IDs (leave blank to fall back to brand-wide defaults above).</div>`;
+    for (const s of stores) {
+      const ps = cfg.ebayPerStorePolicies?.[s.code] || {};
+      html += `
+        <div style="margin-top:12px;padding:10px;background:var(--white);border:1px solid var(--line);border-radius:6px">
+          <div style="font-weight:600;font-size:12px;margin-bottom:8px">${escapeHtml(s.name)}${s.primary ? ' <span style="font-size:10px;font-weight:500;color:var(--ink-soft)">(primary)</span>' : ''}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+            <div class="field"><label>Payment policy ID</label><input data-ebay-policy-input data-store-code="${escapeAttr(s.code)}" data-policy-kind="payment" placeholder="Override" value="${escapeAttr(ps.payment || '')}"></div>
+            <div class="field"><label>Shipping policy ID</label><input data-ebay-policy-input data-store-code="${escapeAttr(s.code)}" data-policy-kind="shipping" placeholder="Override" value="${escapeAttr(ps.shipping || '')}"></div>
+            <div class="field"><label>Return policy ID</label><input data-ebay-policy-input data-store-code="${escapeAttr(s.code)}" data-policy-kind="return" placeholder="Override" value="${escapeAttr(ps.return || '')}"></div>
+          </div>
+        </div>`;
+    }
+    html += `</div>`;
+  }
+
+  wrap.innerHTML = html;
 }
 
 async function resetSyncCursor() {
