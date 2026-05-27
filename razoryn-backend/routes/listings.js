@@ -808,4 +808,152 @@ router.post('/push-to-ebay', requireAdmin, async (req, res) => {
   }
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// POST /api/listings/create-ebay
+// Create a NEW eBay listing for a product that's on Shopify but not yet on
+// eBay. Uses the Trading API AddItem call so it works with per-store
+// Auth'n'Auth tokens (Calibre's two stores) or the OAuth fallback (Razoryn).
+//
+// Required body fields:
+//   productId    — warehouse products.id (the source-of-truth row)
+//   storeCode    — eBay store code (e.g. 'evbodyparts', 'evantagrande', or the
+//                  single-store brand's primary store code)
+//   categoryId   — eBay numeric category ID
+//   conditionId  — 1000 = New, 1500 = New other, 3000 = Used, etc.
+//   price        — listing price in GBP
+//   quantity     — stock to list
+//
+// Optional:
+//   titleOverride — override the auto-generated title (max 80 chars)
+//   businessPolicies — { paymentId, shippingId, returnId } if not relying on
+//                       per-store defaults from app_settings
+//   useShopifyDescription — fetch the rich HTML description from Shopify
+//                            (default true; turn off for faster listing creation)
+//   itemSpecifics — array of extra { name, value } pairs
+//
+// On success, inserts a row into mirror_links so the product is treated as
+// "linked" by the rest of the warehouse system.
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/create-ebay', requireAdmin, async (req, res) => {
+  const ebay = require('../services/ebay');
+  const shopify = require('../services/shopify');
+  const brand = require('../lib/brand');
+  const b = req.body || {};
+
+  if (!b.productId)  return res.status(400).json({ error: 'productId required' });
+  if (!b.storeCode)  return res.status(400).json({ error: 'storeCode required' });
+  if (!b.categoryId) return res.status(400).json({ error: 'categoryId required — eBay needs a numeric category for the listing' });
+  if (b.price == null || isNaN(parseFloat(b.price))) return res.status(400).json({ error: 'valid price required' });
+
+  // Look up the product. We need at minimum: sku, title, image_url, brand, mpn.
+  const pr = await query(`SELECT * FROM products WHERE id = $1`, [b.productId]);
+  const product = pr.rows[0];
+  if (!product) return res.status(404).json({ error: 'product_not_found' });
+
+  // Resolve the store. For multi-store brands the user must pass storeCode.
+  const store = brand.getStore(b.storeCode);
+  if (!store) return res.status(400).json({ error: 'unknown_store', message: `No eBay store configured with code "${b.storeCode}". Available: ${brand.stores.map(s => s.code).join(', ')}` });
+
+  // Pull eBay listing defaults from app_settings (per-store policies + location).
+  // The settings UI lets the user save these once so they don't have to type them
+  // for every new listing.
+  const settings = (await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {};
+
+  // Per-store business policies, namespaced by store code in the DB column names.
+  // Falls back to the brand-wide default keys (no store suffix) for single-store brands.
+  const polPrefix = `ebay_policy_${store.code}_`;
+  const pol = {
+    paymentId:  settings[`${polPrefix}payment`]  || settings['ebay_policy_payment']  || b.businessPolicies?.paymentId  || null,
+    shippingId: settings[`${polPrefix}shipping`] || settings['ebay_policy_shipping'] || b.businessPolicies?.shippingId || null,
+    returnId:   settings[`${polPrefix}return`]   || settings['ebay_policy_return']   || b.businessPolicies?.returnId   || null,
+  };
+
+  const loc = {
+    country:    settings.ebay_location_country    || 'GB',
+    postalCode: settings.ebay_location_postcode   || '',
+    city:       settings.ebay_location_city       || '',
+  };
+
+  // Try to enrich with Shopify-side content (description + extra images).
+  // Best-effort; if Shopify fetch fails we fall back to the warehouse data.
+  let description = '';
+  let imageUrls = product.image_url ? [product.image_url] : [];
+  if (b.useShopifyDescription !== false && product.shopify_product_id) {
+    try {
+      const sp = await shopify.getShopifyProductFull(product.shopify_product_id);
+      if (sp.description) description = sp.description;
+      if (sp.imageUrls?.length) imageUrls = sp.imageUrls;
+    } catch (e) {
+      console.warn('[create-ebay] Shopify fetch failed (continuing with warehouse data):', e.message);
+    }
+  }
+  // Fallback description if Shopify didn't supply one
+  if (!description) {
+    description = `<div style="font-family:Arial,sans-serif;line-height:1.5"><h2>${escapeHtmlServer(product.title)}</h2>` +
+      (product.brand ? `<p><strong>Brand:</strong> ${escapeHtmlServer(product.brand)}</p>` : '') +
+      (product.part_number ? `<p><strong>Part number:</strong> ${escapeHtmlServer(product.part_number)}</p>` : '') +
+      `<p>Listed by ${escapeHtmlServer(brand.name || 'our warehouse')}. Please contact us with any fitment questions before purchase.</p></div>`;
+  }
+
+  const title = (b.titleOverride || product.title || '').trim();
+  if (!title) return res.status(400).json({ error: 'no_title', message: 'Product has no title — set one in inventory before listing.' });
+
+  try {
+    const result = await ebay.addItem(store.code, {
+      sku: product.sku,
+      title,
+      description,
+      categoryId: b.categoryId,
+      conditionId: b.conditionId || 1000,
+      price: parseFloat(b.price),
+      quantity: parseInt(b.quantity) || product.qty_on_hand || 1,
+      currency: 'GBP',
+      imageUrls,
+      businessPolicies: pol,
+      location: loc,
+      brand: product.brand,
+      mpn: product.part_number,
+      itemSpecifics: Array.isArray(b.itemSpecifics) ? b.itemSpecifics : [],
+    });
+
+    if (!result.itemId) throw new Error('AddItem succeeded but returned no ItemID');
+
+    // Save the new ItemID into mirror_links so the rest of the system treats
+    // this product as linked to eBay. Self-healing migration ensures store_code
+    // column exists.
+    try {
+      await query(`ALTER TABLE mirror_links ADD COLUMN IF NOT EXISTS store_code TEXT`);
+    } catch (e) {}
+    await query(`
+      INSERT INTO mirror_links (sku, shopify_product_id, ebay_item_id, store_code, created_at)
+      VALUES ($1, $2, $3, $4, now())
+      ON CONFLICT (sku) DO UPDATE SET ebay_item_id = EXCLUDED.ebay_item_id, store_code = EXCLUDED.store_code
+    `, [product.sku, product.shopify_product_id, result.itemId, store.code]).catch(async () => {
+      // If there's no unique constraint on sku, just insert plainly
+      await query(`INSERT INTO mirror_links (sku, shopify_product_id, ebay_item_id, store_code, created_at) VALUES ($1, $2, $3, $4, now())`,
+        [product.sku, product.shopify_product_id, result.itemId, store.code]);
+    });
+
+    await audit(req, 'create_ebay_listing', 'product', product.id, {
+      sku: product.sku, itemId: result.itemId, store: store.code, categoryId: b.categoryId,
+    });
+
+    res.json({
+      ok: true,
+      itemId: result.itemId,
+      url: `https://www.ebay.co.uk/itm/${result.itemId}`,
+      fees: result.fees,
+      ack: result.ack,
+    });
+  } catch (e) {
+    console.error('[create-ebay]', e.message);
+    res.status(500).json({ error: 'create_failed', message: e.message });
+  }
+});
+
+// Helper: minimal HTML-escape for server-side description fallback strings
+function escapeHtmlServer(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 module.exports = router;

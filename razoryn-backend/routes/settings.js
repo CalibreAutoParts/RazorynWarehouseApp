@@ -27,10 +27,32 @@ async function ensureSocialColumns() {
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS google_review_url TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS review_platform TEXT DEFAULT 'trustpilot'`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS default_country_code TEXT DEFAULT '44'`);
-    // Shopify product handle on products — populated by /import-shopify so
-    // Quote Builder's Shopify link can go direct to /products/{handle}
-    // instead of falling back to a /search?q=SKU URL.
+    // Shopify product handle on products
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS shopify_handle TEXT`);
+    // eBay listing defaults — used by the Shopify→eBay listing creator. These
+    // are the values pre-filled into the "Create eBay listing" modal so the user
+    // doesn't have to type them every time. Per-store columns let multi-store
+    // brands (Calibre) have different defaults per eBay account.
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_category_id TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_condition_id TEXT DEFAULT '1000'`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_location_country TEXT DEFAULT 'GB'`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_location_postcode TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_location_city TEXT`);
+    // Business policy IDs — brand-wide fallback (used if no per-store override).
+    // For per-store overrides we add columns dynamically below based on the stores.
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_payment TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_shipping TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_return TEXT`);
+    // Per-store policy overrides — created lazily on read/write. The brand
+    // service exposes brand.stores so we can pre-create columns for every store.
+    try {
+      const brand = require('../lib/brand');
+      for (const s of brand.stores || []) {
+        await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_${s.code}_payment TEXT`).catch(()=>{});
+        await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_${s.code}_shipping TEXT`).catch(()=>{});
+        await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_${s.code}_return TEXT`).catch(()=>{});
+      }
+    } catch (e) { /* brand module may not be ready */ }
     _migrationDone = true;
   } catch (e) {
     console.warn('[settings.js] migration warning:', e.message);
@@ -154,6 +176,32 @@ router.get('/pricing-config', async (req, res) => {
     reviewPlatform:  r.review_platform || 'trustpilot',  // 'trustpilot' | 'google' | 'both'
     // Phone normalisation default — UK as default but configurable for non-UK
     defaultCountryCode: r.default_country_code || '44',
+    // eBay listing defaults — used by the Shopify→eBay create-listing flow.
+    // Defaults the modal pre-fills so users don't have to type them every time.
+    ebayDefaultCategoryId:  r.ebay_default_category_id || '',
+    ebayDefaultConditionId: r.ebay_default_condition_id || '1000',
+    ebayLocationCountry:    r.ebay_location_country || 'GB',
+    ebayLocationPostcode:   r.ebay_location_postcode || '',
+    ebayLocationCity:       r.ebay_location_city || '',
+    ebayPolicyPayment:      r.ebay_policy_payment || '',
+    ebayPolicyShipping:     r.ebay_policy_shipping || '',
+    ebayPolicyReturn:       r.ebay_policy_return || '',
+    // Per-store policy overrides (multi-store brands only).
+    // Shape: { storeCode: { payment, shipping, return } }
+    ebayPerStorePolicies:   (() => {
+      const out = {};
+      try {
+        const brand = require('../lib/brand');
+        for (const s of brand.stores || []) {
+          out[s.code] = {
+            payment:  r[`ebay_policy_${s.code}_payment`]  || '',
+            shipping: r[`ebay_policy_${s.code}_shipping`] || '',
+            return:   r[`ebay_policy_${s.code}_return`]   || '',
+          };
+        }
+      } catch (e) {}
+      return out;
+    })(),
   });
 });
 
@@ -189,6 +237,15 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       googleReviewUrl:    'google_review_url',
       reviewPlatform:     'review_platform',
       defaultCountryCode: 'default_country_code',
+      // eBay listing defaults
+      ebayDefaultCategoryId:  'ebay_default_category_id',
+      ebayDefaultConditionId: 'ebay_default_condition_id',
+      ebayLocationCountry:    'ebay_location_country',
+      ebayLocationPostcode:   'ebay_location_postcode',
+      ebayLocationCity:       'ebay_location_city',
+      ebayPolicyPayment:      'ebay_policy_payment',
+      ebayPolicyShipping:     'ebay_policy_shipping',
+      ebayPolicyReturn:       'ebay_policy_return',
     };
     const updates = [], params = [];
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
@@ -199,6 +256,19 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       }
       params.push(val);
       updates.push(`${dbCol} = $${params.length}`);
+    }
+    // Per-store policy overrides — shape: { storeCode: { payment, shipping, return } }
+    // Sent under body.ebayPerStorePolicies. Column names are ebay_policy_{store}_{kind}
+    // and the migration block has already ensured they exist for every known store.
+    if (b.ebayPerStorePolicies && typeof b.ebayPerStorePolicies === 'object') {
+      for (const [storeCode, ids] of Object.entries(b.ebayPerStorePolicies)) {
+        if (!/^[a-z0-9_]+$/.test(storeCode)) continue;  // defence: only safe-char store codes
+        for (const kind of ['payment', 'shipping', 'return']) {
+          if (ids[kind] === undefined) continue;
+          params.push(ids[kind]);
+          updates.push(`ebay_policy_${storeCode}_${kind} = $${params.length}`);
+        }
+      }
     }
     if (!updates.length) return res.json({ ok: true, message: 'no_changes' });
     await query(`UPDATE app_settings SET ${updates.join(', ')}, updated_at = now() WHERE id = 1`, params);
