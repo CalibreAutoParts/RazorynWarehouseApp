@@ -6770,8 +6770,10 @@ function renderLinkStatus() {
     <div class="card" style="margin-bottom:14px">
       <div class="card-body">
         <div id="lm-stores-status" style="margin-bottom:10px"></div>
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <button class="btn btn-primary" onclick="forceMatchLinks()" title="Pull active eBay listings and auto-match by SKU + barcode + title token">🔗 Force match all</button>
+          <button class="btn btn-outline" onclick="hydrateEbayPrices()" title="Pull live eBay prices and backfill them on warehouse products. Also auto-detects each item's store. Run this if 'phone pricing' shows £0 or if you see the legacy-store-code warning below.">💷 Hydrate eBay prices</button>
+          <button class="btn btn-outline" onclick="cleanupDisabledStoreLinks()" title="Delete mirror_links rows tied to disabled stores. Use after temporarily disabling a store via the EBAY_STORE_DISABLED env var.">🗑 Clean stale links</button>
           <input id="links-search" placeholder="Search by SKU, title or part #…" oninput="debouncedLinkSearch(this.value)" value="${escapeAttr(State.linkSearch || '')}" style="flex:1;min-width:220px">
         </div>
       </div>
@@ -7062,9 +7064,9 @@ async function refreshLinkMirrorStoresStatus() {
           <div style="flex:1;min-width:220px">
             <strong>Store${disabled.length === 1 ? '' : 's'} disabled:</strong> ${disabled.map(s => escapeHtml(s.name)).join(', ')}.
             All linking, syncing and force-matching skips ${disabled.length === 1 ? 'this store' : 'these stores'} until re-enabled.
+            Use <strong>🗑 Clean stale links</strong> (above) to delete its existing mirror_links rows.
             Re-enable by removing the store code from the <code>EBAY_STORE_DISABLED</code> env var in Railway, then redeploy.
           </div>
-          <button class="btn btn-outline btn-sm" onclick="cleanupDisabledStoreLinks()" title="Delete mirror_links rows pointing to disabled stores">🗑 Clean stale links</button>
         </div>
       `;
     }
@@ -7089,17 +7091,65 @@ async function refreshLinkMirrorStoresStatus() {
 // Deletes mirror_links rows that point to currently-disabled stores. Used to
 // clean up after disabling a store (e.g. Evanta) so the listing-mirror counts
 // reflect reality. Safe to re-run.
+//
+// When nothing is currently disabled, the button is still useful — it
+// surfaces an instruction modal explaining how to disable a store via the
+// EBAY_STORE_DISABLED env var, listing the actual store codes available.
 async function cleanupDisabledStoreLinks() {
-  if (!confirm('Delete mirror_links rows that point to disabled eBay stores?\n\nThis is safe to do — after re-enabling a store and running Force match, the links will be re-created from the live eBay listings.')) return;
+  // Check the configured stores first so we can show actionable guidance
+  let storeData;
+  try {
+    storeData = await Api.get('/api/listings/stores');
+  } catch (e) {
+    toast('Failed to check store status: ' + (e.data?.message || e.message), 'error');
+    return;
+  }
+  const stores = storeData.stores || [];
+  const disabled = stores.filter(s => s.disabled);
+
+  // Path 1: nothing disabled — show how-to modal instead of silently confirming
+  if (disabled.length === 0) {
+    const storeList = stores.map(s =>
+      `<li style="margin:4px 0"><code style="background:var(--bg-soft);padding:1px 6px;border-radius:3px">${escapeHtml(s.code)}</code> — ${escapeHtml(s.name)}${s.primary ? ' <span style="color:var(--ink-soft);font-size:11px">(primary)</span>' : ''}</li>`
+    ).join('');
+    modal({
+      title: '🗑 Clean stale links',
+      body: `
+        <div style="font-size:13px;line-height:1.6">
+          <p>Nothing to clean — <strong>no eBay stores are currently disabled</strong>.</p>
+          <p>This button removes mirror_links rows tied to <em>disabled</em> stores. To use it, you first need to disable a store:</p>
+          <ol style="margin:10px 0;padding-left:20px">
+            <li>Open <strong>Railway</strong> → your service → <strong>Variables</strong></li>
+            <li>Add a new variable: <code style="background:var(--bg-soft);padding:1px 6px;border-radius:3px">EBAY_STORE_DISABLED</code></li>
+            <li>Set its value to the store code(s) you want to disable, comma-separated.</li>
+            <li>Save → Railway redeploys → return here and click 🗑 Clean stale links</li>
+          </ol>
+          <div style="margin-top:12px;padding:10px;background:var(--bg-soft);border-radius:6px">
+            <div style="font-size:12px;color:var(--ink-soft);margin-bottom:6px;font-weight:600">Your configured store codes:</div>
+            <ul style="margin:0;padding-left:20px;font-size:13px">${storeList || '<li style="color:var(--ink-soft)">(none)</li>'}</ul>
+          </div>
+          <div style="margin-top:10px;font-size:12px;color:var(--ink-soft)">
+            <strong>Example for Calibre:</strong> set <code>EBAY_STORE_DISABLED=evantagrande</code> to disable Evanta Grande temporarily so all linking happens against EVBODYPARTS only.
+          </div>
+        </div>
+      `,
+      actions: [
+        { label: 'Got it', primary: true, onClick: closeModal },
+      ],
+    });
+    return;
+  }
+
+  // Path 2: one or more stores ARE disabled — confirm + delete their links
+  if (!confirm(`Delete mirror_links rows pointing to disabled store${disabled.length === 1 ? '' : 's'}: ${disabled.map(s => s.name).join(', ')}?\n\nThis is safe to do — after re-enabling a store and running Force match, the links will be re-created from the live eBay listings.`)) return;
   const taskId = Task.start('Cleaning up disabled-store links…');
   try {
     const r = await Api.post('/api/listings/cleanup-disabled-store-links');
     Task.done(taskId, `${r.deleted} deleted`);
     if (r.deleted === 0) {
-      toast(r.message || 'Nothing to clean — no disabled stores or no stale links.', 'info');
+      toast('Nothing to clean — no mirror_links rows point to disabled stores.', 'info');
     } else {
       toast(`✓ Cleaned ${r.deleted} stale link${r.deleted === 1 ? '' : 's'} from ${r.disabledStores.join(', ')}`, 'success');
-      // Reload listing mirror so the counts reflect the cleanup
       try { await loadLinkStatus?.(); } catch (e) {}
       renderLinkStatus();
     }
