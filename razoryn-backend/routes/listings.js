@@ -831,29 +831,33 @@ router.get('/test-ebay-connection', requireAdmin, async (req, res) => {
   const ebay = require('../services/ebay');
   const stores = ebay.listStores();
   const results = [];
-  // Try fetching the App-level quota usage too. It's per-App so we only need
-  // ONE store's token to call it; first usable store wins. If every store
-  // fails this call, we'll see that in the quotaError field.
+  // Try fetching the App-level quota usage via the Developer Analytics API.
+  // This is an OAuth client_credentials call — it doesn't need a per-store
+  // user token and is on a separate quota plane from the Trading API, so it's
+  // safe to call even when the Trading API daily cap is exceeded.
+  //
+  // (Replaces the deprecated GetAPIAccessRules Trading-API call that eBay
+  // decommissioned on 2023-03-10.)
   let quota = null;
   let quotaError = null;
-  for (const s of stores) {
-    if (s.disabled || !s.hasToken) continue;
-    try {
-      const allRules = await ebay.getApiAccessRules(s.code);
-      // Filter to the rules most useful for diagnosing this app's behaviour.
-      // Empty CallName is the "all calls" aggregate row eBay returns.
-      const interesting = ['', 'GetMyeBaySelling', 'GetItem', 'GetOrders', 'ReviseItem', 'AddItem', 'CompleteSale', 'AddMemberMessageAAQToPartner'];
-      quota = allRules
-        .filter(r => interesting.includes(r.callName))
-        .map(r => ({
-          ...r,
-          dailyRemaining: r.dailyHardLimit > 0 ? Math.max(0, r.dailyHardLimit - r.dailyUsage) : null,
-          hourlyRemaining: r.hourlyHardLimit > 0 ? Math.max(0, r.hourlyHardLimit - r.hourlyUsage) : null,
-        }));
-      break;
-    } catch (e) {
-      quotaError = e.message;
-    }
+  try {
+    const rules = await ebay.getRateLimits('tradingapi');
+    // Filter to the call-names that this app actually uses. Empty `name` is
+    // the aggregate row eBay returns for the whole context.
+    const interesting = ['', 'GetMyeBaySelling', 'GetItem', 'GetOrders', 'ReviseItem', 'AddItem', 'CompleteSale', 'AddMemberMessageAAQToPartner', 'ReviseInventoryStatus', 'GetSellerList'];
+    quota = rules
+      .filter(r => interesting.includes(r.callName) || rules.length <= 12)  // if eBay returns few, show all
+      .map(r => ({
+        ...r,
+        // legacy aliases for the existing renderer
+        hourlyHardLimit: 0,
+        hourlyUsage: 0,
+        dailyRemaining: r.dailyRemaining,
+        hourlyRemaining: null,
+      }));
+  } catch (e) {
+    quotaError = e.message;
+    console.warn('[test-ebay-connection] getRateLimits failed:', e.message);
   }
   for (const s of stores) {
     const result = { store: s.code, name: s.name, hasToken: !!s.hasToken, disabled: !!s.disabled };
