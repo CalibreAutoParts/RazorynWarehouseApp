@@ -7188,9 +7188,15 @@ async function forceMatchLinks() {
 }
 
 // Shared error-surfacing modal for hydrate / force-match / test-connection.
-// Shows the per-store error + likely-cause + remediation links so the user
-// can identify which token is broken without diving into Railway logs.
-function showEbayErrorsModal(storeErrors, fullResponse) {
+// Shows the per-store error + likely-cause + remediation. Detects the special
+// "rate limit" case and shows quota usage + reset-time guidance instead of the
+// generic "refresh your token" advice (which wouldn't help for a quota issue).
+function showEbayErrorsModal(storeErrors, fullResponse, quota) {
+  // Detect rate-limit specifically — those need different guidance entirely.
+  const isRateLimit = storeErrors.some(e =>
+    (e.reason === 'rate_limit') ||
+    /usage limit|exceeded usage|call limit|getapiaccessrules|21917/i.test(e.error || '')
+  );
   const rows = storeErrors.map(e => `
     <div style="padding:12px;border:1px solid var(--line);border-radius:8px;margin-bottom:10px;background:var(--bg-soft)">
       <div style="font-weight:600;color:var(--red);margin-bottom:6px">⚠ ${escapeHtml(e.store || 'unknown')}</div>
@@ -7198,24 +7204,45 @@ function showEbayErrorsModal(storeErrors, fullResponse) {
       ${e.likelyCause ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:8px"><strong>Likely cause:</strong> ${escapeHtml(e.likelyCause)}</div>` : ''}
     </div>
   `).join('');
+  // Different remediation block based on whether it's a quota issue or auth issue
+  const remediation = isRateLimit ? `
+    <div style="font-size:12px;color:#5a4400;background:#fff8e6;border:1px solid #f0d171;padding:12px;border-radius:6px;line-height:1.7;margin-top:8px">
+      <strong>This is a quota issue — your tokens are fine.</strong><br><br>
+      Your eBay developer app has hit its daily Trading API quota for one or more call-names. The quota is <strong>per-app</strong> (shared across all stores using the same <code>EBAY_CLIENT_ID</code>), not per-store.<br><br>
+      <strong>Three options:</strong><br>
+      1. <strong>Wait</strong> — daily counters reset at midnight Pacific Time (≈ 8am UK winter / 7am UK BST summer). Don't run Force match / Hydrate again until then.<br>
+      2. <strong>Apply for higher limits</strong> at <a href="https://developer.ebay.com/marketplace/risk-and-compliance/static/compatible-application-check.html" target="_blank" rel="noopener" style="color:var(--brand-primary)">eBay Compatible Application Check</a>. Takes a few days; one-time process.<br>
+      3. <strong>Use a different App</strong> for one of your stores so they don't share quota (only worth it if you have two distinct eBay developer accounts).
+    </div>
+  ` : `
+    <div style="font-size:12px;color:var(--ink-soft);margin-top:12px;padding:10px;background:var(--bg-soft);border-radius:6px;line-height:1.6">
+      <strong>How to refresh an expired eBay token:</strong><br>
+      1. Open <a href="https://developer.ebay.com/my/auth/?env=production" target="_blank" rel="noopener" style="color:var(--brand-primary)">developer.ebay.com/my/auth</a> (production environment)<br>
+      2. Sign in to the eBay account for the broken store<br>
+      3. Click "Sign in to Production" → grant access → copy the new user token<br>
+      4. In Railway → Variables, replace the relevant <code>EBAY_AUTH_TOKEN_*</code> value with the new token<br>
+      5. Wait for redeploy, then retry
+    </div>
+  `;
   modal({
-    title: 'eBay connection failed',
+    title: isRateLimit ? 'eBay daily API quota exceeded' : 'eBay connection failed',
     body: `
       <div style="font-size:13px;line-height:1.6;margin-bottom:14px">
-        One or more eBay stores returned errors. <strong>The scan completed but no listings were fetched from these stores</strong> — that's why you saw "0 listings".
+        ${isRateLimit
+          ? 'Your eBay App has used up its daily API call quota. Scans completed but no listings were returned because the quota was already at the cap.'
+          : 'One or more eBay stores returned errors. <strong>The scan completed but no listings were fetched from these stores</strong> — that\'s why you saw "0 listings".'}
       </div>
       ${rows}
-      <div style="font-size:12px;color:var(--ink-soft);margin-top:12px;padding:10px;background:var(--bg-soft);border-radius:6px;line-height:1.6">
-        <strong>How to refresh an expired eBay token:</strong><br>
-        1. Open <a href="https://developer.ebay.com/my/auth/?env=production" target="_blank" rel="noopener" style="color:var(--brand-primary)">developer.ebay.com/my/auth</a> (production environment)<br>
-        2. Sign in to the eBay account for the broken store<br>
-        3. Click "Sign in to Production" → grant access → copy the new user token<br>
-        4. In Railway → Variables, replace the relevant <code>EBAY_AUTH_TOKEN_*</code> value with the new token<br>
-        5. Wait for redeploy, then retry
-      </div>
+      ${quota && quota.length ? renderQuotaTable(quota) : ''}
+      ${remediation}
     `,
     actions: [
       { label: 'Close', onClick: closeModal },
+      // Show "Run connection test" for both cases. For rate-limit cases the
+      // test endpoint uses GetAPIAccessRules to fetch quota — which is exempt
+      // from the daily Trading API limit, so it's safe to call even when
+      // you're hitting the cap. The result will show exactly which call-name
+      // is at its limit and how many calls remain.
       { label: '🩺 Run connection test', primary: true, onClick: async () => { closeModal(); await testEbayConnection(); } },
     ],
   });
@@ -7223,6 +7250,9 @@ function showEbayErrorsModal(storeErrors, fullResponse) {
 
 // Calls /test-ebay-connection and surfaces the result. If everything's fine,
 // just shows a success toast. If any store failed, opens the diagnostics modal.
+// Always shows quota (when available) since that's frequently what the user
+// actually needs to see — even when stores test "OK", you might be 1 call away
+// from the daily cap.
 async function testEbayConnection() {
   const taskId = Task.start('Testing eBay connectivity per store…');
   try {
@@ -7231,18 +7261,74 @@ async function testEbayConnection() {
     const passed = (r.results || []).filter(x => x.ok);
     if (failed.length === 0) {
       Task.done(taskId, `All ${passed.length} store${passed.length === 1 ? '' : 's'} OK`);
-      const summary = passed.map(p => `✓ ${p.name}: ${p.sampleCount} active listings`).join('\n');
-      toast(summary || 'All stores responding.', 'success', 8000);
+      // If we got quota data, show it in the success modal too — useful to
+      // know how close to the cap you are even when things are working.
+      if (r.quota && r.quota.length) {
+        showQuotaModal(r.quota, passed);
+      } else {
+        const summary = passed.map(p => `✓ ${p.name}: ${p.sampleCount} active listings`).join('\n');
+        toast(summary || 'All stores responding.', 'success', 8000);
+      }
     } else {
       Task.fail(taskId, `${failed.length} failed`);
-      // Map test-connection errors to the shared modal format
-      const errors = failed.map(f => ({ store: f.name || f.store, error: f.error, likelyCause: f.likelyCause }));
-      showEbayErrorsModal(errors, r);
+      const errors = failed.map(f => ({ store: f.name || f.store, error: f.error, likelyCause: f.likelyCause, reason: f.reason }));
+      showEbayErrorsModal(errors, r, r.quota);
     }
   } catch (e) {
     Task.fail(taskId, 'Test failed');
     toast('Test failed: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+// Renders the quota table — used both standalone (success path) and inside
+// the errors modal (when a rate-limit error fires).
+function renderQuotaTable(quota) {
+  if (!quota || !quota.length) return '';
+  const rows = quota.map(q => {
+    const name = q.callName || '— total —';
+    const dailyPct = q.dailyHardLimit > 0 ? Math.round((q.dailyUsage / q.dailyHardLimit) * 100) : 0;
+    const barColor = dailyPct >= 90 ? '#dc2626' : dailyPct >= 70 ? '#f59e0b' : '#10b981';
+    return `
+      <tr>
+        <td style="padding:6px 10px;font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(name)}</td>
+        <td style="padding:6px 10px;font-size:12px;white-space:nowrap">${q.dailyUsage.toLocaleString()} / ${q.dailyHardLimit.toLocaleString()}</td>
+        <td style="padding:6px 10px;font-size:11px;color:${dailyPct >= 90 ? '#dc2626' : 'var(--ink-soft)'}">${dailyPct}%</td>
+        <td style="padding:6px 10px;width:100px"><div style="height:6px;background:var(--bg-soft);border-radius:3px;overflow:hidden"><div style="height:100%;width:${Math.min(100, dailyPct)}%;background:${barColor}"></div></div></td>
+      </tr>
+    `;
+  }).join('');
+  return `
+    <div style="margin-top:14px">
+      <div style="font-weight:600;font-size:13px;margin-bottom:8px">📊 Today's eBay API quota usage</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px;background:var(--bg-soft);border-radius:6px;overflow:hidden">
+        <thead><tr style="background:var(--white);font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">
+          <th style="padding:8px 10px;text-align:left">Call name</th>
+          <th style="padding:8px 10px;text-align:left">Today's usage</th>
+          <th style="padding:8px 10px;text-align:left">%</th>
+          <th style="padding:8px 10px;text-align:left">Bar</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:8px;line-height:1.5">
+        Quota is per-eBay-App (shared across all your stores). Daily counter resets at midnight Pacific Time (≈ 8am UK winter / 7am BST summer). To raise the limit permanently, apply for the <a href="https://developer.ebay.com/marketplace/risk-and-compliance/static/compatible-application-check.html" target="_blank" rel="noopener" style="color:var(--brand-primary)">Compatible Application Check</a>.
+      </div>
+    </div>
+  `;
+}
+
+// Shows quota for the "all stores OK" path — gives the user visibility into
+// where they're standing on the cap even when things are working.
+function showQuotaModal(quota, passed) {
+  const sample = passed.map(p => `<div style="font-size:12px;color:var(--ink-soft)">✓ ${escapeHtml(p.name)}: ${p.sampleCount} active listings</div>`).join('');
+  modal({
+    title: '✓ eBay connection OK',
+    body: `
+      <div style="font-size:13px;line-height:1.6;margin-bottom:12px">All configured stores responded successfully.</div>
+      ${sample}
+      ${renderQuotaTable(quota)}
+    `,
+    actions: [{ label: 'Close', primary: true, onClick: closeModal }],
+  });
 }
 
 
