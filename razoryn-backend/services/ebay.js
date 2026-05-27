@@ -835,7 +835,7 @@ module.exports = {
   completeSale,
   addItem,
   // Multi-store helpers
-  listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary, standalone: !!s.standalone })),
+  listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary, standalone: !!s.standalone, disabled: !!s.disabled, disabledReason: s.disabledReason || null })),
   getPrimaryStore: () => brand.getPrimaryStore(),
   getStore: (code) => brand.getStore(code),
 };
