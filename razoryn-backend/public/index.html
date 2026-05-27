@@ -6773,6 +6773,7 @@ function renderLinkStatus() {
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <button class="btn btn-primary" onclick="forceMatchLinks()" title="Pull active eBay listings and auto-match by SKU + barcode + title token">🔗 Force match all</button>
           <button class="btn btn-outline" onclick="hydrateEbayPrices()" title="Pull live eBay prices and backfill them on warehouse products. Also auto-detects each item's store. Run this if 'phone pricing' shows £0 or if you see the legacy-store-code warning below.">💷 Hydrate eBay prices</button>
+          <button class="btn btn-outline" onclick="testEbayConnection()" title="Test if eBay tokens still work — surfaces the actual error so you can see if a token has expired or has wrong scopes">🩺 Test eBay connection</button>
           <button class="btn btn-outline" onclick="cleanupDisabledStoreLinks()" title="Delete mirror_links rows tied to disabled stores. Use after temporarily disabling a store via the EBAY_STORE_DISABLED env var.">🗑 Clean stale links</button>
           <input id="links-search" placeholder="Search by SKU, title or part #…" oninput="debouncedLinkSearch(this.value)" value="${escapeAttr(State.linkSearch || '')}" style="flex:1;min-width:220px">
         </div>
@@ -7164,6 +7165,14 @@ async function forceMatchLinks() {
   const taskId = Task.start('Auto-matching eBay listings to products');
   try {
     const r = await Api.post('/api/listings/link-status/force-match');
+    // If eBay calls failed for ANY store, the scan count will be 0 from that
+    // store but the endpoint still returns "success" with storeErrors populated.
+    // Show the actual error prominently so users don't spin on "0 scanned".
+    if (r.storeErrors && r.storeErrors.length) {
+      Task.fail(taskId, `${r.storeErrors.length} store error${r.storeErrors.length === 1 ? '' : 's'}`);
+      showEbayErrorsModal(r.storeErrors, r);
+      return;
+    }
     const lines = [];
     lines.push(`Scanned ${r.scanned} eBay listings.`);
     lines.push(`✓ ${r.matched} newly linked`);
@@ -7175,6 +7184,64 @@ async function forceMatchLinks() {
   } catch (e) {
     Task.fail(taskId, 'Match failed');
     toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// Shared error-surfacing modal for hydrate / force-match / test-connection.
+// Shows the per-store error + likely-cause + remediation links so the user
+// can identify which token is broken without diving into Railway logs.
+function showEbayErrorsModal(storeErrors, fullResponse) {
+  const rows = storeErrors.map(e => `
+    <div style="padding:12px;border:1px solid var(--line);border-radius:8px;margin-bottom:10px;background:var(--bg-soft)">
+      <div style="font-weight:600;color:var(--red);margin-bottom:6px">⚠ ${escapeHtml(e.store || 'unknown')}</div>
+      <div style="font-size:12px;font-family:ui-monospace,monospace;color:var(--ink);padding:8px;background:var(--white);border-radius:4px;word-break:break-word">${escapeHtml(e.error || '(no error message)')}</div>
+      ${e.likelyCause ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:8px"><strong>Likely cause:</strong> ${escapeHtml(e.likelyCause)}</div>` : ''}
+    </div>
+  `).join('');
+  modal({
+    title: 'eBay connection failed',
+    body: `
+      <div style="font-size:13px;line-height:1.6;margin-bottom:14px">
+        One or more eBay stores returned errors. <strong>The scan completed but no listings were fetched from these stores</strong> — that's why you saw "0 listings".
+      </div>
+      ${rows}
+      <div style="font-size:12px;color:var(--ink-soft);margin-top:12px;padding:10px;background:var(--bg-soft);border-radius:6px;line-height:1.6">
+        <strong>How to refresh an expired eBay token:</strong><br>
+        1. Open <a href="https://developer.ebay.com/my/auth/?env=production" target="_blank" rel="noopener" style="color:var(--brand-primary)">developer.ebay.com/my/auth</a> (production environment)<br>
+        2. Sign in to the eBay account for the broken store<br>
+        3. Click "Sign in to Production" → grant access → copy the new user token<br>
+        4. In Railway → Variables, replace the relevant <code>EBAY_AUTH_TOKEN_*</code> value with the new token<br>
+        5. Wait for redeploy, then retry
+      </div>
+    `,
+    actions: [
+      { label: 'Close', onClick: closeModal },
+      { label: '🩺 Run connection test', primary: true, onClick: async () => { closeModal(); await testEbayConnection(); } },
+    ],
+  });
+}
+
+// Calls /test-ebay-connection and surfaces the result. If everything's fine,
+// just shows a success toast. If any store failed, opens the diagnostics modal.
+async function testEbayConnection() {
+  const taskId = Task.start('Testing eBay connectivity per store…');
+  try {
+    const r = await Api.get('/api/listings/test-ebay-connection');
+    const failed = (r.results || []).filter(x => !x.ok);
+    const passed = (r.results || []).filter(x => x.ok);
+    if (failed.length === 0) {
+      Task.done(taskId, `All ${passed.length} store${passed.length === 1 ? '' : 's'} OK`);
+      const summary = passed.map(p => `✓ ${p.name}: ${p.sampleCount} active listings`).join('\n');
+      toast(summary || 'All stores responding.', 'success', 8000);
+    } else {
+      Task.fail(taskId, `${failed.length} failed`);
+      // Map test-connection errors to the shared modal format
+      const errors = failed.map(f => ({ store: f.name || f.store, error: f.error, likelyCause: f.likelyCause }));
+      showEbayErrorsModal(errors, r);
+    }
+  } catch (e) {
+    Task.fail(taskId, 'Test failed');
+    toast('Test failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 
@@ -9508,6 +9575,12 @@ async function hydrateEbayPrices() {
   const taskId = Task.start('Fetching eBay listings & updating prices');
   try {
     const r = await Api.post('/api/listings/hydrate-ebay-prices');
+    // Per-store errors → open the diagnostic modal instead of pretending success
+    if (r.storeErrors && r.storeErrors.length) {
+      Task.fail(taskId, `${r.storeErrors.length} store error${r.storeErrors.length === 1 ? '' : 's'}`);
+      showEbayErrorsModal(r.storeErrors, r);
+      return;
+    }
     Task.done(taskId, `Updated ${r.updated} products`);
     // Build a detailed result so the user can see which match strategy fired
     const lines = [`Done. ${r.updated} products updated from ${r.listingsFound} eBay listings.`];
@@ -9515,6 +9588,11 @@ async function hydrateEbayPrices() {
     if (r.matchedViaSku)          lines.push(`✓ ${r.matchedViaSku} via exact SKU`);
     if (r.matchedViaNormalizedSku) lines.push(`✓ ${r.matchedViaNormalizedSku} via normalised SKU`);
     if (r.unmatched)              lines.push(`• ${r.unmatched} unmatched (no product in DB)`);
+    // Special-case: 0 listings + 0 errors + stores configured = something else off
+    if (r.listingsFound === 0 && r.stores?.length) {
+      lines.push('');
+      lines.push(`⚠ 0 listings returned even though ${r.stores.length} store${r.stores.length === 1 ? ' is' : 's are'} configured. Click 🩺 Test eBay connection to diagnose.`);
+    }
     toast(lines.join('\n'), 'success', 6000);
     await Store.refresh('products');
   } catch (e) {
