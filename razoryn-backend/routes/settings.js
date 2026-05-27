@@ -43,6 +43,16 @@ async function ensureSocialColumns() {
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_payment TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_shipping TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_return TEXT`);
+    // Logo — uploaded image stored as base64 data URL. Used on invoices + the
+    // app's top-bar logo (overrides the static /logo.png fallback). Storing
+    // inline avoids needing a file-host; size is capped client-side at ~500KB.
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS logo_data_url TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS logo_filename TEXT`);
+    // Stock-check reminder — fires once per month on the configured day of
+    // month. Day stored 1-31; empty/null = disabled. The actual "did the user
+    // dismiss it this month" tracking lives in localStorage per-device.
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS stock_check_day INTEGER`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS stock_check_enabled BOOLEAN DEFAULT false`);
     // Per-store policy overrides — created lazily on read/write. The brand
     // service exposes brand.stores so we can pre-create columns for every store.
     try {
@@ -186,6 +196,14 @@ router.get('/pricing-config', async (req, res) => {
     ebayPolicyPayment:      r.ebay_policy_payment || '',
     ebayPolicyShipping:     r.ebay_policy_shipping || '',
     ebayPolicyReturn:       r.ebay_policy_return || '',
+    // Logo — uploaded image data URL (base64). Front-end overrides
+    // brand.logoUrl with this when present. Empty string when no upload.
+    logoDataUrl:    r.logo_data_url || '',
+    logoFilename:   r.logo_filename || '',
+    // Stock-check reminder — fires once per month on this day of month.
+    // Disabled when stock_check_enabled is false OR day is null.
+    stockCheckDay:     r.stock_check_day || null,
+    stockCheckEnabled: !!r.stock_check_enabled,
     // Per-store policy overrides (multi-store brands only).
     // Shape: { storeCode: { payment, shipping, return } }
     ebayPerStorePolicies:   (() => {
@@ -246,6 +264,9 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       ebayPolicyPayment:      'ebay_policy_payment',
       ebayPolicyShipping:     'ebay_policy_shipping',
       ebayPolicyReturn:       'ebay_policy_return',
+      // Stock-check reminder
+      stockCheckDay:          'stock_check_day',
+      stockCheckEnabled:      'stock_check_enabled',
     };
     const updates = [], params = [];
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
@@ -253,6 +274,15 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       let val = b[bodyKey];
       if (['cash_discount_pct','bank_transfer_pct','free_delivery_threshold','ebay_buyer_protection_markup','vat_rate'].includes(dbCol)) {
         val = parseFloat(val);
+      }
+      // Stock-check day → INTEGER (or null if empty). Day stored 1-31.
+      if (dbCol === 'stock_check_day') {
+        const n = parseInt(val);
+        val = (Number.isFinite(n) && n >= 1 && n <= 31) ? n : null;
+      }
+      // Stock-check enabled → BOOLEAN
+      if (dbCol === 'stock_check_enabled') {
+        val = (val === true || val === 'true' || val === 1 || val === '1');
       }
       params.push(val);
       updates.push(`${dbCol} = $${params.length}`);
@@ -359,4 +389,62 @@ router.get('/sync-state', async (req, res) => {
   res.json({ state: rows });
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// Logo upload + delete + serve.
+// POST /api/settings/logo with { dataUrl, filename } — stores as base64 data
+//   URL in app_settings.logo_data_url. Validates content-type and decoded
+//   size (max ~500KB to keep invoice HTML payloads reasonable).
+// DELETE /api/settings/logo — clears the stored logo (falls back to brand default).
+// GET /api/settings/logo — serves the binary with proper content-type so
+//   <img src="/api/settings/logo"> works in static contexts (browser tab favicon
+//   isn't covered — for that, use logoDataUrl from /pricing-config and inject).
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/logo', requireAdmin, async (req, res) => {
+  await ensureSocialColumns();
+  const { dataUrl, filename } = req.body || {};
+  if (!dataUrl || typeof dataUrl !== 'string') return res.status(400).json({ error: 'dataUrl required' });
+  // Validate it's a data URL with an image content type
+  const m = dataUrl.match(/^data:(image\/(?:png|jpeg|jpg|gif|webp|svg\+xml));base64,([A-Za-z0-9+/=]+)$/);
+  if (!m) return res.status(400).json({ error: 'invalid_data_url', message: 'Logo must be a base64-encoded image data URL (PNG, JPEG, GIF, WEBP, or SVG).' });
+  // Decoded size cap: 500KB. Base64 inflates ~33%, so the data URL string is up
+  // to ~700KB — still safe to inline in every invoice HTML.
+  const base64Len = m[2].length;
+  const decodedSize = Math.ceil(base64Len * 0.75);
+  if (decodedSize > 500_000) {
+    return res.status(413).json({ error: 'too_large', message: `Logo is ~${(decodedSize/1024).toFixed(0)} KB — please use an image under 500 KB. Consider resizing or compressing.` });
+  }
+  const safeFilename = (filename || 'logo.png').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 100);
+  await query(`UPDATE app_settings SET logo_data_url = $1, logo_filename = $2 WHERE id = 1`, [dataUrl, safeFilename]);
+  await audit(req, 'upload_logo', null, null, { filename: safeFilename, sizeKb: Math.round(decodedSize/1024) });
+  res.json({ ok: true, filename: safeFilename, sizeKb: Math.round(decodedSize/1024) });
+});
+
+router.delete('/logo', requireAdmin, async (req, res) => {
+  await query(`UPDATE app_settings SET logo_data_url = NULL, logo_filename = NULL WHERE id = 1`);
+  await audit(req, 'delete_logo', null, null, {});
+  res.json({ ok: true });
+});
+
+// Unauthenticated logo serving (so <img> tags work without auth in invoice
+// HTML). Mounted at /public-logo in server.js (separate path from the
+// auth-protected /api/settings namespace). Returns 404 when no logo is
+// uploaded — the front-end then falls back to the brand's static /logo.png
+// file in public/.
+const publicLogoRouter = express.Router();
+publicLogoRouter.get('/public-logo', async (req, res) => {
+  try {
+    const { rows } = await query(`SELECT logo_data_url FROM app_settings WHERE id = 1`);
+    const dataUrl = rows[0]?.logo_data_url;
+    if (!dataUrl) return res.status(404).end();
+    const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!m) return res.status(500).end();
+    const buf = Buffer.from(m[2], 'base64');
+    res.setHeader('Content-Type', m[1]);
+    res.setHeader('Cache-Control', 'public, max-age=300');  // short cache so updates show quickly
+    res.end(buf);
+  } catch (e) {
+    res.status(500).end();
+  }
+});
 module.exports = router;
+module.exports.publicLogoRouter = publicLogoRouter;

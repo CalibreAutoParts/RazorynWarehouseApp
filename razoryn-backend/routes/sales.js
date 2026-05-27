@@ -706,7 +706,13 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   }
 
   // ----- FULL INVOICE -----
-  const logoUrl = (baseUrl || '') + brand.logoUrl;
+  // Logo selection — prefer the uploaded logo (from app_settings.logo_data_url)
+  // if one is set, else fall back to the brand-default file in public/. The
+  // uploaded version is inlined as a data URL so it always renders in print +
+  // email preview without needing a follow-up request.
+  const logoUrl = company.logo_data_url
+    ? company.logo_data_url
+    : (baseUrl || '') + brand.logoUrl;
   // VAT display rules (everywhere prices are gross-inclusive):
   //  • Cash sale: NEVER break out VAT. Just show "Subtotal" + "Total" — no VAT line at all.
   //    User policy is cash is VAT-free. (Even if business is vat_registered, cash is excluded.)

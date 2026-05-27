@@ -956,4 +956,58 @@ function escapeHtmlServer(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// GET /api/listings/stores
+// Returns the configured eBay stores with their enabled/disabled state.
+// Used by the Listing Mirror UI to show a "X disabled" banner and to power
+// the "Clean up disabled-store links" button.
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/stores', requireAdmin, (req, res) => {
+  const ebay = require('../services/ebay');
+  res.json({ stores: ebay.listStores() });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// POST /api/listings/cleanup-disabled-store-links
+// Deletes mirror_links rows whose store_code matches a currently-disabled
+// store. Used to clear out stale links after temporarily disabling a store
+// — so the listing-mirror counts and the Quote Builder's eBay link logic
+// reflect reality.
+//
+// Behaviour:
+//   • Looks up the disabled stores from ebay.listStores() (server-side, not
+//     trusting client input)
+//   • Deletes any mirror_links row whose store_code is in that set
+//   • Returns the deleted-count + a sample of deleted rows for confirmation
+//
+// Safe to re-run — idempotent. After re-enabling a store, running force-match
+// re-creates the links from the live eBay listings.
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/cleanup-disabled-store-links', requireAdmin, async (req, res) => {
+  const ebay = require('../services/ebay');
+  const disabled = ebay.listStores().filter(s => s.disabled).map(s => s.code);
+  if (disabled.length === 0) {
+    return res.json({ ok: true, deleted: 0, disabledStores: [], message: 'No disabled stores — nothing to clean.' });
+  }
+  // Get a sample of what will be deleted (for audit + user confirmation in toast)
+  const sampleRes = await query(
+    `SELECT ebay_item_id, store_code, last_synced_sku, last_synced_title
+     FROM mirror_links WHERE store_code = ANY($1) LIMIT 20`,
+    [disabled]
+  );
+  const delRes = await query(
+    `DELETE FROM mirror_links WHERE store_code = ANY($1)`,
+    [disabled]
+  );
+  await audit(req, 'cleanup_disabled_store_links', null, null, {
+    disabledStores: disabled, deleted: delRes.rowCount,
+  });
+  res.json({
+    ok: true,
+    deleted: delRes.rowCount || 0,
+    disabledStores: disabled,
+    sample: sampleRes.rows,
+  });
+});
+
 module.exports = router;
