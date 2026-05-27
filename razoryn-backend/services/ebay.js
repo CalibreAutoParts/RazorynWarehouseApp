@@ -356,7 +356,18 @@ function decodeEntities(s) {
 }
 
 // Pull all active eBay listings (paginated) for a given store.
-async function getActiveListings(storeArg) {
+//
+// Photo enrichment: by default this is OFF. Setting it on triggers a separate
+// GetItem call per listing to retrieve the full picture set (GetMyeBaySelling
+// only returns one gallery image). This was previously always-on, causing
+// thousands of GetItem calls per scan (≈ one per active listing × stores)
+// and rapidly exhausting the 5,000/day GetItem quota.
+//
+// Only set enrichPhotos=true when you actually need the photos (e.g. pulling
+// listings into Shopify with full image sets). For force-match, hydrate,
+// SKU diff, etc. — leave it off.
+async function getActiveListings(storeArg, opts = {}) {
+  const { enrichPhotos = false } = opts;
   if (!isConfigured(storeArg)) return [];
   const store = resolveStore(storeArg);
   const all = [];
@@ -426,28 +437,36 @@ async function getActiveListings(storeArg) {
     page++;
   }
 
-  // Step 2: GetMyeBaySelling only returns the GalleryURL (1 photo) and sometimes
-  // omits photos entirely. Enrich every listing with GetItem to get the full picture set.
-  // Concurrency-limited to avoid hammering eBay.
-  const concurrency = 6;
-  let enriched = 0;
-  for (let i = 0; i < all.length; i += concurrency) {
-    const batch = all.slice(i, i + concurrency);
-    await Promise.all(batch.map(async (l) => {
-      try {
-        const itemXml = await tradingCall('GetItem', `<ItemID>${l.itemId}</ItemID><IncludeItemSpecifics>false</IncludeItemSpecifics>`, storeArg);
-        const picBlock = extractOne(itemXml, 'PictureDetails') || '';
-        const pictureUrls = extractAll(picBlock, 'PictureURL').map(decodeEntities);
-        const galleryUrl = decodeEntities(extractOne(picBlock, 'GalleryURL') || '');
-        const allPics = [...new Set([galleryUrl, ...pictureUrls].filter(Boolean))];
-        if (allPics.length) l.pictureUrls = allPics;
-      } catch (e) {
-        // Don't fail the whole pull if one item enrichment fails
-        console.warn(`[ebay] enrich ${l.itemId} failed: ${e.message}`);
-      }
-    }));
-    enriched += batch.length;
-    if (enriched % 60 === 0) console.log(`[ebay] enriched ${enriched}/${all.length}`);
+  // Step 2 (OPT-IN): GetMyeBaySelling only returns the GalleryURL (1 photo) and
+  // sometimes omits photos entirely. When the caller asks for it, enrich every
+  // listing with a separate GetItem call to get the full picture set.
+  //
+  // This is gated behind opts.enrichPhotos because it makes ONE GetItem call
+  // per active listing — easily 1,000+ calls per scan across two stores —
+  // which used to burn through the 5,000/day GetItem quota in just a few scans.
+  // Only the Shopify-cross-listing flow actually needs photos; everything else
+  // (force-match, hydrate, sku-mismatches) only needs SKU + title + price.
+  if (enrichPhotos) {
+    const concurrency = 6;
+    let enriched = 0;
+    for (let i = 0; i < all.length; i += concurrency) {
+      const batch = all.slice(i, i + concurrency);
+      await Promise.all(batch.map(async (l) => {
+        try {
+          const itemXml = await tradingCall('GetItem', `<ItemID>${l.itemId}</ItemID><IncludeItemSpecifics>false</IncludeItemSpecifics>`, storeArg);
+          const picBlock = extractOne(itemXml, 'PictureDetails') || '';
+          const pictureUrls = extractAll(picBlock, 'PictureURL').map(decodeEntities);
+          const galleryUrl = decodeEntities(extractOne(picBlock, 'GalleryURL') || '');
+          const allPics = [...new Set([galleryUrl, ...pictureUrls].filter(Boolean))];
+          if (allPics.length) l.pictureUrls = allPics;
+        } catch (e) {
+          // Don't fail the whole pull if one item enrichment fails
+          console.warn(`[ebay] enrich ${l.itemId} failed: ${e.message}`);
+        }
+      }));
+      enriched += batch.length;
+      if (enriched % 60 === 0) console.log(`[ebay] enriched ${enriched}/${all.length}`);
+    }
   }
 
   // Auto-detect probable template images: any image URL appearing in 2+ listings
@@ -873,45 +892,64 @@ async function getRateLimits(apiContext = 'tradingapi') {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     timeout: 20000,
   });
-  // Response shape: { rateLimits: [{ apiContext, apiName, apiVersion, resources: [{ name, rates: [{ count, limit, reset, timeWindow }] }] }] }
-  // Flatten to a per-method array.
+  // Response shape (verified against the live eBay Developer Analytics API on 2026-05-27):
+  // { rateLimits: [{ apiContext, apiName, resources: [{ name, rates: [{ count, limit, remaining, reset, timeWindow }] }] }] }
   //
-  // FIELD-NAME GOTCHA: eBay's Analytics API has inconsistent field naming across
-  // docs and versions — some payloads return `remaining` (the API-spec-documented
-  // name in recent docs), others return `count` (older docs). Whichever is
-  // returned represents the calls *remaining* in the period, not used.
-  // Additionally, for call-names that have never been hit today, the field can
-  // be omitted entirely or returned as null — in which case the safe assumption
-  // is "no usage" (remaining = limit), not "fully exhausted" (remaining = 0).
-  // Falling for "remaining = 0 when omitted" would falsely show 100% used for
-  // every call you don't use that day.
+  // FIELDS (clearer than the docs):
+  //   count     — calls USED so far in the current period (the "usage" counter)
+  //   limit     — total calls allowed per period
+  //   remaining — calls left (limit - count)
+  //   reset     — ISO timestamp when the period resets
+  //
+  // CAVEAT: eBay sometimes returns `count: 0, remaining: 0` for unused call-names
+  // (looks like a bug on their side — both should logically equal `limit` when
+  // unused). To detect this, we cross-check: if count == 0 AND remaining == 0
+  // AND limit > 0, treat the call as untouched (remaining = limit, count = 0).
+  // This matches what we see for AddItem in real data (eBay correctly returns
+  // remaining = limit there), so the inconsistency is per-call.
   const out = [];
   for (const api of (r.data?.rateLimits || [])) {
     for (const resource of (api.resources || [])) {
       const rate = (resource.rates && resource.rates[0]) || {};
       const limit = parseInt(rate.limit) || 0;
-      let remaining;
-      if (rate.remaining !== undefined && rate.remaining !== null) {
-        remaining = parseInt(rate.remaining);
-      } else if (rate.count !== undefined && rate.count !== null) {
-        remaining = parseInt(rate.count);
+      let count = (rate.count !== undefined && rate.count !== null) ? parseInt(rate.count) : null;
+      let remaining = (rate.remaining !== undefined && rate.remaining !== null) ? parseInt(rate.remaining) : null;
+      // Reconcile the two: prefer `count` for usage when present
+      let usage, leftover;
+      if (count !== null && remaining !== null) {
+        // Both present. Trust whichever is more informative.
+        if (count > 0) {
+          // Real usage data — trust count
+          usage = count;
+          leftover = Math.max(0, limit - count);
+        } else if (remaining === 0 && limit > 0) {
+          // count=0 AND remaining=0 — eBay's buggy "untouched" pattern.
+          // Display as "no usage" rather than "100% used".
+          usage = 0;
+          leftover = limit;
+        } else {
+          usage = Math.max(0, limit - remaining);
+          leftover = remaining;
+        }
+      } else if (count !== null) {
+        usage = count;
+        leftover = Math.max(0, limit - count);
+      } else if (remaining !== null) {
+        usage = Math.max(0, limit - remaining);
+        leftover = remaining;
       } else {
-        // Field missing entirely → eBay omits it for unused call-names.
-        // Treat as "no calls made today" (remaining = limit).
-        remaining = limit;
+        usage = 0;
+        leftover = limit;
       }
-      if (!Number.isFinite(remaining)) remaining = limit;
       out.push({
         callName: resource.name || api.apiName || 'unknown',
         apiContext: api.apiContext,
         apiName: api.apiName,
         dailyHardLimit: limit,
-        dailyUsage: Math.max(0, limit - remaining),
-        dailyRemaining: remaining,
+        dailyUsage: usage,
+        dailyRemaining: leftover,
         resetAt: rate.reset || null,
         timeWindow: parseInt(rate.timeWindow) || 0,
-        // Raw rate object for debugging — visible in the test-connection modal
-        // so we can confirm which field name eBay is actually using today.
         _raw: rate,
       });
     }
