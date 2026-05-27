@@ -195,12 +195,14 @@ router.post('/link-status/force-match', requireAdmin, async (req, res) => {
   const stores = ebay.listStores().filter(s => s.hasToken);
 
   let allListings = [];
+  const storeErrors = [];
   for (const s of stores) {
     try {
       const part = await ebay.getActiveListings(s.code);
       allListings = allListings.concat(part);
     } catch (e) {
       console.warn(`[force-match] store=${s.code} fetch failed: ${e.message}`);
+      storeErrors.push({ store: s.code, error: e.message });
     }
   }
 
@@ -273,7 +275,7 @@ router.post('/link-status/force-match', requireAdmin, async (req, res) => {
     if (matches.length < 20) matches.push({ ebayItemId: l.itemId, productId: product.id, sku: product.sku, title: l.title, store: l.storeCode });
   }
   await audit(req, 'force_match_links', null, null, { matched, alreadyLinked, noMatch, pricesUpdated, storeCodesBackfilled, stores: stores.map(s => s.code) });
-  res.json({ scanned: allListings.length, matched, alreadyLinked, noMatch, pricesUpdated, storeCodesBackfilled, sample: matches, stores: stores.map(s => s.code) });
+  res.json({ scanned: allListings.length, matched, alreadyLinked, noMatch, pricesUpdated, storeCodesBackfilled, sample: matches, stores: stores.map(s => s.code), storeErrors });
 });
 
 // POST /api/listings/hydrate-ebay-prices
@@ -292,11 +294,18 @@ router.post('/hydrate-ebay-prices', requireAdmin, async (req, res) => {
   try {
     const stores = ebay.listStores().filter(s => s.hasToken);
     let allListings = [];
+    // Per-store errors — surfaced in the response so the user can see exactly
+    // which store's token / scope is broken. Without this they just see "0 from
+    // 0 listings" and assume nothing is wrong with the auth.
+    const storeErrors = [];
     for (const s of stores) {
       try {
         const part = await ebay.getActiveListings(s.code);
         allListings = allListings.concat(part);
-      } catch (e) { console.warn(`[hydrate-ebay-prices] store=${s.code} failed: ${e.message}`); }
+      } catch (e) {
+        console.warn(`[hydrate-ebay-prices] store=${s.code} failed: ${e.message}`);
+        storeErrors.push({ store: s.code, error: e.message });
+      }
     }
 
     // Pre-load mirror_links — used for strategy 1.
@@ -383,6 +392,7 @@ router.post('/hydrate-ebay-prices', requireAdmin, async (req, res) => {
       unmatched,
       unmatchedSample,
       stores: stores.map(s => s.code),
+      storeErrors,  // populated only when one or more stores failed to fetch
     });
   } catch (e) {
     console.error('[hydrate-ebay-prices]', e);
@@ -806,6 +816,65 @@ router.post('/push-to-ebay', requireAdmin, async (req, res) => {
     console.error('[listings/push-to-ebay]', e.message);
     res.status(500).json({ error: 'revise_failed', message: e.message });
   }
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// GET /api/listings/test-ebay-connection
+// Pings eBay per-store with a tiny GetMyeBaySelling call and reports back the
+// exact result for each store. Used to diagnose silent eBay failures (expired
+// tokens, missing scopes, network issues) that hydrate / force-match would
+// otherwise swallow with just a console.warn.
+//
+// Returns: { results: [ { store, ok, sampleCount?, error?, likelyCause? } ] }
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/test-ebay-connection', requireAdmin, async (req, res) => {
+  const ebay = require('../services/ebay');
+  const stores = ebay.listStores();
+  const results = [];
+  for (const s of stores) {
+    const result = { store: s.code, name: s.name, hasToken: !!s.hasToken, disabled: !!s.disabled };
+    if (s.disabled) {
+      result.ok = false;
+      result.reason = 'disabled';
+      result.error = `Store disabled via EBAY_STORE_DISABLED env var: ${s.disabledReason || '(reason unknown)'}`;
+      results.push(result);
+      continue;
+    }
+    if (!s.hasToken) {
+      result.ok = false;
+      result.reason = 'no_token';
+      const envName = s.code === 'razoryn' ? 'EBAY_AUTH_TOKEN' : 'EBAY_AUTH_TOKEN_' + s.code.toUpperCase();
+      result.error = `No auth token configured. Set ${envName} in Railway.`;
+      results.push(result);
+      continue;
+    }
+    // Try a minimal call — just fetch active listings. Surfaces auth/scope errors.
+    try {
+      const listings = await ebay.getActiveListings(s.code);
+      result.ok = true;
+      result.sampleCount = listings.length;
+      result.firstItem = listings[0]
+        ? { itemId: listings[0].itemId, title: (listings[0].title || '').slice(0, 60), sku: listings[0].sku }
+        : null;
+    } catch (e) {
+      result.ok = false;
+      result.reason = 'api_error';
+      result.error = e.message;
+      // Surface human-readable likely-causes from the raw eBay error
+      const msg = (e.message || '').toLowerCase();
+      if (msg.includes('auth') || msg.includes('token') || msg.includes('expired') || msg.includes('invalid') || msg.includes('iaf') || msg.includes('17470') || msg.includes('931') || msg.includes('932')) {
+        result.likelyCause = 'Token expired or invalid. Generate a fresh user token at https://developer.ebay.com/my/auth/?env=production and update the Railway env var.';
+      } else if (msg.includes('scope') || msg.includes('21916')) {
+        result.likelyCause = 'Token lacks the right scope. Regenerate with at least the Trading API access.';
+      } else if (msg.includes('network') || msg.includes('timeout') || msg.includes('socket') || msg.includes('econnreset')) {
+        result.likelyCause = 'Network / timeout — probably transient. Retry in a minute.';
+      } else if (msg.includes('iaf-token-expired') || msg.includes('iaf-token-invalid')) {
+        result.likelyCause = 'IAF (OAuth) token expired. The OAuth refresh-token flow may have lapsed.';
+      }
+    }
+    results.push(result);
+  }
+  res.json({ results });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
