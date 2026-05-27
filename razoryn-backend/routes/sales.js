@@ -337,18 +337,48 @@ router.post('/', requireAdmin, async (req, res) => {
     const invoiceNumber = isEstimate ? null : await nextInvoiceNumber(c);
     const paymentReference = genReference(paymentMethod);
 
+    // Resolve customer link — either an existing customer_id (picked from
+    // autocomplete) or a freshly-created record via b.createCustomer payload.
+    // The sale's denormalised customer_name/email/phone columns are still set
+    // for historical accuracy, but customer_id lets us roll up lifetime spend.
+    let customerId = b.customerId || null;
+    if (!customerId && b.createCustomer && b.customerName) {
+      try {
+        // Self-healing in case the customers table doesn't exist yet
+        await c.query(`CREATE TABLE IF NOT EXISTS customers (
+          id SERIAL PRIMARY KEY, name TEXT NOT NULL, business_name TEXT,
+          email TEXT, phone TEXT, address TEXT, whatsapp TEXT, notes TEXT,
+          is_trade BOOLEAN NOT NULL DEFAULT false, tags TEXT,
+          created_by INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )`);
+        const cu = await c.query(
+          `INSERT INTO customers (name, business_name, email, phone, address, whatsapp, notes, is_trade, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+          [b.customerName, b.customerBusinessName || null, b.customerEmail || null,
+           b.customerPhone || null, b.shippingAddress || null, b.customerWhatsapp || null,
+           b.customerNotes || null, !!b.customerIsTrade, req.user.id]
+        );
+        customerId = cu.rows[0].id;
+      } catch (e) {
+        console.warn('[sales] customer auto-create failed:', e.message);
+      }
+    }
+
     const sale = await c.query(
       `INSERT INTO sales (channel, customer_name, customer_phone, customer_email,
                           subtotal, vat, shipping, total, status, invoice_number,
                           notes, recorded_by, payment_method, payment_reference,
-                          is_estimate, order_number, vehicle_reg, vin_number, shipping_address)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
+                          is_estimate, order_number, vehicle_reg, vin_number, shipping_address,
+                          customer_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *`,
       [b.channel, b.customerName || null, b.customerPhone || null, b.customerEmail || null,
        subtotal, vat, shipping, total,
        isEstimate ? 'pending' : 'paid',
        invoiceNumber, b.notes || null, req.user.id,
        paymentMethod, paymentReference,
-       isEstimate, b.orderNumber || null, b.vehicleReg || null, b.vinNumber || null, b.shippingAddress || null]
+       isEstimate, b.orderNumber || null, b.vehicleReg || null, b.vinNumber || null, b.shippingAddress || null,
+       customerId]
     );
 
     for (const it of itemsResolved) {
