@@ -214,10 +214,75 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   res.json({ product: rows[0] });
 });
 
-// POST /api/products/:id/adjust-stock  { delta, reason, notes }
-// Direct stock adjustment that records a movement.
+// Shared helper: push a product's current qty_on_hand to Shopify AND every
+// eBay store it's linked to (via mirror_links). Used by adjust-stock + the
+// product PATCH so manual quantity edits actually propagate to the channels.
+//
+// Returns { shopify, ebay: [...] } describing what happened, with errors
+// captured per-channel so one failure doesn't block the others.
+async function pushProductStockToChannels(productId) {
+  const result = { shopify: null, ebay: [] };
+  // Load the product + its eBay links
+  const pr = await query(
+    `SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id FROM products WHERE id = $1`,
+    [productId]
+  );
+  const product = pr.rows[0];
+  if (!product) return result;
+
+  // --- Shopify push ---
+  try {
+    const shopify = require('../services/shopify');
+    if (shopify.isConfigured() && product.shopify_inventory_id) {
+      await shopify.pushStockForProduct(product);
+      result.shopify = { ok: true, qty: product.qty_on_hand };
+    } else {
+      result.shopify = { skipped: product.shopify_inventory_id ? 'shopify_not_configured' : 'no_inventory_id' };
+    }
+  } catch (e) {
+    result.shopify = { error: e.message };
+  }
+
+  // --- eBay push (per linked store) ---
+  // Find every eBay listing linked to this product via mirror_links. Each row
+  // carries the ItemID + which store it belongs to. We use ReviseInventoryStatus
+  // (Trading API) which works for Calibre's legacy listings.
+  try {
+    const ebay = require('../services/ebay');
+    const links = await query(
+      `SELECT ebay_item_id, store_code FROM mirror_links
+       WHERE shopify_product_id::text = $1`,
+      [product.shopify_product_id]
+    );
+    for (const link of links.rows) {
+      // Skip stores with no token / disabled
+      const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
+      const store = stores.find(s => s.code === link.store_code)
+        || (link.store_code ? null : stores.find(s => s.primary) || stores[0]);
+      if (!store) {
+        result.ebay.push({ itemId: link.ebay_item_id, store: link.store_code, skipped: 'store_unavailable' });
+        continue;
+      }
+      try {
+        await ebay.setQuantityTradingAPI(link.ebay_item_id, product.qty_on_hand, store.code);
+        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true, qty: product.qty_on_hand });
+      } catch (e) {
+        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, error: e.message });
+      }
+    }
+    if (links.rows.length === 0) result.ebay.push({ skipped: 'no_ebay_links' });
+  } catch (e) {
+    result.ebay.push({ error: e.message });
+  }
+
+  return result;
+}
+
+// POST /api/products/:id/adjust-stock  { delta, reason, notes, push }
+// Direct stock adjustment that records a movement. When push !== false, the
+// new quantity is propagated to Shopify + all linked eBay stores.
 router.post('/:id/adjust-stock', requirePermission('inventory'), async (req, res) => {
-  const { delta, reason = 'manual', notes } = req.body || {};
+  const { delta, reason = 'manual', notes, push = true } = req.body || {};
   const d = parseInt(delta);
   if (!Number.isInteger(d) || d === 0) return res.status(400).json({ error: 'delta_required' });
 
@@ -237,10 +302,94 @@ router.post('/:id/adjust-stock', requirePermission('inventory'), async (req, res
   });
   if (!result) return res.status(404).json({ error: 'not_found' });
   await audit(req, 'adjust_stock', 'product', result.id, { delta: d, reason });
-  res.json({ product: result });
+
+  // Propagate the new quantity to channels (unless explicitly disabled)
+  let channelPush = null;
+  if (push !== false) {
+    try { channelPush = await pushProductStockToChannels(result.id); }
+    catch (e) { channelPush = { error: e.message }; }
+  }
+
+  res.json({ product: result, channelPush });
 });
 
-// POST /api/products/bulk-delete — delete multiple products at once.
+// POST /api/products/:id/set-quantity  { quantity, push }
+// Set an ABSOLUTE quantity (not a delta). Records the implied movement and
+// pushes to channels. Cleaner for the UI than computing a delta client-side.
+router.post('/:id/set-quantity', requirePermission('inventory'), async (req, res) => {
+  const { quantity, push = true, notes } = req.body || {};
+  const q = parseInt(quantity);
+  if (!Number.isInteger(q) || q < 0) return res.status(400).json({ error: 'invalid_quantity' });
+
+  const result = await withTx(async (c) => {
+    const before = await c.query(`SELECT qty_on_hand FROM products WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    if (!before.rows[0]) return null;
+    const delta = q - before.rows[0].qty_on_hand;
+    const cur = await c.query(`UPDATE products SET qty_on_hand = $1 WHERE id = $2 RETURNING *`, [q, req.params.id]);
+    if (delta !== 0) {
+      await c.query(
+        `INSERT INTO stock_movements (product_id, delta, reason, notes, performed_by)
+         VALUES ($1,$2,'manual',$3,$4)`,
+        [req.params.id, delta, notes || 'Set absolute quantity', req.user.id]
+      );
+    }
+    return cur.rows[0];
+  });
+  if (!result) return res.status(404).json({ error: 'not_found' });
+  await audit(req, 'set_quantity', 'product', result.id, { quantity: q });
+
+  let channelPush = null;
+  if (push !== false) {
+    try { channelPush = await pushProductStockToChannels(result.id); }
+    catch (e) { channelPush = { error: e.message }; }
+  }
+  res.json({ product: result, channelPush });
+});
+
+// POST /api/products/pull-ebay-stock — for every product with eBay links,
+// read the live quantity from eBay and update qty_on_hand to match. Use this
+// to fix products showing 0 in the app when eBay actually has stock (the
+// import only reads Shopify levels). Admin-only; uses GetItem per linked item.
+router.post('/pull-ebay-stock', requireAdmin, async (req, res) => {
+  const ebay = require('../services/ebay');
+  const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
+  if (stores.length === 0) return res.json({ ok: true, updated: 0, message: 'No active eBay stores.' });
+
+  // Get all linked products (those with a mirror_links row)
+  const links = await query(`
+    SELECT ml.ebay_item_id, ml.store_code, p.id AS product_id, p.sku, p.qty_on_hand
+    FROM mirror_links ml
+    JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text
+    WHERE p.active = true
+    LIMIT 2000
+  `);
+
+  let updated = 0, checked = 0, unchanged = 0;
+  const errors = [];
+  for (const link of links.rows) {
+    const store = stores.find(s => s.code === link.store_code) || (link.store_code ? null : stores[0]);
+    if (!store) continue;
+    checked++;
+    try {
+      const ebayQty = await ebay.getQuantityTradingAPI(link.ebay_item_id, store.code);
+      if (ebayQty !== link.qty_on_hand) {
+        await query(`UPDATE products SET qty_on_hand = $1 WHERE id = $2`, [ebayQty, link.product_id]);
+        updated++;
+      } else {
+        unchanged++;
+      }
+    } catch (e) {
+      errors.push({ itemId: link.ebay_item_id, sku: link.sku, error: e.message });
+      // Bail early if we hit the rate limit — no point hammering
+      if (/usage limit|exceeded|21917/i.test(e.message)) {
+        errors.push({ fatal: 'eBay API quota exceeded — stopping. Try again after the daily reset.' });
+        break;
+      }
+    }
+  }
+  await audit(req, 'pull_ebay_stock', null, null, { checked, updated });
+  res.json({ ok: true, checked, updated, unchanged, errors: errors.slice(0, 20) });
+});
 // Body: { ids: [..], hard: true|false, shopify: true|false }
 router.post('/bulk-delete', requireAdmin, async (req, res) => {
   const ids = (req.body.ids || []).map(String);
