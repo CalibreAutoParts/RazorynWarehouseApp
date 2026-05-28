@@ -1241,6 +1241,28 @@ function adaptNotification(n) {
    that needs fresh data. Each mutation calls the API and then
    refreshes the relevant slice of state.
    ========================================================== */
+// Loads the ENTIRE product catalogue by paginating. Inventory / stock-check /
+// location search all filter the in-memory product list client-side, so every
+// product must be present or it's invisible to search. A single request now
+// returns up to 1000 (backend cap raised), and this loops in case there are
+// more than 1000 products. Without this, products beyond the first page were
+// silently unsearchable (the original cause of "SKU shows in Listing Mirror
+// but not in inventory").
+async function loadAllProducts() {
+  const pageSize = 1000;
+  let page = 1;
+  let all = [];
+  for (let i = 0; i < 20; i++) {  // hard stop at 20 pages (20k products) for safety
+    const r = await Api.get(`/api/products?pageSize=${pageSize}&page=${page}`);
+    const batch = (r.products || []).map(adaptProduct);
+    all = all.concat(batch);
+    const total = r.total ?? all.length;
+    if (all.length >= total || batch.length === 0) break;
+    page++;
+  }
+  return all;
+}
+
 const Store = {
   async refreshAll() {
     // Fan out — if any single endpoint fails (e.g. warehouse staff getting 403
@@ -1248,7 +1270,7 @@ const Store = {
     // down the whole UI. Always preserve a sane fallback (empty array) so
     // dashboard renderers can call .filter/.length without crashing.
     const calls = [
-      ['products',      () => Api.get('/api/products?pageSize=200').then(r => (r.products || []).map(adaptProduct))],
+      ['products',      () => loadAllProducts()],
       ['sales',         () => Api.get('/api/sales?pageSize=200').then(r => (r.sales || []).map(adaptSale))],
       ['returns',       () => Api.get('/api/returns').then(r => (r.returns || []).map(adaptReturn))],
       ['schedule',      () => Api.get('/api/schedule').then(r => (r.tasks || []).map(adaptTask))],
@@ -1282,7 +1304,7 @@ const Store = {
 
   async refresh(key) {
     const map = {
-      products:      () => Api.get('/api/products?pageSize=200').then(r => (r.products || []).map(adaptProduct)),
+      products:      () => loadAllProducts(),
       sales:         () => Api.get('/api/sales?pageSize=200').then(r => (r.sales || []).map(adaptSale)),
       returns:       () => Api.get('/api/returns').then(r => (r.returns || []).map(adaptReturn)),
       schedule:      () => Api.get('/api/schedule').then(r => (r.tasks || []).map(adaptTask)),
