@@ -1135,8 +1135,9 @@ function adaptProduct(p) {
     location: p.location_name || (p.location_code ? `(${p.location_code})` : ''),
     locationCode: p.location_code,
     locationId: p.location_id,
-    locationDesc: '',
-    locationPhoto: null,
+    locationDesc: p.location_note || '',
+    locationNote: p.location_note || '',
+    locationPhoto: p.location_photo_data_url || null,
     imageUrl: p.image_url,
     shopifyProductId: p.shopify_product_id,
     shopifyVariantId: p.shopify_variant_id,
@@ -3220,38 +3221,84 @@ async function openLocationModal(id) {
     body: `
       <div class="field"><label>Item</label><div style="padding:10px;background:var(--line-2);border-radius:8px"><strong>${escapeHtml(p.title)}</strong><div style="font-size:12px;color:var(--ink-soft);font-family:ui-monospace,monospace;margin-top:2px">${escapeHtml(p.sku)}</div></div></div>
       <div class="field">
-        <label>Storage location</label>
+        <label>Storage area</label>
         <select id="lm-location-id" style="width:100%">${optionsHtml}</select>
         <div style="font-size:12px;color:var(--ink-soft);margin-top:6px">
           ${locations.length === 0
-            ? 'No locations defined yet. Create storage locations on the Locations page first, then assign products to them here.'
-            : 'Pick where this item is stored. Manage the list of locations (with photos) on the Locations page.'}
+            ? 'No areas defined yet. Add storage areas on the Locations page first.'
+            : 'Which area is it in? Manage areas (with their own photos) on the Locations page.'}
         </div>
+      </div>
+      <div class="field">
+        <label>Exactly where in this area? (note)</label>
+        <textarea id="lm-note" rows="2" placeholder="e.g. 3rd shelf from top, behind the door · Bay 4, bottom row">${escapeHtml(p.locationNote || '')}</textarea>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">A specific note for THIS item — row, shelf, bin, landmark.</div>
+      </div>
+      <div class="field">
+        <label>Photo of where this item sits (optional)</label>
+        <div id="lm-preview" style="aspect-ratio:4/3;background:var(--line-2);border-radius:8px;margin-bottom:8px;background-size:cover;background-position:center;display:flex;align-items:center;justify-content:center;color:var(--ink-soft);${p.locationPhoto ? `background-image:url(${p.locationPhoto})` : ''}"><span id="lm-preview-ph" style="font-size:12px;${p.locationPhoto ? 'display:none' : ''}">${p.locationPhoto ? '' : 'No photo yet'}</span></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <label class="btn btn-outline btn-sm" style="cursor:pointer">📷 ${p.locationPhoto ? 'Replace photo' : 'Add photo'}<input type="file" id="lm-photo" accept="image/*" capture="environment" style="display:none" onchange="lmPreviewProductPhoto(this)"></label>
+          ${p.locationPhoto ? `<button type="button" class="btn btn-ghost btn-sm" onclick="lmClearProductPhoto()" style="color:var(--red)">Remove photo</button>` : ''}
+        </div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Snap exactly where this part lives so anyone can find it. Max 2 MB.</div>
       </div>
     `,
     actions: [
       { label: 'Save', primary: true, onClick: async () => {
         const locId = el('lm-location-id')?.value || '';
+        const note = el('lm-note')?.value.trim() || '';
+        const payload = {
+          locationId: locId === '' ? null : parseInt(locId),
+          locationNote: note || null,
+        };
+        // _lmPhotoState: undefined = unchanged, null = cleared, string = new data URL
+        if (window._lmPhotoState !== undefined) {
+          payload.locationPhotoDataUrl = window._lmPhotoState;  // null clears, string sets
+        }
         try {
-          await Api.patch('/api/products/' + p.id, {
-            locationId: locId === '' ? null : parseInt(locId),
-          });
-          toast('Location updated', 'success');
+          await Api.patch('/api/products/' + p.id, payload);
+          window._lmPhotoState = undefined;  // reset
+          toast('Location saved', 'success');
           closeModal();
-          // Refresh products so the new location shows everywhere
           await Store.refresh('products');
-          // Repaint whichever page is active
           if (typeof routeTo === 'function' && State.page) {
-            const fn = { locations: renderLocations, inventory: renderInventory }[State.page];
+            const fn = { locations: () => { if (typeof paintLocItems === 'function') paintLocItems(); }, inventory: renderInventory }[State.page];
             if (fn) fn();
           }
         } catch (e) {
-          toast('Failed to save location: ' + (e.data?.message || e.message), 'error');
+          if (e.data?.error === 'photo_too_large') toast(e.data.message, 'error');
+          else toast('Failed to save: ' + (e.data?.message || e.message), 'error');
         }
       }},
-      { label: 'Cancel', onClick: closeModal }
+      { label: 'Cancel', onClick: () => { window._lmPhotoState = undefined; closeModal(); } }
     ]
   });
+  window._lmPhotoState = undefined;  // reset on open
+}
+
+// Per-product location photo: preview + stash as data URL in window._lmPhotoState
+function lmPreviewProductPhoto(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) { toast('Photo too big — max 2 MB. Try again with a smaller image.', 'warn'); input.value = ''; return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    window._lmPhotoState = reader.result;  // data URL string
+    const preview = el('lm-preview');
+    const ph = el('lm-preview-ph');
+    if (preview) preview.style.backgroundImage = `url(${reader.result})`;
+    if (ph) ph.style.display = 'none';
+  };
+  reader.readAsDataURL(file);
+}
+
+function lmClearProductPhoto() {
+  window._lmPhotoState = null;  // explicit clear
+  const preview = el('lm-preview');
+  const ph = el('lm-preview-ph');
+  if (preview) preview.style.backgroundImage = '';
+  if (ph) { ph.style.display = ''; ph.textContent = 'No photo yet'; }
 }
 function fileToDataUrl(file) {
   return new Promise((res, rej) => {
