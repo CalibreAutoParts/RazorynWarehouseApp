@@ -1435,7 +1435,9 @@ async function loadBrand() {
     // /logo-dark.png (dark) for Razoryn. Calibre brand uses /logo-calibre.png and
     // /logo-calibre-dark.png. If a dark variant isn't deployed, both fall back to the light one.
     const lightUrl = b.logoUrl || '/logo.png';
-    const darkUrl = lightUrl.replace(/(\.[a-z]+)$/i, '-dark$1');
+    // Prefer the explicit dark URL from the brand config; fall back to deriving
+    // it by inserting "-dark" before the extension (legacy convention).
+    const darkUrl = b.logoUrlDark || lightUrl.replace(/(\.[a-z]+)$/i, '-dark$1');
     document.querySelectorAll('[data-brand-logo-light]').forEach(el => { el.src = lightUrl; el.alt = b.name; });
     document.querySelectorAll('[data-brand-logo-dark]').forEach(el => {
       el.src = darkUrl;
@@ -6871,7 +6873,7 @@ function renderLinkStatus() {
             </tbody>
           </table>
         </div>
-        ${data.summary?.linkedNoStoreCode > 0 ? `<div style="padding:10px;background:var(--amber-light);color:var(--amber);font-size:12px;border-radius:6px;margin-top:8px"><strong>${data.summary.linkedNoStoreCode}</strong> linked product${data.summary.linkedNoStoreCode === 1 ? '' : 's'} ${data.summary.linkedNoStoreCode === 1 ? 'has' : 'have'} unknown eBay store (legacy). Run <strong>Force match</strong> or <strong>Hydrate eBay prices</strong> to backfill — the next scan auto-detects each item's store.</div>` : ''}
+        ${data.summary?.linkedNoStoreCode > 0 ? `<div style="padding:10px;background:var(--amber-light);color:var(--amber);font-size:12px;border-radius:6px;margin-top:8px"><strong>${data.summary.linkedNoStoreCode}</strong> linked product${data.summary.linkedNoStoreCode === 1 ? '' : 's'} ${data.summary.linkedNoStoreCode === 1 ? 'has' : 'have'} unknown eBay store (legacy). <button class="btn btn-outline btn-sm" onclick="resolveLegacyLinks()" style="margin-left:8px" title="Detects each legacy link's store with one lightweight call per item — much cheaper than a full Force match. Can also clear links that belong to disabled stores (e.g. Evanta).">🔧 Resolve legacy links</button></div>` : ''}
         ${filtered.length > 200 ? `<div style="padding:10px;text-align:center;font-size:12px;color:var(--ink-soft)">Showing first 200 of ${filtered.length}. Use search to narrow down.</div>` : ''}
       </div>
     `}
@@ -7132,6 +7134,73 @@ async function refreshLinkMirrorStoresStatus() {
 // When nothing is currently disabled, the button is still useful — it
 // surfaces an instruction modal explaining how to disable a store via the
 // EBAY_STORE_DISABLED env var, listing the actual store codes available.
+// Resolves NULL-store-code legacy mirror_links. Phase 1 auto-detects each
+// link's owning store with a cheap per-item check (not a full scan). Phase 2
+// optionally clears any that can't be attributed to an active store — which,
+// after disabling Evanta, are almost certainly old Evanta listings.
+async function resolveLegacyLinks() {
+  // Run phase 1 first (detect-only, no deletes)
+  const t1 = Task.start('Detecting stores for legacy links…');
+  let r;
+  try {
+    r = await Api.post('/api/listings/resolve-legacy-links', { clearUnresolved: false });
+    Task.done(t1, `${r.resolved} resolved`);
+  } catch (e) {
+    Task.fail(t1, 'Failed');
+    if ((e.data?.message || e.message || '').match(/usage limit|exceeded|21917/i)) {
+      toast('eBay API quota is exhausted — wait for the 7am reset, then try again.', 'error', 8000);
+    } else {
+      toast('Failed: ' + (e.data?.message || e.message), 'error');
+    }
+    return;
+  }
+
+  // If everything resolved, we're done
+  if (r.unresolved === 0) {
+    toast(`✓ All ${r.resolved} legacy link${r.resolved === 1 ? '' : 's'} resolved — store codes backfilled.`, 'success', 6000);
+    await loadLinkStatus();
+    renderLinkStatus();
+    return;
+  }
+
+  // Some couldn't be attributed to an active store. Offer to clear them.
+  const sampleList = (r.unresolvedSample || []).map(s =>
+    `<li style="margin:3px 0;font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(s.itemId)}${s.sku ? ' · ' + escapeHtml(s.sku) : ''}</li>`
+  ).join('');
+  modal({
+    title: '🔧 Resolve legacy links',
+    body: `
+      <div style="font-size:13px;line-height:1.6">
+        <p><strong>${r.resolved}</strong> link${r.resolved === 1 ? '' : 's'} resolved to ${r.resolved === 1 ? 'its' : 'their'} store. ✓</p>
+        <p><strong>${r.unresolved}</strong> couldn't be matched to any active store. These are usually:</p>
+        <ul style="margin:8px 0;padding-left:20px;font-size:12px;color:var(--ink-soft)">
+          <li>Old <strong>Evanta</strong> listings (now that Evanta is disabled, its items can't be verified)</li>
+          <li>Listings that have ended or been deleted on eBay</li>
+        </ul>
+        ${sampleList ? `<div style="margin:10px 0;padding:10px;background:var(--bg-soft);border-radius:6px"><div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px;font-weight:600">Unresolved items:</div><ul style="margin:0;padding-left:18px">${sampleList}</ul></div>` : ''}
+        <p style="font-size:12px;color:var(--ink-soft)">Clearing them removes the stale link rows. If any were valid EVBODY listings, re-enable the relevant store and run Force match to re-link.</p>
+      </div>
+    `,
+    actions: [
+      { label: 'Leave them', onClick: closeModal },
+      { label: `🗑 Clear ${r.unresolved} unresolved`, primary: true, onClick: async () => {
+        closeModal();
+        const t2 = Task.start('Clearing unresolved legacy links…');
+        try {
+          const r2 = await Api.post('/api/listings/resolve-legacy-links', { clearUnresolved: true });
+          Task.done(t2, `${r2.cleared} cleared`);
+          toast(`✓ Resolved ${r2.resolved}, cleared ${r2.cleared} unresolved link${r2.cleared === 1 ? '' : 's'}.`, 'success', 6000);
+          await loadLinkStatus();
+          renderLinkStatus();
+        } catch (e) {
+          Task.fail(t2, 'Failed');
+          toast('Failed: ' + (e.data?.message || e.message), 'error');
+        }
+      }},
+    ],
+  });
+}
+
 async function cleanupDisabledStoreLinks() {
   // Check the configured stores first so we can show actionable guidance
   let storeData;
