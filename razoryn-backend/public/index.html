@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#c8202d">
-<title>Razoryn Warehouse Hub</title>
+<title>Warehouse Hub</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -1593,7 +1593,7 @@ async function loadTheme() {
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', theme === 'dark' ? '#0d0f13' : '#c8202d');
+  if (meta) meta.setAttribute('content', theme === 'dark' ? '#0d0f13' : (State.brand?.primaryColor || '#c8202d'));
   const lightIcon = document.querySelector('.theme-icon-light');
   const darkIcon = document.querySelector('.theme-icon-dark');
   if (lightIcon && darkIcon) {
@@ -1788,7 +1788,7 @@ function notifyNewReturn(returnRow) {
   const body = sku ? `${sku} · ${reason}` : reason;
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
-      const n = new Notification(title, { body, icon: '/logo.png', tag: 'return-' + returnRow.id });
+      const n = new Notification(title, { body, icon: (State.brand?.logoUrl || '/logo.png'), tag: 'return-' + returnRow.id });
       n.onclick = () => { window.focus(); routeTo('returns'); };
     }
   } catch (e) {}
@@ -1804,7 +1804,7 @@ function notifyReturnClosed(returnRow) {
   const body = sku ? `${sku} · ${returnRow.status}` : returnRow.status;
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
-      new Notification(title, { body, icon: '/logo.png', tag: 'return-closed-' + returnRow.id });
+      new Notification(title, { body, icon: (State.brand?.logoUrl || '/logo.png'), tag: 'return-closed-' + returnRow.id });
     }
   } catch (e) {}
   Sounds.playForReturnClosed();
@@ -1823,7 +1823,7 @@ function notifyLowStock(productIds) {
     : `${first.sku || first.title}${products.length > 1 ? ' + ' + (products.length - 1) + ' more' : ''}`;
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
-      const n = new Notification(title, { body, icon: '/logo.png', tag: 'lowstock-' + Date.now() });
+      const n = new Notification(title, { body, icon: (State.brand?.logoUrl || '/logo.png'), tag: 'lowstock-' + Date.now() });
       n.onclick = () => { window.focus(); routeTo('inventory'); };
     }
   } catch (e) {}
@@ -1847,7 +1847,7 @@ function notifyNewSale(sale) {
   // Browser notification
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
-      const n = new Notification(title, { body, icon: '/logo.png', tag: 'sale-' + sale.id });
+      const n = new Notification(title, { body, icon: (State.brand?.logoUrl || '/logo.png'), tag: 'sale-' + sale.id });
       n.onclick = () => { window.focus(); routeTo('sales'); };
     }
   } catch (e) {}
@@ -3584,8 +3584,19 @@ function labelsPrint() {
   const w = window.open('', '_blank', 'width=900,height=700');
   if (!w) { toast('Pop-up blocked. Allow pop-ups for this site.', 'error'); return; }
 
-  // Logo source — served from /logo.png. If it fails, fallback text "RAZORYN".
-  const logoUrl = window.location.origin + '/logo.png';
+  // Branding — driven by the active brand (Calibre vs Razoryn vs any future
+  // brand) so labels never show the wrong company. Prefer an uploaded custom
+  // logo from settings; else the brand's own logo file. Colours + name + domain
+  // all come from State.brand, which is loaded from /api/brand at startup.
+  const b = State.brand || {};
+  const uploadedLogo = State.pricingConfig?.logoDataUrl || State.settings?.logoDataUrl || null;
+  const logoUrl = uploadedLogo || (window.location.origin + (b.logoUrl || '/logo.png'));
+  const brandName = b.name || 'Warehouse';
+  const brandTagline = b.tagline || '';
+  const brandDomain = (b.domain || '').replace(/^https?:\/\//, '');
+  const brandColor = b.primaryColor || '#c8202d';
+  // Fallback wordmark text (shown only if the logo image fails to load).
+  const wordmark = escapeHtml(brandName);
 
   // Per-layout label HTML
   let labelTemplate;
@@ -3594,9 +3605,9 @@ function labelsPrint() {
     labelTemplate = (it, idx) => `
       <div class="label large-landscape">
         <div class="header">
-          <img src="${logoUrl}" class="logo" alt="Razoryn" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
-          <div class="logo-text" style="display:none">RAZORYN <span style="color:#c8202d">e-Parts</span></div>
-          <div class="tagline">Quality aftermarket vehicle parts · razoryn.co.uk</div>
+          <img src="${logoUrl}" class="logo" alt="${escapeAttr(brandName)}" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+          <div class="logo-text" style="display:none">${wordmark}</div>
+          ${brandTagline || brandDomain ? `<div class="tagline">${escapeHtml(brandTagline)}${brandTagline && brandDomain ? ' · ' : ''}${escapeHtml(brandDomain)}</div>` : ''}
         </div>
         <div class="body">
           <div class="title">${escapeHtml(it.title)}</div>
@@ -3611,8 +3622,8 @@ function labelsPrint() {
     labelTemplate = (it, idx) => `
       <div class="label large-portrait">
         <div class="header">
-          <img src="${logoUrl}" class="logo" alt="Razoryn" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
-          <div class="logo-text" style="display:none">RAZORYN <span style="color:#c8202d">e-Parts</span></div>
+          <img src="${logoUrl}" class="logo" alt="${escapeAttr(brandName)}" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+          <div class="logo-text" style="display:none">${wordmark}</div>
         </div>
         <div class="body">
           <div class="title">${escapeHtml(it.title)}</div>
@@ -3621,7 +3632,7 @@ function labelsPrint() {
         <div class="barcode-wrap">
           <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
         </div>
-        <div class="footer">razoryn.co.uk</div>
+        ${brandDomain ? `<div class="footer">${escapeHtml(brandDomain)}</div>` : ''}
       </div>`;
   } else if (s.layout === 'tall') {
     // 25×50 portrait small thermal — minimal layout
@@ -3687,7 +3698,7 @@ function labelsPrint() {
   .label.large-landscape { padding: 8mm 10mm; }
   .label.large-landscape .header {
     display: flex; justify-content: space-between; align-items: flex-start;
-    padding-bottom: 4mm; border-bottom: 2px solid #c8202d;
+    padding-bottom: 4mm; border-bottom: 2px solid ${brandColor};
   }
   .label.large-landscape .logo { height: 18mm; max-width: 60mm; object-fit: contain; }
   .label.large-landscape .logo-text { font-size: 22pt; font-weight: 800; letter-spacing: -0.02em; line-height: 1; }
@@ -3704,8 +3715,8 @@ function labelsPrint() {
   }
   .label.large-landscape .sku {
     font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace;
-    font-weight: 600; color: #c8202d; margin-top: 3mm;
-    padding: 2mm 4mm; background: #fff0f1; border-radius: 2mm; display: inline-block;
+    font-weight: 600; color: ${brandColor}; margin-top: 3mm;
+    padding: 2mm 4mm; background: ${brandColor}14; border-radius: 2mm; display: inline-block;
     align-self: flex-start;
   }
   .label.large-landscape .barcode-wrap {
@@ -3716,7 +3727,7 @@ function labelsPrint() {
   /* ============ LARGE 4×6 portrait — logo top, big title, barcode below ============ */
   .label.large-portrait { padding: 6mm 7mm; text-align: center; }
   .label.large-portrait .header {
-    padding-bottom: 4mm; border-bottom: 2px solid #c8202d; margin-bottom: 5mm;
+    padding-bottom: 4mm; border-bottom: 2px solid ${brandColor}; margin-bottom: 5mm;
   }
   .label.large-portrait .logo { height: 16mm; max-width: 70mm; object-fit: contain; }
   .label.large-portrait .logo-text { font-size: 20pt; font-weight: 800; letter-spacing: -0.02em; }
@@ -3727,8 +3738,8 @@ function labelsPrint() {
   }
   .label.large-portrait .sku {
     font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace;
-    font-weight: 600; color: #c8202d; margin-top: 4mm;
-    padding: 2mm 4mm; background: #fff0f1; border-radius: 2mm; display: inline-block;
+    font-weight: 600; color: ${brandColor}; margin-top: 4mm;
+    padding: 2mm 4mm; background: ${brandColor}14; border-radius: 2mm; display: inline-block;
   }
   .label.large-portrait .barcode-wrap { padding-top: 4mm; }
   .label.large-portrait .bc { width: 100%; height: ${s.barH}px; display: block; }
@@ -5648,30 +5659,44 @@ function generateInvoice(id) {
 function invoiceHtml(items, filter) {
   const total = items.reduce((a,b)=>a+b.amount, 0);
   const today = new Date().toLocaleDateString('en-GB');
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Invoice — Razoryn e-Parts</title>
+  // Brand + company details — pulled from the active brand and the configured
+  // company settings so this export is never hardcoded to one company.
+  const b = State.brand || {};
+  const cfg = State.pricingConfig || {};
+  const brandName = b.name || 'Company';
+  const brandColor = b.primaryColor || '#111';
+  const fullName = cfg.companyName || b.fullName || brandName;
+  const domain = (cfg.companyWebsite || b.domain || '').replace(/^https?:\/\//, '');
+  const addr = (cfg.companyAddress || '').replace(/\n+/g, ', ').replace(/, $/, '');
+  const regNo = cfg.companyRegNo ? ` · Co. ${escapeHtml(cfg.companyRegNo)}` : '';
+  const email = cfg.companyEmail || '';
+  const phone = cfg.companyPhone || '';
+  const contactLine = [email, phone].filter(Boolean).map(escapeHtml).join(' · ');
+  // Split brand name into main + suffix for the wordmark (e.g. "Calibre Auto Parts")
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Invoice — ${escapeHtml(fullName)}</title>
   <style>body{font-family:Inter,sans-serif;padding:40px;max-width:800px;margin:auto;color:#0f1115}
-  .top{display:flex;justify-content:space-between;border-bottom:3px solid #c8202d;padding-bottom:20px;margin-bottom:30px}
-  .logo{font-size:28px;font-weight:800}.logo span{color:#c8202d}
+  .top{display:flex;justify-content:space-between;border-bottom:3px solid ${brandColor};padding-bottom:20px;margin-bottom:30px}
+  .logo{font-size:28px;font-weight:800;color:${brandColor}}
   table{width:100%;border-collapse:collapse;margin:20px 0}
   th,td{padding:10px;text-align:left;border-bottom:1px solid #ddd}
   th{background:#f5f5f5}.num{text-align:right}.tot{font-size:20px;font-weight:700}
   .small{font-size:12px;color:#666}
   </style></head><body>
   <div class="top">
-    <div><div class="logo">Razoryn<span>.</span></div><div class="small">e-Parts Ltd · Watford</div></div>
+    <div><div class="logo">${escapeHtml(brandName)}</div><div class="small">${escapeHtml(b.tagline || '')}</div></div>
     <div style="text-align:right">
       <div><strong>Invoice</strong></div>
       <div class="small">Date: ${today}</div>
-      <div class="small">${filter && filter !== 'all' ? 'Channel: ' + filter : 'All channels'}</div>
+      <div class="small">${filter && filter !== 'all' ? 'Channel: ' + escapeHtml(filter) : 'All channels'}</div>
     </div>
   </div>
-  <p><strong>Razoryn Ecommerce Limited</strong> · Unit 4 Shakespeare Industrial Estate, Watford · Co. 16466013</p>
+  <p><strong>${escapeHtml(fullName)}</strong>${addr ? ' · ' + escapeHtml(addr) : ''}${regNo}</p>
   <table>
     <thead><tr><th>Date</th><th>Invoice</th><th>Channel</th><th>Item</th><th>Customer</th><th class="num">Amount</th></tr></thead>
     <tbody>${items.map(s => `<tr><td>${new Date(s.date).toLocaleDateString('en-GB')}</td><td>${s.invoice||'—'}</td><td>${s.channel}</td><td>${s.title}<br><span class="small">${s.sku}</span></td><td>${s.customer}</td><td class="num">£${s.amount.toFixed(2)}</td></tr>`).join('')}</tbody>
     <tfoot><tr><td colspan="5" class="num"><strong>Total</strong></td><td class="num tot">£${total.toFixed(2)}</td></tr></tfoot>
   </table>
-  <p class="small">Thank you for your business. VAT 20% included. Returns within 30 days. eparts@razoryn.co.uk · +44 7494589542</p>
+  <p class="small">Thank you for your business. VAT 20% included where applicable. Returns within 30 days.${contactLine ? ' ' + contactLine : ''}${domain ? ' · ' + escapeHtml(domain) : ''}</p>
   <script>setTimeout(()=>window.print(),300)<\/script>
   </body></html>`;
 }
@@ -8767,11 +8792,11 @@ function renderSettings() {
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
             <div class="field" style="grid-column:1/-1">
               <label>Company address</label>
-              <textarea id="set-address" rows="2" placeholder="Unit 4 Shakespeare Industrial Estate, Watford"></textarea>
+              <textarea id="set-address" rows="2" placeholder="Company address"></textarea>
             </div>
-            <div class="field"><label>Phone</label><input id="set-phone" placeholder="+44 7494589542"></div>
-            <div class="field"><label>Email</label><input id="set-email" placeholder="eparts@razoryn.co.uk"></div>
-            <div class="field"><label>Website</label><input id="set-website" placeholder="www.razoryn.co.uk"></div>
+            <div class="field"><label>Phone</label><input id="set-phone" placeholder="+44 7000 000000"></div>
+            <div class="field"><label>Email</label><input id="set-email" placeholder="hello@yourcompany.co.uk"></div>
+            <div class="field"><label>Website</label><input id="set-website" placeholder="www.yourcompany.co.uk"></div>
             <div class="field"><label>Company Reg. No.</label><input id="set-regno" placeholder="16466013"></div>
           </div>
           <div style="margin-top:14px;padding:14px;background:var(--bg-soft);border-radius:8px">
