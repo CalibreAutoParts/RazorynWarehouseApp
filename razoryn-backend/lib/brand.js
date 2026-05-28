@@ -14,6 +14,7 @@ const BRANDS = {
     fullName: 'Razoryn e-Parts',
     domain: 'razoryn.co.uk',
     logoUrl: '/logo.png',
+    logoUrlDark: '/logo-dark.png',  // shown when dark theme is active
     primaryColor: '#c8202d',        // brand red — sidebar, primary buttons, accents
     secondaryColor: '#1a1a1a',       // ink colour for headers
     supportColor: '#ffffff',
@@ -35,7 +36,8 @@ const BRANDS = {
     name: 'Calibre Auto Parts',
     fullName: 'Calibre Auto Parts Ltd',
     domain: 'calibreautoparts.co.uk',
-    logoUrl: '/logo-calibre.png',
+    logoUrl: '/logo-calibre.jpeg',
+    logoUrlDark: '/logo-calibre-dark.jpeg',  // shown when dark theme is active
     primaryColor: '#0D1B2A',         // navy — sidebar, headings
     secondaryColor: '#E30613',        // red accent — primary buttons, links
     supportColor: '#ffffff',
