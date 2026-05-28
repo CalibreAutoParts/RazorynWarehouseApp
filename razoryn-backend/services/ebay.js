@@ -957,6 +957,52 @@ async function getRateLimits(apiContext = 'tradingapi') {
   return out;
 }
 
+// itemBelongsToStore — check whether a given eBay ItemID is a listing owned by
+// the given store's account. Used to backfill store_code on legacy mirror_links
+// without a full GetMyeBaySelling scan. One GetItem call per check.
+//
+// GetItem with a store's token returns the item if that token's account can see
+// it. To confirm *ownership* (not just visibility) we compare the item's Seller
+// UserID against the store. Since we don't store each store's eBay username,
+// we use a simpler proxy: GetItem called with the OWNING seller's token returns
+// Ack=Success AND includes the item; called with a different seller's token it
+// still returns the public item (GetItem is public), so that alone isn't enough.
+//
+// Instead we use GetSellerList-style scoping: call GetItem and read the
+// <Seller><UserID>. We cache each store's own UserID via GetUser on first use.
+let _storeUserIdCache = {};
+async function getStoreUserId(storeArg) {
+  const store = resolveStore(storeArg);
+  if (!store) return null;
+  if (_storeUserIdCache[store.code] !== undefined) return _storeUserIdCache[store.code];
+  try {
+    const xml = await tradingCall('GetUser', '', storeArg);
+    const uid = extractOne(xml, 'UserID') || null;
+    _storeUserIdCache[store.code] = uid;
+    return uid;
+  } catch (e) {
+    _storeUserIdCache[store.code] = null;
+    return null;
+  }
+}
+
+async function itemBelongsToStore(itemId, storeArg) {
+  if (!itemId) return false;
+  const myUserId = await getStoreUserId(storeArg);
+  if (!myUserId) return false;
+  try {
+    const xml = await tradingCall('GetItem', `<ItemID>${escapeXml(String(itemId))}</ItemID><DetailLevel>ReturnAll</DetailLevel>`, storeArg);
+    const ack = extractOne(xml, 'Ack') || '';
+    if (ack !== 'Success' && ack !== 'Warning') return false;
+    // Read the seller's UserID from the item and compare to this store's UserID
+    const sellerBlock = extractOne(xml, 'Seller') || xml;
+    const itemSellerId = extractOne(sellerBlock, 'UserID') || '';
+    return itemSellerId && itemSellerId.toLowerCase() === myUserId.toLowerCase();
+  } catch (e) {
+    return false;
+  }
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
@@ -972,6 +1018,8 @@ module.exports = {
   completeSale,
   addItem,
   getRateLimits,
+  itemBelongsToStore,
+  getStoreUserId,
   // Multi-store helpers
   listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary, standalone: !!s.standalone, disabled: !!s.disabled, disabledReason: s.disabledReason || null })),
   getPrimaryStore: () => brand.getPrimaryStore(),
