@@ -2387,7 +2387,7 @@ function renderInventory() {
               <th style="width:32px"><input type="checkbox" id="inv-check-all" onchange="invToggleAll(this.checked)"></th>
               <th style="width:64px"></th>
               <th>Product</th><th>Part #</th><th>Location</th>
-              <th class="num">Shopify</th><th class="num">eBay</th><th class="num">Total</th>
+              <th class="num">Stock</th>
               <th class="num">Price</th><th></th>
             </tr></thead>
             <tbody id="inv-tbody"></tbody>
@@ -2423,13 +2423,11 @@ function renderInventory() {
         <td><div style="font-weight:500">${p.title}</div><div style="color:var(--ink-soft);font-size:11px">${p.sku}</div></td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${p.partNumber||'—'}</td>
         <td><div style="font-size:12px">${p.location || '—'}</div></td>
-        <td class="num">${p.qtyShopify}</td>
-        <td class="num">${p.qtyEbay}</td>
         <td class="num"><strong>${totalQty(p)}</strong> ${totalQty(p)<=p.lowThresh ? `<span class="pill ${totalQty(p)===0?'red':'amber'}" style="margin-left:6px">${totalQty(p)===0?'Out':'Low'}</span>`:''}</td>
         <td class="num">${gbp(p.priceShopify)}</td>
         <td style="white-space:nowrap"><button class="btn btn-outline btn-sm" onclick="openProductModal('${p.id}')">Edit</button> <button class="btn btn-ghost btn-sm" onclick="deleteProduct('${p.id}','${(p.title||'').replace(/'/g,"\\'")}')" style="color:var(--red)" title="Delete product">🗑</button></td>
       </tr>
-    `).join('') || `<tr><td colspan="10"><div class="empty"><div class="t">No products match</div>${q && State.user?.role === 'admin' ? `<div style="margin-top:10px"><button class="btn btn-outline btn-sm" onclick="diagnoseSku('${escapeAttr(el('inv-search').value.trim())}')">🔍 Why isn't "${escapeHtml(el('inv-search').value.trim())}" showing?</button></div>` : ''}</div></td></tr>`;
+    `).join('') || `<tr><td colspan="9"><div class="empty"><div class="t">No products match</div>${q && State.user?.role === 'admin' ? `<div style="margin-top:10px"><button class="btn btn-outline btn-sm" onclick="diagnoseSku('${escapeAttr(el('inv-search').value.trim())}')">🔍 Why isn't "${escapeHtml(el('inv-search').value.trim())}" showing?</button></div>` : ''}</div></td></tr>`;
     invUpdateBulkBar();
   }
   paint();
@@ -2598,6 +2596,31 @@ async function deleteProduct(id, title) {
   }
 }
 
+// Turn a channelPush result from the backend into a human toast message,
+// e.g. "✓ Stock pushed: Shopify ✓, EVBODYPARTS ✓" or noting failures.
+function summarizeChannelPush(push) {
+  if (!push) return 'Saved';
+  const parts = [];
+  // Shopify
+  if (push.shopify?.ok) parts.push('Shopify ✓');
+  else if (push.shopify?.error) parts.push('Shopify ✗');
+  else if (push.shopify?.skipped) parts.push('Shopify —');
+  // eBay (per store)
+  for (const e of (push.ebay || [])) {
+    if (e.ok) parts.push(`${e.store || 'eBay'} ✓`);
+    else if (e.error) parts.push(`${e.store || 'eBay'} ✗`);
+    // skipped (no links / unavailable) → don't clutter the toast
+  }
+  if (parts.length === 0) return 'Saved (no linked channels to push to)';
+  const anyErr = pushResultHasError(push);
+  return (anyErr ? '⚠ Stock saved, some pushes failed: ' : '✓ Stock synced: ') + parts.join(', ');
+}
+function pushResultHasError(push) {
+  if (!push) return false;
+  if (push.shopify?.error) return true;
+  return (push.ebay || []).some(e => e.error);
+}
+
 function openProductModal(id) {
   const p = id ? State.products.find(x => x.id == id) : { id:'p'+Date.now(), title:'', sku:'', barcode:'', brand:'', model:'', position:'', partNumber:'', priceShopify:0, priceEbay:0, qtyShopify:0, qtyEbay:0, lowThresh:3, location:'', locationDesc:'', locationPhoto:null };
   modal({
@@ -2614,8 +2637,7 @@ function openProductModal(id) {
         <div class="field"><label>Low-stock threshold</label><input type="number" id="m-thresh" value="${p.lowThresh}"></div>
         <div class="field"><label>Shopify price (£)</label><input type="number" step="0.01" id="m-pshop" value="${p.priceShopify}"></div>
         <div class="field"><label>eBay price (£)</label><input type="number" step="0.01" id="m-peby" value="${p.priceEbay}"></div>
-        <div class="field"><label>Shopify qty</label><input type="number" id="m-qshop" value="${p.qtyShopify}"></div>
-        <div class="field"><label>eBay qty</label><input type="number" id="m-qeby" value="${p.qtyEbay}"></div>
+        <div class="field" style="grid-column:1/-1"><label>Stock quantity (synced to Shopify + eBay)</label><input type="number" min="0" id="m-qty" value="${p.qtyOnHand ?? p.qtyShopify ?? 0}"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">One stock figure keeps Shopify and eBay in sync. Saving pushes this quantity to both.</div></div>
       </div>
       <div class="field"><label>Storage location</label><input id="m-loc" value="${p.location||''}" placeholder="Aisle B, Rack 3, Shelf 2"></div>
       <div class="field"><label>Storage notes</label><textarea id="m-locdesc" rows="2">${p.locationDesc||''}</textarea></div>
@@ -2630,25 +2652,31 @@ function openProductModal(id) {
         };
         try {
           let newProduct = null;
+          let pushResult = null;
           if (id) {
             await Api.patch('/api/products/' + id, payload);
-            const newQty = +el('m-qshop').value;
-            if (newQty !== p.qtyOnHand) {
-              await Api.post('/api/products/' + id + '/adjust-stock', {
-                delta: newQty - p.qtyOnHand, reason: 'manual', notes: 'Edited from product modal',
+            const newQty = +el('m-qty').value;
+            if (newQty !== (p.qtyOnHand ?? p.qtyShopify)) {
+              // set-quantity sets the absolute value AND pushes to Shopify + eBay
+              const r = await Api.post('/api/products/' + id + '/set-quantity', {
+                quantity: newQty, notes: 'Edited from product modal',
               });
+              pushResult = r.channelPush;
             }
           } else {
-            const created = await Api.post('/api/products', { ...payload, qtyOnHand: +el('m-qshop').value });
+            const created = await Api.post('/api/products', { ...payload, qtyOnHand: +el('m-qty').value });
             newProduct = created.product || created;
           }
           await Store.refresh('products');
           closeModal();
-          toast('Saved · stock will sync to Shopify + eBay', 'success');
+          // Build a precise toast about where the stock actually went
+          if (pushResult) {
+            toast(summarizeChannelPush(pushResult), pushResultHasError(pushResult) ? 'warn' : 'success', 7000);
+          } else {
+            toast('Saved', 'success');
+          }
           renderInventory();
           refreshNavCounts();
-          // For brand-new products, prompt to print labels. Use the freshly-refreshed
-          // State.products to find the saved row (which has the canonical id).
           if (!id && newProduct?.id) {
             const fresh = State.products.find(x => x.id === newProduct.id) || newProduct;
             setTimeout(() => promptPrintLabels(fresh, 'new_product'), 300);
@@ -2809,7 +2837,7 @@ function adjustStock(id, action) {
           const delta = newQ - (p.qtyOnHand ?? totalQty(p));
           if (delta === 0) { closeModal(); return; }
           try {
-            await Api.post('/api/products/' + p.id + '/adjust-stock', {
+            const r = await Api.post('/api/products/' + p.id + '/adjust-stock', {
               delta, reason: reason.toLowerCase().replace(/\s+/g, '_'),
               notes: el('adj-notes').value,
             });
@@ -2819,11 +2847,10 @@ function adjustStock(id, action) {
             await Store.refresh('products');
             const updated = State.products.find(x => x.id === p.id);
             closeModal();
-            toast(`Updated ${p.sku} → ${newQ} (${reason})`, 'success');
+            const pushMsg = r.channelPush ? ' · ' + summarizeChannelPush(r.channelPush).replace(/^[✓⚠]\s*/, '') : '';
+            toast(`Updated ${p.sku} → ${newQ}${pushMsg}`, r.channelPush && pushResultHasError(r.channelPush) ? 'warn' : 'success', 6000);
             if (updated) showProductScanCard(updated);
             refreshNavCounts();
-            // Prompt to print labels — useful after a stock count, especially for items
-            // whose stock just went up (received a new batch).
             if (updated && delta > 0) {
               setTimeout(() => promptPrintLabels(updated, 'stock_added', delta), 300);
             }
@@ -7126,6 +7153,7 @@ function renderLinkStatus() {
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <button class="btn btn-primary" onclick="forceMatchLinks()" title="Pull active eBay listings and auto-match by SKU + barcode + title token">🔗 Force match all</button>
           <button class="btn btn-outline" onclick="hydrateEbayPrices()" title="Pull live eBay prices and backfill them on warehouse products. Also auto-detects each item's store. Run this if 'phone pricing' shows £0 or if you see the legacy-store-code warning below.">💷 Hydrate eBay prices</button>
+          <button class="btn btn-outline" onclick="pullEbayStock()" title="Read live quantities from eBay for every linked product and update the warehouse to match. Use this if the app shows 0 stock but eBay actually has stock.">📦 Pull eBay stock</button>
           <button class="btn btn-outline" onclick="testEbayConnection()" title="Test if eBay tokens still work — surfaces the actual error so you can see if a token has expired or has wrong scopes">🩺 Test eBay connection</button>
           <button class="btn btn-outline" onclick="cleanupDisabledStoreLinks()" title="Delete mirror_links rows tied to disabled stores. Use after temporarily disabling a store via the EBAY_STORE_DISABLED env var.">🗑 Clean stale links</button>
           <input id="links-search" placeholder="Search by SKU, title or part #…" oninput="debouncedLinkSearch(this.value)" value="${escapeAttr(State.linkSearch || '')}" style="flex:1;min-width:220px">
@@ -10086,6 +10114,31 @@ async function syncEbayReturns() {
     Task.fail(taskId, 'Returns pull failed');
     if (e.data?.error === 'post_order_api_unavailable') {
       toast(e.data.message, 'error', 10000);
+    } else {
+      toast('Failed: ' + (e.data?.message || e.message), 'error');
+    }
+  }
+}
+
+async function pullEbayStock() {
+  if (!confirm('Read live quantities from eBay for every linked product and update the warehouse to match?\n\nThis fixes products showing the wrong stock (e.g. 0 in the app when eBay has stock). Uses one eBay lookup per linked item — may take a minute. Quota permitting.')) return;
+  const taskId = Task.start('Pulling live stock from eBay…');
+  try {
+    const r = await Api.post('/api/products/pull-ebay-stock');
+    Task.done(taskId, `${r.updated} updated`);
+    const fatal = (r.errors || []).find(e => e.fatal);
+    if (fatal) {
+      toast(fatal.fatal, 'error', 9000);
+    } else {
+      toast(`✓ Checked ${r.checked} linked items · updated ${r.updated} · ${r.unchanged} already correct${r.errors?.length ? ` · ${r.errors.length} errors` : ''}`, r.errors?.length ? 'warn' : 'success', 8000);
+    }
+    await Store.refresh('products');
+    if (State.page === 'inventory') renderInventory();
+    if (State.page === 'mirror') { await loadLinkStatus?.(); renderLinkStatus?.(); }
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    if (/usage limit|exceeded|21917/i.test(e.data?.message || e.message || '')) {
+      toast('eBay API quota is exhausted — wait for the daily reset (≈7am UK), then try again.', 'error', 8000);
     } else {
       toast('Failed: ' + (e.data?.message || e.message), 'error');
     }
