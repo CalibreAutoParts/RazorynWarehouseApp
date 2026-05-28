@@ -9,6 +9,22 @@ const router = express.Router();
 // All product routes require auth.
 router.use(requireAuth);
 
+// Self-healing migration: per-product location detail columns.
+//   location_note            — free text, e.g. "3rd shelf, behind the door"
+//   location_photo_data_url  — base64 photo of exactly where THIS item sits
+// Stored as base64 in the DB (not on disk) so they survive Railway redeploys,
+// matching how location-area photos are stored. Idempotent.
+let _prodLocMigrated = false;
+async function ensureProductLocationColumns() {
+  if (_prodLocMigrated) return;
+  try {
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS location_note TEXT`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS location_photo_data_url TEXT`);
+    _prodLocMigrated = true;
+  } catch (e) { console.warn('[products] location-columns migration warning:', e.message); }
+}
+ensureProductLocationColumns();
+
 // GET /api/products?search=&brand=&lowStock=1&page=1&pageSize=50
 router.get('/', requirePermission('inventory'), async (req, res) => {
   const { search = '', brand = '', lowStock } = req.query;
@@ -190,12 +206,21 @@ router.post('/', requireAdmin, async (req, res) => {
 router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
                    'low_stock_threshold', 'price_shopify', 'price_ebay', 'cost_price',
-                   'location_id', 'active'];
+                   'location_id', 'active', 'location_note', 'location_photo_data_url'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
-                costPrice: 'cost_price', locationId: 'location_id' };
+                costPrice: 'cost_price', locationId: 'location_id',
+                locationNote: 'location_note', locationPhotoDataUrl: 'location_photo_data_url' };
   const sets = [], params = [];
+  // Make sure the per-product location columns exist before we try to set them
+  if (req.body && (req.body.locationNote !== undefined || req.body.locationPhotoDataUrl !== undefined)) {
+    await ensureProductLocationColumns();
+  }
+  // Guard: location photo data URL must be a reasonable size (≤ 2.7MB string ≈ 2MB image)
+  if (typeof req.body?.locationPhotoDataUrl === 'string' && req.body.locationPhotoDataUrl.length > 2_800_000) {
+    return res.status(413).json({ error: 'photo_too_large', message: 'Location photo is too large — please use an image under 2 MB.' });
+  }
   for (const [k, v] of Object.entries(req.body || {})) {
     const col = map[k] || k;
     if (allowed.includes(col)) {
@@ -210,7 +235,10 @@ router.patch('/:id', requireAdmin, async (req, res) => {
     params
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
-  await audit(req, 'update_product', 'product', rows[0].id, req.body);
+  // Audit without the huge base64 blob
+  const auditBody = { ...req.body };
+  if (auditBody.locationPhotoDataUrl) auditBody.locationPhotoDataUrl = '[photo]';
+  await audit(req, 'update_product', 'product', rows[0].id, auditBody);
   res.json({ product: rows[0] });
 });
 
