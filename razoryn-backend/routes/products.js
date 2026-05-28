@@ -20,7 +20,10 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   if (search) {
     params.push(`%${search}%`);
     const i = params.length;
-    where.push(`(title ILIKE $${i} OR sku ILIKE $${i} OR part_number ILIKE $${i} OR barcode = $${params.length === i ? i : i})`);
+    // All four columns use ILIKE for consistent partial matching. The barcode
+    // clause previously used exact `= $i` against a wildcard-wrapped param, so
+    // it never matched anything — now it's ILIKE like the others.
+    where.push(`(title ILIKE $${i} OR sku ILIKE $${i} OR part_number ILIKE $${i} OR barcode ILIKE $${i})`);
   }
   if (brand) { params.push(brand); where.push(`brand = $${params.length}`); }
   if (lowStock === '1') where.push('qty_on_hand <= low_stock_threshold');
@@ -61,6 +64,85 @@ router.get('/low-stock', requirePermission('inventory'), async (req, res) => {
      ORDER BY qty_on_hand ASC, title`
   );
   res.json({ products: rows });
+});
+
+// GET /api/products/diagnose/:sku — trace a SKU across products + mirror_links
+// to explain WHY it might show in Listing Mirror but not in inventory search.
+// MUST be defined before GET /:id, otherwise "diagnose" is captured as an :id.
+router.get('/diagnose/:sku', requireAdmin, async (req, res) => {
+  const sku = (req.params.sku || '').trim();
+  const out = { sku, findings: [] };
+
+  const exact = await query(
+    `SELECT id, sku, title, active, shopify_product_id, barcode, part_number, location_id, qty_on_hand
+     FROM products WHERE sku = $1`, [sku]);
+  out.exactProductMatch = exact.rows;
+
+  const fuzzy = await query(
+    `SELECT id, sku, title, active, qty_on_hand,
+            ('[' || sku || ']') AS sku_with_brackets, length(sku) AS sku_len
+     FROM products WHERE TRIM(LOWER(sku)) = TRIM(LOWER($1))`, [sku]);
+  out.fuzzyProductMatch = fuzzy.rows;
+
+  const ilike = await query(
+    `SELECT id, sku, title, active FROM products WHERE sku ILIKE $1 LIMIT 10`, [`%${sku}%`]);
+  out.ilikeMatch = ilike.rows;
+
+  const ml = await query(
+    `SELECT ebay_item_id, shopify_product_id, store_code, last_synced_sku, last_synced_title
+     FROM mirror_links WHERE last_synced_sku = $1 OR last_synced_sku ILIKE $2`, [sku, `%${sku}%`]);
+  out.mirrorLinkMatch = ml.rows;
+
+  out.mirrorLinkProductCheck = [];
+  for (const link of ml.rows) {
+    const prodForLink = await query(
+      `SELECT id, sku, title, active FROM products WHERE shopify_product_id = $1::text`,
+      [link.shopify_product_id]);
+    out.mirrorLinkProductCheck.push({
+      ebay_item_id: link.ebay_item_id,
+      shopify_product_id: link.shopify_product_id,
+      matchingProducts: prodForLink.rows,
+      productExists: prodForLink.rows.length > 0,
+    });
+  }
+
+  if (out.exactProductMatch.length > 0) {
+    const p = out.exactProductMatch[0];
+    if (!p.active) {
+      out.diagnosis = `Product EXISTS (id ${p.id}) but active = ${p.active}. Inventory search filters active=true, so it's hidden. Fix: reactivate.`;
+      out.fixAvailable = 'reactivate';
+      out.fixProductId = p.id;
+    } else {
+      out.diagnosis = `Product EXISTS (id ${p.id}) and is active — it should appear in search. If not, the search term may have hidden whitespace; compare sku_len in fuzzyProductMatch.`;
+    }
+  } else if (out.fuzzyProductMatch.length > 0) {
+    out.diagnosis = `No EXACT sku match, but a whitespace/case variant exists. Stored SKU differs from "${sku}". See fuzzyProductMatch for the real value + its length.`;
+    out.fixAvailable = 'normalize_sku';
+    out.fixProductId = out.fuzzyProductMatch[0].id;
+  } else if (out.mirrorLinkMatch.length > 0) {
+    const anyProduct = out.mirrorLinkProductCheck.some(c => c.productExists);
+    if (!anyProduct) {
+      out.diagnosis = `This SKU exists ONLY in mirror_links (eBay↔Shopify link) with NO matching product row. That's why Listing Mirror shows it but inventory search can't find it. The Shopify product was never imported into the warehouse, OR the shopify_product_id didn't match on import. Fix: run Import Shopify products (Settings), or clean the orphan link.`;
+      out.fixAvailable = 'reimport_or_orphan';
+      out.orphanShopifyIds = out.mirrorLinkProductCheck.map(c => c.shopify_product_id);
+    } else {
+      out.diagnosis = `mirror_links has this SKU AND a product exists for its shopify_product_id — but the product's OWN sku differs from the eBay last_synced_sku. Search for the product's real SKU (see mirrorLinkProductCheck.matchingProducts), not "${sku}".`;
+    }
+  } else {
+    out.diagnosis = `"${sku}" not found anywhere — not in products, not in mirror_links. Check exact spelling.`;
+  }
+
+  res.json(out);
+});
+
+// POST /api/products/:id/reactivate — flip active back to true
+router.post('/:id/reactivate', requireAdmin, async (req, res) => {
+  const { rows } = await query(
+    `UPDATE products SET active = true WHERE id = $1 RETURNING id, sku, title, active`,
+    [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+  await audit(req, 'reactivate_product', 'product', rows[0].id, {});
+  res.json({ ok: true, product: rows[0] });
 });
 
 // GET /api/products/:id
