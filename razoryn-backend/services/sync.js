@@ -356,6 +356,39 @@ async function runFullSync() {
     results.ebay = { error: e.message };
     await setCursor('ebay', { lastSyncedAt: new Date(), status: 'error', error: e.message });
   }
+
+  // MASTER-STOCK PROPAGATION: incoming eBay/Shopify orders decrement the
+  // warehouse qty_on_hand (done in the pull loops above). The warehouse is the
+  // master, so after ingesting orders we re-push the NEW quantity to every
+  // channel — this keeps Shopify and eBay in sync with each other. Example: an
+  // eBay sale drops stock 3→2 in the app; without this, Shopify would still
+  // show 3. We push the freshest qty for every product touched by a sale in
+  // this run.
+  try {
+    const touched = await query(`
+      SELECT DISTINCT p.id, p.sku, p.qty_on_hand, p.shopify_inventory_id, p.shopify_product_id
+      FROM products p
+      JOIN stock_movements sm ON sm.product_id = p.id
+      WHERE sm.reason LIKE 'sale_%'
+        AND sm.created_at > now() - interval '10 minutes'
+        AND p.active = true
+    `);
+    let pushed = 0;
+    for (const product of touched.rows) {
+      if (shopify.isConfigured()) {
+        try { await shopify.pushStockForProduct(product); } catch (e) { console.warn('[sync] shopify re-push', product.sku, e.message); }
+      }
+      if (ebay.isConfigured()) {
+        try { await ebay.pushStockForProduct(product); } catch (e) { console.warn('[sync] ebay re-push', product.sku, e.message); }
+      }
+      pushed++;
+    }
+    results.stockPropagation = { productsRepushed: pushed };
+  } catch (e) {
+    console.error('[sync] stock propagation failed:', e.message);
+    results.stockPropagation = { error: e.message };
+  }
+
   try { results.shopifyStock = await pushAllStockToShopify(); }
   catch (e) {
     console.error('[sync] stock push failed:', e.message);

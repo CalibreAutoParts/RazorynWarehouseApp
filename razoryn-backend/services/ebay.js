@@ -256,8 +256,41 @@ async function getRecentOrdersTrading(sinceISO, storeArg) {
 
 async function pushStockForProduct(product) {
   if (!product.sku) return { skipped: 'no_sku' };
-  await setInventoryQty(product.sku, product.qty_on_hand);
-  return { ok: true };
+  // Route through the warehouse DB → mirror_links to find this product's eBay
+  // ItemID(s) + store, then push via ReviseInventoryStatus (Trading API) which
+  // works for legacy listings. Falls back to the Inventory-API SKU update only
+  // if no mirror link exists (e.g. inventory-model listings).
+  let links = [];
+  try {
+    const { query } = require('../db');
+    const r = await query(
+      `SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`,
+      [product.shopify_product_id]
+    );
+    links = r.rows;
+  } catch (e) { /* db unavailable — fall through to SKU path */ }
+
+  if (links.length) {
+    const results = [];
+    for (const link of links) {
+      const store = link.store_code || undefined;
+      try {
+        await setQuantityTradingAPI(link.ebay_item_id, product.qty_on_hand, store);
+        results.push({ itemId: link.ebay_item_id, store, ok: true });
+      } catch (e) {
+        results.push({ itemId: link.ebay_item_id, store, error: e.message });
+      }
+    }
+    return { ok: true, via: 'ReviseInventoryStatus', results };
+  }
+
+  // No mirror link — try the Inventory API SKU update as a last resort.
+  try {
+    await setInventoryQty(product.sku, product.qty_on_hand);
+    return { ok: true, via: 'inventory_api' };
+  } catch (e) {
+    return { error: e.message };
+  }
 }
 
 // setQuantityTradingAPI — update a listing's available quantity using the
