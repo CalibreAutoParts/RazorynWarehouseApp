@@ -2923,101 +2923,167 @@ function adjustStock(id, action) {
    LOCATIONS
    ========================================================== */
 async function renderLocations() {
+  if (!State.locFilter) State.locFilter = 'all';  // 'all' | location id | 'none'
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
-        <div><h1>Storage Locations</h1><div class="desc">Define your storage areas, then assign products to them</div></div>
+        <div><h1>Storage Locations</h1><div class="desc">Tap an area to see only its items · add notes &amp; photos to find things fast</div></div>
         <div class="actions"><button class="btn btn-primary" onclick="openAddLocationModal()">+ Add location</button></div>
       </div>
 
-      <!-- Locations manager — the list of storage areas (Ground Floor, Mezzanine, etc.) -->
-      <div class="card" style="margin-bottom:18px">
-        <div class="card-head"><h3>Your storage areas</h3></div>
-        <div class="card-body" style="padding-top:8px">
-          <div id="loc-list">Loading…</div>
-        </div>
-      </div>
+      <!-- Storage areas — clickable cards that filter the item list below -->
+      <div id="loc-areas" style="margin-bottom:18px">Loading…</div>
 
-      <!-- Product → location assignment view -->
-      <div class="page-head" style="margin-bottom:14px">
-        <div><h2 style="font-size:18px;margin:0">Item locations</h2><div class="desc">Tap an item to set where it's stored</div></div>
+      <!-- Item list, scoped to the selected area -->
+      <div class="page-head" style="margin-bottom:12px">
+        <div><h2 id="loc-items-title" style="font-size:18px;margin:0">All items</h2><div class="desc" id="loc-items-sub">Tap an item to set or change where it's stored</div></div>
       </div>
-      <div class="toolbar"><input type="search" class="search-input" id="loc-search" placeholder="Search by item or location..."></div>
+      <div class="toolbar"><input type="search" class="search-input" id="loc-search" placeholder="Search items in this area..."></div>
       <div class="grid-3" id="loc-grid"></div>
     </div>
   `;
 
-  // Load + render the storage-areas list
   await refreshLocationsList();
-
-  function paint() {
-    const q = (el('loc-search')?.value || '').toLowerCase();
-    const items = State.products.filter(p => !q || p.title.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.location||'').toLowerCase().includes(q));
-    el('loc-grid').innerHTML = items.slice(0, 300).map(p => `
-      <div class="loc-card" onclick="openLocationModal('${p.id}')">
-        <div class="loc-img" style="${p.locationPhoto ? `background-image:url(${p.locationPhoto})` : ''}">
-          ${!p.locationPhoto ? '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' : ''}
-        </div>
-        <div class="loc-meta">
-          <div class="loc-title">${escapeHtml(p.title)}</div>
-          <div class="loc-desc">${p.location ? escapeHtml(p.location) : '<span style="color:var(--amber)">No location set</span>'}</div>
-        </div>
-      </div>
-    `).join('') || '<div class="empty"><div class="t">No matches</div></div>';
-  }
-  paint();
-  el('loc-search')?.addEventListener('input', paint);
+  paintLocItems();
+  el('loc-search')?.addEventListener('input', paintLocItems);
 }
 
-// Fetch + render the list of storage areas with product counts + edit/delete.
+// Render the item grid, scoped to the currently-selected area filter.
+function paintLocItems() {
+  const grid = el('loc-grid');
+  if (!grid) return;
+  const q = (el('loc-search')?.value || '').toLowerCase();
+  const filter = State.locFilter || 'all';
+
+  let items = State.products;
+  // Scope to selected area — this is the "load only from that area" behaviour:
+  // we filter to just that area's products so big areas like Ground Floor
+  // don't render the whole catalogue.
+  if (filter === 'none') {
+    items = items.filter(p => !p.locationId);
+  } else if (filter !== 'all') {
+    items = items.filter(p => String(p.locationId) === String(filter));
+  }
+  if (q) {
+    items = items.filter(p => p.title.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.location||'').toLowerCase().includes(q));
+  }
+
+  // Title reflects the active filter
+  const titleEl = el('loc-items-title');
+  const subEl = el('loc-items-sub');
+  if (titleEl) {
+    if (filter === 'all') { titleEl.textContent = 'All items'; }
+    else if (filter === 'none') { titleEl.textContent = 'Unassigned items'; }
+    else {
+      const loc = (State.locations || []).find(l => String(l.id) === String(filter));
+      titleEl.textContent = loc ? loc.name : 'Items';
+    }
+  }
+  if (subEl) subEl.textContent = `${items.length} item${items.length === 1 ? '' : 's'} · tap to change location`;
+
+  grid.innerHTML = items.slice(0, 400).map(p => `
+    <div class="loc-card" onclick="openLocationModal('${p.id}')">
+      <div class="loc-img" style="${p.locationPhoto ? `background-image:url(${p.locationPhoto})` : ''}">
+        ${!p.locationPhoto ? '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' : ''}
+      </div>
+      <div class="loc-meta">
+        <div class="loc-title">${escapeHtml(p.title)}</div>
+        <div class="loc-desc">${p.location ? escapeHtml(p.location) : '<span style="color:var(--amber)">No location set</span>'}</div>
+      </div>
+    </div>
+  `).join('') || '<div class="empty"><div class="t">No items in this area</div></div>';
+}
+
+function setLocFilter(filter) {
+  State.locFilter = filter;
+  // Re-render the area cards (to show selected state) + the item list
+  renderLocAreaCards();
+  paintLocItems();
+}
+
+// Fetch + render the storage-area cards. Clickable to filter; each shows count,
+// notes, and photo thumbnail. Edit/delete live in the area's own modal.
 async function refreshLocationsList() {
-  const wrap = el('loc-list');
-  if (!wrap) return;
   let locations = [];
   try {
     const r = await Api.get('/api/locations');
     locations = r.locations || [];
   } catch (e) {
-    wrap.innerHTML = `<div style="color:var(--red);font-size:13px">Failed to load locations: ${escapeHtml(e.message)}</div>`;
+    const wrap = el('loc-areas');
+    if (wrap) wrap.innerHTML = `<div style="color:var(--red);font-size:13px">Failed to load locations: ${escapeHtml(e.message)}</div>`;
     return;
   }
   State.locations = locations;
+  renderLocAreaCards();
+}
+
+function renderLocAreaCards() {
+  const wrap = el('loc-areas');
+  if (!wrap) return;
+  const locations = State.locations || [];
+  const filter = State.locFilter || 'all';
+  const unassignedCount = (State.products || []).filter(p => !p.locationId).length;
+
   if (locations.length === 0) {
     wrap.innerHTML = `
-      <div style="text-align:center;padding:20px 12px;color:var(--ink-soft)">
+      <div class="card"><div class="card-body" style="text-align:center;padding:24px 12px;color:var(--ink-soft)">
         <div style="font-size:14px;margin-bottom:6px">No storage areas yet</div>
         <div style="font-size:12px;margin-bottom:14px">Add your first area — e.g. Ground Floor, Mezzanine, 2nd Floor.</div>
         <button class="btn btn-primary btn-sm" onclick="openAddLocationModal()">+ Add your first location</button>
-      </div>`;
+      </div></div>`;
     return;
   }
+
+  // "chip" helper for the All / Unassigned quick filters
+  const chip = (key, label, count, active) =>
+    `<button class="btn ${active ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="setLocFilter('${key}')">${label}${count != null ? ` (${count})` : ''}</button>`;
+
   wrap.innerHTML = `
-    <div style="display:flex;flex-direction:column;gap:8px">
-      ${locations.map(l => `
-        <div style="display:flex;align-items:center;gap:12px;padding:12px;background:var(--bg-soft);border-radius:8px;flex-wrap:wrap">
-          <div style="flex:1;min-width:160px">
-            <div style="font-weight:600;font-size:14px">${escapeHtml(l.name)}</div>
-            <div style="font-size:12px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.code)}${l.description ? ' · ' + escapeHtml(l.description) : ''}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      ${chip('all', 'All items', (State.products || []).length, filter === 'all')}
+      ${unassignedCount > 0 ? chip('none', 'Unassigned', unassignedCount, filter === 'none') : ''}
+    </div>
+    <div class="grid-3">
+      ${locations.map(l => {
+        const isActive = String(filter) === String(l.id);
+        const photoUrl = l.photo_data_url || (l.photo_path ? `/uploads/${l.photo_path}` : null);
+        return `
+        <div class="card" style="cursor:pointer;${isActive ? 'outline:2px solid var(--brand-primary);outline-offset:-1px' : ''}" onclick="setLocFilter('${l.id}')">
+          <div style="height:120px;background:var(--line-2);border-radius:10px 10px 0 0;background-size:cover;background-position:center;${photoUrl ? `background-image:url(${photoUrl})` : 'display:flex;align-items:center;justify-content:center'}">
+            ${!photoUrl ? '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--ink-soft)" stroke-width="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>' : ''}
           </div>
-          <span class="pill" style="background:var(--bg);color:var(--ink-soft);font-size:11px">${l.product_count || 0} item${l.product_count === 1 ? '' : 's'}</span>
-          <div style="display:flex;gap:6px">
-            <button class="btn btn-outline btn-sm" onclick="openEditLocationModal(${l.id})">Edit</button>
-            <button class="btn btn-ghost btn-sm" onclick="deleteLocation(${l.id}, '${escapeAttr(l.name)}')" style="color:var(--red)">Delete</button>
+          <div class="card-body" style="padding:12px">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+              <div style="flex:1;min-width:0">
+                <div style="font-weight:600;font-size:14px">${escapeHtml(l.name)}</div>
+                <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.code)}</div>
+              </div>
+              <span class="pill" style="background:var(--bg-soft);color:var(--ink-soft);font-size:11px;white-space:nowrap">${l.product_count || 0} item${l.product_count === 1 ? '' : 's'}</span>
+            </div>
+            ${l.description ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:6px;line-height:1.4">📝 ${escapeHtml(l.description)}</div>` : ''}
+            <div style="display:flex;gap:6px;margin-top:10px" onclick="event.stopPropagation()">
+              <button class="btn btn-outline btn-sm" onclick="openEditLocationModal(${l.id})">Edit</button>
+              <button class="btn btn-ghost btn-sm" onclick="deleteLocation(${l.id}, '${escapeAttr(l.name)}')" style="color:var(--red)">Delete</button>
+            </div>
           </div>
-        </div>
-      `).join('')}
+        </div>`;
+      }).join('')}
     </div>`;
 }
 
-// Add-location modal — simple code + name + optional description.
+// Add-location modal — name, code, notes, and optional photo (multipart upload).
 function openAddLocationModal() {
   modal({
     title: '+ Add storage location',
     body: `
       <div class="field"><label>Name *</label><input id="al-name" placeholder="e.g. Ground Floor" autofocus></div>
-      <div class="field"><label>Short code *</label><input id="al-code" placeholder="e.g. GF"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">A short reference shown on product rows. Must be unique.</div></div>
-      <div class="field"><label>Description (optional)</label><input id="al-desc" placeholder="e.g. Main warehouse floor, bays 1–8"></div>
-      <div style="font-size:12px;color:var(--ink-soft);margin-top:6px;padding:10px;background:var(--bg-soft);border-radius:6px">Quick examples: Ground Floor (GF) · Mezzanine (MEZ) · 2nd Floor (2F). You can add as many as you like.</div>
+      <div class="field"><label>Short code *</label><input id="al-code" placeholder="e.g. GF"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">A short reference shown on product rows. Must be unique. Auto-fills from the name if left blank.</div></div>
+      <div class="field"><label>Notes / finding instructions (optional)</label><textarea id="al-desc" rows="3" placeholder="e.g. Ground floor — rows 1–4 on the left as you walk in. Heavy bumpers on the bottom shelf."></textarea><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Helps staff find things in big areas — mention rows, shelves, landmarks.</div></div>
+      <div class="field"><label>Photo (optional)</label>
+        <div id="al-preview" style="aspect-ratio:4/3;background:var(--line-2);border-radius:8px;margin-bottom:8px;background-size:cover;background-position:center;display:flex;align-items:center;justify-content:center;color:var(--ink-soft)"><span id="al-preview-ph" style="font-size:12px">No photo selected</span></div>
+        <input type="file" id="al-photo" accept="image/*" capture="environment" onchange="locPreviewPhoto(this,'al-preview','al-preview-ph')">
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">A photo of the area helps staff recognise it. Max 8 MB.</div>
+      </div>
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
@@ -3025,21 +3091,27 @@ function openAddLocationModal() {
         const name = el('al-name')?.value.trim();
         let code = el('al-code')?.value.trim();
         const description = el('al-desc')?.value.trim();
+        const photoFile = el('al-photo')?.files?.[0];
         if (!name) { toast('Name is required', 'warn'); return; }
-        // Auto-derive a code from the name if the user left it blank
         if (!code) code = name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'LOC';
         try {
-          // The endpoint accepts multipart (for optional photo) but also plain JSON
-          await Api.post('/api/locations', { code, name, description: description || null });
+          // Multipart so the optional photo can ride along. FormData handles both.
+          const fd = new FormData();
+          fd.append('code', code);
+          fd.append('name', name);
+          if (description) fd.append('description', description);
+          if (photoFile) fd.append('photo', photoFile);
+          const r = await fetch('/api/locations', { method: 'POST', body: fd, credentials: 'include' });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            if (err.error === 'code_exists') { toast(`Code "${code}" already used — pick another`, 'error'); return; }
+            throw new Error(err.message || `HTTP ${r.status}`);
+          }
           toast('Location added', 'success');
           closeModal();
           await refreshLocationsList();
         } catch (e) {
-          if (e.data?.error === 'code_exists') {
-            toast(`Code "${code}" is already used — pick a different short code`, 'error');
-          } else {
-            toast('Failed to add: ' + (e.data?.message || e.message), 'error');
-          }
+          toast('Failed to add: ' + e.message, 'error');
         }
       }},
     ],
@@ -3049,12 +3121,18 @@ function openAddLocationModal() {
 function openEditLocationModal(id) {
   const l = (State.locations || []).find(x => x.id == id);
   if (!l) { toast('Location not found', 'error'); return; }
+  const photoUrl = l.photo_data_url || (l.photo_path ? `/uploads/${l.photo_path}` : null);
   modal({
     title: 'Edit location',
     body: `
       <div class="field"><label>Name *</label><input id="el-name" value="${escapeAttr(l.name)}" autofocus></div>
       <div class="field"><label>Short code *</label><input id="el-code" value="${escapeAttr(l.code)}"></div>
-      <div class="field"><label>Description (optional)</label><input id="el-desc" value="${escapeAttr(l.description || '')}"></div>
+      <div class="field"><label>Notes / finding instructions (optional)</label><textarea id="el-desc" rows="3" placeholder="e.g. rows 1–4 on the left, heavy items bottom shelf">${escapeHtml(l.description || '')}</textarea></div>
+      <div class="field"><label>Photo</label>
+        <div id="el-preview" style="aspect-ratio:4/3;background:var(--line-2);border-radius:8px;margin-bottom:8px;background-size:cover;background-position:center;display:flex;align-items:center;justify-content:center;color:var(--ink-soft);${photoUrl ? `background-image:url(${photoUrl})` : ''}"><span id="el-preview-ph" style="font-size:12px;${photoUrl ? 'display:none' : ''}">${photoUrl ? '' : 'No photo'}</span></div>
+        <input type="file" id="el-photo" accept="image/*" capture="environment" onchange="locPreviewPhoto(this,'el-preview','el-preview-ph')">
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Upload a new photo to replace the current one. Max 8 MB.</div>
+      </div>
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
@@ -3062,19 +3140,44 @@ function openEditLocationModal(id) {
         const name = el('el-name')?.value.trim();
         const code = el('el-code')?.value.trim();
         const description = el('el-desc')?.value.trim();
+        const photoFile = el('el-photo')?.files?.[0];
         if (!name || !code) { toast('Name and code are required', 'warn'); return; }
         try {
-          await Api.patch('/api/locations/' + id, { code, name, description });
+          const fd = new FormData();
+          fd.append('code', code);
+          fd.append('name', name);
+          fd.append('description', description || '');
+          if (photoFile) fd.append('photo', photoFile);
+          const r = await fetch('/api/locations/' + id, { method: 'PATCH', body: fd, credentials: 'include' });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            if (err.error === 'code_exists') { toast(`Code "${code}" already used`, 'error'); return; }
+            throw new Error(err.message || `HTTP ${r.status}`);
+          }
           toast('Location updated', 'success');
           closeModal();
           await refreshLocationsList();
         } catch (e) {
-          if (e.data?.error === 'code_exists') toast(`Code "${code}" already used`, 'error');
-          else toast('Failed to save: ' + (e.data?.message || e.message), 'error');
+          toast('Failed to save: ' + e.message, 'error');
         }
       }},
     ],
   });
+}
+
+// Live preview when a photo file is chosen in a location modal.
+function locPreviewPhoto(input, previewId, placeholderId) {
+  const file = input.files?.[0];
+  if (!file) return;
+  if (file.size > 8 * 1024 * 1024) { toast('Photo too big — max 8 MB', 'warn'); input.value = ''; return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const preview = el(previewId);
+    const ph = el(placeholderId);
+    if (preview) preview.style.backgroundImage = `url(${reader.result})`;
+    if (ph) ph.style.display = 'none';
+  };
+  reader.readAsDataURL(file);
 }
 
 async function deleteLocation(id, name) {
@@ -3082,8 +3185,10 @@ async function deleteLocation(id, name) {
   try {
     await Api.delete('/api/locations/' + id);
     toast('Location deleted', 'success');
+    if (String(State.locFilter) === String(id)) State.locFilter = 'all';
     await refreshLocationsList();
-    await Store.refresh('products');  // product location labels may have changed
+    await Store.refresh('products');
+    paintLocItems();
   } catch (e) {
     toast('Failed to delete: ' + (e.data?.message || e.message), 'error');
   }
