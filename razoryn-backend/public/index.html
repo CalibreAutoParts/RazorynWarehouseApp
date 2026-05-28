@@ -1496,6 +1496,7 @@ async function init() {
     State.user = me;
     await Store.refreshAll();
     try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (e) {}
+    try { await Sounds.loadPrefs(); } catch (e) {}
     enterApp();
     return;
   } catch (e) {
@@ -1645,6 +1646,7 @@ function bindLogin() {
       pin = ''; renderDots();
       await Store.refreshAll();
       try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (e) {}
+    try { await Sounds.loadPrefs(); } catch (e) {}
       enterApp();
     } catch (e) {
       errEl.textContent = e.message === 'unauthorized' || e.status === 401
@@ -1670,6 +1672,7 @@ function bindLogin() {
       State.user = user;
       await Store.refreshAll();
       try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (e) {}
+    try { await Sounds.loadPrefs(); } catch (e) {}
       enterApp();
     } catch (e) {
       toast(e.status === 401 ? 'Invalid email or password' : 'Login failed', 'error');
@@ -1885,9 +1888,13 @@ function notifyNewSale(sale) {
 const Sounds = {
   _ctx: null,
   _lastPlay: {},
-  // HTMLAudioElement cache for custom uploads — Web Audio API can't play
-  // arbitrary mp3/wav data without decoding; <audio> handles all formats natively.
-  _customAudio: null,
+  // Server-synced preferences, loaded from /api/settings/sound-prefs at startup.
+  // Shape: { sale: {choice, customDataUrl?, customName?}, return: {...}, ... }
+  // Synced across ALL devices (stored in the DB), unlike the old localStorage.
+  _prefs: {},
+  _prefsLoaded: false,
+  // Cache of <audio> elements per event for custom sounds (keyed by event).
+  _customAudio: {},
   _getCtx() {
     if (!this._ctx) {
       try { this._ctx = new (window.AudioContext || window.webkitAudioContext)(); }
@@ -1897,33 +1904,38 @@ const Sounds = {
     return this._ctx;
   },
 
-  // Get the user's chosen sound for a category. Default: cha-ching for sale,
-  // ding for everything else.
-  getChoice(category) {
-    return localStorage.getItem(`rwh_sound_${category}`) || (category === 'sale' ? 'chaching' : 'ding');
-  },
-  setChoice(category, name) {
-    if (name === 'chaching' && category === 'sale') localStorage.removeItem(`rwh_sound_${category}`);
-    else localStorage.setItem(`rwh_sound_${category}`, name);
+  // Per-event defaults used until the server prefs load (or if an event is unset).
+  _defaults: { sale: 'chaching', return: 'chime', return_closed: 'pop', low_stock: 'bell' },
+
+  // Load synced preferences from the server. Called at app start + after saving.
+  async loadPrefs() {
+    try {
+      const r = await Api.get('/api/settings/sound-prefs');
+      this._prefs = r.soundPrefs || {};
+      this._prefsLoaded = true;
+      this._customAudio = {};  // invalidate cached audio elements on reload
+    } catch (e) {
+      console.warn('[sounds] failed to load prefs:', e.message);
+      this._prefs = {};
+    }
+    return this._prefs;
   },
 
-  // Custom uploaded sound storage — stored as data URL in localStorage.
-  // Limited to ~1MB raw (which becomes ~1.3MB base64 in localStorage) to stay
-  // well under the typical 5–10MB per-origin localStorage quota.
-  getCustom() {
-    return localStorage.getItem('rwh_sound_custom') || null;
+  // The resolved choice for an event (server pref → per-event default → 'ding').
+  getChoice(category) {
+    const p = this._prefs[category];
+    if (p && p.choice) return p.choice;
+    return this._defaults[category] || 'ding';
   },
-  setCustom(dataUrl, filename) {
-    if (dataUrl) {
-      localStorage.setItem('rwh_sound_custom', dataUrl);
-      localStorage.setItem('rwh_sound_custom_name', filename || 'custom.audio');
-    } else {
-      localStorage.removeItem('rwh_sound_custom');
-      localStorage.removeItem('rwh_sound_custom_name');
-    }
-    this._customAudio = null;  // invalidate cached <audio> element
+  // The custom data URL for an event, if it has one.
+  getCustomFor(category) {
+    const p = this._prefs[category];
+    return (p && p.choice === 'custom' && p.customDataUrl) ? p.customDataUrl : null;
   },
-  getCustomName() { return localStorage.getItem('rwh_sound_custom_name'); },
+  getCustomNameFor(category) {
+    const p = this._prefs[category];
+    return (p && p.customName) || null;
+  },
 
   playForSale() { this._playDebounced('sale'); },
   playForReturn() { this._playDebounced('return'); },
@@ -1936,34 +1948,56 @@ const Sounds = {
     const now = Date.now();
     if (this._lastPlay[category] && now - this._lastPlay[category] < 5000) return;
     this._lastPlay[category] = now;
-    this.play(name);
+    this.playForEvent(category);
   },
 
-  preview(name) {
-    if (name === 'none') return;
-    this.play(name);
-  },
-
-  play(name) {
-    // Custom uploaded sound — play via HTMLAudioElement for format flexibility
-    if (name === 'custom') {
-      const dataUrl = this.getCustom();
-      if (!dataUrl) return;  // user selected "custom" but never uploaded — silently ignore
-      try {
-        // Reuse the audio element if possible; reload only when the source changes
-        if (!this._customAudio || this._customAudio.dataset.dataUrl !== dataUrl) {
-          this._customAudio = new Audio(dataUrl);
-          this._customAudio.dataset.dataUrl = dataUrl;
-          this._customAudio.volume = 0.8;
-        } else {
-          this._customAudio.currentTime = 0;  // restart if mid-play
-        }
-        const p = this._customAudio.play();
-        if (p?.catch) p.catch(() => {});  // ignore autoplay block errors
-      } catch (e) {}
+  // Preview a specific event's configured sound (used by the settings page).
+  previewEvent(category, overrideChoice, overrideDataUrl) {
+    const choice = overrideChoice || this.getChoice(category);
+    if (choice === 'none') return;
+    if (choice === 'custom') {
+      const url = overrideDataUrl || this.getCustomFor(category);
+      if (url) this._playCustomUrl(category, url);
       return;
     }
-    // Synthesised sounds — Web Audio API
+    this._playSynth(choice);
+  },
+
+  // Play whatever the given event is configured to play.
+  playForEvent(category) {
+    const choice = this.getChoice(category);
+    if (choice === 'none') return;
+    if (choice === 'custom') {
+      const url = this.getCustomFor(category);
+      if (url) this._playCustomUrl(category, url);
+      return;
+    }
+    this._playSynth(choice);
+  },
+
+  // Generic preview by synth name (no event context) — for testing built-ins.
+  preview(name) {
+    if (name === 'none' || name === 'custom') return;
+    this._playSynth(name);
+  },
+
+  _playCustomUrl(key, dataUrl) {
+    try {
+      let audio = this._customAudio[key];
+      if (!audio || audio.dataset.dataUrl !== dataUrl) {
+        audio = new Audio(dataUrl);
+        audio.dataset.dataUrl = dataUrl;
+        audio.volume = 0.8;
+        this._customAudio[key] = audio;
+      } else {
+        audio.currentTime = 0;
+      }
+      const p = audio.play();
+      if (p?.catch) p.catch(() => {});
+    } catch (e) {}
+  },
+
+  _playSynth(name) {
     const ctx = this._getCtx();
     if (!ctx) return;
     const fn = this._synths[name];
@@ -9045,37 +9079,19 @@ function renderSettings() {
       <div class="card" style="margin-bottom:16px">
         <div class="card-head">
           <h3>🔔 Notification sounds</h3>
-          <div class="card-desc">Different sounds for different events so you can recognise what's happening without looking. Per-device — each workstation remembers its own preference.</div>
+          <div class="card-desc">A different sound for each event so you know what's happening without looking. Each event can use a built-in sound or its own uploaded file. Settings sync across all devices and staff.</div>
         </div>
         <div class="card-body">
           <div style="font-size:11px;color:var(--ink-soft);margin-bottom:14px">
-            Auto-plays at most once every 5 seconds per event category — won't blast if several alerts fire together.
+            Auto-plays at most once every 5 seconds per event — won't blast if several alerts fire together. Set any event to "Custom" to upload your own sound for it.
           </div>
 
-          <!-- The four event rows are generated by the JS helper. Each row gives
-               the user a dropdown + preview button. Custom uploads share a single
-               file across categories (one upload, picked separately per event). -->
+          <!-- One row per event: dropdown + preview + (if Custom) its own upload. -->
           <div id="sound-event-rows" style="display:flex;flex-direction:column;gap:14px"></div>
 
-          <!-- Custom upload panel — shared across all event categories.
-               Visible when ANY event has "Custom" selected. -->
-          <div id="set-sound-custom-wrap" style="display:none;margin-top:18px;padding:12px;background:var(--bg-soft);border-radius:8px;max-width:520px">
-            <div style="font-weight:600;font-size:13px;margin-bottom:6px">Custom sound file (shared across all events)</div>
-            <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">
-              Upload an MP3, WAV, OGG, or M4A file. Max ~1 MB. Stored locally on this device only — won't sync across other staff devices. The same uploaded file is used by any event you've set to "Custom".
-            </div>
-            <div id="set-sound-custom-current" style="display:none;font-size:12px;padding:8px 12px;background:var(--white);border:1px solid var(--line);border-radius:6px;margin-bottom:8px">
-              <strong style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">Loaded</strong>
-              <div id="set-sound-custom-name" style="font-family:ui-monospace,monospace;font-size:11px;margin-top:2px"></div>
-            </div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-              <input type="file" id="set-sound-custom-file" accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/x-m4a,audio/mp4,.mp3,.wav,.ogg,.m4a" onchange="onCustomSoundUpload(this)" style="font-size:12px;flex:1;min-width:200px">
-              <button class="btn btn-ghost btn-sm" onclick="clearCustomSound()" id="set-sound-custom-clear" style="display:none;color:var(--red)">Remove</button>
-            </div>
-          </div>
-
-          <div style="margin-top:14px">
+          <div style="margin-top:16px">
             <button class="btn btn-primary btn-sm" onclick="saveSoundPrefs()">Save all sounds</button>
+            <span style="font-size:11px;color:var(--ink-soft);margin-left:8px">Saves to all devices</span>
           </div>
         </div>
       </div>
@@ -9242,10 +9258,12 @@ async function loadPricingConfig() {
       vatReg.addEventListener('change', () => { vatNumWrap.style.display = vatReg.checked ? '' : 'none'; });
     }
     State.pricingConfig = r;
-    // Hydrate the per-device sound preferences from localStorage by re-rendering
-    // the event-rows. Independent of backend settings — each computer remembers
-    // its own choices.
-    if (typeof renderSoundEventRows === 'function' && el('sound-event-rows')) renderSoundEventRows();
+    // Sound preferences are synced from the server. Ensure they're loaded (in
+    // case settings is opened before the startup load finished), then render.
+    if (typeof renderSoundEventRows === 'function' && el('sound-event-rows')) {
+      if (!Sounds._prefsLoaded) { Sounds.loadPrefs().then(() => renderSoundEventRows()); }
+      else renderSoundEventRows();
+    }
     // Hydrate the eBay listing defaults card
     if (typeof hydrateEbayDefaults === 'function' && el('set-ebay-cat')) hydrateEbayDefaults(r);
     // Hydrate the logo card + apply uploaded logo to topbar everywhere
@@ -9292,93 +9310,68 @@ function renderSoundEventRows() {
   const wrap = el('sound-event-rows');
   if (!wrap) return;
   wrap.innerHTML = SOUND_EVENTS.map(ev => {
-    const current = localStorage.getItem(`rwh_sound_${ev.key}`) || ev.defaultName;
+    const current = Sounds.getChoice(ev.key);
+    const customName = Sounds.getCustomNameFor(ev.key);
     const options = SOUND_OPTIONS.map(o =>
       `<option value="${o.value}" ${o.value === current ? 'selected' : ''}>${escapeHtml(o.label)}</option>`
     ).join('');
     return `
-      <div class="field" style="margin:0">
+      <div class="field" style="margin:0;padding:12px;background:var(--bg-soft);border-radius:8px">
         <label>${escapeHtml(ev.label)}</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <select class="sound-event-select" data-event="${ev.key}" onchange="onSoundEventChange()" style="font-size:14px;flex:1;min-width:240px">${options}</select>
+          <select class="sound-event-select" data-event="${ev.key}" onchange="onSoundEventChange('${ev.key}')" style="font-size:14px;flex:1;min-width:200px">${options}</select>
           <button class="btn btn-outline btn-sm" onclick="previewSoundFor('${ev.key}')">▶ Preview</button>
         </div>
         <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">${escapeHtml(ev.desc)}</div>
+        <!-- Per-event custom upload — shown only when this event is set to Custom -->
+        <div class="sound-custom-panel" data-event="${ev.key}" style="display:${current === 'custom' ? 'block' : 'none'};margin-top:10px;padding:10px;background:var(--white);border:1px solid var(--line);border-radius:6px">
+          <div class="sound-custom-current" data-event="${ev.key}" style="display:${customName ? 'flex' : 'none'};align-items:center;gap:8px;font-size:11px;margin-bottom:8px">
+            <span style="font-family:ui-monospace,monospace">${customName ? '🎵 ' + escapeHtml(customName) : ''}</span>
+            <button class="btn btn-ghost btn-sm" onclick="clearEventCustomSound('${ev.key}')" style="color:var(--red);padding:2px 8px">Remove</button>
+          </div>
+          <input type="file" class="sound-custom-file" data-event="${ev.key}" accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/x-m4a,audio/mp4,.mp3,.wav,.ogg,.m4a" onchange="onEventCustomUpload(this,'${ev.key}')" style="font-size:12px;width:100%">
+          <div style="font-size:10px;color:var(--ink-soft);margin-top:4px">Upload MP3/WAV/OGG/M4A, max ~1 MB. This sound is for this event only and syncs to all devices.</div>
+        </div>
       </div>
     `;
   }).join('');
-  refreshCustomSoundUI();  // show/hide custom upload panel based on whether any row picked "custom"
 }
 
-// Preview the dropdown's *currently selected* value (which may not yet be saved).
+// Preview the dropdown's currently-selected value for an event (may be unsaved).
 function previewSoundFor(eventKey) {
   const select = document.querySelector(`.sound-event-select[data-event="${eventKey}"]`);
   if (!select) return;
-  if (select.value === 'custom' && !Sounds.getCustom()) {
-    toast('Upload a sound file first', 'warn');
+  const choice = select.value;
+  if (choice === 'custom') {
+    // Prefer a freshly-staged upload, else the already-saved custom sound.
+    const staged = (window._stagedCustomSounds || {})[eventKey];
+    const url = staged || Sounds.getCustomFor(eventKey);
+    if (!url) { toast('Upload a sound file for this event first', 'warn'); return; }
+    Sounds.previewEvent(eventKey, 'custom', url);
     return;
   }
-  Sounds.preview(select.value);
+  Sounds.previewEvent(eventKey, choice);
 }
 
-// Save every event row's selection in one go.
-function saveSoundPrefs() {
-  const customNeeded = [];
-  document.querySelectorAll('.sound-event-select').forEach(sel => {
-    if (sel.value === 'custom') customNeeded.push(sel.dataset.event);
-  });
-  if (customNeeded.length && !Sounds.getCustom()) {
-    toast('Upload a sound file first — at least one event is set to Custom', 'warn');
-    return;
-  }
-  document.querySelectorAll('.sound-event-select').forEach(sel => {
-    Sounds.setChoice(sel.dataset.event, sel.value);
-  });
-  toast('Notification sounds saved on this device', 'success');
+// When an event's dropdown changes: show/hide its custom-upload panel.
+function onSoundEventChange(eventKey) {
+  const select = document.querySelector(`.sound-event-select[data-event="${eventKey}"]`);
+  const panel = document.querySelector(`.sound-custom-panel[data-event="${eventKey}"]`);
+  if (select && panel) panel.style.display = select.value === 'custom' ? 'block' : 'none';
 }
 
-// Triggered when any dropdown changes — re-evaluates whether the custom upload
-// panel should be visible (any row set to "custom" → show it).
-function onSoundEventChange() {
-  refreshCustomSoundUI();
-}
-
-// Show the custom upload panel if ANY event row is set to "custom". Update the
-// "loaded" indicator + clear-button based on whether a file is currently stored.
-function refreshCustomSoundUI() {
-  const wrap = el('set-sound-custom-wrap');
-  if (!wrap) return;
-  const anyCustom = !!document.querySelector('.sound-event-select[data-event] option:checked[value="custom"]')
-    || Array.from(document.querySelectorAll('.sound-event-select')).some(s => s.value === 'custom');
-  wrap.style.display = anyCustom ? 'block' : 'none';
-  const current = el('set-sound-custom-current');
-  const clearBtn = el('set-sound-custom-clear');
-  const nameEl = el('set-sound-custom-name');
-  const hasCustom = !!Sounds.getCustom();
-  if (current)  current.style.display = hasCustom ? 'block' : 'none';
-  if (clearBtn) clearBtn.style.display = hasCustom ? 'inline-flex' : 'none';
-  if (nameEl)   nameEl.textContent = Sounds.getCustomName() || '';
-}
-
-// Handle file upload from the input. Reads as data URL (base64), validates type
-// + size, stores in localStorage so it persists across sessions on this device.
-async function onCustomSoundUpload(input) {
+// Stage an uploaded custom sound for an event (held in memory until Save).
+async function onEventCustomUpload(input, eventKey) {
   const file = input.files?.[0];
   if (!file) return;
-  // Size check — keep under 1MB raw. Base64 inflates ~33%, so the stored size
-  // ends up around 1.3MB. localStorage typical limit is 5–10MB per origin.
   const MAX_BYTES = 1_000_000;
   if (file.size > MAX_BYTES) {
-    toast(`File too big — ${(file.size / 1024 / 1024).toFixed(1)} MB. Max 1 MB. Try shortening the clip or converting to a lower bitrate.`, 'error', 8000);
-    input.value = '';
-    return;
+    toast(`File too big — ${(file.size/1024/1024).toFixed(1)} MB. Max 1 MB.`, 'error', 7000);
+    input.value = ''; return;
   }
-  // Type check — be permissive since browsers report these inconsistently
-  const accepted = /^(audio\/|.*\.(mp3|wav|ogg|m4a)$)/i;
-  if (!accepted.test(file.type) && !/\.(mp3|wav|ogg|m4a)$/i.test(file.name)) {
+  if (!/^(audio\/|.*\.(mp3|wav|ogg|m4a)$)/i.test(file.type) && !/\.(mp3|wav|ogg|m4a)$/i.test(file.name)) {
     toast('Unsupported file type. Use MP3, WAV, OGG, or M4A.', 'error');
-    input.value = '';
-    return;
+    input.value = ''; return;
   }
   try {
     const dataUrl = await new Promise((resolve, reject) => {
@@ -9387,32 +9380,73 @@ async function onCustomSoundUpload(input) {
       reader.onerror = () => reject(reader.error || new Error('Read failed'));
       reader.readAsDataURL(file);
     });
-    Sounds.setCustom(dataUrl, file.name);
-    refreshCustomSoundUI();
-    toast(`Loaded "${file.name}" — click Preview on any event to test.`, 'success', 5000);
-  } catch (e) {
-    // localStorage QuotaExceededError fires if the user has lots of other data stored.
-    Sounds.setCustom(null);
-    refreshCustomSoundUI();
-    if (String(e).includes('quota') || e.name === 'QuotaExceededError') {
-      toast('Browser storage full. Try a smaller audio file.', 'error', 8000);
-    } else {
-      toast('Failed to load file: ' + e.message, 'error');
+    window._stagedCustomSounds = window._stagedCustomSounds || {};
+    window._stagedCustomSoundNames = window._stagedCustomSoundNames || {};
+    window._stagedCustomSounds[eventKey] = dataUrl;
+    window._stagedCustomSoundNames[eventKey] = file.name;
+    // Update the "current" indicator
+    const cur = document.querySelector(`.sound-custom-current[data-event="${eventKey}"]`);
+    if (cur) {
+      cur.style.display = 'flex';
+      cur.querySelector('span').textContent = '🎵 ' + file.name + ' (unsaved)';
     }
+    toast(`"${file.name}" ready — press ▶ Preview to test, then Save all sounds.`, 'success', 5000);
+  } catch (e) {
+    toast('Could not read file: ' + e.message, 'error');
   }
 }
 
-function clearCustomSound() {
-  if (!confirm('Remove the uploaded sound file? Any events set to Custom will fall back to their default.')) return;
-  Sounds.setCustom(null);
-  // For any event still set to custom, fall back to that event's default sound
-  SOUND_EVENTS.forEach(ev => {
-    if (Sounds.getChoice(ev.key) === 'custom') Sounds.setChoice(ev.key, ev.defaultName);
-  });
-  renderSoundEventRows();
-  const fileInput = el('set-sound-custom-file');
+// Remove an event's custom sound (staged or saved).
+function clearEventCustomSound(eventKey) {
+  if (window._stagedCustomSounds) delete window._stagedCustomSounds[eventKey];
+  if (window._stagedCustomSoundNames) delete window._stagedCustomSoundNames[eventKey];
+  // Also clear from loaded prefs so Save persists the removal
+  if (Sounds._prefs[eventKey]) { delete Sounds._prefs[eventKey].customDataUrl; delete Sounds._prefs[eventKey].customName; }
+  const cur = document.querySelector(`.sound-custom-current[data-event="${eventKey}"]`);
+  if (cur) cur.style.display = 'none';
+  const fileInput = document.querySelector(`.sound-custom-file[data-event="${eventKey}"]`);
   if (fileInput) fileInput.value = '';
-  toast('Custom sound removed', 'success');
+  toast('Removed — pick a built-in sound or upload a new file, then Save.', 'info');
+}
+
+// Save every event's selection + any staged custom uploads to the SERVER so it
+// syncs across all devices.
+async function saveSoundPrefs() {
+  const prefs = {};
+  const staged = window._stagedCustomSounds || {};
+  const stagedNames = window._stagedCustomSoundNames || {};
+  let missingCustom = null;
+  document.querySelectorAll('.sound-event-select').forEach(sel => {
+    const key = sel.dataset.event;
+    const choice = sel.value;
+    const entry = { choice };
+    if (choice === 'custom') {
+      // Use a freshly-staged upload if present, else the already-saved one.
+      const url = staged[key] || Sounds.getCustomFor(key);
+      const name = stagedNames[key] || Sounds.getCustomNameFor(key);
+      if (!url) { missingCustom = key; return; }
+      entry.customDataUrl = url;
+      entry.customName = name || 'custom.audio';
+    }
+    prefs[key] = entry;
+  });
+  if (missingCustom) {
+    const ev = SOUND_EVENTS.find(e => e.key === missingCustom);
+    toast(`Upload a sound file for "${ev ? ev.label : missingCustom}" first — it's set to Custom.`, 'warn', 6000);
+    return;
+  }
+  try {
+    const r = await Api.put('/api/settings/sound-prefs', { soundPrefs: prefs });
+    Sounds._prefs = r.soundPrefs || prefs;
+    Sounds._customAudio = {};
+    window._stagedCustomSounds = {};
+    window._stagedCustomSoundNames = {};
+    toast('Notification sounds saved — synced to all devices', 'success', 5000);
+    renderSoundEventRows();
+  } catch (e) {
+    if (e.data?.error === 'audio_too_large') toast(e.data.message, 'error', 7000);
+    else toast('Failed to save: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
