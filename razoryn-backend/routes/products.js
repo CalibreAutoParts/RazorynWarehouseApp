@@ -13,7 +13,12 @@ router.use(requireAuth);
 router.get('/', requirePermission('inventory'), async (req, res) => {
   const { search = '', brand = '', lowStock } = req.query;
   const page = Math.max(1, parseInt(req.query.page) || 1);
-  const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 50));
+  // Cap raised to 1000 (from 200) so the frontend can load the entire catalogue
+  // in one request — inventory/stock-check/location search all filter the
+  // in-memory product list client-side, so every product must be loaded or it's
+  // invisible to search. With ~540 products one request covers everything; the
+  // frontend also paginates as a safety net for catalogues beyond 1000.
+  const pageSize = Math.min(1000, Math.max(1, parseInt(req.query.pageSize) || 50));
 
   const where = ['active = true'];
   const params = [];
