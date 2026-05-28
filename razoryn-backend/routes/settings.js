@@ -76,6 +76,69 @@ router.get('/', async (req, res) => {
   res.json({ settings: rows[0] || {} });
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// Notification sound preferences — synced across ALL devices.
+//
+// Stored in app_settings.data->'soundPrefs' (JSONB) so every workstation and
+// phone shares the same configuration. Replaces the old per-device localStorage
+// approach. Structure (one entry per event category):
+//   {
+//     "sale":          { "choice": "custom", "customDataUrl": "data:audio/mp3;base64,…", "customName": "register.mp3" },
+//     "return":        { "choice": "chime" },
+//     "return_closed": { "choice": "pop" },
+//     "low_stock":     { "choice": "bell" }
+//   }
+// Each event can have its OWN custom uploaded sound (customDataUrl), unlike the
+// old single shared upload.
+//
+// GET is available to any authenticated user (sounds must play for warehouse
+// staff too). PUT is admin-only (configuration is a management action).
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/sound-prefs', async (req, res) => {
+  const { rows } = await query(`SELECT data FROM app_settings WHERE id = 1`);
+  const prefs = (rows[0]?.data && rows[0].data.soundPrefs) || {};
+  res.json({ soundPrefs: prefs });
+});
+
+router.put('/sound-prefs', requireAdmin, async (req, res) => {
+  const incoming = req.body?.soundPrefs;
+  if (!incoming || typeof incoming !== 'object') {
+    return res.status(400).json({ error: 'soundPrefs object required' });
+  }
+  // Validate + size-guard each event. A custom data URL must be a base64 audio
+  // data URL under ~1.2MB decoded (so the whole soundPrefs blob stays well
+  // within reasonable JSONB row limits even with 4 custom sounds).
+  const ALLOWED_CHOICES = new Set(['chaching', 'bell', 'chime', 'ding', 'pop', 'custom', 'none']);
+  const MAX_DECODED = 1_200_000;
+  const clean = {};
+  for (const [key, val] of Object.entries(incoming)) {
+    if (!val || typeof val !== 'object') continue;
+    const choice = String(val.choice || '');
+    if (!ALLOWED_CHOICES.has(choice)) continue;
+    const entry = { choice };
+    if (choice === 'custom') {
+      const dataUrl = val.customDataUrl;
+      if (typeof dataUrl !== 'string' || !/^data:audio\/[\w.+-]+;base64,[A-Za-z0-9+/=]+$/.test(dataUrl)) {
+        return res.status(400).json({ error: 'invalid_audio', message: `"${key}" is set to Custom but has no valid audio data.` });
+      }
+      const base64 = dataUrl.split(',')[1] || '';
+      if (Math.ceil(base64.length * 0.75) > MAX_DECODED) {
+        return res.status(413).json({ error: 'audio_too_large', message: `Custom sound for "${key}" is too large — keep each under ~1 MB.` });
+      }
+      entry.customDataUrl = dataUrl;
+      entry.customName = String(val.customName || 'custom.audio').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 100);
+    }
+    clean[key] = entry;
+  }
+  // Merge into the existing data JSONB without clobbering other keys.
+  const cur = await query(`SELECT data FROM app_settings WHERE id = 1`);
+  const data = cur.rows[0]?.data || {};
+  data.soundPrefs = clean;
+  await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify(data)]);
+  await audit(req, 'update_sound_prefs', null, null, { events: Object.keys(clean) });
+  res.json({ ok: true, soundPrefs: clean });
+});
+
 // PATCH /api/settings (admin)
 router.patch('/', requireAdmin, async (req, res) => {
   const b = req.body || {};
