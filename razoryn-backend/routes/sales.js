@@ -569,10 +569,11 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   `;
 
   // Returns / fitment policy varies per channel
+  const policyDomain = (company.company_website || brand.domain || '').replace(/^https?:\/\//, '') || 'our website';
   const returnsPolicy = isEbay
     ? "Returns handled via eBay within 30 days. Open a return request through your eBay account; we'll respond within 48 hours."
     : isShopify
-    ? "30-day returns from delivery, in original packaging. Open a return request via your account at razoryn.co.uk. 5% restocking fee applies."
+    ? `30-day returns from delivery, in original packaging. Open a return request via your account at ${policyDomain}. 5% restocking fee applies.`
     : "Within 30 days of purchase, in original packaging. 5% restocking fee applies. Return shipping at buyer's cost unless faulty.";
 
   const fitmentPolicy = (isEbay || isShopify)
@@ -1060,7 +1061,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     <div class="terms">
       ${company.company_reg_no ? `${escapeHtml(brand.name)} is a trading name of ${escapeHtml(company.company_name || brand.fullName)}, Company Reg Number ${escapeHtml(company.company_reg_no)}, registered in England & Wales.` : ''}
       ${isVatRegistered && company.vat_number ? ` VAT Number: ${escapeHtml(company.vat_number)}.` : ''}
-      Full terms: ${company.company_website ? escapeHtml(company.company_website) + '/policies' : 'razoryn.co.uk/policies'}
+      Full terms: ${company.company_website ? escapeHtml(company.company_website) + '/policies' : escapeHtml((brand.domain || '').replace(/^https?:\/\//, '')) + '/policies'}
     </div>
   </div>
 </div>
