@@ -2345,11 +2345,81 @@ function renderInventory() {
         <td class="num">${gbp(p.priceShopify)}</td>
         <td style="white-space:nowrap"><button class="btn btn-outline btn-sm" onclick="openProductModal('${p.id}')">Edit</button> <button class="btn btn-ghost btn-sm" onclick="deleteProduct('${p.id}','${(p.title||'').replace(/'/g,"\\'")}')" style="color:var(--red)" title="Delete product">🗑</button></td>
       </tr>
-    `).join('') || '<tr><td colspan="10"><div class="empty"><div class="t">No products match</div></div></td></tr>';
+    `).join('') || `<tr><td colspan="10"><div class="empty"><div class="t">No products match</div>${q && State.user?.role === 'admin' ? `<div style="margin-top:10px"><button class="btn btn-outline btn-sm" onclick="diagnoseSku('${escapeAttr(el('inv-search').value.trim())}')">🔍 Why isn't "${escapeHtml(el('inv-search').value.trim())}" showing?</button></div>` : ''}</div></td></tr>`;
     invUpdateBulkBar();
   }
   paint();
   ['inv-search','inv-brand','inv-stock'].forEach(id => el(id).addEventListener('input', paint));
+}
+
+// Diagnose why a SKU that appears in Listing Mirror doesn't show in inventory.
+// Calls the backend tracer and presents a plain-English explanation + 1-click fix.
+async function diagnoseSku(sku) {
+  if (!sku) return;
+  const taskId = Task.start('Tracing "' + sku + '" across the database…');
+  let r;
+  try {
+    r = await Api.get('/api/products/diagnose/' + encodeURIComponent(sku));
+    Task.done(taskId, 'Diagnosis ready');
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Diagnostic failed: ' + (e.data?.message || e.message), 'error');
+    return;
+  }
+
+  // Build a fix button based on what the backend found
+  let fixButton = null;
+  if (r.fixAvailable === 'reactivate' && r.fixProductId) {
+    fixButton = { label: '✓ Reactivate this product', primary: true, onClick: async () => {
+      try {
+        await Api.post('/api/products/' + r.fixProductId + '/reactivate');
+        toast('Product reactivated — it will now show in search', 'success');
+        closeModal();
+        await Store.refresh('products');
+        renderInventory();
+      } catch (e) { toast('Reactivate failed: ' + (e.data?.message || e.message), 'error'); }
+    }};
+  } else if (r.fixAvailable === 'reimport_or_orphan') {
+    fixButton = { label: '📥 Import from Shopify', primary: true, onClick: async () => {
+      closeModal();
+      const t = Task.start('Importing products from Shopify…');
+      try {
+        await Api.post('/api/settings/import-shopify');
+        Task.done(t, 'Import complete');
+        toast('Shopify import finished — search for the SKU again', 'success', 6000);
+        await Store.refresh('products');
+      } catch (e) {
+        Task.fail(t, 'Failed');
+        toast('Import failed: ' + (e.data?.message || e.message), 'error');
+      }
+    }};
+  }
+
+  // Render details
+  const detailRows = [];
+  if (r.exactProductMatch?.length) {
+    detailRows.push(`<div style="margin:6px 0"><strong>Product table (exact):</strong> ${r.exactProductMatch.map(p => `id ${p.id}, active=${p.active}, qty=${p.qty_on_hand}`).join('; ')}</div>`);
+  }
+  if (r.fuzzyProductMatch?.length && !r.exactProductMatch?.length) {
+    detailRows.push(`<div style="margin:6px 0"><strong>Found a case/space variant:</strong> ${r.fuzzyProductMatch.map(p => `${p.sku_with_brackets} (length ${p.sku_len}, id ${p.id})`).join('; ')}</div>`);
+  }
+  if (r.mirrorLinkMatch?.length) {
+    detailRows.push(`<div style="margin:6px 0"><strong>eBay mirror links:</strong> ${r.mirrorLinkMatch.length} found · ${r.mirrorLinkProductCheck.filter(c => c.productExists).length} have a matching product, ${r.mirrorLinkProductCheck.filter(c => !c.productExists).length} are orphans</div>`);
+  }
+
+  modal({
+    title: '🔍 Diagnosis: ' + escapeHtml(sku),
+    body: `
+      <div style="font-size:13px;line-height:1.6">
+        <div style="padding:12px;background:var(--bg-soft);border-radius:8px;margin-bottom:12px">${escapeHtml(r.diagnosis || 'No diagnosis available.')}</div>
+        ${detailRows.join('')}
+      </div>
+    `,
+    actions: [
+      { label: 'Close', onClick: closeModal },
+      ...(fixButton ? [fixButton] : []),
+    ],
+  });
 }
 
 function invToggleRow(id, on) {
@@ -2771,40 +2841,64 @@ function renderLocations() {
   el('loc-search').addEventListener('input', paint);
 }
 
-function openLocationModal(id) {
+async function openLocationModal(id) {
   const p = State.products.find(x => x.id == id);
+  if (!p) { toast('Product not found', 'error'); return; }
+
+  // Load the list of storage locations so the user can pick one. The product →
+  // location link is via products.location_id (FK to the locations table), which
+  // the PATCH /api/products/:id endpoint already supports.
+  let locations = [];
+  try {
+    const r = await Api.get('/api/locations');
+    locations = r.locations || r || [];
+  } catch (e) {
+    // Non-fatal — show the modal anyway with a note
+    console.warn('[locations] failed to load list:', e.message);
+  }
+
+  const optionsHtml = ['<option value="">— No location assigned —</option>']
+    .concat(locations.map(l =>
+      `<option value="${l.id}" ${String(p.locationId) === String(l.id) ? 'selected' : ''}>${escapeHtml(l.code ? l.code + ' · ' : '')}${escapeHtml(l.name || '')}</option>`
+    )).join('');
+
   modal({
     title: 'Location — ' + p.sku,
     body: `
-      <div class="field"><label>Item</label><div style="padding:10px;background:var(--line-2);border-radius:8px"><strong>${p.title}</strong></div></div>
-      <div class="field"><label>Location reference</label><input id="lm-loc" value="${p.location||''}" placeholder="Aisle B, Rack 3, Shelf 2"></div>
-      <div class="field"><label>Description (helps staff find it)</label><textarea id="lm-desc" rows="2">${p.locationDesc||''}</textarea></div>
-      <div class="field"><label>Photo</label>
-        <div id="lm-preview" style="aspect-ratio:4/3;background:var(--line-2);border-radius:8px;margin-bottom:8px;background-size:cover;background-position:center;${p.locationPhoto?`background-image:url(${p.locationPhoto})`:''}"></div>
-        <input type="file" id="lm-photo" accept="image/*" capture="environment">
-        <div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Tap to take or pick a photo of where this item is stored</div>
+      <div class="field"><label>Item</label><div style="padding:10px;background:var(--line-2);border-radius:8px"><strong>${escapeHtml(p.title)}</strong><div style="font-size:12px;color:var(--ink-soft);font-family:ui-monospace,monospace;margin-top:2px">${escapeHtml(p.sku)}</div></div></div>
+      <div class="field">
+        <label>Storage location</label>
+        <select id="lm-location-id" style="width:100%">${optionsHtml}</select>
+        <div style="font-size:12px;color:var(--ink-soft);margin-top:6px">
+          ${locations.length === 0
+            ? 'No locations defined yet. Create storage locations on the Locations page first, then assign products to them here.'
+            : 'Pick where this item is stored. Manage the list of locations (with photos) on the Locations page.'}
+        </div>
       </div>
     `,
     actions: [
       { label: 'Save', primary: true, onClick: async () => {
-        // Per-product location text + photos require a schema field that isn't in the
-        // backend yet. The Locations admin page (via /api/locations with code/name/photo)
-        // is the canonical place to manage where things are stored.
-        toast('Per-product location storage coming with the Locations admin page', 'warn');
-        closeModal();
+        const locId = el('lm-location-id')?.value || '';
+        try {
+          await Api.patch('/api/products/' + p.id, {
+            locationId: locId === '' ? null : parseInt(locId),
+          });
+          toast('Location updated', 'success');
+          closeModal();
+          // Refresh products so the new location shows everywhere
+          await Store.refresh('products');
+          // Repaint whichever page is active
+          if (typeof routeTo === 'function' && State.page) {
+            const fn = { locations: renderLocations, inventory: renderInventory }[State.page];
+            if (fn) fn();
+          }
+        } catch (e) {
+          toast('Failed to save location: ' + (e.data?.message || e.message), 'error');
+        }
       }},
       { label: 'Cancel', onClick: closeModal }
     ]
   });
-  setTimeout(() => {
-    const photoInput = el('lm-photo');
-    if (photoInput) photoInput.addEventListener('change', async e => {
-      const file = e.target.files[0]; if (!file) return;
-      const url = await fileToDataUrl(file);
-      const preview = el('lm-preview');
-      if (preview) preview.style.backgroundImage = `url(${url})`;
-    });
-  }, 50);
 }
 function fileToDataUrl(file) {
   return new Promise((res, rej) => {
