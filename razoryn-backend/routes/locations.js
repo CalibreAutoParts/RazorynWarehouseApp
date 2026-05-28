@@ -10,19 +10,18 @@ const { audit } = require('../middleware/audit');
 const router = express.Router();
 router.use(requireAuth);
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
-const LOC_DIR = path.join(UPLOAD_DIR, 'locations');
-fs.mkdirSync(LOC_DIR, { recursive: true });
-
+// Photos are stored as base64 data URLs in the database (photo_data_url column)
+// rather than as files on disk. This is deliberate: Railway's filesystem is
+// EPHEMERAL — anything written to a local uploads/ folder is wiped on every
+// redeploy. Storing the image inline in Postgres means location photos survive
+// deploys without needing a mounted volume. Images are capped at 2MB and
+// downscaled client-side isn't required (8MB upload limit, but we reject >2MB
+// decoded to keep rows reasonable).
+//
+// We use multer memoryStorage so the file lands in req.file.buffer, which we
+// convert to a data URL.
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, LOC_DIR),
-    filename: (req, file, cb) => {
-      const stamp = Date.now() + '-' + Math.round(Math.random() * 1e6);
-      const ext = path.extname(file.originalname).toLowerCase().replace(/[^.\w]/g, '') || '.jpg';
-      cb(null, `loc-${stamp}${ext}`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   fileFilter: (req, file, cb) => {
     if (!/^image\//.test(file.mimetype)) return cb(new Error('only_images'));
     cb(null, true);
@@ -30,10 +29,37 @@ const upload = multer({
   limits: { fileSize: 8 * 1024 * 1024 },
 });
 
+// Self-healing: ensure the photo_data_url column exists (older DBs only have
+// photo_path). Idempotent.
+let _migrated = false;
+async function ensureColumns() {
+  if (_migrated) return;
+  try {
+    await query(`ALTER TABLE locations ADD COLUMN IF NOT EXISTS photo_data_url TEXT`);
+    _migrated = true;
+  } catch (e) { console.warn('[locations] migration warning:', e.message); }
+}
+ensureColumns();
+
+// Convert an uploaded file buffer to a data URL, rejecting oversized images.
+function fileToDataUrl(file) {
+  if (!file) return null;
+  const decodedSize = file.buffer.length;
+  if (decodedSize > 2 * 1024 * 1024) {
+    const err = new Error('photo_too_large');
+    err.userMessage = `Photo is ~${Math.round(decodedSize / 1024)} KB — please use an image under 2 MB.`;
+    throw err;
+  }
+  return `data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
+}
+
 // GET /api/locations
 router.get('/', requirePermission('locations'), async (req, res) => {
+  await ensureColumns();
   const { rows } = await query(`
-    SELECT l.*, COUNT(p.id)::int AS product_count
+    SELECT l.id, l.code, l.name, l.description, l.photo_path, l.photo_data_url,
+           l.created_at, l.updated_at,
+           COUNT(p.id)::int AS product_count
     FROM locations l
     LEFT JOIN products p ON p.location_id = l.id AND p.active = true
     GROUP BY l.id
@@ -55,16 +81,19 @@ router.get('/:id', requirePermission('locations'), async (req, res) => {
   res.json({ location: l.rows[0], products: products.rows });
 });
 
-// POST /api/locations  (multipart - optional photo)
+// POST /api/locations  (multipart - optional photo stored as base64)
 router.post('/', requirePermission('locations'), upload.single('photo'), async (req, res) => {
+  await ensureColumns();
   const { code, name, description } = req.body || {};
   if (!code || !name) return res.status(400).json({ error: 'code_and_name_required' });
-  const photoPath = req.file ? path.relative(UPLOAD_DIR, req.file.path) : null;
+  let photoDataUrl = null;
+  try { photoDataUrl = fileToDataUrl(req.file); }
+  catch (e) { return res.status(413).json({ error: 'photo_too_large', message: e.userMessage }); }
   try {
     const { rows } = await query(
-      `INSERT INTO locations (code, name, description, photo_path)
+      `INSERT INTO locations (code, name, description, photo_data_url)
        VALUES ($1,$2,$3,$4) RETURNING *`,
-      [code, name, description || null, photoPath]
+      [code, name, description || null, photoDataUrl]
     );
     await audit(req, 'create_location', 'location', rows[0].id, { code });
     res.status(201).json({ location: rows[0] });
@@ -76,24 +105,32 @@ router.post('/', requirePermission('locations'), upload.single('photo'), async (
 
 // PATCH /api/locations/:id (multipart - optional photo replacement)
 router.patch('/:id', requirePermission('locations'), upload.single('photo'), async (req, res) => {
+  await ensureColumns();
   const { code, name, description } = req.body || {};
   const sets = [], params = [];
   if (code) { params.push(code); sets.push(`code = $${params.length}`); }
   if (name) { params.push(name); sets.push(`name = $${params.length}`); }
-  if (description !== undefined) { params.push(description); sets.push(`description = $${params.length}`); }
+  if (description !== undefined) { params.push(description || null); sets.push(`description = $${params.length}`); }
   if (req.file) {
-    const photoPath = path.relative(UPLOAD_DIR, req.file.path);
-    params.push(photoPath); sets.push(`photo_path = $${params.length}`);
+    let photoDataUrl;
+    try { photoDataUrl = fileToDataUrl(req.file); }
+    catch (e) { return res.status(413).json({ error: 'photo_too_large', message: e.userMessage }); }
+    params.push(photoDataUrl); sets.push(`photo_data_url = $${params.length}`);
   }
   if (!sets.length) return res.status(400).json({ error: 'no_updatable_fields' });
   params.push(req.params.id);
-  const { rows } = await query(
-    `UPDATE locations SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`,
-    params
-  );
-  if (!rows[0]) return res.status(404).json({ error: 'not_found' });
-  await audit(req, 'update_location', 'location', rows[0].id);
-  res.json({ location: rows[0] });
+  try {
+    const { rows } = await query(
+      `UPDATE locations SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length} RETURNING *`,
+      params
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+    await audit(req, 'update_location', 'location', rows[0].id);
+    res.json({ location: rows[0] });
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'code_exists' });
+    throw e;
+  }
 });
 
 // DELETE /api/locations/:id
