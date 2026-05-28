@@ -260,6 +260,48 @@ async function pushStockForProduct(product) {
   return { ok: true };
 }
 
+// setQuantityTradingAPI — update a listing's available quantity using the
+// Trading API ReviseInventoryStatus call. This is the correct path for
+// Calibre's listings, which are legacy Trading-API listings NOT migrated to
+// the eBay Inventory (Sell) API. The Inventory-API bulk_update used by
+// setInventoryQty() silently no-ops for these listings because they don't
+// exist in the inventory model — which is why quantities never propagated.
+//
+// ReviseInventoryStatus is the lightweight quantity/price-only revise call:
+// it doesn't count as heavily against revision limits and can update up to 4
+// items per call. We update by ItemID (looked up from mirror_links).
+async function setQuantityTradingAPI(itemId, quantity, storeArg) {
+  if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
+  if (!itemId) throw new Error('missing_item_id');
+  const qty = Math.max(0, parseInt(quantity) || 0);
+  const body = `<InventoryStatus><ItemID>${escapeXml(String(itemId))}</ItemID><Quantity>${qty}</Quantity></InventoryStatus>`;
+  const xml = await tradingCall('ReviseInventoryStatus', body, storeArg);
+  if (xml.includes('<Ack>Failure</Ack>')) {
+    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+    throw new Error('eBay ReviseInventoryStatus error: ' + decodeEntities(err));
+  }
+  return { ok: true, itemId, quantity: qty, storeCode: resolveStore(storeArg)?.code };
+}
+
+// getQuantityTradingAPI — read a listing's current available quantity via
+// GetItem (Trading API). Used to PULL eBay stock into the warehouse so the app
+// reflects what's actually live on each store (the import only reads Shopify
+// levels, so eBay-only stock like EVBODY's was never captured).
+async function getQuantityTradingAPI(itemId, storeArg) {
+  if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
+  if (!itemId) throw new Error('missing_item_id');
+  const xml = await tradingCall('GetItem',
+    `<ItemID>${escapeXml(String(itemId))}</ItemID><DetailLevel>ReturnAll</DetailLevel>`, storeArg);
+  if (xml.includes('<Ack>Failure</Ack>')) {
+    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+    throw new Error('eBay GetItem error: ' + decodeEntities(err));
+  }
+  // Available = Quantity - QuantitySold
+  const qty = parseInt(extractOne(xml, 'Quantity') || '0') || 0;
+  const sold = parseInt(extractOne(xml, 'QuantitySold') || '0') || 0;
+  return Math.max(0, qty - sold);
+}
+
 // ---------- Trading API (XML) — needed for GetMyeBaySelling ----------
 // The newer Sell APIs only return listings migrated to the inventory model,
 // which most legacy listings aren't. Trading API works for everything.
@@ -1013,6 +1055,8 @@ module.exports = {
   getOpenReturns,
   getAllRecentReturns,
   pushStockForProduct,
+  setQuantityTradingAPI,
+  getQuantityTradingAPI,
   getActiveListings,
   reviseItem,
   completeSale,
