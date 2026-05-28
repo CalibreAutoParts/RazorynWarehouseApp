@@ -1115,4 +1115,75 @@ router.post('/cleanup-disabled-store-links', requireAdmin, async (req, res) => {
   });
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// POST /api/listings/resolve-legacy-links
+// Handles mirror_links rows with store_code = NULL (the "N linked products
+// have unknown eBay store (legacy)" banner). These predate per-store tracking.
+//
+// Two-phase, cheap (no bulk GetMyeBaySelling scan):
+//   Phase 1 — for each NULL-store link, call GetItem (1 call each) to find which
+//             store the ItemID belongs to by checking the seller user ID against
+//             each configured store. Far cheaper than a full re-scan because
+//             there are only a handful of legacy rows.
+//   Phase 2 — anything still unresolved (item ended, GetItem failed, store
+//             disabled) can be cleared if ?clearUnresolved=true is passed.
+//
+// Body: { clearUnresolved?: boolean }
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/resolve-legacy-links', requireAdmin, async (req, res) => {
+  const ebay = require('../services/ebay');
+  const clearUnresolved = !!req.body?.clearUnresolved;
+
+  // Find the NULL-store links
+  const legacy = await query(
+    `SELECT ebay_item_id, last_synced_sku FROM mirror_links WHERE store_code IS NULL`
+  );
+  if (legacy.rows.length === 0) {
+    return res.json({ ok: true, resolved: 0, cleared: 0, unresolved: 0, message: 'No legacy links — nothing to resolve.' });
+  }
+
+  const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
+  let resolved = 0, cleared = 0;
+  const unresolvedRows = [];
+
+  for (const link of legacy.rows) {
+    let matchedStore = null;
+    // Try each active store: ask its account for this ItemID. The store whose
+    // token can see the item as its own listing is the owner.
+    for (const s of stores) {
+      try {
+        const owns = await ebay.itemBelongsToStore(link.ebay_item_id, s.code);
+        if (owns) { matchedStore = s.code; break; }
+      } catch (e) { /* try next store */ }
+    }
+    if (matchedStore) {
+      await query(`UPDATE mirror_links SET store_code = $1 WHERE ebay_item_id = $2`, [matchedStore, link.ebay_item_id]);
+      resolved++;
+    } else {
+      unresolvedRows.push(link);
+    }
+  }
+
+  // Phase 2 — optionally clear the ones we couldn't attribute to any active
+  // store (likely Evanta listings now that Evanta is disabled, or ended items).
+  if (clearUnresolved && unresolvedRows.length) {
+    const ids = unresolvedRows.map(r => r.ebay_item_id);
+    const del = await query(`DELETE FROM mirror_links WHERE ebay_item_id = ANY($1)`, [ids]);
+    cleared = del.rowCount || 0;
+  }
+
+  await audit(req, 'resolve_legacy_links', null, null, {
+    total: legacy.rows.length, resolved, cleared, unresolved: unresolvedRows.length - cleared,
+  });
+
+  res.json({
+    ok: true,
+    total: legacy.rows.length,
+    resolved,
+    cleared,
+    unresolved: unresolvedRows.length - cleared,
+    unresolvedSample: unresolvedRows.slice(0, 10).map(r => ({ itemId: r.ebay_item_id, sku: r.last_synced_sku })),
+  });
+});
+
 module.exports = router;

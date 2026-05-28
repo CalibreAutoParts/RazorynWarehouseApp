@@ -13,6 +13,7 @@ router.get('/', (req, res) => {
     fullName: brand.fullName,
     domain: brand.domain,
     logoUrl: brand.logoUrl,
+    logoUrlDark: brand.logoUrlDark || brand.logoUrl,
     primaryColor: brand.primaryColor,
     secondaryColor: brand.secondaryColor,
     supportColor: brand.supportColor,
