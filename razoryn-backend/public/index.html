@@ -678,6 +678,68 @@
     .table th, .table td { padding: 10px; font-size: 12px; }
   }
 
+  /* ==================== RESPONSIVE POLISH ====================
+     Tablet + phone refinements layered on top of the base breakpoints above.
+     Goal: every page usable one-handed on a phone, no horizontal page scroll,
+     touch targets ≥ 40px, wide tables scroll inside their card not the page. */
+
+  /* Tablet (≤ 1024px): tighten grids so cards don't get too narrow */
+  @media (max-width: 1024px) {
+    .grid-4 { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+    .content { padding: 18px; }
+  }
+
+  /* Any table inside a card should scroll horizontally on its own rather than
+     forcing the whole page to scroll. Wrap is applied via .table-scroll, but we
+     also make bare tables in cards behave. */
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .card > .table, .card .table-scroll > .table { min-width: 0; }
+
+  @media (max-width: 768px) {
+    /* Comfortable padding on tablets/phones */
+    .content { padding: 14px; }
+    .page-head { gap: 10px; margin-bottom: 16px; }
+    .page-head h1 { font-size: 19px; }
+    /* Stats: 2-up on phones rather than cramped 4-up */
+    .grid-4 { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .grid-3 { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+    /* Action buttons go full-width-ish and wrap cleanly */
+    .page-head .actions { width: 100%; }
+    .page-head .actions .btn { flex: 1 1 auto; justify-content: center; min-height: 42px; }
+    /* Touch targets: bump small buttons up to a tappable size */
+    .btn { min-height: 40px; }
+    .btn-sm { min-height: 34px; }
+    /* Tables: force horizontal scroll within their wrapper, keep columns from collapsing */
+    .table { min-width: 560px; }
+    .table-wrap, .card > div[style*="overflow-x"] { -webkit-overflow-scrolling: touch; }
+    /* Search inputs full width */
+    .search-input, .toolbar .search-input { width: 100%; min-width: 0; }
+    .toolbar { gap: 8px; }
+    /* Modal becomes near-full-screen sheet */
+    .modal { max-width: 100%; max-height: 94vh; border-radius: 14px 14px 0 0; margin-top: auto; }
+    .modal-overlay { align-items: flex-end; padding: 0; }
+    .modal-body { padding: 16px; }
+    /* Form fields: prevent iOS zoom-on-focus by keeping font ≥ 16px */
+    .field input, .field select, .field textarea, input, select, textarea { font-size: 16px; }
+    /* Quote Builder footer: stack the totals + button */
+    #qb-footer { flex-direction: column; align-items: stretch; gap: 8px; }
+    #qb-footer .btn { width: 100%; justify-content: center; }
+  }
+
+  @media (max-width: 480px) {
+    /* Phones: single-column stats so values are legible */
+    .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    .grid-3, .grid-2 { grid-template-columns: 1fr; }
+    .content { padding: 12px; }
+    .modal-foot { flex-direction: column-reverse; gap: 8px; }
+    .modal-foot .btn { width: 100%; justify-content: center; }
+    /* Stat tile compaction */
+    .stat { padding: 12px; }
+    .stat .value { font-size: 18px; }
+    .stat .label { font-size: 11px; }
+    /* Location cards single column on small phones handled by grid-3 → 1fr above */
+  }
+
   /* Hide on mobile - admin-only desktop features */
   .admin-only { display: none; }
   body.is-admin .admin-only { display: initial; }
@@ -2833,34 +2895,171 @@ function adjustStock(id, action) {
 /* ==========================================================
    LOCATIONS
    ========================================================== */
-function renderLocations() {
+async function renderLocations() {
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
-        <div><h1>Storage Locations</h1><div class="desc">Where each item is stored — with photos to help find them fast</div></div>
+        <div><h1>Storage Locations</h1><div class="desc">Define your storage areas, then assign products to them</div></div>
+        <div class="actions"><button class="btn btn-primary" onclick="openAddLocationModal()">+ Add location</button></div>
+      </div>
+
+      <!-- Locations manager — the list of storage areas (Ground Floor, Mezzanine, etc.) -->
+      <div class="card" style="margin-bottom:18px">
+        <div class="card-head"><h3>Your storage areas</h3></div>
+        <div class="card-body" style="padding-top:8px">
+          <div id="loc-list">Loading…</div>
+        </div>
+      </div>
+
+      <!-- Product → location assignment view -->
+      <div class="page-head" style="margin-bottom:14px">
+        <div><h2 style="font-size:18px;margin:0">Item locations</h2><div class="desc">Tap an item to set where it's stored</div></div>
       </div>
       <div class="toolbar"><input type="search" class="search-input" id="loc-search" placeholder="Search by item or location..."></div>
       <div class="grid-3" id="loc-grid"></div>
     </div>
   `;
+
+  // Load + render the storage-areas list
+  await refreshLocationsList();
+
   function paint() {
-    const q = el('loc-search').value.toLowerCase();
+    const q = (el('loc-search')?.value || '').toLowerCase();
     const items = State.products.filter(p => !q || p.title.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.location||'').toLowerCase().includes(q));
-    el('loc-grid').innerHTML = items.map(p => `
+    el('loc-grid').innerHTML = items.slice(0, 300).map(p => `
       <div class="loc-card" onclick="openLocationModal('${p.id}')">
         <div class="loc-img" style="${p.locationPhoto ? `background-image:url(${p.locationPhoto})` : ''}">
           ${!p.locationPhoto ? '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' : ''}
         </div>
         <div class="loc-meta">
-          <div class="loc-title">${p.title}</div>
-          <div class="loc-desc">${p.location || 'No location set'}</div>
-          ${p.locationDesc ? `<div class="loc-desc" style="margin-top:4px">${p.locationDesc}</div>`:''}
+          <div class="loc-title">${escapeHtml(p.title)}</div>
+          <div class="loc-desc">${p.location ? escapeHtml(p.location) : '<span style="color:var(--amber)">No location set</span>'}</div>
         </div>
       </div>
     `).join('') || '<div class="empty"><div class="t">No matches</div></div>';
   }
   paint();
-  el('loc-search').addEventListener('input', paint);
+  el('loc-search')?.addEventListener('input', paint);
+}
+
+// Fetch + render the list of storage areas with product counts + edit/delete.
+async function refreshLocationsList() {
+  const wrap = el('loc-list');
+  if (!wrap) return;
+  let locations = [];
+  try {
+    const r = await Api.get('/api/locations');
+    locations = r.locations || [];
+  } catch (e) {
+    wrap.innerHTML = `<div style="color:var(--red);font-size:13px">Failed to load locations: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  State.locations = locations;
+  if (locations.length === 0) {
+    wrap.innerHTML = `
+      <div style="text-align:center;padding:20px 12px;color:var(--ink-soft)">
+        <div style="font-size:14px;margin-bottom:6px">No storage areas yet</div>
+        <div style="font-size:12px;margin-bottom:14px">Add your first area — e.g. Ground Floor, Mezzanine, 2nd Floor.</div>
+        <button class="btn btn-primary btn-sm" onclick="openAddLocationModal()">+ Add your first location</button>
+      </div>`;
+    return;
+  }
+  wrap.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${locations.map(l => `
+        <div style="display:flex;align-items:center;gap:12px;padding:12px;background:var(--bg-soft);border-radius:8px;flex-wrap:wrap">
+          <div style="flex:1;min-width:160px">
+            <div style="font-weight:600;font-size:14px">${escapeHtml(l.name)}</div>
+            <div style="font-size:12px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.code)}${l.description ? ' · ' + escapeHtml(l.description) : ''}</div>
+          </div>
+          <span class="pill" style="background:var(--bg);color:var(--ink-soft);font-size:11px">${l.product_count || 0} item${l.product_count === 1 ? '' : 's'}</span>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-outline btn-sm" onclick="openEditLocationModal(${l.id})">Edit</button>
+            <button class="btn btn-ghost btn-sm" onclick="deleteLocation(${l.id}, '${escapeAttr(l.name)}')" style="color:var(--red)">Delete</button>
+          </div>
+        </div>
+      `).join('')}
+    </div>`;
+}
+
+// Add-location modal — simple code + name + optional description.
+function openAddLocationModal() {
+  modal({
+    title: '+ Add storage location',
+    body: `
+      <div class="field"><label>Name *</label><input id="al-name" placeholder="e.g. Ground Floor" autofocus></div>
+      <div class="field"><label>Short code *</label><input id="al-code" placeholder="e.g. GF"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">A short reference shown on product rows. Must be unique.</div></div>
+      <div class="field"><label>Description (optional)</label><input id="al-desc" placeholder="e.g. Main warehouse floor, bays 1–8"></div>
+      <div style="font-size:12px;color:var(--ink-soft);margin-top:6px;padding:10px;background:var(--bg-soft);border-radius:6px">Quick examples: Ground Floor (GF) · Mezzanine (MEZ) · 2nd Floor (2F). You can add as many as you like.</div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Add location', primary: true, onClick: async () => {
+        const name = el('al-name')?.value.trim();
+        let code = el('al-code')?.value.trim();
+        const description = el('al-desc')?.value.trim();
+        if (!name) { toast('Name is required', 'warn'); return; }
+        // Auto-derive a code from the name if the user left it blank
+        if (!code) code = name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'LOC';
+        try {
+          // The endpoint accepts multipart (for optional photo) but also plain JSON
+          await Api.post('/api/locations', { code, name, description: description || null });
+          toast('Location added', 'success');
+          closeModal();
+          await refreshLocationsList();
+        } catch (e) {
+          if (e.data?.error === 'code_exists') {
+            toast(`Code "${code}" is already used — pick a different short code`, 'error');
+          } else {
+            toast('Failed to add: ' + (e.data?.message || e.message), 'error');
+          }
+        }
+      }},
+    ],
+  });
+}
+
+function openEditLocationModal(id) {
+  const l = (State.locations || []).find(x => x.id == id);
+  if (!l) { toast('Location not found', 'error'); return; }
+  modal({
+    title: 'Edit location',
+    body: `
+      <div class="field"><label>Name *</label><input id="el-name" value="${escapeAttr(l.name)}" autofocus></div>
+      <div class="field"><label>Short code *</label><input id="el-code" value="${escapeAttr(l.code)}"></div>
+      <div class="field"><label>Description (optional)</label><input id="el-desc" value="${escapeAttr(l.description || '')}"></div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Save', primary: true, onClick: async () => {
+        const name = el('el-name')?.value.trim();
+        const code = el('el-code')?.value.trim();
+        const description = el('el-desc')?.value.trim();
+        if (!name || !code) { toast('Name and code are required', 'warn'); return; }
+        try {
+          await Api.patch('/api/locations/' + id, { code, name, description });
+          toast('Location updated', 'success');
+          closeModal();
+          await refreshLocationsList();
+        } catch (e) {
+          if (e.data?.error === 'code_exists') toast(`Code "${code}" already used`, 'error');
+          else toast('Failed to save: ' + (e.data?.message || e.message), 'error');
+        }
+      }},
+    ],
+  });
+}
+
+async function deleteLocation(id, name) {
+  if (!confirm(`Delete location "${name}"?\n\nProducts stored here will be unassigned (set to no location). This won't delete any products.`)) return;
+  try {
+    await Api.delete('/api/locations/' + id);
+    toast('Location deleted', 'success');
+    await refreshLocationsList();
+    await Store.refresh('products');  // product location labels may have changed
+  } catch (e) {
+    toast('Failed to delete: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 async function openLocationModal(id) {
