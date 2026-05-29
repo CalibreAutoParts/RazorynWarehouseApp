@@ -3117,7 +3117,7 @@ function openAddLocationModal() {
       <div class="field"><label>Photo (optional)</label>
         <div id="al-preview" style="aspect-ratio:4/3;background:var(--line-2);border-radius:8px;margin-bottom:8px;background-size:cover;background-position:center;display:flex;align-items:center;justify-content:center;color:var(--ink-soft)"><span id="al-preview-ph" style="font-size:12px">No photo selected</span></div>
         <input type="file" id="al-photo" accept="image/*" capture="environment" onchange="locPreviewPhoto(this,'al-preview','al-preview-ph')">
-        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">A photo of the area helps staff recognise it. Max 8 MB.</div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Take a photo with your phone or upload one — auto-resized for fast upload.</div>
       </div>
     `,
     actions: [
@@ -3126,7 +3126,9 @@ function openAddLocationModal() {
         const name = el('al-name')?.value.trim();
         let code = el('al-code')?.value.trim();
         const description = el('al-desc')?.value.trim();
-        const photoFile = el('al-photo')?.files?.[0];
+        const photoInput = el('al-photo');
+        const photoFile = photoInput?._processedBlob || photoInput?.files?.[0];
+        const photoName = photoInput?._processedName || photoInput?.files?.[0]?.name;
         if (!name) { toast('Name is required', 'warn'); return; }
         if (!code) code = name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'LOC';
         try {
@@ -3135,7 +3137,7 @@ function openAddLocationModal() {
           fd.append('code', code);
           fd.append('name', name);
           if (description) fd.append('description', description);
-          if (photoFile) fd.append('photo', photoFile);
+          if (photoFile) fd.append('photo', photoFile, photoName || 'photo.jpg');
           const r = await fetch('/api/locations', { method: 'POST', body: fd, credentials: 'include' });
           if (!r.ok) {
             const err = await r.json().catch(() => ({}));
@@ -3166,7 +3168,7 @@ function openEditLocationModal(id) {
       <div class="field"><label>Photo</label>
         <div id="el-preview" style="aspect-ratio:4/3;background:var(--line-2);border-radius:8px;margin-bottom:8px;background-size:cover;background-position:center;display:flex;align-items:center;justify-content:center;color:var(--ink-soft);${photoUrl ? `background-image:url(${photoUrl})` : ''}"><span id="el-preview-ph" style="font-size:12px;${photoUrl ? 'display:none' : ''}">${photoUrl ? '' : 'No photo'}</span></div>
         <input type="file" id="el-photo" accept="image/*" capture="environment" onchange="locPreviewPhoto(this,'el-preview','el-preview-ph')">
-        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Upload a new photo to replace the current one. Max 8 MB.</div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Pick a new photo to replace the current one — auto-resized for fast upload.</div>
       </div>
     `,
     actions: [
@@ -3175,14 +3177,16 @@ function openEditLocationModal(id) {
         const name = el('el-name')?.value.trim();
         const code = el('el-code')?.value.trim();
         const description = el('el-desc')?.value.trim();
-        const photoFile = el('el-photo')?.files?.[0];
+        const photoInput = el('el-photo');
+        const photoFile = photoInput?._processedBlob || photoInput?.files?.[0];
+        const photoName = photoInput?._processedName || photoInput?.files?.[0]?.name;
         if (!name || !code) { toast('Name and code are required', 'warn'); return; }
         try {
           const fd = new FormData();
           fd.append('code', code);
           fd.append('name', name);
           fd.append('description', description || '');
-          if (photoFile) fd.append('photo', photoFile);
+          if (photoFile) fd.append('photo', photoFile, photoName || 'photo.jpg');
           const r = await fetch('/api/locations/' + id, { method: 'PATCH', body: fd, credentials: 'include' });
           if (!r.ok) {
             const err = await r.json().catch(() => ({}));
@@ -3201,18 +3205,102 @@ function openEditLocationModal(id) {
 }
 
 // Live preview when a photo file is chosen in a location modal.
-function locPreviewPhoto(input, previewId, placeholderId) {
+// Downscale an image file in the browser before upload. Modern phones produce
+// 4–10 MB photos straight from the camera; uploading those is slow on cellular
+// AND fails the server-side size guards. We draw the image onto a canvas at a
+// max dimension of 1600px (plenty for warehouse reference photos) and re-encode
+// as JPEG. Typical result: 3 MB phone photo → ~400 KB JPEG, still sharp.
+//
+// Returns a Blob with the downscaled image, or the original file if it's
+// already small (<400 KB) so we don't re-encode for no benefit.
+async function downscaleImage(file, opts = {}) {
+  const maxDim = opts.maxDim || 1600;
+  const quality = opts.quality || 0.82;
+  const skipBelowBytes = opts.skipBelowBytes || 400_000;
+  if (!file || !/^image\//.test(file.type)) return file;
+  if (file.size <= skipBelowBytes) return file;  // small already — skip re-encode
+  try {
+    // createImageBitmap is faster than <img> + onload and handles EXIF orientation
+    // correctly. Fall back to the <img> path if a browser doesn't support it.
+    let bitmap;
+    if (typeof createImageBitmap === 'function') {
+      try { bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+      catch { bitmap = await createImageBitmap(file); }
+    } else {
+      bitmap = await new Promise((res, rej) => {
+        const img = new Image();
+        img.onload = () => res(img);
+        img.onerror = () => rej(new Error('image decode failed'));
+        img.src = URL.createObjectURL(file);
+      });
+    }
+    const srcW = bitmap.width || bitmap.naturalWidth;
+    const srcH = bitmap.height || bitmap.naturalHeight;
+    const scale = Math.min(1, maxDim / Math.max(srcW, srcH));
+    const dstW = Math.round(srcW * scale);
+    const dstH = Math.round(srcH * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = dstW;
+    canvas.height = dstH;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0, dstW, dstH);
+    if (bitmap.close) bitmap.close();
+    const blob = await new Promise((res) => canvas.toBlob(b => res(b), 'image/jpeg', quality));
+    if (!blob) return file;  // toBlob failed (rare) — fall back to original
+    // If somehow the "downscaled" version is larger than the original (already-
+    // compressed source like a tiny PNG), keep the original.
+    return blob.size < file.size ? blob : file;
+  } catch (e) {
+    console.warn('[downscaleImage] failed, using original:', e.message);
+    return file;
+  }
+}
+
+// Read a Blob or File as a data URL. Returns a promise.
+function readAsDataUrl(blob) {
+  return new Promise((res, rej) => {
+    const reader = new FileReader();
+    reader.onload = () => res(reader.result);
+    reader.onerror = () => rej(reader.error || new Error('read failed'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function locPreviewPhoto(input, previewId, placeholderId) {
   const file = input.files?.[0];
   if (!file) return;
-  if (file.size > 8 * 1024 * 1024) { toast('Photo too big — max 8 MB', 'warn'); input.value = ''; return; }
-  const reader = new FileReader();
-  reader.onload = () => {
-    const preview = el(previewId);
-    const ph = el(placeholderId);
-    if (preview) preview.style.backgroundImage = `url(${reader.result})`;
+  // Allow up to 12 MB raw from the camera; we'll downscale it ourselves so the
+  // upload is always reasonable. Anything above 12 MB is almost certainly a RAW
+  // file or video and we shouldn't try to handle it.
+  if (file.size > 12 * 1024 * 1024) {
+    toast(`Photo is ${(file.size/1024/1024).toFixed(1)} MB — too big even after compression. Max 12 MB. Try the standard camera setting (not RAW).`, 'warn', 7000);
+    input.value = '';
+    return;
+  }
+  const previewEl = el(previewId);
+  const ph = el(placeholderId);
+  if (previewEl) previewEl.style.opacity = '0.5';  // brief dim while we process
+  try {
+    const blob = await downscaleImage(file);
+    // Stash the processed blob on the input so the submit handler uses the
+    // downscaled version, not the raw camera file. We do this with a non-
+    // enumerable property to avoid surprising anything else.
+    input._processedBlob = blob;
+    input._processedName = (file.name || 'photo').replace(/\.[^.]+$/, '') + '.jpg';
+    const dataUrl = await readAsDataUrl(blob);
+    if (previewEl) {
+      previewEl.style.backgroundImage = `url(${dataUrl})`;
+      previewEl.style.opacity = '1';
+    }
     if (ph) ph.style.display = 'none';
-  };
-  reader.readAsDataURL(file);
+    // If we actually shrank it, let the user know — reassuring on slow connections.
+    if (blob.size < file.size * 0.7) {
+      toast(`Photo compressed to ${(blob.size/1024).toFixed(0)} KB — uploading…`, 'info', 2500);
+    }
+  } catch (e) {
+    if (previewEl) previewEl.style.opacity = '1';
+    toast('Could not process photo: ' + e.message, 'error');
+  }
 }
 
 async function deleteLocation(id, name) {
@@ -3275,7 +3363,7 @@ async function openLocationModal(id) {
           <label class="btn btn-outline btn-sm" style="cursor:pointer">📷 ${p.locationPhoto ? 'Replace photo' : 'Add photo'}<input type="file" id="lm-photo" accept="image/*" capture="environment" style="display:none" onchange="lmPreviewProductPhoto(this)"></label>
           ${p.locationPhoto ? `<button type="button" class="btn btn-ghost btn-sm" onclick="lmClearProductPhoto()" style="color:var(--red)">Remove photo</button>` : ''}
         </div>
-        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Snap exactly where this part lives so anyone can find it. Max 2 MB.</div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Snap exactly where this part lives so anyone can find it — auto-resized for fast upload.</div>
       </div>
     `,
     actions: [
@@ -3311,20 +3399,37 @@ async function openLocationModal(id) {
   window._lmPhotoState = undefined;  // reset on open
 }
 
-// Per-product location photo: preview + stash as data URL in window._lmPhotoState
-function lmPreviewProductPhoto(input) {
+// Per-product location photo: downscale + preview + stash as data URL in
+// window._lmPhotoState. Same downscaling logic as the area photos — phone
+// cameras produce 4-10 MB JPEGs that we shrink to ~400 KB without losing
+// useful detail for finding parts on a shelf.
+async function lmPreviewProductPhoto(input) {
   const file = input.files?.[0];
   if (!file) return;
-  if (file.size > 2 * 1024 * 1024) { toast('Photo too big — max 2 MB. Try again with a smaller image.', 'warn'); input.value = ''; return; }
-  const reader = new FileReader();
-  reader.onload = () => {
-    window._lmPhotoState = reader.result;  // data URL string
-    const preview = el('lm-preview');
-    const ph = el('lm-preview-ph');
-    if (preview) preview.style.backgroundImage = `url(${reader.result})`;
+  if (file.size > 12 * 1024 * 1024) {
+    toast(`Photo is ${(file.size/1024/1024).toFixed(1)} MB — too big even after compression. Max 12 MB.`, 'warn', 7000);
+    input.value = '';
+    return;
+  }
+  const preview = el('lm-preview');
+  const ph = el('lm-preview-ph');
+  if (preview) preview.style.opacity = '0.5';
+  try {
+    const blob = await downscaleImage(file);
+    const dataUrl = await readAsDataUrl(blob);
+    window._lmPhotoState = dataUrl;
+    if (preview) {
+      preview.style.backgroundImage = `url(${dataUrl})`;
+      preview.style.opacity = '1';
+    }
     if (ph) ph.style.display = 'none';
-  };
-  reader.readAsDataURL(file);
+    if (blob.size < file.size * 0.7) {
+      toast(`Photo compressed to ${(blob.size/1024).toFixed(0)} KB — will save on next Save.`, 'info', 2500);
+    }
+  } catch (e) {
+    if (preview) preview.style.opacity = '1';
+    toast('Could not process photo: ' + e.message, 'error');
+  }
 }
 
 function lmClearProductPhoto() {
