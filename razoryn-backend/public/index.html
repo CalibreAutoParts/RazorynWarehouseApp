@@ -2428,9 +2428,68 @@ function renderInventory() {
             <tbody id="inv-tbody"></tbody>
           </table>
         </div>
+        <div id="inv-foot" style="padding:10px 14px;color:var(--ink-soft);font-size:12px;text-align:center"></div>
       </div>
+      <div id="inv-sentinel" style="height:1px"></div>
     </div>
   `;
+
+  // ---- Paginated render + event delegation (Phase 1B) ----
+  // Filtering still scans ALL products; only the DOM is capped at PAGE rows,
+  // with more appended on scroll via an IntersectionObserver. Rows carry NO
+  // inline handlers — two delegated listeners on the tbody handle every row,
+  // so appended rows need no wiring and cost almost nothing to add.
+  const PAGE = 50;
+  let shown = 0;
+
+  function rowHtml(p) {
+    const tq = totalQty(p);
+    return `
+      <tr>
+        <td><input type="checkbox" class="inv-row-check" data-act="check" data-pid="${p.id}" ${State.invSelected.has(p.id)?'checked':''}></td>
+        <td>
+          ${p.imageUrl
+            ? `<img src="${p.imageUrl}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:6px;background:var(--line-2)">`
+            : `<div style="width:48px;height:48px;border-radius:6px;background:var(--line-2);display:flex;align-items:center;justify-content:center;color:var(--ink-soft)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>`
+          }
+        </td>
+        <td><div style="font-weight:500">${p.title}</div><div style="color:var(--ink-soft);font-size:11px">${p.sku}</div></td>
+        <td style="font-family:ui-monospace,monospace;font-size:12px">${p.partNumber||'—'}</td>
+        <td><div style="font-size:12px">${p.location || '—'}</div></td>
+        <td class="num"><strong>${tq}</strong> ${tq<=p.lowThresh ? `<span class="pill ${tq===0?'red':'amber'}" style="margin-left:6px">${tq===0?'Out':'Low'}</span>`:''}</td>
+        <td class="num">${gbp(p.priceShopify)}</td>
+        <td style="white-space:nowrap"><button class="btn btn-outline btn-sm" data-act="edit" data-pid="${p.id}">Edit</button> <button class="btn btn-ghost btn-sm" data-act="del" data-pid="${p.id}" style="color:var(--red)" title="Delete product">🗑</button></td>
+      </tr>
+    `;
+  }
+
+  function updateFoot() {
+    const total = (State._invFiltered || []).length;
+    const foot = el('inv-foot');
+    if (foot) foot.textContent = total ? `Showing ${Math.min(shown, total)} of ${total}` : '';
+  }
+
+  function renderChunk() {
+    const list = State._invFiltered || [];
+    if (shown >= list.length) return;
+    const slice = list.slice(shown, shown + PAGE);
+    el('inv-tbody').insertAdjacentHTML('beforeend', slice.map(rowHtml).join(''));
+    shown += slice.length;
+    updateFoot();
+  }
+
+  // Keep filling while the sentinel sits near the viewport — handles tall
+  // screens where one 50-row chunk doesn't reach the fold.
+  function fillToViewport() {
+    const s = el('inv-sentinel');
+    if (!s) return;
+    const list = State._invFiltered || [];
+    if (shown >= list.length) return;
+    if (s.getBoundingClientRect().top < window.innerHeight + 300) {
+      renderChunk();
+      requestAnimationFrame(fillToViewport);
+    }
+  }
 
   function paint() {
     const q = el('inv-search').value.toLowerCase();
@@ -2446,25 +2505,48 @@ function renderInventory() {
       return true;
     });
     State._invFiltered = filtered;
-    el('inv-tbody').innerHTML = filtered.map(p => `
-      <tr>
-        <td><input type="checkbox" class="inv-row-check" data-pid="${p.id}" ${State.invSelected.has(p.id)?'checked':''} onchange="invToggleRow('${p.id}',this.checked)"></td>
-        <td>
-          ${p.imageUrl
-            ? `<img src="${p.imageUrl}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:6px;background:var(--line-2)">`
-            : `<div style="width:48px;height:48px;border-radius:6px;background:var(--line-2);display:flex;align-items:center;justify-content:center;color:var(--ink-soft)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>`
-          }
-        </td>
-        <td><div style="font-weight:500">${p.title}</div><div style="color:var(--ink-soft);font-size:11px">${p.sku}</div></td>
-        <td style="font-family:ui-monospace,monospace;font-size:12px">${p.partNumber||'—'}</td>
-        <td><div style="font-size:12px">${p.location || '—'}</div></td>
-        <td class="num"><strong>${totalQty(p)}</strong> ${totalQty(p)<=p.lowThresh ? `<span class="pill ${totalQty(p)===0?'red':'amber'}" style="margin-left:6px">${totalQty(p)===0?'Out':'Low'}</span>`:''}</td>
-        <td class="num">${gbp(p.priceShopify)}</td>
-        <td style="white-space:nowrap"><button class="btn btn-outline btn-sm" onclick="openProductModal('${p.id}')">Edit</button> <button class="btn btn-ghost btn-sm" onclick="deleteProduct('${p.id}','${(p.title||'').replace(/'/g,"\\'")}')" style="color:var(--red)" title="Delete product">🗑</button></td>
-      </tr>
-    `).join('') || `<tr><td colspan="9"><div class="empty"><div class="t">No products match</div>${q && State.user?.role === 'admin' ? `<div style="margin-top:10px"><button class="btn btn-outline btn-sm" onclick="diagnoseSku('${escapeAttr(el('inv-search').value.trim())}')">🔍 Why isn't "${escapeHtml(el('inv-search').value.trim())}" showing?</button></div>` : ''}</div></td></tr>`;
+    shown = 0;
+    const tbody = el('inv-tbody');
+    if (!filtered.length) {
+      tbody.innerHTML = `<tr><td colspan="9"><div class="empty"><div class="t">No products match</div>${q && State.user?.role === 'admin' ? `<div style="margin-top:10px"><button class="btn btn-outline btn-sm" onclick="diagnoseSku('${escapeAttr(el('inv-search').value.trim())}')">🔍 Why isn't "${escapeHtml(el('inv-search').value.trim())}" showing?</button></div>` : ''}</div></td></tr>`;
+      updateFoot();
+      invUpdateBulkBar();
+      return;
+    }
+    tbody.innerHTML = '';
+    renderChunk();
+    requestAnimationFrame(fillToViewport);
     invUpdateBulkBar();
   }
+
+  // Event delegation — TWO listeners for the whole table, replacing the ~1,600
+  // inline handlers that used to make every keystroke retype 590 KB of DOM.
+  const tbody = el('inv-tbody');
+  tbody.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const pid = btn.getAttribute('data-pid');
+    if (btn.getAttribute('data-act') === 'edit') {
+      openProductModal(pid);
+    } else if (btn.getAttribute('data-act') === 'del') {
+      const prod = State.products.find(x => String(x.id) === String(pid));
+      deleteProduct(pid, prod ? (prod.title || '') : '');
+    }
+  });
+  tbody.addEventListener('change', (e) => {
+    const cb = e.target.closest('input[data-act="check"]');
+    if (!cb) return;
+    invToggleRow(cb.getAttribute('data-pid'), cb.checked);
+  });
+
+  // Infinite scroll: append the next chunk when the sentinel scrolls into view.
+  if (State._invObserver) State._invObserver.disconnect();
+  State._invObserver = new IntersectionObserver((entries) => {
+    if (entries.some(en => en.isIntersecting)) fillToViewport();
+  }, { rootMargin: '300px' });
+  const sentinel = el('inv-sentinel');
+  if (sentinel) State._invObserver.observe(sentinel);
+
   paint();
   ['inv-search','inv-brand','inv-stock'].forEach(id => el(id).addEventListener('input', paint));
 }
