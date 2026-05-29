@@ -2364,6 +2364,17 @@ function isToday(iso) {
 }
 function totalQty(p) { return p.qtyShopify; /* eBay & Shopify share the same physical stock */ }
 
+// Keyword search used by Inventory + Locations. Splits the query into tokens and
+// requires EACH token to appear (in any order) within a normalised haystack.
+// Normalising strips spaces/punctuation, so "mg4" matches "MG 4", "mg-4", and
+// "mg4 headlight" matches "MG 4 2022-2026 LED Right Headlight".
+function matchesKeywords(query, ...parts) {
+  const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const hay = norm(parts.join(' '));
+  const tokens = (query || '').toLowerCase().split(/\s+/).map(t => t.replace(/[^a-z0-9]+/g, '')).filter(Boolean);
+  return tokens.every(t => hay.includes(t));
+}
+
 function channelPill(ch) {
   // Map raw channel codes to (colour, label) pairs. eBay store codes look up
   // the human-readable store name from the brand config so e.g. ebay_em →
@@ -2502,7 +2513,7 @@ function renderInventory() {
     const b = el('inv-brand').value;
     const s = el('inv-stock').value;
     const filtered = State.products.filter(p => {
-      if (q && !(p.title.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.partNumber||'').toLowerCase().includes(q))) return false;
+      if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model)) return false;
       if (b && p.brand !== b) return false;
       const tq = totalQty(p);
       if (s === 'low' && tq > p.lowThresh) return false;
@@ -3089,7 +3100,7 @@ function paintLocItems() {
     items = items.filter(p => String(p.locationId) === String(filter));
   }
   if (q) {
-    items = items.filter(p => p.title.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.location||'').toLowerCase().includes(q));
+    items = items.filter(p => matchesKeywords(q, p.title, p.sku, p.location, p.brand, p.model));
   }
 
   // Title reflects the active filter
