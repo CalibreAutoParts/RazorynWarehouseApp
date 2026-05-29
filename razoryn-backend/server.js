@@ -117,23 +117,32 @@ app.use((err, req, res, next) => {
 });
 
 // ---------- Cron: periodic sync ----------
-const cronExpr = process.env.SYNC_CRON;
-if (cronExpr && cronExpr.trim()) {
-  if (cron.validate(cronExpr)) {
-    cron.schedule(cronExpr, async () => {
-      console.log(`[cron] running sync (${cronExpr})`);
-      try {
-        const sync = require('./services/sync');
-        const result = await sync.runFullSync();
-        console.log('[cron] sync complete', JSON.stringify(result));
-      } catch (e) {
-        console.error('[cron] sync failed:', e.message);
-      }
-    });
-    console.log(`[boot] cron scheduled: ${cronExpr}`);
-  } else {
-    console.warn(`[boot] invalid SYNC_CRON expression: ${cronExpr}`);
-  }
+// The sync cron pulls new orders from Shopify + eBay and re-pushes warehouse
+// stock to every channel (warehouse = master). It MUST always arm — a silently
+// dead scheduler let auto-ingested sales fall ~37 hrs stale before this default
+// was added. So, like the returns cron, it defaults to a fixed expression when
+// SYNC_CRON is unset, and the only two boot outcomes are "armed" or "warned" —
+// never a silent no-op.
+const DEFAULT_SYNC_CRON = '*/30 * * * *'; // every 30 min
+const cronExpr = (process.env.SYNC_CRON || DEFAULT_SYNC_CRON).trim();
+if (cron.validate(cronExpr)) {
+  cron.schedule(cronExpr, async () => {
+    // Heartbeat: prove the scheduler is alive on every tick, even if the run
+    // itself is a no-op (no new orders). Grep Railway logs for "[cron sync]".
+    console.log(`[cron sync] tick @ ${new Date().toISOString()} (${cronExpr})`);
+    try {
+      const sync = require('./services/sync');
+      const result = await sync.runFullSync();
+      console.log('[cron sync] complete', JSON.stringify(result));
+    } catch (e) {
+      console.error('[cron sync] failed:', e.message);
+    }
+  });
+  const usingDefault = !process.env.SYNC_CRON;
+  console.log(`[boot] sync cron scheduled: ${cronExpr}${usingDefault ? ' (default — SYNC_CRON not set)' : ''}`);
+} else {
+  // Loud, unmissable: an invalid expression means NO automatic sync at all.
+  console.error(`[boot] ⚠️  invalid SYNC_CRON expression "${cronExpr}" — AUTOMATIC SYNC IS DISABLED. Fix SYNC_CRON or unset it to use the default (${DEFAULT_SYNC_CRON}).`);
 }
 
 // Auto-pull eBay returns every 15 minutes (or per RETURNS_SYNC_CRON env var).
