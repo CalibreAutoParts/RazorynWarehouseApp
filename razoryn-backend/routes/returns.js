@@ -29,7 +29,7 @@ const upload = multer({
     }
     cb(null, true);
   },
-  limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
+  limits: { fileSize: 15 * 1024 * 1024 }, // 15MB - frontend auto-downscales
 });
 
 // GET /api/returns?status=open&days=60

@@ -217,9 +217,11 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   if (req.body && (req.body.locationNote !== undefined || req.body.locationPhotoDataUrl !== undefined)) {
     await ensureProductLocationColumns();
   }
-  // Guard: location photo data URL must be a reasonable size (≤ 2.7MB string ≈ 2MB image)
-  if (typeof req.body?.locationPhotoDataUrl === 'string' && req.body.locationPhotoDataUrl.length > 2_800_000) {
-    return res.status(413).json({ error: 'photo_too_large', message: 'Location photo is too large — please use an image under 2 MB.' });
+  // Guard: location photo data URL must be a reasonable size. The data URL is
+  // base64-encoded, so it's ~33% larger than the raw image — 7 MB string ≈ 5 MB
+  // image. The frontend auto-downscales to ~400 KB, so this cap is a safety net.
+  if (typeof req.body?.locationPhotoDataUrl === 'string' && req.body.locationPhotoDataUrl.length > 7_000_000) {
+    return res.status(413).json({ error: 'photo_too_large', message: 'Location photo is too large — please use an image under 5 MB.' });
   }
   for (const [k, v] of Object.entries(req.body || {})) {
     const col = map[k] || k;

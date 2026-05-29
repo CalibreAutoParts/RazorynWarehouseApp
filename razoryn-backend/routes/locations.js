@@ -14,9 +14,10 @@ router.use(requireAuth);
 // rather than as files on disk. This is deliberate: Railway's filesystem is
 // EPHEMERAL — anything written to a local uploads/ folder is wiped on every
 // redeploy. Storing the image inline in Postgres means location photos survive
-// deploys without needing a mounted volume. Images are capped at 2MB and
-// downscaled client-side isn't required (8MB upload limit, but we reject >2MB
-// decoded to keep rows reasonable).
+// deploys without needing a mounted volume. Images are capped at 5MB and
+// downscaled client-side isn't required (8MB upload limit, but we reject >5MB
+// decoded to keep rows reasonable). The frontend auto-downscales to ~400 KB,
+// so this cap is only a safety net for unusual cases.
 //
 // We use multer memoryStorage so the file lands in req.file.buffer, which we
 // convert to a data URL.
@@ -26,7 +27,7 @@ const upload = multer({
     if (!/^image\//.test(file.mimetype)) return cb(new Error('only_images'));
     cb(null, true);
   },
-  limits: { fileSize: 8 * 1024 * 1024 },
+  limits: { fileSize: 15 * 1024 * 1024 },
 });
 
 // Self-healing: ensure the photo_data_url column exists (older DBs only have
@@ -45,9 +46,9 @@ ensureColumns();
 function fileToDataUrl(file) {
   if (!file) return null;
   const decodedSize = file.buffer.length;
-  if (decodedSize > 2 * 1024 * 1024) {
+  if (decodedSize > 5 * 1024 * 1024) {
     const err = new Error('photo_too_large');
-    err.userMessage = `Photo is ~${Math.round(decodedSize / 1024)} KB — please use an image under 2 MB.`;
+    err.userMessage = `Photo is ~${Math.round(decodedSize / 1024)} KB — please use an image under 5 MB.`;
     throw err;
   }
   return `data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
