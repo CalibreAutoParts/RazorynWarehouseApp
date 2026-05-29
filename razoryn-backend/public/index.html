@@ -423,6 +423,12 @@
   .loc-meta { padding: 12px; }
   .loc-title { font-weight: 600; font-size: 13px; }
   .loc-desc { color: var(--ink-soft); font-size: 12px; margin-top: 2px; }
+  /* Keep item cards a constant size no matter how many match a search.
+     auto-fit collapsed the empty tracks, so a single result stretched to the
+     full row width and — via .loc-img's aspect-ratio:4/3 — became enormously
+     tall. auto-fill keeps phantom tracks, so cards stay ~220px whether 1 or
+     100 items match. Scoped to #loc-grid so the area cards above are untouched. */
+  #loc-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 
   /* Schedule */
   .task-row {
@@ -1137,7 +1143,7 @@ function adaptProduct(p) {
     locationId: p.location_id,
     locationDesc: p.location_note || '',
     locationNote: p.location_note || '',
-    locationPhoto: p.location_photo_data_url || null,
+    locationPhoto: p.has_location_photo ? `/api/products/${p.id}/location-photo?v=${encodeURIComponent(p.updated_at || '')}` : null,
     imageUrl: p.image_url,
     shopifyProductId: p.shopify_product_id,
     shopifyVariantId: p.shopify_variant_id,
@@ -3057,6 +3063,7 @@ async function renderLocations() {
       </div>
       <div class="toolbar"><input type="search" class="search-input" id="loc-search" placeholder="Search items in this area..."></div>
       <div class="grid-3" id="loc-grid"></div>
+      <div id="loc-sentinel" style="height:1px"></div>
     </div>
   `;
 
@@ -3098,7 +3105,31 @@ function paintLocItems() {
   }
   if (subEl) subEl.textContent = `${items.length} item${items.length === 1 ? '' : 's'} · tap to change location`;
 
-  grid.innerHTML = items.slice(0, 400).map(p => `
+  // Paginate to 50 cards, appending more on scroll (same pattern as Inventory).
+  // Photos lazy-load from the per-product endpoint, so even a big area renders
+  // only ~50 small image requests instead of inlining hundreds of base64 blobs.
+  State._locItems = items;
+  State._locShown = 0;
+  if (!items.length) {
+    grid.innerHTML = '<div class="empty"><div class="t">No items in this area</div></div>';
+    return;
+  }
+  grid.innerHTML = '';
+  locRenderChunk();
+  requestAnimationFrame(locFillToViewport);
+
+  if (State._locObserver) State._locObserver.disconnect();
+  const sentinel = el('loc-sentinel');
+  if (sentinel) {
+    State._locObserver = new IntersectionObserver((entries) => {
+      if (entries.some(en => en.isIntersecting)) locFillToViewport();
+    }, { rootMargin: '300px' });
+    State._locObserver.observe(sentinel);
+  }
+}
+
+function locCardHtml(p) {
+  return `
     <div class="loc-card" onclick="openLocationModal('${p.id}')">
       <div class="loc-img" style="${p.locationPhoto ? `background-image:url(${p.locationPhoto})` : ''}">
         ${!p.locationPhoto ? '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' : ''}
@@ -3108,7 +3139,27 @@ function paintLocItems() {
         <div class="loc-desc">${p.location ? escapeHtml(p.location) : '<span style="color:var(--amber)">No location set</span>'}</div>
       </div>
     </div>
-  `).join('') || '<div class="empty"><div class="t">No items in this area</div></div>';
+  `;
+}
+
+function locRenderChunk() {
+  const grid = el('loc-grid');
+  const list = State._locItems || [];
+  const shown = State._locShown || 0;
+  if (!grid || shown >= list.length) return;
+  const slice = list.slice(shown, shown + 50);
+  grid.insertAdjacentHTML('beforeend', slice.map(locCardHtml).join(''));
+  State._locShown = shown + slice.length;
+}
+
+function locFillToViewport() {
+  const s = el('loc-sentinel');
+  const list = State._locItems || [];
+  if (!s || (State._locShown || 0) >= list.length) return;
+  if (s.getBoundingClientRect().top < window.innerHeight + 300) {
+    locRenderChunk();
+    requestAnimationFrame(locFillToViewport);
+  }
 }
 
 function setLocFilter(filter) {
@@ -3163,7 +3214,7 @@ function renderLocAreaCards() {
     <div class="grid-3">
       ${locations.map(l => {
         const isActive = String(filter) === String(l.id);
-        const photoUrl = l.photo_data_url || (l.photo_path ? `/uploads/${l.photo_path}` : null);
+        const photoUrl = l.has_photo ? `/api/locations/${l.id}/photo?v=${encodeURIComponent(l.updated_at || '')}` : (l.photo_path ? `/uploads/${l.photo_path}` : null);
         return `
         <div class="card" style="cursor:pointer;${isActive ? 'outline:2px solid var(--brand-primary);outline-offset:-1px' : ''}" onclick="setLocFilter('${l.id}')">
           <div style="height:120px;background:var(--line-2);border-radius:10px 10px 0 0;background-size:cover;background-position:center;${photoUrl ? `background-image:url(${photoUrl})` : 'display:flex;align-items:center;justify-content:center'}">
@@ -3240,7 +3291,7 @@ function openAddLocationModal() {
 function openEditLocationModal(id) {
   const l = (State.locations || []).find(x => x.id == id);
   if (!l) { toast('Location not found', 'error'); return; }
-  const photoUrl = l.photo_data_url || (l.photo_path ? `/uploads/${l.photo_path}` : null);
+  const photoUrl = l.has_photo ? `/api/locations/${l.id}/photo?v=${encodeURIComponent(l.updated_at || '')}` : (l.photo_path ? `/uploads/${l.photo_path}` : null);
   modal({
     title: 'Edit location',
     body: `

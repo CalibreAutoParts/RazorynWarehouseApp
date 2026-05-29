@@ -25,6 +25,16 @@ async function ensureProductLocationColumns() {
 }
 ensureProductLocationColumns();
 
+// Decode a base64 data URL stored in the DB and stream it as a cached binary
+// image, so list payloads don't have to inline megabytes of base64.
+function sendPhoto(res, dataUrl) {
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl || '');
+  if (!m) return res.status(404).end();
+  res.set('Content-Type', m[1]);
+  res.set('Cache-Control', 'private, max-age=3600');
+  return res.send(Buffer.from(m[2], 'base64'));
+}
+
 // GET /api/products?search=&brand=&lowStock=1&page=1&pageSize=50
 router.get('/', requirePermission('inventory'), async (req, res) => {
   const { search = '', brand = '', lowStock } = req.query;
@@ -59,7 +69,23 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   `;
   const { rows } = await query(sql, params);
   const count = await query(`SELECT COUNT(*)::int AS n FROM products WHERE ${where.join(' AND ')}`, params);
+  // Don't ship the base64 location photo in the list — it ballooned the payload
+  // (every product carried its full data URL). Replace it with a boolean; the
+  // frontend lazy-loads the image from /api/products/:id/location-photo.
+  for (const r of rows) {
+    r.has_location_photo = !!r.location_photo_data_url;
+    delete r.location_photo_data_url;
+  }
   res.json({ products: rows, total: count.rows[0].n, page, pageSize });
+});
+
+// GET /api/products/:id/location-photo — stream the per-product location photo
+// as cached binary instead of inlining the base64. `private` cache because the
+// route is behind auth (must not be stored by shared proxies); callers
+// cache-bust with ?v=<updated_at>. 404 when the product has no location photo.
+router.get('/:id/location-photo', requirePermission('locations'), async (req, res) => {
+  const { rows } = await query('SELECT location_photo_data_url FROM products WHERE id = $1', [req.params.id]);
+  return sendPhoto(res, rows[0] && rows[0].location_photo_data_url);
 });
 
 // GET /api/products/barcode/:code  — quick scan lookup
