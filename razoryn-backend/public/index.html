@@ -9435,6 +9435,23 @@ function renderSettings() {
         </div>
       </div>
 
+      <!-- Desktop app download -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>💻 Desktop app</h3>
+          <div class="card-desc">Install the warehouse app on a Windows or Mac computer. It runs in its own window and updates automatically.</div>
+        </div>
+        <div class="card-body">
+          <div id="desktop-status" style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">Checking for the latest build…</div>
+          <div id="desktop-buttons" style="display:none;gap:8px;flex-wrap:wrap">
+            <a id="desktop-win" class="btn btn-primary" href="/api/desktop/download?platform=win" style="display:none">⬇ Download for Windows</a>
+            <a id="desktop-mac" class="btn btn-outline" href="/api/desktop/download?platform=mac" style="display:none">⬇ Download for Mac</a>
+            <a id="desktop-linux" class="btn btn-outline" href="/api/desktop/download?platform=linux" style="display:none">⬇ Download for Linux</a>
+          </div>
+          <div id="desktop-help" style="display:none;font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
+        </div>
+      </div>
+
       <!-- Monthly stock-check reminder -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-head">
@@ -9775,6 +9792,8 @@ async function loadPricingConfig() {
     if (typeof hydrateEbayDefaults === 'function' && el('set-ebay-cat')) hydrateEbayDefaults(r);
     // Hydrate the logo card + apply uploaded logo to topbar everywhere
     if (typeof hydrateLogoUI === 'function') hydrateLogoUI(r);
+    // Desktop-app download availability
+    if (typeof hydrateDesktopInfo === 'function') hydrateDesktopInfo();
     // Hydrate stock-check reminder card + fire today's reminder if due
     if (typeof hydrateStockCheckUI === 'function' && el('set-stockcheck-enabled')) hydrateStockCheckUI(r);
     if (typeof checkStockTakeReminder === 'function') checkStockTakeReminder();
@@ -10041,6 +10060,23 @@ async function saveEbayListingDefaults() {
 // backend which stores it. Same data URL is then used inline on invoices
 // (no follow-up HTTP request from the print/email template).
 // ──────────────────────────────────────────────────────────────────────────
+async function hydrateDesktopInfo() {
+  const status = el('desktop-status'), btns = el('desktop-buttons'), help = el('desktop-help');
+  if (!status) return;
+  let info;
+  try { info = await Api.get('/api/desktop/info'); }
+  catch (e) { status.textContent = 'Could not check for a desktop build right now.'; return; }
+  if (!info.available) {
+    status.innerHTML = 'No desktop build has been published yet. An admin can produce one from GitHub → <strong>Actions</strong> → <strong>Build desktop app</strong> → <strong>Run workflow</strong> (no command line needed). It appears here automatically once built.';
+    return;
+  }
+  status.innerHTML = `Latest build: <strong>${escapeHtml(info.version || '')}</strong>${info.publishedAt ? ' · ' + new Date(info.publishedAt).toLocaleDateString('en-GB') : ''}`;
+  btns.style.display = 'flex';
+  const show = (id, on) => { const a = el(id); if (a) a.style.display = on ? 'inline-flex' : 'none'; };
+  show('desktop-win', info.win); show('desktop-mac', info.mac); show('desktop-linux', info.linux);
+  if (help) { help.style.display = 'block'; help.textContent = 'Tip: on first run Windows/Mac may warn about an unidentified developer — choose “Run anyway” / “Open”. The app updates itself after that.'; }
+}
+
 function hydrateLogoUI(cfg) {
   const fill = (prefix, dataUrl, filename) => {
     const wrap = el(prefix + 'current-wrap');

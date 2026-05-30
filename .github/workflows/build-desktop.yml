@@ -40,11 +40,11 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build installer (+ publish on tag)
-        # On a tag push, electron-builder publishes the installer AND the
-        # latest*.yml update metadata to a GitHub Release, which electron-updater
-        # reads to auto-update the shell. On manual runs it just builds.
-        run: npm run dist -- --publish ${{ startsWith(github.ref, 'refs/tags/desktop-v') && 'always' || 'never' }}
+      - name: Build installer (+ publish)
+        # Publishes the installer + latest*.yml update metadata to a GitHub
+        # Release on a tag push OR a manual "Run workflow" (Actions tab) — so you
+        # can produce a downloadable build entirely from the browser.
+        run: npm run dist -- --publish ${{ (startsWith(github.ref, 'refs/tags/desktop-v') || github.event_name == 'workflow_dispatch') && 'always' || 'never' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Don't try to code-sign in CI (no certs configured). Remove this once
