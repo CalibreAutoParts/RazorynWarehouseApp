@@ -8172,9 +8172,9 @@ async function openCreateEbayListing(productId) {
 async function loadEbayPolicies(saved) {
   const note = el('ce-policy-note');
   let r;
-  try { r = await Api.get('/api/listings/business-policies'); }
+  try { r = await Api.get('/api/listings/business-policies?storeCode=' + encodeURIComponent(el('ce-store')?.value || '')); }
   catch (e) {
-    if (note) note.textContent = 'Couldn’t load your eBay policies (eBay account not connected for the Account API) — your saved Settings policy will be used.';
+    if (note) note.textContent = 'Couldn’t load your eBay policies: ' + (e.data?.message || e.message) + ' — your saved Settings policy will be used.';
     return;
   }
   const n = (r.shipping?.length || 0) + (r.payment?.length || 0) + (r.return?.length || 0);

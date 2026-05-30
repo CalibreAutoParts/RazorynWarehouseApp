@@ -995,6 +995,37 @@ async function getBusinessPolicies(marketplaceId = "EBAY_GB", storeArg) {
   return { payment, shipping, return: returns };
 }
 
+// Diagnostic for the empty-policy-dropdown problem. Returns the raw eBay XML
+// (trimmed), the auth mode used, and the parsed profiles so the cause is
+// visible: Ack/Errors reveal auth issues; an empty SupportedSellerProfile list
+// means the account hasn't opted into Business Policies.
+async function debugBusinessPolicies(storeArg) {
+  const store = resolveStore(storeArg);
+  const out = {
+    store: store?.code || 'default',
+    hasStoreToken: !!tokenFor(storeArg),
+    hasOAuthRefresh: !!(REFRESH_TOKEN && CLIENT_ID && CLIENT_SECRET),
+    raw: null, ack: null, errors: [], parsed: null,
+  };
+  try {
+    const xml = await tradingCall('GetUserPreferences',
+      '<ShowSellerProfilePreferences>true</ShowSellerProfilePreferences>', storeArg);
+    out.raw = String(xml).slice(0, 4000);
+    out.ack = extractOne(xml, 'Ack');
+    for (const errBlock of extractAll(xml, 'Errors')) {
+      out.errors.push({
+        code: extractOne(errBlock, 'ErrorCode'),
+        shortMessage: decodeEntities(extractOne(errBlock, 'ShortMessage') || ''),
+        longMessage: decodeEntities(extractOne(errBlock, 'LongMessage') || ''),
+      });
+    }
+    out.parsed = await getBusinessPolicies('EBAY_GB', storeArg);
+  } catch (e) {
+    out.error = e.message;
+  }
+  return out;
+}
+
 // Auto-dispatch support: which recent orders have been shipped/fulfilled ON
 // eBay (so the warehouse app can auto-mark them dispatched). Returns a Set of
 // orderIds with orderFulfillmentStatus === FULFILLED. Needs the OAuth Sell
@@ -1251,6 +1282,7 @@ module.exports = {
   getCategorySpecifics,
   getSuggestedCategories,
   getBusinessPolicies,
+  debugBusinessPolicies,
   getFulfilledOrderIds,
   getOrderTracking,
   getRateLimits,

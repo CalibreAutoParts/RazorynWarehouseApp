@@ -87,6 +87,19 @@ router.get('/business-policies', requireAdmin, async (req, res) => {
   }
 });
 
+// Diagnostic: returns the raw GetUserPreferences response + parsed result so we
+// can see WHY policy dropdowns are empty (account not opted in vs auth error vs
+// parse miss). Admin-only. ?storeCode=… selects the eBay account.
+router.get('/business-policies-debug', requireAdmin, async (req, res) => {
+  const brand = require('../lib/brand');
+  const storeCode = req.query.storeCode || (brand.getPrimaryStore() && brand.getPrimaryStore().code);
+  try {
+    res.json(await ebay.debugBusinessPolicies(storeCode));
+  } catch (e) {
+    res.status(502).json({ error: 'ebay_error', message: e.message });
+  }
+});
+
 // ──────────────────────────────────────────────────────────────────────────
 // Self-healing migration: adds the store_code column to mirror_links if it
 // doesn't already exist. Lets us track which eBay account each link belongs
