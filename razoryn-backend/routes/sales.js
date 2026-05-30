@@ -599,7 +599,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     billedToName = 'Online customer';
   }
 
-  const isCashReceipt = mode === 'receipt' || (sale.payment_method === 'cash' && !isVatRegistered);
+  const isCashReceipt = mode === 'receipt' || sale.payment_method === 'cash';
   // Pro-forma uses the FULL invoice template (1:1 with a real invoice) — just a different
   // document title and a "not yet paid" notice. Customer needs to recognise it as a
   // normal invoice they can pay against, not a casual estimate.
@@ -1137,7 +1137,7 @@ router.get('/:id/invoice.html', requireAdmin, async (req, res) => {
   const isProforma = forceProforma || (sale.is_estimate && !!sale.payment_method);
   const mode = isProforma ? 'proforma'
              : sale.is_estimate ? 'estimate'
-             : (sale.payment_method === 'cash' && !company.vat_registered) ? 'receipt'
+             : (sale.payment_method === 'cash') ? 'receipt'
              : 'invoice';
   const baseUrl = `${req.protocol}://${req.get('host')}`;
   await audit(req, 'view_invoice', 'sale', req.params.id, { mode });  // GDPR: log customer-data read
@@ -1159,7 +1159,7 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
   const isProforma = sale.is_estimate && !!sale.payment_method;
   const mode = isProforma ? 'proforma'
              : sale.is_estimate ? 'estimate'
-             : (sale.payment_method === 'cash' && !company.vat_registered) ? 'receipt'
+             : (sale.payment_method === 'cash') ? 'receipt'
              : 'invoice';
   const html = renderInvoiceHtml({ sale, items, company, mode, baseUrl: `${req.protocol}://${req.get('host')}` });
   const docLabel = mode === 'estimate' ? 'Estimate'
