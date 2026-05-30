@@ -8112,7 +8112,10 @@ async function openCreateEbayListing(productId) {
         </div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="field"><label>Price (£)</label><input id="ce-price" type="number" step="0.01" min="0" value="${escapeAttr(suggestedPrice)}"></div>
+        <div class="field"><label>Price (£)</label>
+          <input id="ce-price" type="number" step="0.01" min="0" value="${escapeAttr(suggestedPrice)}">
+          <button type="button" class="btn btn-outline btn-sm" style="margin-top:4px" onclick="ceCalcEbayPrice(this)">From Shopify +${escapeAttr(cfg.ebayMarkupPct != null ? cfg.ebayMarkupPct : 15)}%</button>
+        </div>
         <div class="field"><label>Quantity</label>
           <input id="ce-qty" type="number" min="0" step="1" value="${escapeAttr(product.qty_on_hand ?? 1)}">
           <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap">
