@@ -1144,6 +1144,9 @@ function adaptProduct(p) {
     locationDesc: p.location_note || '',
     locationNote: p.location_note || '',
     locationPhoto: p.has_location_photo ? `/api/products/${p.id}/location-photo?v=${encodeURIComponent(p.updated_at || '')}` : null,
+    itemPhoto: p.has_item_photo ? `/api/products/${p.id}/item-photo?v=${encodeURIComponent(p.updated_at || '')}` : null,
+    locationPhoto2: p.has_location_photo_2 ? `/api/products/${p.id}/location-photo-2?v=${encodeURIComponent(p.updated_at || '')}` : null,
+    primaryPhoto: p.primary_photo || 'item',
     imageUrl: p.image_url,
     shopifyProductId: p.shopify_product_id,
     shopifyVariantId: p.shopify_variant_id,
@@ -3139,11 +3142,19 @@ function paintLocItems() {
   }
 }
 
+// Pick the thumbnail for the Locations grid card — the slot the user marked as
+// main, falling back item → location → location2.
+function productThumb(p) {
+  const byKey = { item: p.itemPhoto, location: p.locationPhoto, location2: p.locationPhoto2 };
+  return byKey[p.primaryPhoto] || p.itemPhoto || p.locationPhoto || p.locationPhoto2 || null;
+}
+
 function locCardHtml(p) {
+  const thumb = productThumb(p);
   return `
     <div class="loc-card" onclick="openLocationModal('${p.id}')">
-      <div class="loc-img" style="${p.locationPhoto ? `background-image:url(${p.locationPhoto})` : ''}">
-        ${!p.locationPhoto ? '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' : ''}
+      <div class="loc-img" style="${thumb ? `background-image:url(${thumb})` : ''}">
+        ${!thumb ? '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' : ''}
       </div>
       <div class="loc-meta">
         <div class="loc-title">${escapeHtml(p.title)}</div>
@@ -3500,15 +3511,27 @@ async function openLocationModal(id) {
         <textarea id="lm-note" rows="2" placeholder="e.g. 3rd shelf from top, behind the door · Bay 4, bottom row">${escapeHtml(p.locationNote || '')}</textarea>
         <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">A specific note for THIS item — row, shelf, bin, landmark.</div>
       </div>
-      <div class="field">
-        <label>Photo of where this item sits (optional)</label>
-        <div id="lm-preview" style="aspect-ratio:4/3;background:var(--line-2);border-radius:8px;margin-bottom:8px;background-size:cover;background-position:center;display:flex;align-items:center;justify-content:center;color:var(--ink-soft);${p.locationPhoto ? `background-image:url(${p.locationPhoto})` : ''}"><span id="lm-preview-ph" style="font-size:12px;${p.locationPhoto ? 'display:none' : ''}">${p.locationPhoto ? '' : 'No photo yet'}</span></div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <label class="btn btn-outline btn-sm" style="cursor:pointer">📷 ${p.locationPhoto ? 'Replace photo' : 'Add photo'}<input type="file" id="lm-photo" accept="image/*" capture="environment" style="display:none" onchange="lmPreviewProductPhoto(this)"></label>
-          ${p.locationPhoto ? `<button type="button" class="btn btn-ghost btn-sm" onclick="lmClearProductPhoto()" style="color:var(--red)">Remove photo</button>` : ''}
-        </div>
-        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Snap exactly where this part lives so anyone can find it — auto-resized for fast upload.</div>
-      </div>
+      <div style="font-weight:600;font-size:13px;margin:6px 0 4px">Photos</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">Photo 1 = what the item looks like. Photos 2–3 = where it lives, so anyone can find it. The ★ photo is the thumbnail on the Locations grid. Auto-resized for fast upload.</div>
+      ${[
+        { key: 'item',      label: '📦 What it looks like (item / packaging)', url: p.itemPhoto },
+        { key: 'location',  label: '📍 Where it is — photo 1',                 url: p.locationPhoto },
+        { key: 'location2', label: '📍 Where it is — photo 2',                 url: p.locationPhoto2 },
+      ].map(s => {
+        const isMain = (p.primaryPhoto || 'item') === s.key;
+        return `
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:8px">
+            <span>${s.label}</span>
+            <button type="button" class="btn btn-ghost btn-sm lm-main-btn" data-key="${s.key}" onclick="lmSetMain('${s.key}')" style="margin-left:auto;${isMain ? 'color:var(--amber)' : 'color:var(--ink-soft)'}">${isMain ? '★ Main' : '☆ Set as main'}</button>
+          </label>
+          <div id="lm-preview-${s.key}" style="aspect-ratio:4/3;background:var(--line-2);border-radius:8px;margin-bottom:8px;background-size:cover;background-position:center;display:flex;align-items:center;justify-content:center;color:var(--ink-soft);${s.url ? `background-image:url(${s.url})` : ''}"><span id="lm-preview-ph-${s.key}" style="font-size:12px;${s.url ? 'display:none' : ''}">${s.url ? '' : 'No photo yet'}</span></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <label class="btn btn-outline btn-sm" style="cursor:pointer">📷 Choose photo<input type="file" accept="image/*" capture="environment" style="display:none" onchange="lmPreviewSlot(this,'${s.key}')"></label>
+            <button type="button" id="lm-remove-${s.key}" class="btn btn-ghost btn-sm" onclick="lmClearSlot('${s.key}')" style="color:var(--red);${s.url ? '' : 'display:none'}">Remove</button>
+          </div>
+        </div>`;
+      }).join('')}
     `,
     actions: [
       { label: 'Save', primary: true, onClick: async () => {
@@ -3518,13 +3541,15 @@ async function openLocationModal(id) {
           locationId: locId === '' ? null : parseInt(locId),
           locationNote: note || null,
         };
-        // _lmPhotoState: undefined = unchanged, null = cleared, string = new data URL
-        if (window._lmPhotoState !== undefined) {
-          payload.locationPhotoDataUrl = window._lmPhotoState;  // null clears, string sets
+        // Each slot: undefined = unchanged, null = cleared, string = new data URL.
+        const fieldMap = { item: 'itemPhotoDataUrl', location: 'locationPhotoDataUrl', location2: 'locationPhotoDataUrl2' };
+        for (const key of ['item', 'location', 'location2']) {
+          if (window._lmPhotos[key] !== undefined) payload[fieldMap[key]] = window._lmPhotos[key];
         }
+        payload.primaryPhoto = window._lmPrimary || 'item';
         try {
           await Api.patch('/api/products/' + p.id, payload);
-          window._lmPhotoState = undefined;  // reset
+          window._lmPhotos = { item: undefined, location: undefined, location2: undefined };  // reset
           toast('Location saved', 'success');
           closeModal();
           await Store.refresh('products');
@@ -3537,17 +3562,19 @@ async function openLocationModal(id) {
           else toast('Failed to save: ' + (e.data?.message || e.message), 'error');
         }
       }},
-      { label: 'Cancel', onClick: () => { window._lmPhotoState = undefined; closeModal(); } }
+      { label: 'Cancel', onClick: () => { window._lmPhotos = { item: undefined, location: undefined, location2: undefined }; closeModal(); } }
     ]
   });
-  window._lmPhotoState = undefined;  // reset on open
+  // reset per-slot edit state on open
+  window._lmPhotos = { item: undefined, location: undefined, location2: undefined };
+  window._lmPrimary = p.primaryPhoto || 'item';
 }
 
-// Per-product location photo: downscale + preview + stash as data URL in
-// window._lmPhotoState. Same downscaling logic as the area photos — phone
-// cameras produce 4-10 MB JPEGs that we shrink to ~400 KB without losing
-// useful detail for finding parts on a shelf.
-async function lmPreviewProductPhoto(input) {
+// Per-product photo slot (item / location / location2): downscale + preview +
+// stash as a data URL in window._lmPhotos[key]. Same downscaling as the area
+// photos — phone cameras produce 4-10 MB JPEGs we shrink to ~400 KB without
+// losing detail needed to identify a part or find it on a shelf.
+async function lmPreviewSlot(input, key) {
   const file = input.files?.[0];
   if (!file) return;
   if (file.size > 12 * 1024 * 1024) {
@@ -3555,18 +3582,20 @@ async function lmPreviewProductPhoto(input) {
     input.value = '';
     return;
   }
-  const preview = el('lm-preview');
-  const ph = el('lm-preview-ph');
+  const preview = el('lm-preview-' + key);
+  const ph = el('lm-preview-ph-' + key);
   if (preview) preview.style.opacity = '0.5';
   try {
     const blob = await downscaleImage(file);
     const dataUrl = await readAsDataUrl(blob);
-    window._lmPhotoState = dataUrl;
+    window._lmPhotos[key] = dataUrl;
     if (preview) {
       preview.style.backgroundImage = `url(${dataUrl})`;
       preview.style.opacity = '1';
     }
     if (ph) ph.style.display = 'none';
+    const rm = el('lm-remove-' + key);
+    if (rm) rm.style.display = '';
     if (blob.size < file.size * 0.7) {
       toast(`Photo compressed to ${(blob.size/1024).toFixed(0)} KB — will save on next Save.`, 'info', 2500);
     }
@@ -3576,12 +3605,25 @@ async function lmPreviewProductPhoto(input) {
   }
 }
 
-function lmClearProductPhoto() {
-  window._lmPhotoState = null;  // explicit clear
-  const preview = el('lm-preview');
-  const ph = el('lm-preview-ph');
+function lmClearSlot(key) {
+  window._lmPhotos[key] = null;  // explicit clear
+  const preview = el('lm-preview-' + key);
+  const ph = el('lm-preview-ph-' + key);
   if (preview) preview.style.backgroundImage = '';
   if (ph) { ph.style.display = ''; ph.textContent = 'No photo yet'; }
+  const rm = el('lm-remove-' + key);
+  if (rm) rm.style.display = 'none';
+}
+
+// Mark a slot as the main thumbnail (★). Records the choice in window._lmPrimary
+// and repaints the star buttons; persisted as primary_photo on Save.
+function lmSetMain(key) {
+  window._lmPrimary = key;
+  document.querySelectorAll('.lm-main-btn').forEach(b => {
+    const on = b.getAttribute('data-key') === key;
+    b.textContent = on ? '★ Main' : '☆ Set as main';
+    b.style.color = on ? 'var(--amber)' : 'var(--ink-soft)';
+  });
 }
 function fileToDataUrl(file) {
   return new Promise((res, rej) => {

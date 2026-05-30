@@ -20,6 +20,13 @@ async function ensureProductLocationColumns() {
   try {
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS location_note TEXT`);
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS location_photo_data_url TEXT`);
+    // Phase 3A: 1 item photo + 2 location photos, plus which one is the thumbnail.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS item_photo_data_url TEXT`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS location_photo_data_url_2 TEXT`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS primary_photo TEXT`);
+    // updated_at lets the frontend cache-bust photo URLs (?v=updated_at) when an
+    // image changes — without it, edited photos could serve stale from cache.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()`);
     _prodLocMigrated = true;
   } catch (e) { console.warn('[products] location-columns migration warning:', e.message); }
 }
@@ -69,23 +76,35 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   `;
   const { rows } = await query(sql, params);
   const count = await query(`SELECT COUNT(*)::int AS n FROM products WHERE ${where.join(' AND ')}`, params);
-  // Don't ship the base64 location photo in the list — it ballooned the payload
-  // (every product carried its full data URL). Replace it with a boolean; the
-  // frontend lazy-loads the image from /api/products/:id/location-photo.
+  // Don't ship base64 photos in the list — they ballooned the payload (every
+  // product carried full data URLs). Replace with booleans; the frontend
+  // lazy-loads each image from its photo endpoint.
   for (const r of rows) {
+    r.has_item_photo = !!r.item_photo_data_url;
     r.has_location_photo = !!r.location_photo_data_url;
+    r.has_location_photo_2 = !!r.location_photo_data_url_2;
+    delete r.item_photo_data_url;
     delete r.location_photo_data_url;
+    delete r.location_photo_data_url_2;
   }
   res.json({ products: rows, total: count.rows[0].n, page, pageSize });
 });
 
-// GET /api/products/:id/location-photo — stream the per-product location photo
-// as cached binary instead of inlining the base64. `private` cache because the
-// route is behind auth (must not be stored by shared proxies); callers
-// cache-bust with ?v=<updated_at>. 404 when the product has no location photo.
+// Per-product photo endpoints — stream the stored base64 as cached binary
+// instead of inlining it. `private` cache because they're behind auth (must not
+// be stored by shared proxies); callers cache-bust with ?v=<updated_at>.
+// 404 when the slot is empty.
+router.get('/:id/item-photo', requirePermission('locations'), async (req, res) => {
+  const { rows } = await query('SELECT item_photo_data_url FROM products WHERE id = $1', [req.params.id]);
+  return sendPhoto(res, rows[0] && rows[0].item_photo_data_url);
+});
 router.get('/:id/location-photo', requirePermission('locations'), async (req, res) => {
   const { rows } = await query('SELECT location_photo_data_url FROM products WHERE id = $1', [req.params.id]);
   return sendPhoto(res, rows[0] && rows[0].location_photo_data_url);
+});
+router.get('/:id/location-photo-2', requirePermission('locations'), async (req, res) => {
+  const { rows } = await query('SELECT location_photo_data_url_2 FROM products WHERE id = $1', [req.params.id]);
+  return sendPhoto(res, rows[0] && rows[0].location_photo_data_url_2);
 });
 
 // GET /api/products/barcode/:code  — quick scan lookup
@@ -232,22 +251,27 @@ router.post('/', requireAdmin, async (req, res) => {
 router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
                    'low_stock_threshold', 'price_shopify', 'price_ebay', 'cost_price',
-                   'location_id', 'active', 'location_note', 'location_photo_data_url'];
+                   'location_id', 'active', 'location_note', 'location_photo_data_url',
+                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
                 costPrice: 'cost_price', locationId: 'location_id',
-                locationNote: 'location_note', locationPhotoDataUrl: 'location_photo_data_url' };
+                locationNote: 'location_note', locationPhotoDataUrl: 'location_photo_data_url',
+                itemPhotoDataUrl: 'item_photo_data_url',
+                locationPhotoDataUrl2: 'location_photo_data_url_2',
+                primaryPhoto: 'primary_photo' };
   const sets = [], params = [];
-  // Make sure the per-product location columns exist before we try to set them
-  if (req.body && (req.body.locationNote !== undefined || req.body.locationPhotoDataUrl !== undefined)) {
-    await ensureProductLocationColumns();
-  }
-  // Guard: location photo data URL must be a reasonable size. The data URL is
-  // base64-encoded, so it's ~33% larger than the raw image — 7 MB string ≈ 5 MB
-  // image. The frontend auto-downscales to ~400 KB, so this cap is a safety net.
-  if (typeof req.body?.locationPhotoDataUrl === 'string' && req.body.locationPhotoDataUrl.length > 7_000_000) {
-    return res.status(413).json({ error: 'photo_too_large', message: 'Location photo is too large — please use an image under 5 MB.' });
+  // Always ensure the per-product location/photo columns (incl. updated_at)
+  // exist before we touch them — cheap (cached after first run).
+  await ensureProductLocationColumns();
+  // Guard: photo data URLs must be a reasonable size. The data URL is base64,
+  // so ~33% larger than the raw image — 7 MB string ≈ 5 MB image. The frontend
+  // auto-downscales to ~400 KB, so this cap is just a safety net.
+  for (const f of ['itemPhotoDataUrl', 'locationPhotoDataUrl', 'locationPhotoDataUrl2']) {
+    if (typeof req.body?.[f] === 'string' && req.body[f].length > 7_000_000) {
+      return res.status(413).json({ error: 'photo_too_large', message: 'Photo is too large — please use an image under 5 MB.' });
+    }
   }
   for (const [k, v] of Object.entries(req.body || {})) {
     const col = map[k] || k;
@@ -258,14 +282,17 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   }
   if (!sets.length) return res.status(400).json({ error: 'no_updatable_fields' });
   params.push(req.params.id);
+  // Bump updated_at so the frontend's ?v= cache-buster sees changed photos.
   const { rows } = await query(
-    `UPDATE products SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`,
+    `UPDATE products SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length} RETURNING *`,
     params
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
-  // Audit without the huge base64 blob
+  // Audit without the huge base64 blobs
   const auditBody = { ...req.body };
-  if (auditBody.locationPhotoDataUrl) auditBody.locationPhotoDataUrl = '[photo]';
+  for (const f of ['itemPhotoDataUrl', 'locationPhotoDataUrl', 'locationPhotoDataUrl2']) {
+    if (auditBody[f]) auditBody[f] = '[photo]';
+  }
   await audit(req, 'update_product', 'product', rows[0].id, auditBody);
   res.json({ product: rows[0] });
 });
