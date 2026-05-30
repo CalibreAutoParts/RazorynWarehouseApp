@@ -5432,12 +5432,19 @@ function renderSales() {
     `; }).join('') : '<tr><td colspan="8"><div class="empty"><div class="t">No ' + (filter === 'estimates' ? 'estimates' : 'sales') + '</div></div></td></tr>';
     salesUpdateBulkBar();
   }
+  let currentFilter = 'all';
   paintStats(); paintTable();
   document.querySelectorAll('[data-sf]').forEach(b => b.addEventListener('click', () => {
     document.querySelectorAll('[data-sf]').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
-    paintStats(b.dataset.sf); paintTable(b.dataset.sf);
+    currentFilter = b.dataset.sf;
+    paintStats(currentFilter); paintTable(currentFilter);
   }));
+  const salesSearch = el('sales-search');
+  if (salesSearch) salesSearch.addEventListener('input', () => {
+    State.salesSearch = salesSearch.value;
+    paintTable(currentFilter);
+  });
 }
 
 function salesToggleRow(id, on) {
