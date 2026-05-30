@@ -140,6 +140,33 @@ Railway redeploys automatically on each push to `main`. Watch the deploy logs:
 
 Health check: `https://<railway-domain>/health` → `{"ok":true,"db":"up",...}`
 
+### 5b. Running Razoryn and Calibre side-by-side (multi-brand)
+
+This is one codebase serving multiple brands. Each brand runs as its **own
+Railway service with its own Postgres database** — they never share data. The
+only thing that selects the brand is the `APP_BRAND` env var.
+
+To stand up the **Razoryn** app alongside an existing Calibre deployment (or
+vice-versa):
+
+1. **New Railway service** from this same repo + add a **Postgres plugin** (this
+   gives the new service its own `DATABASE_URL`).
+2. **Copy `.env.razoryn.example`** into the service's Variables and fill in real
+   values. Critical: `APP_BRAND=razoryn`.
+   - Generate a **fresh `JWT_SECRET`** (don't reuse the other brand's).
+   - Use Razoryn's **own** eBay token (`EBAY_AUTH_TOKEN`) and, if used, its own
+     Shopify store/token.
+3. **Deploy.** The boot log should read `[boot] Razoryn Warehouse Hub (razoryn)`.
+   A **boot guard** hard-fails the service in production if `APP_BRAND` is
+   unknown or `JWT_SECRET` / `DATABASE_URL` is missing — so a misconfigured
+   second deployment won't silently half-start. A missing eBay token only warns.
+4. **Log in** with the seeded admin and change the password.
+5. **Verify eBay** via Settings → "🔍 Check eBay business policies".
+
+Calibre keeps `APP_BRAND=calibre` with its own DB/vars; Razoryn keeps
+`APP_BRAND=razoryn` with its own. Add more brands by adding an entry to
+`lib/brand.js` and repeating these steps.
+
 ### 6. Custom domain — `warehouse.razoryn.co.uk`
 
 In Railway:
