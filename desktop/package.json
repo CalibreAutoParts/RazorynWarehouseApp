@@ -13,6 +13,11 @@
   "build": {
     "appId": "uk.co.calibreautoparts.warehouse",
     "productName": "Calibre Warehouse Hub",
+    "publish": {
+      "provider": "github",
+      "owner": "CalibreAutoParts",
+      "repo": "RazorynWarehouseApp"
+    },
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -38,6 +43,9 @@
       "target": ["AppImage"],
       "category": "Office"
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
     "electron": "^31.7.6",

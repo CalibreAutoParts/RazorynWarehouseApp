@@ -42,6 +42,21 @@ npm run dist      # outputs installers to desktop/dist/
 npm start         # run the app without packaging (for testing)
 ```
 
+## How updates work
+
+- **App content** (features, fixes, pages, colours): updates **automatically** —
+  the app loads the live site, so the latest deploy shows on the next relaunch
+  (or an in-app refresh). No reinstall, ever.
+- **The shell** (this Electron wrapper): auto-updates via `electron-updater`
+  from GitHub Releases. On launch it checks for a newer release, downloads it in
+  the background, and installs on the next relaunch.
+  - Windows (`.exe`) and Linux (`.AppImage`) auto-update out of the box.
+  - **macOS auto-update requires a signed + notarised app.** Until signing is
+    configured, Mac users update by downloading the new `.dmg`.
+  - Auto-update activates from the **second** release onward (the first install
+    is the baseline it updates *from*). Bump `version` in `package.json` for
+    each new release.
+
 ## App icon
 
 By default electron-builder uses a placeholder icon. To use the Calibre brand:

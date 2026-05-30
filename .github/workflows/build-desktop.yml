@@ -40,10 +40,14 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build installer
-        run: npm run dist
+      - name: Build installer (+ publish on tag)
+        # On a tag push, electron-builder publishes the installer AND the
+        # latest*.yml update metadata to a GitHub Release, which electron-updater
+        # reads to auto-update the shell. On manual runs it just builds.
+        run: npm run dist -- --publish ${{ startsWith(github.ref, 'refs/tags/desktop-v') && 'always' || 'never' }}
         env:
-          # Don't try to code-sign in CI (no certs configured). Remove these once
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Don't try to code-sign in CI (no certs configured). Remove this once
           # you add signing certificates as repo secrets.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
@@ -53,9 +57,3 @@ jobs:
           name: warehouse-${{ matrix.os }}
           path: desktop/dist/${{ matrix.artifact }}
           if-no-files-found: warn
-
-      - name: Attach to GitHub Release (tag pushes only)
-        if: startsWith(github.ref, 'refs/tags/desktop-v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: desktop/dist/${{ matrix.artifact }}

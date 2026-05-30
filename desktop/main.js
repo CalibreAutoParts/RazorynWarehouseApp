@@ -5,6 +5,7 @@
 // version — no rebuild needed when the web app updates. Build installers with
 // `npm run dist` (or via the GitHub Actions workflow) to get .dmg/.exe/.AppImage.
 const { app, BrowserWindow, shell, session, Menu } = require('electron');
+const { autoUpdater } = require('electron-updater');
 
 // The live site to load. Override at launch with WAREHOUSE_URL=... to point at
 // Razoryn or a staging deploy.
@@ -74,6 +75,13 @@ app.whenReady().then(() => {
   ]));
 
   createWindow();
+
+  // Self-update the desktop SHELL from GitHub Releases. (The app's content
+  // already updates automatically because it loads the live site; this keeps
+  // the wrapper itself current too.) Downloads in the background and installs on
+  // the next relaunch. Note: macOS auto-update requires a signed app — until
+  // signing is set up, Mac users update by downloading a new .dmg.
+  try { autoUpdater.checkForUpdatesAndNotify(); } catch (e) { /* offline / dev */ }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
