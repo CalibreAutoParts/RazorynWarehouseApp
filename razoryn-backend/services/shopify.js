@@ -64,18 +64,37 @@ async function getAccessToken() {
 // HTTP client — token added per-request so it can refresh
 async function shopifyRequest(method, path, opts = {}) {
   const token = await getAccessToken();
-  return axios({
-    method,
-    url: `https://${STORE}/admin/api/${VERSION}${path}`,
-    headers: {
-      'X-Shopify-Access-Token': token,
-      'Content-Type': 'application/json',
-      ...(opts.headers || {}),
-    },
-    params: opts.params,
-    data: opts.data,
-    timeout: opts.timeout || 60000,
-  });
+  const maxRetries = opts.retries != null ? opts.retries : 5;
+  let attempt = 0;
+  while (true) {
+    try {
+      return await axios({
+        method,
+        url: `https://${STORE}/admin/api/${VERSION}${path}`,
+        headers: {
+          'X-Shopify-Access-Token': token,
+          'Content-Type': 'application/json',
+          ...(opts.headers || {}),
+        },
+        params: opts.params,
+        data: opts.data,
+        timeout: opts.timeout || 60000,
+      });
+    } catch (e) {
+      // Shopify's REST bucket is shared across the app, so a burst (e.g. a stock
+      // push running at the same time) can throttle other calls with 429. Back
+      // off and retry, honouring Retry-After when present.
+      const status = e.response?.status;
+      if ((status === 429 || status === 503) && attempt < maxRetries) {
+        attempt++;
+        const ra = parseFloat(e.response?.headers?.['retry-after']);
+        const waitMs = (!isNaN(ra) && ra > 0) ? ra * 1000 : Math.min(500 * 2 ** attempt, 8000);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      throw e;
+    }
+  }
 }
 
 // ---------- Public API ----------
@@ -717,6 +736,7 @@ async function bulkSetBarcodeToSku({ dryRun = true } = {}) {
     if (!m) break;
     pageInfo = new URL(m[1]).searchParams.get('page_info');
     if (!pageInfo) break;
+    await sleep(300);  // gentle pacing between pages to avoid the 429 bucket
   }
   return { dryRun, totalVariants, candidates, updated, skippedNoSku, sample, errors, errorCount: errors.length };
 }

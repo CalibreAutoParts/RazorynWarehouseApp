@@ -1087,6 +1087,7 @@ const Api = {
   },
   get(path)         { return this._req('GET', path); },
   post(path, body)  { return this._req('POST', path, body); },
+  put(path, body)   { return this._req('PUT', path, body); },
   patch(path, body) { return this._req('PATCH', path, body); },
   delete(path)      { return this._req('DELETE', path); },
   postForm(path, formData) { return this._req('POST', path, formData, true); },
@@ -5958,16 +5959,24 @@ function manualSaleRecalc() {
   }
   const shipping = parseFloat(el('ms-shipping')?.value || 0);
   const cfg = State.pricingConfig || {};
-  // Only apply VAT if VAT-registered; line-item prices are entered tax-inclusive
+  const payment = el('ms-payment')?.value || 'cash';
+  const isCash = payment === 'cash';
   const vatRegistered = !!cfg.vatRegistered;
-  const vatRate = vatRegistered ? (cfg.vatRate || 20) / 100 : 0;
-  const vat = +(subtotal * vatRate).toFixed(2);
-  const total = +(subtotal + vat + shipping).toFixed(2);
+  // Cash sales are VAT-free. Otherwise line-item prices are entered GROSS
+  // (VAT-inclusive), so VAT is the portion WITHIN the subtotal — never added on
+  // top. Total = subtotal + shipping. (Matches the backend exactly.)
+  const vatRate = (!isCash && vatRegistered) ? (cfg.vatRate || 20) / 100 : 0;
+  const vat = vatRate ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2) : 0;
+  const total = +(subtotal + shipping).toFixed(2);
   const sum = el('ms-summary');
   if (sum) {
     sum.innerHTML = `
       <div style="display:flex;justify-content:space-between"><span>Subtotal</span><strong>${gbp(subtotal)}</strong></div>
-      ${vatRegistered ? `<div style="display:flex;justify-content:space-between"><span>VAT (${(vatRate*100).toFixed(0)}%)</span><strong>${gbp(vat)}</strong></div>` : '<div style="font-size:11px;color:var(--ink-soft)">(Not VAT-registered — no VAT charged)</div>'}
+      ${isCash
+        ? '<div style="font-size:11px;color:var(--ink-soft)">Cash sale — VAT-free</div>'
+        : vatRate
+          ? `<div style="display:flex;justify-content:space-between"><span>incl. VAT (${(vatRate*100).toFixed(0)}%)</span><strong>${gbp(vat)}</strong></div>`
+          : '<div style="font-size:11px;color:var(--ink-soft)">(Not VAT-registered — no VAT charged)</div>'}
       <div style="display:flex;justify-content:space-between"><span>Shipping</span><strong>${gbp(shipping)}</strong></div>
       <div style="display:flex;justify-content:space-between;border-top:1px solid var(--line);margin-top:6px;padding-top:6px;font-size:15px"><span>Total</span><strong>${gbp(total)}</strong></div>
     `;
