@@ -16,9 +16,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE TABLE IF NOT EXISTS users (
   id              SERIAL PRIMARY KEY,
   email           CITEXT UNIQUE,
-  -- bcrypt hash of the email password (admin only required to have one)
+  -- login username (case-insensitive unique). Everyone logs in with username
+  -- (or email) + password; the PIN keypad has been retired.
+  username        TEXT,
+  -- bcrypt hash of the password
   password_hash   TEXT,
-  -- bcrypt hash of the 4-digit PIN (warehouse staff)
+  -- bcrypt hash of the 4-digit PIN (legacy, dormant — kept for re-enablement)
   pin_hash        TEXT,
   name            TEXT NOT NULL,
   role            TEXT NOT NULL CHECK (role IN ('admin','warehouse')),
@@ -31,6 +34,7 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS users_role_idx ON users (role) WHERE active = true;
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_uniq ON users (LOWER(username)) WHERE username IS NOT NULL;
 
 -- ---------- Storage locations (feature 3) ----------
 CREATE TABLE IF NOT EXISTS locations (
