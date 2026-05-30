@@ -7,6 +7,9 @@ const brand = require('../lib/brand');
 
 const router = express.Router();
 router.use(requireAuth);
+// GDPR: sales/invoices carry customer PII — never let a browser or proxy cache
+// these responses.
+router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
 const CHANNELS = ['shopify', 'ebay_em', 'ebay_cl', 'direct_cash', 'direct_bank'];
 
@@ -304,6 +307,7 @@ router.get('/:id', requireAdmin, async (req, res) => {
   const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   const items = await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id]);
+  await audit(req, 'view_sale', 'sale', req.params.id);  // GDPR: log customer-data read
   res.json({ sale: s.rows[0], items: items.rows });
 });
 
@@ -1136,6 +1140,7 @@ router.get('/:id/invoice.html', requireAdmin, async (req, res) => {
              : (sale.payment_method === 'cash' && !company.vat_registered) ? 'receipt'
              : 'invoice';
   const baseUrl = `${req.protocol}://${req.get('host')}`;
+  await audit(req, 'view_invoice', 'sale', req.params.id, { mode });  // GDPR: log customer-data read
   res.set('Content-Type', 'text/html').send(renderInvoiceHtml({ sale, items, company, mode, baseUrl }));
 });
 
