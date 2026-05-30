@@ -269,6 +269,3 @@ app.listen(PORT, () => {
   console.log(`[boot] env=${process.env.NODE_ENV || 'development'} upload_dir=${UPLOAD_DIR}`);
   console.log(`[boot] eBay stores: ${brand.stores.map(s => s.code + (s.token ? '✓' : '✗')).join(', ')}`);
 });
-  console.log(`[boot] env=${process.env.NODE_ENV || 'development'} upload_dir=${UPLOAD_DIR}`);
-  console.log(`[boot] eBay stores: ${brand.stores.map(s => s.code + (s.token ? '✓' : '✗')).join(', ')}`);
-});
