@@ -239,6 +239,34 @@ cron.schedule('15 3 * * *', async () => {
 
 // ---------- Start ----------
 const brand = require('./lib/brand');
+
+// ──────────────────────────────────────────────────────────────────────────
+// Brand-aware boot guard. With two deployments (Calibre + Razoryn) sharing one
+// codebase, the common failure modes are config mistakes, not code bugs:
+// pointing the new service at an unknown brand, or forgetting JWT_SECRET /
+// DATABASE_URL. Fail LOUD in production so a half-working instance never
+// silently starts; only warn in development.
+// ──────────────────────────────────────────────────────────────────────────
+(function bootGuard() {
+  const problems = [];
+  const requested = (process.env.APP_BRAND || '').toLowerCase().trim();
+  if (requested && !brand.all[requested]) {
+    problems.push(`APP_BRAND="${process.env.APP_BRAND}" is not a known brand (fell back to "${brand.code}"). Known: ${Object.keys(brand.all).join(', ')}.`);
+  }
+  if (!process.env.JWT_SECRET) problems.push('JWT_SECRET is not set — auth tokens cannot be signed securely.');
+  if (!process.env.DATABASE_URL) problems.push('DATABASE_URL is not set — no database to connect to.');
+  if (!brand.stores.some(s => s.token)) {
+    console.warn(`[boot] WARNING: brand "${brand.code}" has no eBay store token — eBay features stay inert until its token env var is set.`);
+  }
+  if (problems.length) {
+    console.error('[boot] Configuration problems:\n  - ' + problems.join('\n  - '));
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[boot] Refusing to start in production. Fix the env vars and redeploy.');
+      process.exit(1);
+    }
+  }
+})();
+
 app.listen(PORT, () => {
   console.log(`[boot] ${brand.appTitle} (${brand.code}) listening on :${PORT}`);
   console.log(`[boot] env=${process.env.NODE_ENV || 'development'} upload_dir=${UPLOAD_DIR}`);
