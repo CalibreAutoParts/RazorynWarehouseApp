@@ -8130,7 +8130,8 @@ function ceCategorySearch(q) {
   _ceCatTimer = setTimeout(async () => {
     if (!el('ce-cat-suggest')) return;
     try {
-      const r = await Api.get('/api/listings/category-search?carPartsOnly=1&q=' + encodeURIComponent(q.trim()));
+      const store = el('ce-store')?.value || '';
+      const r = await Api.get('/api/listings/category-search?carPartsOnly=1&q=' + encodeURIComponent(q.trim()) + (store ? '&storeCode=' + encodeURIComponent(store) : ''));
       const cats = r.categories || [];
       el('ce-cat-suggest').innerHTML = cats.length
         ? `<div style="position:absolute;left:0;right:0;background:var(--white);border:1px solid var(--line);border-radius:6px;max-height:240px;overflow-y:auto;z-index:30;box-shadow:var(--shadow-lg)">
@@ -8140,7 +8141,7 @@ function ceCategorySearch(q) {
           </div>`
         : '<div style="font-size:12px;color:var(--ink-soft);padding:6px 4px">No matching categories — try another word, or type the numeric ID.</div>';
     } catch (e) {
-      el('ce-cat-suggest').innerHTML = '<div style="font-size:12px;color:var(--ink-soft);padding:6px 4px">Category search needs eBay connected — type the numeric ID manually.</div>';
+      el('ce-cat-suggest').innerHTML = '<div style="font-size:12px;color:var(--red);padding:6px 4px">eBay: ' + escapeHtml(e.data?.message || e.message || 'search failed') + '</div>';
     }
   }, 350);
 }
@@ -8184,12 +8185,12 @@ async function ceLoadSpecifics(categoryId) {
   const core = [{ name: 'Manufacturer Part Number', required: true, values: [] }, { name: 'Brand', required: true, values: [] }];
   if (!categoryId) { wrap.innerHTML = ceSpecsGrid(core); return; }
   wrap.innerHTML = '<div style="font-size:12px;color:var(--ink-soft);padding:6px 0">Loading this category’s specifics…</div>';
-  let specs = [];
+  let specs = [], specErr = null;
   try {
     const store = el('ce-store')?.value || '';
     const r = await Api.get('/api/listings/category-specifics?categoryId=' + encodeURIComponent(categoryId) + (store ? '&storeCode=' + encodeURIComponent(store) : ''));
     specs = r.specifics || [];
-  } catch (e) {}
+  } catch (e) { specErr = e.data?.message || e.message; }
   const have = new Set(specs.map(s => (s.name || '').toLowerCase()));
   const merged = [...specs];
   if (!have.has('brand')) merged.unshift({ name: 'Brand', required: true, values: [] });
@@ -8197,7 +8198,7 @@ async function ceLoadSpecifics(categoryId) {
   const reqN = merged.filter(s => s.required).length;
   const head = specs.length
     ? `<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">${reqN} required · ${merged.length} specifics for this category</div>`
-    : '<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Couldn’t load the category’s specifics (eBay not connected) — fill the core fields.</div>';
+    : `<div style="font-size:11px;color:var(--red);margin-bottom:6px">Couldn’t load this category’s specifics${specErr ? ' — eBay: ' + escapeHtml(specErr) : ''}. Fill the core fields below.</div>`;
   wrap.innerHTML = head + ceSpecsGrid(merged);
 }
 

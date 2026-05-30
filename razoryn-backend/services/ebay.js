@@ -975,24 +975,27 @@ async function getOrderTracking(orderId) {
   }
 }
 
-// Search eBay categories by NAME (not numeric ID) via the Commerce Taxonomy
-// API, returning the full path so the UI can show context and filter to vehicle
+// Search eBay categories by NAME (not numeric ID) using the Trading API
+// GetSuggestedCategories — this works with the per-store Auth'n'Auth token (the
+// same one used to list items), so it doesn't depend on an OAuth setup. Returns
+// the leaf name + the ancestor path so the UI can show context and flag vehicle
 // parts. e.g. "grille" -> Vehicle Parts & Accessories › Car Parts › … › Grilles.
-async function getSuggestedCategories(query) {
+async function getSuggestedCategories(query, storeArg) {
   if (!query || query.trim().length < 2) return [];
-  const treeId = process.env.EBAY_CATEGORY_TREE_ID || '3'; // 3 = eBay UK
-  const r = await http('GET',
-    `/commerce/taxonomy/v1/category_tree/${treeId}/get_category_suggestions?q=${encodeURIComponent(query.trim())}`);
-  return (r.data?.categorySuggestions || []).map(s => {
-    const anc = (s.categoryTreeNodeAncestors || []).map(a => a.categoryName).reverse();
-    const leaf = s.category?.categoryName;
-    return {
-      id: s.category?.categoryId,
-      name: leaf,
-      path: [...anc, leaf].filter(Boolean).join(' › '),
-      automotive: [...anc, leaf].join(' ').toLowerCase().match(/vehicle parts|car parts|parts & accessories|automotive/) ? true : false,
-    };
-  }).filter(c => c.id);
+  const xml = await tradingCall('GetSuggestedCategories', `<Query>${escapeXml(query.trim())}</Query>`, storeArg);
+  const out = [];
+  for (const block of extractAll(xml, 'SuggestedCategory')) {
+    const id = extractOne(block, 'CategoryID');
+    const name = decodeEntities(extractOne(block, 'CategoryName') || '');
+    if (!id) continue;
+    const parents = extractAll(block, 'CategoryParentName').map(p => decodeEntities(p));
+    const path = [...parents, name].filter(Boolean).join(' › ');
+    out.push({
+      id, name, path,
+      automotive: /vehicle parts|car parts|parts & accessories|automotive|vehicle/i.test(path),
+    });
+  }
+  return out;
 }
 
 // GetCategorySpecifics — fetch the item-specific names eBay recommends/requires

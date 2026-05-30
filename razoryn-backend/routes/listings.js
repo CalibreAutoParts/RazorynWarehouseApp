@@ -57,10 +57,13 @@ router.get('/category-specifics', requireAdmin, async (req, res) => {
 // GET /api/listings/category-search?q=grille&carPartsOnly=1
 // Search eBay categories by NAME and (optionally) keep only vehicle-parts ones.
 router.get('/category-search', requireAdmin, async (req, res) => {
+  const brand = require('../lib/brand');
   const q = req.query.q || '';
   if (!q || q.trim().length < 2) return res.json({ categories: [] });
+  const primary = brand.getPrimaryStore();
+  const storeCode = req.query.storeCode || (primary && primary.code);
   try {
-    let cats = await ebay.getSuggestedCategories(q);
+    let cats = await ebay.getSuggestedCategories(q, storeCode);
     if (req.query.carPartsOnly === '1') {
       const auto = cats.filter(c => c.automotive);
       if (auto.length) cats = auto;  // only narrow if we actually have automotive hits
