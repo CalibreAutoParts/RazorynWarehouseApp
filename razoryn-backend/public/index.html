@@ -2924,7 +2924,15 @@ function stopCamera() {
   el('scan-start').style.display='inline-flex';
   el('scan-stop').style.display='none';
 }
+// Debounce tracker — html5-qrcode fires onScanSuccess 5-15x for one physical
+// scan, which spammed toasts and re-rendered the result card repeatedly.
+let _lastScan = { code: null, at: 0 };
 function handleScan(code) {
+  // Ignore the same code seen again within 2s (the duplicate-fire window).
+  const now = Date.now();
+  if (code === _lastScan.code && now - _lastScan.at < 2000) return;
+  _lastScan = { code, at: now };
+
   const p = State.products.find(x => x.barcode === code || x.sku === code);
   if (!p) {
     el('scan-result').innerHTML = `<div class="empty"><div class="t">Not found: ${code}</div>No product matches this barcode. <br><br><button class="btn btn-primary admin-only" onclick="openProductModal()">+ Add as new product</button></div>`;
