@@ -8083,6 +8083,7 @@ async function openCreateEbayListing(productId) {
   });
   // Context for the dynamic specifics loader (used by global handlers).
   State._ceCtx = { product, cfg };
+  ceApplyTemplate(product, cfg);
   // Populate the policy dropdowns from the seller's eBay account (async).
   loadEbayPolicies({
     shipping: policies.shipping || cfg.ebayPolicyShipping,
@@ -8172,6 +8173,25 @@ function cePrefillSpec(name) {
   if (n.includes('placement')) return p.position || '';
   return '';
 }
+// Pre-fill the listing description from the saved eBay template, substituting
+// {placeholders} from the product. Leaves the box blank if no template is set
+// (so the backend falls back to the Shopify description).
+function ceApplyTemplate(product, cfg) {
+  const tpl = cfg.ebayDescriptionTemplate || '';
+  const ta = el('ce-desc');
+  if (!tpl || !ta) return;
+  let year = '';
+  const m = (product.title || '').match(/((?:19|20)\d{2})\s*[-–]\s*((?:19|20)\d{2})/) || (product.title || '').match(/\b((?:19|20)\d{2})\b/);
+  if (m) year = m[2] ? `${m[1]}-${m[2]}` : m[1];
+  const vals = {
+    title: product.title || '', sku: product.sku || '',
+    mpn: product.part_number || '', part_number: product.part_number || '',
+    brand: cfg.ebayDefaultBrand || '', make: product.brand || '',
+    model: product.model || '', year,
+  };
+  ta.value = tpl.replace(/\{(\w+)\}/g, (mm, k) => (vals[k] != null ? vals[k] : mm));
+}
+
 // Add a free-form custom item-specific row (name + value), separate from the
 // category-loaded set so it survives category changes.
 function ceAddCustomSpec(name = '', value = '') {
@@ -9660,6 +9680,11 @@ function renderSettings() {
                 </select>
               </div>
             </div>
+            <div class="field" style="margin-top:10px">
+              <label>eBay description template</label>
+              <textarea id="set-ebay-desc-template" rows="6" placeholder="Paste your eBay-formatted HTML. Placeholders: {title} {sku} {mpn} {brand} {make} {model} {year}"></textarea>
+              <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Pre-fills the listing description (placeholders replaced from the product; editable per listing). Leave blank to use the Shopify description.</div>
+            </div>
           </div>
 
           <div style="padding:14px;background:var(--bg-soft);border-radius:8px;margin-bottom:14px">
@@ -10049,6 +10074,7 @@ async function loadPricingConfig() {
     // eBay listing defaults
     setVal('set-ebay-category',  r.ebayDefaultCategoryId  || '');
     setVal('set-ebay-brand',     r.ebayDefaultBrand       || 'Unbranded');
+    setVal('set-ebay-desc-template', r.ebayDescriptionTemplate || '');
     setVal('set-ebay-condition', r.ebayDefaultConditionId || '1000');
     setVal('set-ebay-country',   r.ebayLocationCountry    || 'GB');
     setVal('set-ebay-city',      r.ebayLocationCity       || '');
@@ -10694,6 +10720,7 @@ async function savePricingConfig() {
     // eBay listing defaults
     ebayDefaultCategoryId:  getStr('set-ebay-category'),
     ebayDefaultBrand:       getStr('set-ebay-brand'),
+    ebayDescriptionTemplate: getStr('set-ebay-desc-template'),
     ebayDefaultConditionId: getStr('set-ebay-condition'),
     ebayLocationCountry:    getStr('set-ebay-country'),
     ebayLocationCity:       getStr('set-ebay-city'),

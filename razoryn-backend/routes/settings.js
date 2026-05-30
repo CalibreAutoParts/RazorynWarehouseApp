@@ -34,6 +34,7 @@ async function ensureSocialColumns() {
     // doesn't have to type them every time. Per-store columns let multi-store
     // brands (Calibre) have different defaults per eBay account.
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_category_id TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_description_template TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_condition_id TEXT DEFAULT '1000'`);
     // Default eBay "Brand" item specific. For aftermarket parts this should be
     // the seller's company name or "Unbranded" — NOT the vehicle make (which
@@ -260,6 +261,7 @@ router.get('/pricing-config', async (req, res) => {
     // eBay listing defaults — used by the Shopify→eBay create-listing flow.
     // Defaults the modal pre-fills so users don't have to type them every time.
     ebayDefaultCategoryId:  r.ebay_default_category_id || '',
+    ebayDescriptionTemplate: r.ebay_description_template || '',
     ebayDefaultBrand:       r.ebay_default_brand || 'Unbranded',
     ebayDefaultConditionId: r.ebay_default_condition_id || '1000',
     ebayLocationCountry:    r.ebay_location_country || 'GB',
@@ -331,6 +333,7 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       defaultCountryCode: 'default_country_code',
       // eBay listing defaults
       ebayDefaultCategoryId:  'ebay_default_category_id',
+      ebayDescriptionTemplate: 'ebay_description_template',
       ebayDefaultBrand:       'ebay_default_brand',
       ebayDefaultConditionId: 'ebay_default_condition_id',
       ebayLocationCountry:    'ebay_location_country',
