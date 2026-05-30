@@ -1,0 +1,71 @@
+// sw.js — warehouse PWA service worker.
+//
+// LOCKED RULE: cache STATIC assets only. NEVER cache /api/* or /uploads/*
+// responses — they carry live stock + customer PII, where staleness and caching
+// are both unacceptable. Those requests bypass the worker entirely.
+//
+// Strategy:
+//   • /api/* and /uploads/*        → not handled here (straight to network).
+//   • navigations / HTML           → network-first, fall back to cached shell
+//                                     when offline (so deploys show instantly).
+//   • other same-origin GETs       → cache-first (logos, manifest, icon).
+const CACHE = 'wh-static-v1';
+const SHELL = '/index.html';
+const PRECACHE = ['/', SHELL, '/manifest.webmanifest', '/app-icon.svg'];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE)
+      .then((c) => c.addAll(PRECACHE).catch(() => {}))
+      .then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  if (req.method !== 'GET') return;
+
+  const url = new URL(req.url);
+  // Only handle same-origin GETs.
+  if (url.origin !== self.location.origin) return;
+  // NEVER touch API or uploads — security + freshness. Let them hit the network.
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/uploads/')) return;
+
+  // Network-first for navigations / HTML so a fresh deploy is picked up at once;
+  // cache the shell as an offline fallback.
+  const isHTML = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
+  if (isHTML) {
+    event.respondWith(
+      fetch(req)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(SHELL, copy)).catch(() => {});
+          return res;
+        })
+        .catch(() => caches.match(SHELL))
+    );
+    return;
+  }
+
+  // Cache-first for other static assets (logos, manifest, icon).
+  event.respondWith(
+    caches.match(req).then((cached) =>
+      cached ||
+      fetch(req).then((res) => {
+        if (res && res.ok && res.type === 'basic') {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+        }
+        return res;
+      })
+    )
+  );
+});

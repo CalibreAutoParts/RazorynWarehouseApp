@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#c8202d">
 <title>Warehouse Hub</title>
+<!-- PWA — manifest + icon are served brand-aware by the server. theme-color is
+     updated from the active brand once it loads (see registerPwa). -->
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/app-icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Warehouse Hub">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -1474,6 +1482,9 @@ async function init() {
   // Load brand (logo, colours, title) FIRST so even the login screen is correctly branded.
   await loadBrand();
 
+  // PWA: register the service worker + brand the manifest/theme + install prompt.
+  registerPwa();
+
   // Theme: load saved preference or fall back to system preference
   await loadTheme();
 
@@ -1494,6 +1505,69 @@ async function init() {
   }
 
   bindLogin();
+}
+
+/* ==================== PWA ==================== */
+// Service worker (static caching only) + brand-aware theme-color + a clean,
+// dismissible install affordance. Never nags once dismissed.
+function registerPwa() {
+  // Brand the browser/OS chrome from the active brand.
+  try {
+    const c = State.brand?.primaryColor;
+    if (c) document.querySelector('meta[name="theme-color"]')?.setAttribute('content', c);
+    const title = State.brand?.appTitle || State.brand?.name;
+    if (title) {
+      document.querySelector('meta[name="apple-mobile-web-app-title"]')?.setAttribute('content', State.brand?.name || title);
+      document.title = title;
+    }
+  } catch (e) {}
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  }
+
+  // Install affordance — only if not already installed and not dismissed before.
+  try { if (localStorage.getItem('pwa-install-dismissed') === '1') return; } catch (e) {}
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  if (isStandalone) return;
+
+  let deferredPrompt = null;
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    showInstallPill(async () => {
+      if (!deferredPrompt) return;
+      deferredPrompt.prompt();
+      try { await deferredPrompt.userChoice; } catch (_) {}
+      deferredPrompt = null;
+    });
+  });
+
+  // iOS Safari has no beforeinstallprompt — show a one-time Add-to-Home hint.
+  const ua = navigator.userAgent;
+  const isIOS = /iphone|ipad|ipod/i.test(ua);
+  const isSafari = isIOS && /safari/i.test(ua) && !/crios|fxios/i.test(ua);
+  if (isIOS && isSafari) showInstallPill(null, 'Install: tap Share, then “Add to Home Screen”.');
+}
+
+function showInstallPill(onInstall, iosText) {
+  if (document.getElementById('pwa-install-pill')) return;
+  const pill = document.createElement('div');
+  pill.id = 'pwa-install-pill';
+  pill.style.cssText = 'position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:9999;display:flex;align-items:center;gap:10px;background:var(--brand-primary,#222);color:#fff;padding:10px 14px;border-radius:999px;box-shadow:0 6px 24px rgba(0,0,0,.25);font-size:13px;font-weight:600;max-width:92vw';
+  if (iosText) {
+    pill.innerHTML = `<span style="font-weight:500">${iosText}</span><button aria-label="Dismiss" style="background:none;border:0;color:#fff;font-size:18px;cursor:pointer;line-height:1;padding:0 2px">×</button>`;
+    pill.querySelector('button').onclick = dismissInstallPill;
+  } else {
+    pill.innerHTML = `<span>📲 Install app</span><button id="pwa-install-go" style="background:#fff;color:#111;border:0;border-radius:999px;padding:5px 12px;font-weight:700;cursor:pointer">Install</button><button aria-label="Dismiss" style="background:none;border:0;color:#fff;font-size:18px;cursor:pointer;line-height:1;padding:0 2px">×</button>`;
+    pill.querySelector('#pwa-install-go').onclick = async () => { await onInstall(); dismissInstallPill(); };
+    pill.querySelectorAll('button')[1].onclick = dismissInstallPill;
+  }
+  document.body.appendChild(pill);
+}
+function dismissInstallPill() {
+  document.getElementById('pwa-install-pill')?.remove();
+  try { localStorage.setItem('pwa-install-dismissed', '1'); } catch (_) {}
 }
 
 /* ==================== THEME ==================== */

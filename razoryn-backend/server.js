@@ -86,11 +86,48 @@ if (settingsModule.publicLogoRouter) {
   app.use('/', settingsModule.publicLogoRouter);
 }
 
+// ---------- PWA: brand-aware manifest + app icon ----------
+// Defined BEFORE the static/SPA fallback so they aren't swallowed by index.html.
+app.get('/manifest.webmanifest', (req, res) => {
+  const b = require('./lib/brand');
+  res.type('application/manifest+json').json({
+    name: b.appTitle || 'Warehouse Hub',
+    short_name: b.name || 'Warehouse',
+    description: b.tagline || '',
+    start_url: '/',
+    scope: '/',
+    display: 'standalone',
+    orientation: 'portrait-primary',
+    background_color: '#ffffff',
+    theme_color: b.primaryColor || '#111111',
+    icons: [
+      { src: '/app-icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+      { src: '/app-icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'maskable' },
+    ],
+  });
+});
+
+// Brand-aware app icon — a clean monogram (brand colour + white initial). SVG so
+// it renders crisply at any size without needing pre-rendered raster icons.
+app.get('/app-icon.svg', (req, res) => {
+  const b = require('./lib/brand');
+  const bg = b.primaryColor || '#111111';
+  const initial = (b.name || 'W').trim().charAt(0).toUpperCase()
+    .replace(/[<>&"']/g, '');
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="${bg}"/>
+  <text x="256" y="272" font-family="Arial, Helvetica, sans-serif" font-size="300" font-weight="700" fill="#ffffff" text-anchor="middle" dominant-baseline="central">${initial}</text>
+</svg>`;
+  res.type('image/svg+xml').set('Cache-Control', 'public, max-age=3600').send(svg);
+});
+
 // ---------- Static: PWA ----------
 app.use(express.static(path.join(__dirname, 'public'), {
   // index.html should not be aggressively cached — it changes on every deploy
   setHeaders: (res, filePath) => {
-    if (filePath.endsWith('index.html')) {
+    // index.html changes every deploy; sw.js must update promptly so the cache
+    // strategy can't get stuck on an old worker.
+    if (filePath.endsWith('index.html') || filePath.endsWith('sw.js')) {
       res.setHeader('Cache-Control', 'no-cache');
     }
   },
