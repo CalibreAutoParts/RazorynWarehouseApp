@@ -8113,7 +8113,13 @@ async function openCreateEbayListing(productId) {
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field"><label>Price (£)</label><input id="ce-price" type="number" step="0.01" min="0" value="${escapeAttr(suggestedPrice)}"></div>
-        <div class="field"><label>Quantity</label><input id="ce-qty" type="number" min="1" step="1" value="${escapeAttr(product.qty_on_hand || 1)}"></div>
+        <div class="field"><label>Quantity</label>
+          <input id="ce-qty" type="number" min="0" step="1" value="${escapeAttr(product.qty_on_hand ?? 1)}">
+          <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap">
+            <button type="button" class="btn btn-outline btn-sm" onclick="ceMatchQty('warehouse',this)">Match warehouse (${escapeAttr(product.qty_on_hand ?? 0)})</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="ceMatchQty('shopify',this)">Match Shopify</button>
+          </div>
+        </div>
       </div>
       <div style="font-weight:600;font-size:13px;margin:12px 0 6px">Item specifics</div>
       <div id="ce-specifics"></div>
@@ -8317,6 +8323,31 @@ async function ceLoadSpecifics(categoryId) {
   } else {
     // eBay's live per-category list is unavailable — use the standard car-parts set.
     wrap.innerHTML = '<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Standard car-parts fields (eBay’s live per-category list isn’t available). Fill what applies; eBay flags anything else on submit.</div>' + ceSpecsGrid(CAR_PART_SPECIFICS);
+  }
+}
+
+// Match the listing quantity to warehouse (master) stock or live Shopify stock.
+async function ceMatchQty(source, btn) {
+  const ctx = State._ceCtx || {};
+  const product = ctx.product || {};
+  const qtyInput = el('ce-qty');
+  if (!qtyInput) return;
+  if (source === 'warehouse') {
+    qtyInput.value = product.qty_on_hand ?? 0;
+    toast('Quantity matched to warehouse stock', 'success', 1500);
+    return;
+  }
+  // Shopify — fetch live quantity.
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  try {
+    const r = await Api.get('/api/products/' + product.id + '/shopify-stock');
+    if (r.notLinked || r.stock == null) { toast('No Shopify stock found for this product', 'warn'); }
+    else { qtyInput.value = r.stock; toast('Quantity matched to Shopify stock (' + r.stock + ')', 'success', 1800); }
+  } catch (e) {
+    toast('Couldn’t read Shopify stock: ' + (e.data?.message || e.message), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
   }
 }
 

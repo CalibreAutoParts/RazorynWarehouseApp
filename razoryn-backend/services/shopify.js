@@ -104,6 +104,16 @@ async function getLocations() {
   return r.data.locations;
 }
 
+// Read the live available quantity for one inventory item at our location.
+async function getInventoryLevel(inventoryItemId) {
+  if (!isConfigured() || !inventoryItemId) return null;
+  const params = { inventory_item_ids: inventoryItemId };
+  if (LOCATION_ID) params.location_ids = LOCATION_ID;
+  const r = await shopifyRequest('get', '/inventory_levels.json', { params });
+  const lvl = (r.data?.inventory_levels || [])[0];
+  return lvl ? parseInt(lvl.available) : null;
+}
+
 async function setInventoryLevel(inventoryItemId, qty) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   if (!LOCATION_ID) throw new Error('SHOPIFY_LOCATION_ID_not_set');
@@ -784,6 +794,7 @@ async function removeCollect(collectId) {
 module.exports = {
   isConfigured,
   getAccessToken,
+  getInventoryLevel,
   getCustomCollections,
   getProductCollects,
   addProductToCollection,
