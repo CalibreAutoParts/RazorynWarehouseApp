@@ -8179,27 +8179,46 @@ function ceSpecsGrid(specs) {
       <input data-spec="${escapeAttr(s.name)}" value="${escapeAttr(cePrefillSpec(s.name))}" ${lid ? `list="${lid}"` : ''} placeholder="${s.required ? 'required' : 'optional'}">${dl}</div>`;
   }).join('') + '</div>';
 }
+// Standard car-parts item specifics — used when eBay's per-category list can't
+// be fetched (their GetCategorySpecifics call is deprecated / OAuth not set up).
+// Covers the fields the vast majority of eBay UK vehicle-part categories want.
+const CAR_PART_SPECIFICS = [
+  { name: 'Brand', required: true, values: [] },
+  { name: 'Manufacturer Part Number', required: true, values: [] },
+  { name: 'Placement on Vehicle', required: false, values: ['Front', 'Rear', 'Left', 'Right', 'Front Left', 'Front Right', 'Rear Left', 'Rear Right', 'Upper', 'Lower', 'Centre'] },
+  { name: 'Make', required: false, values: [] },
+  { name: 'Model', required: false, values: [] },
+  { name: 'Year', required: false, values: [] },
+  { name: 'Type', required: false, values: [] },
+  { name: 'Reference OE/OEM Number', required: false, values: [] },
+  { name: 'Colour', required: false, values: [] },
+  { name: 'Surface Finish', required: false, values: ['Primed', 'Painted', 'Unpainted', 'Textured', 'Gloss', 'Matte'] },
+  { name: 'Material', required: false, values: ['Plastic', 'ABS Plastic', 'Aluminium', 'Steel', 'Carbon Fibre', 'Glass'] },
+  { name: 'Manufacturer Warranty', required: false, values: ['No', '1 Year', '2 Years', '3 Years', 'Lifetime'] },
+  { name: 'Country/Region of Manufacture', required: false, values: [] },
+];
 async function ceLoadSpecifics(categoryId) {
   const wrap = el('ce-specifics');
   if (!wrap) return;
-  const core = [{ name: 'Manufacturer Part Number', required: true, values: [] }, { name: 'Brand', required: true, values: [] }];
-  if (!categoryId) { wrap.innerHTML = ceSpecsGrid(core); return; }
-  wrap.innerHTML = '<div style="font-size:12px;color:var(--ink-soft);padding:6px 0">Loading this category’s specifics…</div>';
-  let specs = [], specErr = null;
+  wrap.innerHTML = '<div style="font-size:12px;color:var(--ink-soft);padding:6px 0">Loading specifics…</div>';
+  let specs = [];
   try {
     const store = el('ce-store')?.value || '';
     const r = await Api.get('/api/listings/category-specifics?categoryId=' + encodeURIComponent(categoryId) + (store ? '&storeCode=' + encodeURIComponent(store) : ''));
     specs = r.specifics || [];
-  } catch (e) { specErr = e.data?.message || e.message; }
-  const have = new Set(specs.map(s => (s.name || '').toLowerCase()));
-  const merged = [...specs];
-  if (!have.has('brand')) merged.unshift({ name: 'Brand', required: true, values: [] });
-  if (!have.has('manufacturer part number')) merged.unshift({ name: 'Manufacturer Part Number', required: true, values: [] });
-  const reqN = merged.filter(s => s.required).length;
-  const head = specs.length
-    ? `<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">${reqN} required · ${merged.length} specifics for this category</div>`
-    : `<div style="font-size:11px;color:var(--red);margin-bottom:6px">Couldn’t load this category’s specifics${specErr ? ' — eBay: ' + escapeHtml(specErr) : ''}. Fill the core fields below.</div>`;
-  wrap.innerHTML = head + ceSpecsGrid(merged);
+  } catch (e) { /* deprecated call / no OAuth — fall back to the standard set */ }
+
+  if (specs.length) {
+    const have = new Set(specs.map(s => (s.name || '').toLowerCase()));
+    const merged = [...specs];
+    if (!have.has('brand')) merged.unshift({ name: 'Brand', required: true, values: [] });
+    if (!have.has('manufacturer part number')) merged.unshift({ name: 'Manufacturer Part Number', required: true, values: [] });
+    const reqN = merged.filter(s => s.required).length;
+    wrap.innerHTML = `<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">${reqN} required · ${merged.length} specifics for this category</div>` + ceSpecsGrid(merged);
+  } else {
+    // eBay's live per-category list is unavailable — use the standard car-parts set.
+    wrap.innerHTML = '<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Standard car-parts fields (eBay’s live per-category list isn’t available). Fill what applies; eBay flags anything else on submit.</div>' + ceSpecsGrid(CAR_PART_SPECIFICS);
+  }
 }
 
 async function submitCreateEbayListing(productId) {
