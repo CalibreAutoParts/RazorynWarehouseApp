@@ -9082,6 +9082,42 @@ async function runShopifyDiag() {
     toast('Diagnostic failed: ' + (e.data?.message || e.message), 'error');
   }
 }
+// Diagnose why the eBay policy dropdowns (shipping/payment/return) are empty.
+// Hits the raw GetUserPreferences debug endpoint per store and explains the
+// result in plain English.
+async function runEbayPolicyDiag() {
+  toast('Checking eBay business policies…', 'info');
+  const stores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
+  const codes = stores.length ? stores.map(s => s.code) : [''];
+  const lines = [];
+  for (const code of codes) {
+    const label = stores.find(s => s.code === code)?.name || code || 'default store';
+    try {
+      const r = await Api.get('/api/listings/business-policies-debug' + (code ? '?storeCode=' + encodeURIComponent(code) : ''));
+      const counts = r.parsed
+        ? `${r.parsed.shipping?.length || 0} shipping · ${r.parsed.payment?.length || 0} payment · ${r.parsed.return?.length || 0} return`
+        : '—';
+      lines.push(`■ ${label}  [store=${r.store}]`);
+      lines.push(`   Store token: ${r.hasStoreToken ? '✓' : '✗ (no Auth’n’Auth token in env)'}`);
+      lines.push(`   eBay Ack: ${r.ack || '(none)'}`);
+      if (r.errors && r.errors.length) {
+        for (const er of r.errors) lines.push(`   ⚠ [${er.code}] ${er.longMessage || er.shortMessage}`);
+      }
+      lines.push(`   Policies found: ${counts}`);
+      if (r.parsed && !((r.parsed.shipping?.length || 0) + (r.parsed.payment?.length || 0) + (r.parsed.return?.length || 0))) {
+        lines.push('   → None found. If Ack=Success, this account is NOT opted into Business');
+        lines.push('     Policies. Fix on eBay: Account → Business Policies → Opt in, create');
+        lines.push('     a Shipping/Payment/Return policy, then re-check here.');
+      }
+      if (r.error) lines.push('   ✗ ' + r.error);
+    } catch (e) {
+      lines.push(`■ ${label}: request failed — ${e.data?.message || e.message}`);
+    }
+    lines.push('');
+  }
+  alert(lines.join('\n'));
+}
+
 function removeMetafield(idx) {
   MirrorState.metafields.splice(idx, 1);
   paintMetafields();
