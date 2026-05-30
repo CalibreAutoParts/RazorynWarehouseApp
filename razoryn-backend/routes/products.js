@@ -218,6 +218,12 @@ router.get('/shopify-collections', requireAdmin, async (req, res) => {
   catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
 });
 
+// GET /api/products/shopify-collections — all Shopify custom collections.
+router.get('/shopify-collections', requireAdmin, async (req, res) => {
+  try { res.json({ collections: await _shopify().getCustomCollections() }); }
+  catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
+});
+
 // GET /api/products/:id
 router.get('/:id', requirePermission('inventory'), async (req, res) => {
   const { rows } = await query(
@@ -561,6 +567,50 @@ router.delete('/:id', requireAdmin, async (req, res) => {
   }
   await audit(req, hard ? 'hard_delete_product' : 'delete_product', 'product', req.params.id, { removeFromShopify });
   res.json({ ok: true });
+});
+
+// ---------- Shopify collections (shop categories) + live stock ----------
+const _shopify = () => require('../services/shopify');
+
+// GET /api/products/:id/shopify-stock — live Shopify available qty (Match button).
+router.get('/:id/shopify-stock', requireAdmin, async (req, res) => {
+  const pr = await query('SELECT shopify_inventory_id, qty_on_hand FROM products WHERE id = $1', [req.params.id]);
+  if (!pr.rows[0]) return res.status(404).json({ error: 'not_found' });
+  const invId = pr.rows[0].shopify_inventory_id;
+  if (!invId) return res.json({ stock: null, warehouse: pr.rows[0].qty_on_hand, notLinked: true });
+  try { res.json({ stock: await _shopify().getInventoryLevel(invId), warehouse: pr.rows[0].qty_on_hand }); }
+  catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
+});
+
+// GET /api/products/:id/collections — which collections this product is in.
+router.get('/:id/collections', requireAdmin, async (req, res) => {
+  const pr = await query('SELECT shopify_product_id FROM products WHERE id = $1', [req.params.id]);
+  const spid = pr.rows[0] && pr.rows[0].shopify_product_id;
+  if (!spid) return res.json({ collects: [], notLinked: true });
+  try { res.json({ collects: await _shopify().getProductCollects(spid) }); }
+  catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
+});
+
+// POST /api/products/:id/collections { collectionId } — add to a collection.
+router.post('/:id/collections', requireAdmin, async (req, res) => {
+  const pr = await query('SELECT shopify_product_id FROM products WHERE id = $1', [req.params.id]);
+  const spid = pr.rows[0] && pr.rows[0].shopify_product_id;
+  if (!spid) return res.status(400).json({ error: 'not_linked_to_shopify' });
+  if (!(req.body && req.body.collectionId)) return res.status(400).json({ error: 'collectionId required' });
+  try {
+    const r = await _shopify().addProductToCollection(spid, req.body.collectionId);
+    await audit(req, 'add_to_collection', 'product', req.params.id, { collectionId: req.body.collectionId });
+    res.json(r);
+  } catch (e) { res.status(502).json({ error: 'shopify_error', message: (e.response && e.response.data && e.response.data.errors) || e.message }); }
+});
+
+// DELETE /api/products/:id/collections/:collectId — remove from a collection.
+router.delete('/:id/collections/:collectId', requireAdmin, async (req, res) => {
+  try {
+    await _shopify().removeCollect(req.params.collectId);
+    await audit(req, 'remove_from_collection', 'product', req.params.id, { collectId: req.params.collectId });
+    res.json({ ok: true });
+  } catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
 });
 
 module.exports = router;
