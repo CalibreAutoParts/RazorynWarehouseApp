@@ -1010,11 +1010,13 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
 
   // Per-store business policies, namespaced by store code in the DB column names.
   // Falls back to the brand-wide default keys (no store suffix) for single-store brands.
+  // Precedence: a per-listing override (chosen at generation time) wins, then
+  // the per-store saved policy, then the brand-wide default.
   const polPrefix = `ebay_policy_${store.code}_`;
   const pol = {
-    paymentId:  settings[`${polPrefix}payment`]  || settings['ebay_policy_payment']  || b.businessPolicies?.paymentId  || null,
-    shippingId: settings[`${polPrefix}shipping`] || settings['ebay_policy_shipping'] || b.businessPolicies?.shippingId || null,
-    returnId:   settings[`${polPrefix}return`]   || settings['ebay_policy_return']   || b.businessPolicies?.returnId   || null,
+    paymentId:  b.businessPolicies?.paymentId  || settings[`${polPrefix}payment`]  || settings['ebay_policy_payment']  || null,
+    shippingId: b.businessPolicies?.shippingId || settings[`${polPrefix}shipping`] || settings['ebay_policy_shipping'] || null,
+    returnId:   b.businessPolicies?.returnId   || settings[`${polPrefix}return`]   || settings['ebay_policy_return']   || null,
   };
 
   const loc = {
@@ -1051,16 +1053,23 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
   const categoryId = b.categoryId || settings.ebay_default_category_id;
   if (!categoryId) return res.status(400).json({ error: 'no_category', message: 'No eBay category — pass categoryId or set a default in Settings.' });
 
-  // Derive item specifics from the product + title. eBay auto-parts categories
-  // commonly require these. User-supplied b.itemSpecifics override the derived
-  // ones (addItem dedupes by name, later entries win).
+  // Vehicle fitment specifics. product.brand/model hold the VEHICLE make/model
+  // in this catalogue, so prefer them; fall back to title parsing for anything
+  // missing (and for the year range, which has no product column).
   const vehicle = parseVehicleFromTitle(title);
+  const vMake  = product.brand || vehicle.make;
+  const vModel = product.model || vehicle.model;
+  const vYear  = vehicle.year;
   const derivedSpecifics = [];
   if (product.position) derivedSpecifics.push({ name: 'Placement on Vehicle', value: product.position });
-  if (vehicle.make)  derivedSpecifics.push({ name: 'Make',  value: vehicle.make });
-  if (vehicle.model) derivedSpecifics.push({ name: 'Model', value: vehicle.model });
-  if (vehicle.year)  derivedSpecifics.push({ name: 'Year',  value: vehicle.year });
+  if (vMake)  derivedSpecifics.push({ name: 'Make',  value: vMake });
+  if (vModel) derivedSpecifics.push({ name: 'Model', value: vModel });
+  if (vYear)  derivedSpecifics.push({ name: 'Year',  value: vYear });
   const mergedSpecifics = [...derivedSpecifics, ...(Array.isArray(b.itemSpecifics) ? b.itemSpecifics : [])];
+
+  // eBay "Brand" = who MADE the part (company name / "Unbranded"), NOT the
+  // vehicle make. Per-listing override wins, else the saved Settings default.
+  const ebayBrand = b.brand || settings.ebay_default_brand || 'Unbranded';
 
   // Pre-validate the category's REQUIRED item specifics (best-effort — if the
   // lookup itself fails we don't block the listing). Surfaces exactly which
@@ -1069,7 +1078,7 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
     try {
       const { specifics } = await ebay.getCategorySpecifics(store.code, categoryId);
       const provided = new Set(mergedSpecifics.filter(s => s.name && s.value).map(s => s.name.toLowerCase()));
-      if (product.brand) provided.add('brand');
+      provided.add('brand');  // we always send a Brand (default/override)
       if (product.part_number) provided.add('manufacturer part number');
       const missing = specifics.filter(s => s.required && !provided.has(s.name.toLowerCase())).map(s => s.name);
       if (missing.length) {
@@ -1096,7 +1105,7 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
       imageUrls,
       businessPolicies: pol,
       location: loc,
-      brand: product.brand,
+      brand: ebayBrand,
       mpn: product.part_number,
       itemSpecifics: mergedSpecifics,
     });

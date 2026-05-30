@@ -9186,6 +9186,11 @@ function renderSettings() {
                 <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Numeric eBay category. Look up on <a href="https://www.isoldwhat.com" target="_blank" rel="noopener">isoldwhat.com</a>.</div>
               </div>
               <div class="field">
+                <label>Default brand (item specific)</label>
+                <input id="set-ebay-brand" placeholder="e.g. Unbranded or your company name">
+                <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">The eBay "Brand" = who made the part. Use "Unbranded" or your company for aftermarket — not the vehicle make (that goes in "Make"). Overridable per-listing.</div>
+              </div>
+              <div class="field">
                 <label>Default condition</label>
                 <select id="set-ebay-condition">
                   <option value="1000">New</option>
@@ -9517,6 +9522,7 @@ async function loadPricingConfig() {
     setVal('set-default-cc',        r.defaultCountryCode || '44');
     // eBay listing defaults
     setVal('set-ebay-category',  r.ebayDefaultCategoryId  || '');
+    setVal('set-ebay-brand',     r.ebayDefaultBrand       || 'Unbranded');
     setVal('set-ebay-condition', r.ebayDefaultConditionId || '1000');
     setVal('set-ebay-country',   r.ebayLocationCountry    || 'GB');
     setVal('set-ebay-city',      r.ebayLocationCity       || '');
@@ -10139,6 +10145,7 @@ async function savePricingConfig() {
     defaultCountryCode:  getStr('set-default-cc'),
     // eBay listing defaults
     ebayDefaultCategoryId:  getStr('set-ebay-category'),
+    ebayDefaultBrand:       getStr('set-ebay-brand'),
     ebayDefaultConditionId: getStr('set-ebay-condition'),
     ebayLocationCountry:    getStr('set-ebay-country'),
     ebayLocationCity:       getStr('set-ebay-city'),

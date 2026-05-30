@@ -35,6 +35,10 @@ async function ensureSocialColumns() {
     // brands (Calibre) have different defaults per eBay account.
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_category_id TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_condition_id TEXT DEFAULT '1000'`);
+    // Default eBay "Brand" item specific. For aftermarket parts this should be
+    // the seller's company name or "Unbranded" — NOT the vehicle make (which
+    // belongs in the "Make" specific). Overridable per-listing.
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_brand TEXT DEFAULT 'Unbranded'`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_location_country TEXT DEFAULT 'GB'`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_location_postcode TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_location_city TEXT`);
@@ -252,6 +256,7 @@ router.get('/pricing-config', async (req, res) => {
     // eBay listing defaults — used by the Shopify→eBay create-listing flow.
     // Defaults the modal pre-fills so users don't have to type them every time.
     ebayDefaultCategoryId:  r.ebay_default_category_id || '',
+    ebayDefaultBrand:       r.ebay_default_brand || 'Unbranded',
     ebayDefaultConditionId: r.ebay_default_condition_id || '1000',
     ebayLocationCountry:    r.ebay_location_country || 'GB',
     ebayLocationPostcode:   r.ebay_location_postcode || '',
@@ -320,6 +325,7 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       defaultCountryCode: 'default_country_code',
       // eBay listing defaults
       ebayDefaultCategoryId:  'ebay_default_category_id',
+      ebayDefaultBrand:       'ebay_default_brand',
       ebayDefaultConditionId: 'ebay_default_condition_id',
       ebayLocationCountry:    'ebay_location_country',
       ebayLocationPostcode:   'ebay_location_postcode',
