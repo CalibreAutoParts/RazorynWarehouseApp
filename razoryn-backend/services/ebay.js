@@ -975,6 +975,26 @@ async function getOrderTracking(orderId) {
   }
 }
 
+// Search eBay categories by NAME (not numeric ID) via the Commerce Taxonomy
+// API, returning the full path so the UI can show context and filter to vehicle
+// parts. e.g. "grille" -> Vehicle Parts & Accessories › Car Parts › … › Grilles.
+async function getSuggestedCategories(query) {
+  if (!query || query.trim().length < 2) return [];
+  const treeId = process.env.EBAY_CATEGORY_TREE_ID || '3'; // 3 = eBay UK
+  const r = await http('GET',
+    `/commerce/taxonomy/v1/category_tree/${treeId}/get_category_suggestions?q=${encodeURIComponent(query.trim())}`);
+  return (r.data?.categorySuggestions || []).map(s => {
+    const anc = (s.categoryTreeNodeAncestors || []).map(a => a.categoryName).reverse();
+    const leaf = s.category?.categoryName;
+    return {
+      id: s.category?.categoryId,
+      name: leaf,
+      path: [...anc, leaf].filter(Boolean).join(' › '),
+      automotive: [...anc, leaf].join(' ').toLowerCase().match(/vehicle parts|car parts|parts & accessories|automotive/) ? true : false,
+    };
+  }).filter(c => c.id);
+}
+
 // GetCategorySpecifics — fetch the item-specific names eBay recommends/requires
 // for a category, so we can pre-validate an AddItem before submitting it (and
 // surface exactly which required specifics are missing). Returns:
@@ -1181,6 +1201,7 @@ module.exports = {
   completeSale,
   addItem,
   getCategorySpecifics,
+  getSuggestedCategories,
   getBusinessPolicies,
   getFulfilledOrderIds,
   getOrderTracking,

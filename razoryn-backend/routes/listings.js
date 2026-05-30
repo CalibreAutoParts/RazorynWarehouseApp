@@ -54,6 +54,23 @@ router.get('/category-specifics', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/listings/category-search?q=grille&carPartsOnly=1
+// Search eBay categories by NAME and (optionally) keep only vehicle-parts ones.
+router.get('/category-search', requireAdmin, async (req, res) => {
+  const q = req.query.q || '';
+  if (!q || q.trim().length < 2) return res.json({ categories: [] });
+  try {
+    let cats = await ebay.getSuggestedCategories(q);
+    if (req.query.carPartsOnly === '1') {
+      const auto = cats.filter(c => c.automotive);
+      if (auto.length) cats = auto;  // only narrow if we actually have automotive hits
+    }
+    res.json({ categories: cats.slice(0, 12) });
+  } catch (e) {
+    res.status(502).json({ error: 'ebay_error', message: e.message });
+  }
+});
+
 // GET /api/listings/business-policies?marketplaceId=EBAY_GB
 // The seller's payment / shipping / return policies, for listing-time dropdowns.
 router.get('/business-policies', requireAdmin, async (req, res) => {
@@ -1039,7 +1056,11 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
   // Best-effort; if Shopify fetch fails we fall back to the warehouse data.
   let description = '';
   let imageUrls = product.image_url ? [product.image_url] : [];
-  if (b.useShopifyDescription !== false && product.shopify_product_id) {
+  // A description typed/edited in the listing form takes priority over everything.
+  if (b.descriptionOverride && String(b.descriptionOverride).trim()) {
+    description = String(b.descriptionOverride);
+  }
+  if (!description && b.useShopifyDescription !== false && product.shopify_product_id) {
     try {
       const sp = await shopify.getShopifyProductFull(product.shopify_product_id);
       if (sp.description) description = sp.description;

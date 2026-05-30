@@ -8023,11 +8023,16 @@ async function openCreateEbayListing(productId) {
         <label>Title (max 80 chars) <span id="ce-title-count" style="font-size:11px;color:var(--ink-soft);float:right">0/80</span></label>
         <input id="ce-title" maxlength="80" value="${escapeAttr((product.title || '').slice(0, 80))}" oninput="el('ce-title-count').textContent = this.value.length + '/80'">
       </div>
+      <div class="field">
+        <label>Category * <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— search by name (vehicle parts)</span></label>
+        <input id="ce-cat-search" placeholder="e.g. grille, front bumper, headlight, wing" autocomplete="off" oninput="ceCategorySearch(this.value)">
+        <div id="ce-cat-suggest" style="position:relative"></div>
+      </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field">
           <label>Category ID *</label>
-          <input id="ce-category" value="${escapeAttr(cfg.ebayDefaultCategoryId || '')}" placeholder="e.g. 33744">
-          <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">eBay numeric category. Look up on <a href="https://www.isoldwhat.com" target="_blank" rel="noopener" style="color:var(--brand-primary)">isoldwhat.com</a> or copy from a similar live listing.</div>
+          <input id="ce-category" value="${escapeAttr(cfg.ebayDefaultCategoryId || '')}" placeholder="picked from search, or type">
+          <div id="ce-cat-path" style="font-size:11px;color:var(--ink-soft);margin-top:4px"></div>
         </div>
         <div class="field">
           <label>Condition *</label>
@@ -8046,10 +8051,20 @@ async function openCreateEbayListing(productId) {
         <div class="field"><label>Price (£)</label><input id="ce-price" type="number" step="0.01" min="0" value="${escapeAttr(suggestedPrice)}"></div>
         <div class="field"><label>Quantity</label><input id="ce-qty" type="number" min="1" step="1" value="${escapeAttr(product.qty_on_hand || 1)}"></div>
       </div>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0">
-        <input type="checkbox" id="ce-use-shopify-desc" checked>
-        Use Shopify description (richer content, ~1 sec slower)
-      </label>
+      <div style="font-weight:600;font-size:13px;margin:12px 0 6px">Item specifics</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field"><label>Manufacturer Part No. (MPN) *</label><input id="ce-mpn" value="${escapeAttr(product.part_number || '')}" placeholder="required by eBay for parts"></div>
+        <div class="field"><label>Brand</label><input id="ce-brand" value="${escapeAttr(cfg.ebayDefaultBrand || 'Unbranded')}"></div>
+        <div class="field"><label>Make (vehicle)</label><input id="ce-make" value="${escapeAttr(product.brand || '')}" placeholder="e.g. Volkswagen"></div>
+        <div class="field"><label>Model</label><input id="ce-model" value="${escapeAttr(product.model || '')}" placeholder="e.g. Tiguan"></div>
+        <div class="field"><label>Year</label><input id="ce-year" placeholder="e.g. 2020-2025"></div>
+        <div class="field"><label>Placement on vehicle</label><input id="ce-placement" value="${escapeAttr(product.position || '')}" placeholder="e.g. Front Left"></div>
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin:4px 0 8px"><strong>MPN is required by eBay for car parts</strong> — leaving it blank is what caused the failure. Blank Make/Model/Year auto-fill from the product &amp; title.</div>
+      <div class="field">
+        <label>Description <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— leave blank to use the Shopify description</span></label>
+        <textarea id="ce-desc" rows="5" placeholder="Type or paste a description (HTML allowed). Leave blank and the Shopify product description is used."></textarea>
+      </div>
       ${policiesConfigured ? '' : `
         <div style="font-size:12px;padding:10px;background:#fff8e6;border:1px solid #f0d171;border-radius:6px;color:#5a4400;margin-top:8px">
           <strong>⚠ No business policies set</strong> for ${escapeHtml(stores.length > 1 ? 'this store' : 'eBay')}. The listing will likely fail because eBay requires payment / shipping / return policies. Set them in Settings → eBay listing defaults first.
@@ -8060,7 +8075,7 @@ async function openCreateEbayListing(productId) {
         <div class="field"><label>Payment policy</label><select id="ce-policy-payment"><option value="">Saved default</option></select></div>
         <div class="field"><label>Return policy</label><select id="ce-policy-return"><option value="">Saved default</option></select></div>
       </div>
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:-2px">Leave as "Saved default" to use your Settings policy. Loading your eBay policies…</div>
+      <div id="ce-policy-note" style="font-size:11px;color:var(--ink-soft);margin-top:-2px">Leave as "Saved default" to use your Settings policy. Loading your eBay policies…</div>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:8px 0 2px">
         <input type="checkbox" id="ce-preview">
         Preview only — validate &amp; show fees without creating a live listing
@@ -8082,9 +8097,17 @@ async function openCreateEbayListing(productId) {
 // Fetch the seller's eBay business policies and fill the listing dropdowns,
 // pre-selecting whichever matches the saved Settings default.
 async function loadEbayPolicies(saved) {
+  const note = el('ce-policy-note');
   let r;
   try { r = await Api.get('/api/listings/business-policies'); }
-  catch (e) { return; }  // leave "Saved default" only
+  catch (e) {
+    if (note) note.textContent = 'Couldn’t load your eBay policies (eBay account not connected for the Account API) — your saved Settings policy will be used.';
+    return;
+  }
+  const n = (r.shipping?.length || 0) + (r.payment?.length || 0) + (r.return?.length || 0);
+  if (note) note.textContent = n
+    ? 'Pick a per-listing policy for this item, or leave as "Saved default".'
+    : 'No business policies found on your eBay account — your saved Settings policy IDs will be used.';
   const fill = (selId, list, savedId) => {
     const sel = el(selId);
     if (!sel) return;
@@ -8101,6 +8124,36 @@ async function loadEbayPolicies(saved) {
   fill('ce-policy-return',   r.return,   saved?.return);
 }
 
+// eBay category search-by-name (auto-filtered to vehicle parts).
+let _ceCatTimer = null;
+function ceCategorySearch(q) {
+  clearTimeout(_ceCatTimer);
+  const wrap = el('ce-cat-suggest');
+  if (!q || q.trim().length < 2) { if (wrap) wrap.innerHTML = ''; return; }
+  _ceCatTimer = setTimeout(async () => {
+    if (!el('ce-cat-suggest')) return;
+    try {
+      const r = await Api.get('/api/listings/category-search?carPartsOnly=1&q=' + encodeURIComponent(q.trim()));
+      const cats = r.categories || [];
+      el('ce-cat-suggest').innerHTML = cats.length
+        ? `<div style="position:absolute;left:0;right:0;background:var(--white);border:1px solid var(--line);border-radius:6px;max-height:240px;overflow-y:auto;z-index:30;box-shadow:var(--shadow-lg)">
+            ${cats.map(c => `<div data-id="${escapeAttr(c.id)}" data-path="${escapeAttr(c.path || c.name)}" onclick="ceCategoryPick(this.dataset.id, this.dataset.path)" style="padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--line-2);font-size:12px">
+              <strong>${escapeHtml(c.name)}</strong> <span style="color:var(--ink-soft)">· ${escapeHtml(c.id)}</span>
+              <div style="color:var(--ink-soft);font-size:11px">${escapeHtml(c.path || '')}</div></div>`).join('')}
+          </div>`
+        : '<div style="font-size:12px;color:var(--ink-soft);padding:6px 4px">No matching categories — try another word, or type the numeric ID.</div>';
+    } catch (e) {
+      el('ce-cat-suggest').innerHTML = '<div style="font-size:12px;color:var(--ink-soft);padding:6px 4px">Category search needs eBay connected — type the numeric ID manually.</div>';
+    }
+  }, 350);
+}
+function ceCategoryPick(id, path) {
+  if (el('ce-category')) el('ce-category').value = id;
+  if (el('ce-cat-path')) el('ce-cat-path').textContent = path || '';
+  if (el('ce-cat-suggest')) el('ce-cat-suggest').innerHTML = '';
+  if (el('ce-cat-search')) el('ce-cat-search').value = path ? path.split(' › ').pop() : id;
+}
+
 async function submitCreateEbayListing(productId) {
   const storeCode = el('ce-store')?.value;
   const title     = (el('ce-title')?.value || '').trim();
@@ -8108,25 +8161,36 @@ async function submitCreateEbayListing(productId) {
   const conditionId = el('ce-condition')?.value;
   const price     = parseFloat(el('ce-price')?.value);
   const quantity  = parseInt(el('ce-qty')?.value);
-  const useShopifyDescription = !!el('ce-use-shopify-desc')?.checked;
   const preview = !!el('ce-preview')?.checked;
   const businessPolicies = {
     shippingId: el('ce-policy-shipping')?.value || undefined,
     paymentId:  el('ce-policy-payment')?.value || undefined,
     returnId:   el('ce-policy-return')?.value || undefined,
   };
+  // Editable item specifics — only send the ones with a value.
+  const itemSpecifics = [];
+  const addSpec = (name, id) => { const v = (el(id)?.value || '').trim(); if (v) itemSpecifics.push({ name, value: v }); };
+  addSpec('Manufacturer Part Number', 'ce-mpn');
+  addSpec('Brand', 'ce-brand');
+  addSpec('Make', 'ce-make');
+  addSpec('Model', 'ce-model');
+  addSpec('Year', 'ce-year');
+  addSpec('Placement on Vehicle', 'ce-placement');
+  const descriptionOverride = (el('ce-desc')?.value || '').trim() || undefined;
 
   if (!storeCode)   { toast('Pick a store', 'warn'); return; }
   if (!title)       { toast('Title required', 'warn'); return; }
-  if (!categoryId)  { toast('Category ID required', 'warn'); return; }
+  if (!categoryId)  { toast('Category required — search by name or type the ID', 'warn'); return; }
   if (!price || isNaN(price)) { toast('Valid price required', 'warn'); return; }
+  if (!el('ce-mpn')?.value.trim() && !confirm('No Manufacturer Part Number (MPN) entered. eBay usually rejects car-part listings without it. Continue anyway?')) return;
 
   const taskId = Task.start(preview ? 'Validating listing…' : 'Creating eBay listing…');
   try {
     const r = await Api.post('/api/listings/create-ebay', {
       productId, storeCode, categoryId, conditionId,
-      price, quantity, titleOverride: title, useShopifyDescription,
-      businessPolicies, preview,
+      price, quantity, titleOverride: title,
+      useShopifyDescription: !descriptionOverride, descriptionOverride,
+      itemSpecifics, businessPolicies, preview,
     });
     // Preview mode: nothing was listed — show fees, keep the modal open so the
     // user can untick Preview and publish.
