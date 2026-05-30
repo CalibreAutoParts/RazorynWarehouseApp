@@ -3014,6 +3014,54 @@ function openProductModal(id) {
       { label: 'Cancel', onClick: closeModal }
     ]
   });
+  if (id) loadProductCollections(id);
+}
+
+// Shopify collections (shop categories) picker inside the product modal.
+async function loadProductCollections(productId) {
+  const wrap = el('m-collections');
+  if (!wrap) return;
+  try {
+    const [all, mine] = await Promise.all([
+      Api.get('/api/products/shopify-collections'),
+      Api.get('/api/products/' + productId + '/collections'),
+    ]);
+    if (mine.notLinked) { wrap.innerHTML = '<span style="color:var(--ink-soft)">Not linked to Shopify — import/link this product first.</span>'; return; }
+    const collections = all.collections || [];
+    if (!collections.length) { wrap.innerHTML = '<span style="color:var(--ink-soft)">No custom collections found on Shopify. (Smart/auto collections are managed by Shopify rules.)</span>'; return; }
+    const inMap = {}; (mine.collects || []).forEach(c => { inMap[c.collectionId] = c.collectId; });
+    State._prodCollects = inMap;
+    wrap.innerHTML = '<div style="display:flex;flex-direction:column;gap:6px;max-height:180px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:8px">' +
+      collections.map(c => {
+        const on = inMap[c.id] != null;
+        return `<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
+          <input type="checkbox" ${on ? 'checked' : ''} onchange="toggleProductCollection('${productId}','${c.id}',this)">
+          ${escapeHtml(c.title)}</label>`;
+      }).join('') + '</div><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Changes save to Shopify immediately.</div>';
+  } catch (e) {
+    wrap.innerHTML = '<span style="color:var(--red)">Couldn’t load collections: ' + escapeHtml(e.data?.message || e.message) + '</span>';
+  }
+}
+async function toggleProductCollection(productId, collectionId, cb) {
+  cb.disabled = true;
+  const map = State._prodCollects || {};
+  try {
+    if (cb.checked) {
+      const r = await Api.post('/api/products/' + productId + '/collections', { collectionId });
+      map[collectionId] = r.collectId;
+      toast('Added to collection', 'success', 1500);
+    } else {
+      const collectId = map[collectionId];
+      if (collectId) await Api.delete('/api/products/' + productId + '/collections/' + collectId);
+      delete map[collectionId];
+      toast('Removed from collection', 'success', 1500);
+    }
+  } catch (e) {
+    cb.checked = !cb.checked;
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  } finally {
+    cb.disabled = false;
+  }
 }
 
 /* ==========================================================
