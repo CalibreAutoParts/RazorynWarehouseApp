@@ -61,6 +61,27 @@ function isConfigured(storeArg) {
 let cachedToken = null;
 let tokenExpiresAt = 0;
 
+// Application token via client_credentials — for public REST APIs like the
+// Commerce Taxonomy API. Needs only the App ID + Cert ID (no user consent or
+// refresh token), so it works wherever Trading works. Replaces the deprecated
+// Trading API category calls (GetCategorySpecifics now returns HTTP 503).
+let cachedAppToken = null, appTokenExpiresAt = 0;
+async function getAppToken() {
+  if (!CLIENT_ID || !CLIENT_SECRET) throw new Error('eBay App ID / Cert ID not set');
+  if (cachedAppToken && Date.now() < appTokenExpiresAt - 60000) return cachedAppToken;
+  const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
+  const r = await axios.post(`${BASE}/identity/v1/oauth2/token`,
+    new URLSearchParams({ grant_type: 'client_credentials', scope: 'https://api.ebay.com/oauth/api_scope' }),
+    { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 });
+  cachedAppToken = r.data.access_token;
+  appTokenExpiresAt = Date.now() + (r.data.expires_in * 1000);
+  return cachedAppToken;
+}
+async function taxonomyGet(path) {
+  const token = await getAppToken();
+  return axios.get(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, timeout: 20000 });
+}
+
 async function getAccessToken() {
   if (!isConfigured()) {
     const have = {
@@ -980,22 +1001,20 @@ async function getOrderTracking(orderId) {
 // same one used to list items), so it doesn't depend on an OAuth setup. Returns
 // the leaf name + the ancestor path so the UI can show context and flag vehicle
 // parts. e.g. "grille" -> Vehicle Parts & Accessories › Car Parts › … › Grilles.
-async function getSuggestedCategories(query, storeArg) {
+async function getSuggestedCategories(query) {
   if (!query || query.trim().length < 2) return [];
-  const xml = await tradingCall('GetSuggestedCategories', `<Query>${escapeXml(query.trim())}</Query>`, storeArg);
-  const out = [];
-  for (const block of extractAll(xml, 'SuggestedCategory')) {
-    const id = extractOne(block, 'CategoryID');
-    const name = decodeEntities(extractOne(block, 'CategoryName') || '');
-    if (!id) continue;
-    const parents = extractAll(block, 'CategoryParentName').map(p => decodeEntities(p));
-    const path = [...parents, name].filter(Boolean).join(' › ');
-    out.push({
-      id, name, path,
-      automotive: /vehicle parts|car parts|parts & accessories|automotive|vehicle/i.test(path),
-    });
-  }
-  return out;
+  const treeId = process.env.EBAY_CATEGORY_TREE_ID || '3'; // 3 = eBay UK
+  const r = await taxonomyGet(`/commerce/taxonomy/v1/category_tree/${treeId}/get_category_suggestions?q=${encodeURIComponent(query.trim())}`);
+  return (r.data?.categorySuggestions || []).map(s => {
+    const anc = (s.categoryTreeNodeAncestors || []).map(a => a.categoryName).reverse();
+    const leaf = s.category?.categoryName;
+    return {
+      id: s.category?.categoryId,
+      name: leaf,
+      path: [...anc, leaf].filter(Boolean).join(' › '),
+      automotive: /vehicle parts|car parts|parts & accessories|automotive|vehicle/i.test([...anc, leaf].join(' ')),
+    };
+  }).filter(c => c.id);
 }
 
 // GetCategorySpecifics — fetch the item-specific names eBay recommends/requires
@@ -1004,21 +1023,20 @@ async function getSuggestedCategories(query, storeArg) {
 //   { categoryId, specifics: [{ name, required, values: [...] }] }
 // `required` = the specific has MinValues >= 1 in its validation rules.
 async function getCategorySpecifics(storeArg, categoryId) {
+  // storeArg kept for call-site compatibility; the Taxonomy API uses the app
+  // token (client_credentials), not a per-store token.
   if (!categoryId) throw new Error('categoryId required');
-  const xml = await tradingCall('GetCategorySpecifics',
-    `<CategoryID>${escapeXml(String(categoryId))}</CategoryID>`, storeArg);
-  const ack = extractOne(xml, 'Ack') || '';
-  if (ack !== 'Success' && ack !== 'Warning') {
-    const errMsg = extractOne(xml, 'ShortMessage') || extractOne(xml, 'LongMessage') || 'GetCategorySpecifics failed';
-    throw new Error(`GetCategorySpecifics [${extractOne(xml, 'ErrorCode') || '?'}]: ${decodeEntities(errMsg)}`);
-  }
+  const treeId = process.env.EBAY_CATEGORY_TREE_ID || '3';
+  const r = await taxonomyGet(`/commerce/taxonomy/v1/category_tree/${treeId}/get_item_aspects_for_category?category_id=${encodeURIComponent(String(categoryId))}`);
   const specifics = [];
-  for (const block of extractAll(xml, 'NameRecommendation')) {
-    const name = decodeEntities(extractOne(block, 'Name') || '').trim();
+  for (const a of (r.data?.aspects || [])) {
+    const name = a.localizedAspectName;
     if (!name) continue;
-    const minValues = parseInt(extractOne(block, 'MinValues') || '0', 10) || 0;
-    const values = extractAll(block, 'Value').map(v => decodeEntities(v).trim()).filter(Boolean);
-    specifics.push({ name, required: minValues >= 1, values });
+    specifics.push({
+      name,
+      required: !!a.aspectConstraint?.aspectRequired,
+      values: (a.aspectValues || []).map(v => v.localizedValue).filter(Boolean),
+    });
   }
   return { categoryId: String(categoryId), specifics };
 }
