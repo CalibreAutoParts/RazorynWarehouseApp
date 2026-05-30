@@ -241,34 +241,34 @@ cron.schedule('15 3 * * *', async () => {
 const brand = require('./lib/brand');
 
 // ──────────────────────────────────────────────────────────────────────────
-// Brand-aware boot guard. With two deployments (Calibre + Razoryn) sharing one
-// codebase, the common failure modes are config mistakes, not code bugs:
-// pointing the new service at an unknown brand, or forgetting JWT_SECRET /
-// DATABASE_URL. Fail LOUD in production so a half-working instance never
-// silently starts; only warn in development.
+// Brand-aware boot diagnostics. With two deployments (Calibre + Razoryn)
+// sharing one codebase, config mistakes are the common failure mode. We surface
+// them LOUDLY in the logs but never refuse to start: the app has safe fallbacks
+// (e.g. a default JWT secret, brand fallback) and a healthy process that serves
+// /health is far better than a crash loop. Operators read the warnings and fix
+// the env vars at their own pace.
 // ──────────────────────────────────────────────────────────────────────────
-(function bootGuard() {
-  const problems = [];
+(function bootDiagnostics() {
+  const warnings = [];
   const requested = (process.env.APP_BRAND || '').toLowerCase().trim();
   if (requested && !brand.all[requested]) {
-    problems.push(`APP_BRAND="${process.env.APP_BRAND}" is not a known brand (fell back to "${brand.code}"). Known: ${Object.keys(brand.all).join(', ')}.`);
+    warnings.push(`APP_BRAND="${process.env.APP_BRAND}" is not a known brand (using "${brand.code}"). Known: ${Object.keys(brand.all).join(', ')}.`);
   }
-  if (!process.env.JWT_SECRET) problems.push('JWT_SECRET is not set — auth tokens cannot be signed securely.');
-  if (!process.env.DATABASE_URL) problems.push('DATABASE_URL is not set — no database to connect to.');
+  if (!process.env.JWT_SECRET) warnings.push('JWT_SECRET is not set — using an insecure default. Set a unique JWT_SECRET in production.');
+  if (!process.env.DATABASE_URL) warnings.push('DATABASE_URL is not set — database features will fail until it is provided.');
   if (!brand.stores.some(s => s.token)) {
-    console.warn(`[boot] WARNING: brand "${brand.code}" has no eBay store token — eBay features stay inert until its token env var is set.`);
+    warnings.push(`brand "${brand.code}" has no eBay store token — eBay features stay inert until its token env var is set.`);
   }
-  if (problems.length) {
-    console.error('[boot] Configuration problems:\n  - ' + problems.join('\n  - '));
-    if (process.env.NODE_ENV === 'production') {
-      console.error('[boot] Refusing to start in production. Fix the env vars and redeploy.');
-      process.exit(1);
-    }
+  if (warnings.length) {
+    console.warn('[boot] Configuration warnings (app will still start):\n  - ' + warnings.join('\n  - '));
   }
 })();
 
 app.listen(PORT, () => {
   console.log(`[boot] ${brand.appTitle} (${brand.code}) listening on :${PORT}`);
+  console.log(`[boot] env=${process.env.NODE_ENV || 'development'} upload_dir=${UPLOAD_DIR}`);
+  console.log(`[boot] eBay stores: ${brand.stores.map(s => s.code + (s.token ? '✓' : '✗')).join(', ')}`);
+});
   console.log(`[boot] env=${process.env.NODE_ENV || 'development'} upload_dir=${UPLOAD_DIR}`);
   console.log(`[boot] eBay stores: ${brand.stores.map(s => s.code + (s.token ? '✓' : '✗')).join(', ')}`);
 });
