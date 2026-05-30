@@ -846,37 +846,17 @@
       <img id="login-logo-img" src="/logo-dark.png" alt="" data-brand-logo-dark style="width:240px;max-width:80%;height:auto;display:block;margin:0 auto 6px;">
       <div class="sub">Warehouse Hub</div>
     </div>
-    <div class="login-tabs">
-      <button class="login-tab active" data-mode="pin">PIN</button>
-      <button class="login-tab" data-mode="email">Email</button>
-    </div>
-
-    <div id="login-pin">
-      <div class="pin-display">
-        <div class="pin-dot"></div><div class="pin-dot"></div>
-        <div class="pin-dot"></div><div class="pin-dot"></div>
-      </div>
-      <div class="pin-pad">
-        <button class="pin-key">1</button><button class="pin-key">2</button><button class="pin-key">3</button>
-        <button class="pin-key">4</button><button class="pin-key">5</button><button class="pin-key">6</button>
-        <button class="pin-key">7</button><button class="pin-key">8</button><button class="pin-key">9</button>
-        <button class="pin-key" data-act="clear">⌫</button>
-        <button class="pin-key">0</button>
-        <button class="pin-key" data-act="enter" style="background:var(--brand-primary);color:var(--brand-on-primary)">→</button>
-      </div>
-      <div class="pin-error" id="pin-error"></div>
-    </div>
-
-    <div id="login-email" style="display:none">
+    <div id="login-form">
       <div class="field">
-        <label>Email</label>
-        <input type="email" id="email-input" placeholder="your@email.com" value="">
+        <label>Username</label>
+        <input type="text" id="username-input" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="username">
       </div>
       <div class="field">
         <label>Password</label>
-        <input type="password" id="pwd-input" placeholder="••••••••" value="">
+        <input type="password" id="pwd-input" autocomplete="current-password" placeholder="••••••••">
       </div>
-      <button class="btn btn-primary btn-block" id="email-login">Sign in</button>
+      <button class="btn btn-primary btn-block" id="login-submit">Sign in</button>
+      <div class="pin-error" id="login-error" style="margin-top:10px"></div>
     </div>
   </div>
 </div>
@@ -1102,8 +1082,8 @@ const Api = {
       try { await window.storage.set('rzn_token', r.token); } catch(_) {}
       return r.user;
     },
-    async loginEmail(email, password) {
-      const r = await Api.post('/api/auth/login', { email, password });
+    async login(username, password) {
+      const r = await Api.post('/api/auth/login', { username, password });
       API_TOKEN = r.token;
       try { await window.storage.set('rzn_token', r.token); } catch(_) {}
       return r.user;
@@ -1255,6 +1235,7 @@ function adaptUser(u) {
   return {
     id: u.id,
     name: u.name,
+    username: u.username,
     email: u.email,
     role: u.role,
     perms: u.permissions || {},          // legacy
@@ -1631,61 +1612,30 @@ async function persistAll() {
    LOGIN
    ========================================================== */
 function bindLogin() {
-  const tabs = document.querySelectorAll('.login-tab');
-  const pinView = document.getElementById('login-pin');
-  const emailView = document.getElementById('login-email');
-  tabs.forEach(t => t.addEventListener('click', () => {
-    tabs.forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    if (t.dataset.mode === 'pin') { pinView.style.display='block'; emailView.style.display='none'; }
-    else { pinView.style.display='none'; emailView.style.display='block'; }
-  }));
-
-  let pin = '';
-  const dots = document.querySelectorAll('.pin-dot');
-  function renderDots() {
-    dots.forEach((d, i) => d.classList.toggle('filled', i < pin.length));
-  }
-  async function tryPin() {
-    const errEl = document.getElementById('pin-error');
-    errEl.textContent = '';
-    try {
-      const user = await Api.auth.loginPin(pin);
-      State.user = user;
-      pin = ''; renderDots();
-      await Store.refreshAll();
-      try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (e) {}
-    try { await Sounds.loadPrefs(); } catch (e) {}
-      enterApp();
-    } catch (e) {
-      errEl.textContent = e.message === 'unauthorized' || e.status === 401
-        ? 'Invalid PIN' : 'Login failed — check your connection';
-      pin = ''; renderDots();
-      setTimeout(() => errEl.textContent = '', 2500);
-    }
-  }
-  document.querySelectorAll('.pin-key').forEach(k => k.addEventListener('click', () => {
-    const act = k.dataset.act;
-    if (act === 'clear') { pin = pin.slice(0, -1); renderDots(); return; }
-    if (act === 'enter') { if (pin.length === 4) tryPin(); return; }
-    if (pin.length < 4) { pin += k.textContent; renderDots(); }
-    if (pin.length === 4) setTimeout(tryPin, 150);
-  }));
-
-  document.getElementById('email-login').addEventListener('click', async () => {
-    const email = document.getElementById('email-input').value.trim();
+  const errEl = document.getElementById('login-error');
+  async function submit() {
+    const username = document.getElementById('username-input').value.trim();
     const pwd = document.getElementById('pwd-input').value;
-    if (!email || !pwd) { toast('Email and password required', 'error'); return; }
+    if (errEl) errEl.textContent = '';
+    if (!username || !pwd) { toast('Username and password required', 'error'); return; }
     try {
-      const user = await Api.auth.loginEmail(email, pwd);
+      const user = await Api.auth.login(username, pwd);
       State.user = user;
       await Store.refreshAll();
       try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (e) {}
-    try { await Sounds.loadPrefs(); } catch (e) {}
+      try { await Sounds.loadPrefs(); } catch (e) {}
       enterApp();
     } catch (e) {
-      toast(e.status === 401 ? 'Invalid email or password' : 'Login failed', 'error');
+      const msg = e.status === 401 ? 'Invalid username or password' : 'Login failed — check your connection';
+      if (errEl) { errEl.textContent = msg; setTimeout(() => { errEl.textContent = ''; }, 3000); }
+      else toast(msg, 'error');
     }
+  }
+  const btn = document.getElementById('login-submit');
+  if (btn) btn.addEventListener('click', submit);
+  ['username-input', 'pwd-input'].forEach(id => {
+    const inp = document.getElementById(id);
+    if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   });
 }
 
@@ -7254,14 +7204,14 @@ function paintStaff() {
           <div class="avatar" style="width:48px;height:48px;font-size:18px">${u.name.charAt(0)}</div>
           <div style="flex:1">
             <div style="font-weight:600;font-size:15px">${u.name}${isSelf ? ' <span style="font-size:11px;color:var(--ink-soft);font-weight:500">(you)</span>' : ''}</div>
-            <div style="color:var(--ink-soft);font-size:12px">${u.email || '—'}</div>
+            <div style="color:var(--ink-soft);font-size:12px">${u.username ? '@' + u.username : (u.email || '—')}</div>
           </div>
           <span class="pill ${isAdmin?'red':'blue'}">${u.role}</span>
         </div>
 
         <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
-          <button class="btn btn-outline btn-sm" onclick="resetPin('${u.id}','${u.name.replace(/'/g, "\\'")}')">Reset PIN</button>
-          ${isAdmin ? `<button class="btn btn-outline btn-sm" onclick="resetPassword('${u.id}','${u.name.replace(/'/g, "\\'")}')">Reset password</button>` : ''}
+          <button class="btn btn-outline btn-sm" onclick="resetPassword('${u.id}','${u.name.replace(/'/g, "\\'")}')">Reset password</button>
+          <button class="btn btn-outline btn-sm" onclick="changeUsername('${u.id}','${u.name.replace(/'/g, "\\'")}')">Change username</button>
         </div>
 
         ${isAdmin ? `
@@ -7320,6 +7270,20 @@ async function resetPassword(uid, uname) {
     toast('Password reset for ' + uname, 'success');
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
+async function changeUsername(uid, uname) {
+  const newName = prompt('Enter new username for ' + uname + ':');
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (!trimmed) { toast('Username cannot be empty', 'error'); return; }
+  try {
+    await Api.patch('/api/staff/' + uid, { username: trimmed });
+    await Store.refresh('staff');
+    paintStaff();
+    toast('Username updated for ' + uname, 'success');
+  } catch (e) {
+    toast(e.data?.error === 'username_or_email_exists' ? 'That username is already taken' : 'Failed: ' + e.message, 'error');
+  }
+}
 async function togglePerm(uid, key, val) {
   const u = State.staff.find(x => x.id == uid);
   if (!u) return;
@@ -7358,24 +7322,28 @@ async function deleteStaff(id) {
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 function openStaffModal(id) {
-  const u = id ? State.staff.find(x => x.id == id) : { id: null, name:'', email:'', role:'warehouse', pin:'', perms:{ inventory:true, scan:true, locations:true, returns:true, sales:false, pricing:true, schedule:true, videos:true, kb:true, kbSensitive:false } };
+  const u = id ? State.staff.find(x => x.id == id) : { id: null, name:'', username:'', email:'', role:'warehouse', perms:{ inventory:true, scan:true, locations:true, returns:true, sales:false, pricing:true, schedule:true, videos:true, kb:true, kbSensitive:false } };
   modal({
     title: id ? 'Edit staff' : 'Add staff',
     body: `
-      <div class="field"><label>Full name</label><input id="s-name" value="${u.name}"></div>
-      <div class="field"><label>Email (admin only)</label><input id="s-email" value="${u.email||''}"></div>
+      <div class="field"><label>Full name</label><input id="s-name" value="${u.name||''}"></div>
+      <div class="field"><label>Username</label><input id="s-username" value="${u.username||''}" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. warehouse1"></div>
+      <div class="field"><label>Email (optional)</label><input id="s-email" value="${u.email||''}"></div>
       <div class="field"><label>Role</label><select id="s-role"><option value="warehouse" ${u.role==='warehouse'?'selected':''}>Warehouse</option><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option></select></div>
-      <div class="field"><label>4-digit PIN (set/reset)</label><input id="s-pin" maxlength="6" pattern="[0-9]{4,6}" placeholder="${id ? 'Leave blank to keep current' : '1234'}"></div>
-      ${id ? '' : '<div class="field"><label>Password (admin only)</label><input id="s-pwd" type="password" placeholder="Required if role = admin"></div>'}`,
+      <div class="field"><label>Password</label><input id="s-pwd" type="password" autocomplete="new-password" placeholder="${id ? 'Leave blank to keep current' : 'Set a password (min 8 chars)'}"></div>`,
     actions: [
       { label: id?'Save':'Add', primary: true, onClick: async () => {
+        const username = el('s-username').value.trim();
+        const pwd = el('s-pwd') ? el('s-pwd').value : '';
+        if (!username) { toast('Username is required', 'error'); return; }
+        if (!id && pwd.length < 8) { toast('Set a password of at least 8 characters', 'error'); return; }
         const payload = {
           name: el('s-name').value,
+          username,
           email: el('s-email').value || null,
           role: el('s-role').value,
         };
-        if (el('s-pin') && el('s-pin').value) payload.pin = el('s-pin').value;
-        if (!id && el('s-pwd') && el('s-pwd').value) payload.password = el('s-pwd').value;
+        if (pwd) payload.password = pwd;
         try {
           if (id) {
             await Api.patch('/api/staff/' + id, payload);
@@ -7384,7 +7352,12 @@ function openStaffModal(id) {
           }
           await Store.refresh('staff');
           closeModal(); paintStaff(); toast('Saved', 'success');
-        } catch (e) { toast('Failed: ' + (e.data?.error || e.message), 'error'); }
+        } catch (e) {
+          const err = e.data?.error;
+          toast(err === 'username_or_email_exists' ? 'That username or email is already taken'
+              : err === 'username_and_password_required' ? 'Username and password are required'
+              : 'Failed: ' + (err || e.message), 'error');
+        }
       }},
       { label: 'Cancel', onClick: closeModal }
     ]

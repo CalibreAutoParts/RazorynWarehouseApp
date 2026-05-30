@@ -34,7 +34,7 @@ const DEFAULT_PERMS = {
 // GET /api/staff
 router.get('/', async (req, res) => {
   const { rows } = await query(`
-    SELECT id, email, name, role, permissions, active, last_login_at, created_at
+    SELECT id, username, email, name, role, permissions, active, last_login_at, created_at
     FROM users ORDER BY active DESC, name
   `);
   res.json({ users: rows });
@@ -45,27 +45,25 @@ router.post('/', async (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.role) return res.status(400).json({ error: 'name_and_role_required' });
   if (!['admin', 'warehouse'].includes(b.role)) return res.status(400).json({ error: 'invalid_role' });
-  if (b.role === 'admin' && (!b.email || !b.password)) {
-    return res.status(400).json({ error: 'admin_needs_email_and_password' });
-  }
-  if (b.role === 'warehouse' && !b.pin) {
-    return res.status(400).json({ error: 'warehouse_needs_pin' });
+  // Everyone now logs in with a username + password (the PIN keypad is retired).
+  if (!b.username || !b.password) {
+    return res.status(400).json({ error: 'username_and_password_required' });
   }
 
-  const passwordHash = b.password ? await bcrypt.hash(b.password, 10) : null;
-  const pinHash = b.pin ? await bcrypt.hash(b.pin, 10) : null;
+  const passwordHash = await bcrypt.hash(b.password, 10);
+  const pinHash = b.pin ? await bcrypt.hash(b.pin, 10) : null;  // optional, dormant
   const perms = b.role === 'warehouse' ? { ...DEFAULT_PERMS, ...(b.permissions || {}) } : {};
 
   try {
     const { rows } = await query(
-      `INSERT INTO users (name, email, password_hash, pin_hash, role, permissions)
-       VALUES ($1,$2,$3,$4,$5,$6::jsonb) RETURNING id, name, email, role, permissions, active`,
-      [b.name, b.email || null, passwordHash, pinHash, b.role, JSON.stringify(perms)]
+      `INSERT INTO users (name, username, email, password_hash, pin_hash, role, permissions)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING id, name, username, email, role, permissions, active`,
+      [b.name, b.username, b.email || null, passwordHash, pinHash, b.role, JSON.stringify(perms)]
     );
     await audit(req, 'create_user', 'user', rows[0].id, { role: b.role });
     res.status(201).json({ user: rows[0] });
   } catch (e) {
-    if (e.code === '23505') return res.status(409).json({ error: 'email_exists' });
+    if (e.code === '23505') return res.status(409).json({ error: 'username_or_email_exists' });
     throw e;
   }
 });
@@ -75,6 +73,7 @@ router.patch('/:id', async (req, res) => {
   const b = req.body || {};
   const sets = [], params = [];
   if (b.name)         { params.push(b.name); sets.push(`name = $${params.length}`); }
+  if (b.username)     { params.push(b.username); sets.push(`username = $${params.length}`); }
   if (b.email)        { params.push(b.email); sets.push(`email = $${params.length}`); }
   if (b.role)         { params.push(b.role); sets.push(`role = $${params.length}`); }
   if (b.active !== undefined) { params.push(b.active); sets.push(`active = $${params.length}`); }
@@ -89,11 +88,17 @@ router.patch('/:id', async (req, res) => {
   }
   if (!sets.length) return res.status(400).json({ error: 'no_updatable_fields' });
   params.push(req.params.id);
-  const { rows } = await query(
-    `UPDATE users SET ${sets.join(', ')} WHERE id = $${params.length}
-     RETURNING id, name, email, role, permissions, active`,
-    params
-  );
+  let rows;
+  try {
+    ({ rows } = await query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id = $${params.length}
+       RETURNING id, name, username, email, role, permissions, active`,
+      params
+    ));
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'username_or_email_exists' });
+    throw e;
+  }
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
   await audit(req, 'update_user', 'user', rows[0].id);
   res.json({ user: rows[0] });
