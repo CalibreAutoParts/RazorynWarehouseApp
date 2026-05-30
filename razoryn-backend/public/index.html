@@ -8351,6 +8351,19 @@ async function ceMatchQty(source, btn) {
   }
 }
 
+// Calculate the eBay price from the Shopify price + the saved markup %.
+function ceCalcEbayPrice(btn) {
+  const ctx = State._ceCtx || {};
+  const product = ctx.product || {};
+  const cfg = ctx.cfg || State.pricingConfig || {};
+  const pct = cfg.ebayMarkupPct != null ? parseFloat(cfg.ebayMarkupPct) : 15;
+  const shopifyPrice = parseFloat(product.shopify_price || product.price_shopify || 0);
+  if (!shopifyPrice) { toast('No Shopify price on this product', 'warn'); return; }
+  const ebayPrice = +(shopifyPrice * (1 + pct / 100)).toFixed(2);
+  if (el('ce-price')) el('ce-price').value = ebayPrice;
+  toast(`eBay price = £${shopifyPrice.toFixed(2)} + ${pct}% = £${ebayPrice.toFixed(2)}`, 'success', 2500);
+}
+
 async function submitCreateEbayListing(productId) {
   const storeCode = el('ce-store')?.value;
   const title     = (el('ce-title')?.value || '').trim();
