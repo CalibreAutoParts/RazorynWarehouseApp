@@ -16,6 +16,7 @@ const BRANDS = {
     logoUrl: '/logo.png',
     logoUrlDark: '/logo-dark.png',  // shown when dark theme is active
     primaryColor: '#c8202d',        // brand red — sidebar, primary buttons, accents
+    primaryColorDark: '#e2545f',    // lifted red for dark mode (legible on dark bg)
     secondaryColor: '#1a1a1a',       // ink colour for headers
     supportColor: '#ffffff',
     invoicePrefix: 'REP',
@@ -36,9 +37,10 @@ const BRANDS = {
     name: 'Calibre Auto Parts',
     fullName: 'Calibre Auto Parts Ltd',
     domain: 'calibreautoparts.co.uk',
-    logoUrl: '/logo-calibre.jpeg',
-    logoUrlDark: '/logo-calibre-dark.jpeg',  // shown when dark theme is active
+    logoUrl: '/logo-calibre.png',
+    logoUrlDark: '/logo-calibre-dark.png',  // shown when dark theme is active
     primaryColor: '#0D1B2A',         // navy — sidebar, headings
+    primaryColorDark: '#4a7fc0',     // legible blue for dark mode (navy is invisible on dark bg)
     secondaryColor: '#E30613',        // red accent — primary buttons, links
     supportColor: '#ffffff',
     invoicePrefix: 'CAP',

@@ -86,17 +86,17 @@
     background: var(--white); border: 1px solid var(--line); border-radius: 6px;
     padding: 8px 10px;
   }
-  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--red); }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--brand-primary); }
   input:disabled, select:disabled, textarea:disabled { opacity: .6; cursor: not-allowed; }
   input::placeholder, textarea::placeholder { color: var(--ink-soft); opacity: .7; }
-  input[type="checkbox"], input[type="radio"] { padding: 0; width: auto; height: auto; accent-color: var(--red); }
+  input[type="checkbox"], input[type="radio"] { padding: 0; width: auto; height: auto; accent-color: var(--brand-primary); }
   /* Override autofill so it picks up dark theme colours */
   input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus, input:-webkit-autofill:active {
     -webkit-box-shadow: 0 0 0 30px var(--white) inset !important;
     -webkit-text-fill-color: var(--ink) !important;
     caret-color: var(--ink);
   }
-  a { color: var(--red); text-decoration: none; }
+  a { color: var(--brand-primary); text-decoration: none; }
 
   /* ==================== LOGIN ==================== */
   .login-screen {
@@ -1596,24 +1596,23 @@ async function loadBrand() {
     // Prefer the explicit dark URL from the brand config; fall back to deriving
     // it by inserting "-dark" before the extension (legacy convention).
     const darkUrl = b.logoUrlDark || lightUrl.replace(/(\.[a-z]+)$/i, '-dark$1');
-    document.querySelectorAll('[data-brand-logo-light]').forEach(el => { el.src = lightUrl; el.alt = b.name; });
-    document.querySelectorAll('[data-brand-logo-dark]').forEach(el => {
-      el.src = darkUrl;
-      el.alt = b.name;
-      // Fall back to the light URL if no dark logo exists
-      el.addEventListener('error', () => { if (el.src !== lightUrl) el.src = lightUrl; }, { once: true });
-    });
-    // Brand colours — these override the :root defaults baked into the stylesheet.
+    // If a .png logo isn't deployed yet, fall back to the legacy .jpeg so the
+    // logo never breaks (e.g. before a new logo-calibre.png is uploaded).
+    const jpegFallback = (el, url) => {
+      el.addEventListener('error', () => {
+        const jpeg = url.replace(/\.png$/i, '.jpeg');
+        if (jpeg !== url && !el.dataset.fb) { el.dataset.fb = '1'; el.src = jpeg; }
+      }, { once: true });
+    };
+    document.querySelectorAll('[data-brand-logo-light]').forEach(el => { el.alt = b.name; jpegFallback(el, lightUrl); el.src = lightUrl; });
+    document.querySelectorAll('[data-brand-logo-dark]').forEach(el => { el.alt = b.name; jpegFallback(el, darkUrl); el.src = darkUrl; });
+    // Brand colours. The primary is theme-aware (see applyBrandColors) — Calibre
+    // navy is invisible on a dark background, so dark mode uses primaryColorDark.
     const root = document.documentElement.style;
-    if (b.primaryColor) {
-      root.setProperty('--brand-primary', b.primaryColor);
-      root.setProperty('--brand-primary-dark', shadeColor(b.primaryColor, -12));
-      root.setProperty('--brand-primary-light', tintColor(b.primaryColor, 0.92));
-    }
     if (b.secondaryColor) root.setProperty('--brand-secondary', b.secondaryColor);
     if (b.supportColor) root.setProperty('--brand-on-primary', b.supportColor);
-    // Mark body so brand-specific overrides can hook on it later
     document.body.setAttribute('data-brand', b.code);
+    applyBrandColors(document.documentElement.getAttribute('data-theme') || 'light');
   } catch (e) {
     console.warn('[brand] failed to load — defaults will be used:', e.message);
   }
@@ -1643,6 +1642,32 @@ function tintColor(hex, amount) {
   return '#' + ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
 }
 
+// Scale a hex colour's brightness by `factor` (<1 darkens). Used for the
+// dark-mode active-nav tint.
+function scaleColor(hex, factor) {
+  const c = hex.replace('#', '');
+  const n = parseInt(c.length === 3 ? c.split('').map(x => x + x).join('') : c, 16);
+  const r = Math.max(0, Math.min(255, Math.round((n >> 16) * factor)));
+  const g = Math.max(0, Math.min(255, Math.round(((n >> 8) & 0xff) * factor)));
+  const b = Math.max(0, Math.min(255, Math.round((n & 0xff) * factor)));
+  return '#' + ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+}
+
+// Apply the brand primary for the given theme. Dark mode uses primaryColorDark
+// (navy reads as black on a dark background) and a dark active-nav tint instead
+// of a light one. Called on load AND on theme toggle, so every --brand-primary
+// usage stays legible in both themes without touching individual rules.
+function applyBrandColors(theme) {
+  const b = State.brand || {};
+  if (!b.primaryColor) return;
+  const isDark = theme === 'dark';
+  const base = isDark ? (b.primaryColorDark || b.primaryColor) : b.primaryColor;
+  const root = document.documentElement.style;
+  root.setProperty('--brand-primary', base);
+  root.setProperty('--brand-primary-dark', isDark ? tintColor(base, 0.12) : shadeColor(base, -12));
+  root.setProperty('--brand-primary-light', isDark ? scaleColor(base, 0.22) : tintColor(base, 0.92));
+}
+
 async function loadTheme() {
   let theme = null;
   try {
@@ -1665,6 +1690,7 @@ async function loadTheme() {
 }
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
+  applyBrandColors(theme);  // re-theme brand primary so dark mode stays legible
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', theme === 'dark' ? '#0d0f13' : (State.brand?.primaryColor || '#c8202d'));
   const lightIcon = document.querySelector('.theme-icon-light');

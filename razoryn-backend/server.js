@@ -111,12 +111,17 @@ app.get('/manifest.webmanifest', (req, res) => {
 // it renders crisply at any size without needing pre-rendered raster icons.
 app.get('/app-icon.svg', (req, res) => {
   const b = require('./lib/brand');
-  const bg = b.primaryColor || '#111111';
-  const initial = (b.name || 'W').trim().charAt(0).toUpperCase()
-    .replace(/[<>&"']/g, '');
+  const safe = (c, fb) => (/^#[0-9a-fA-F]{3,8}$/.test(c || '') ? c : fb);
+  const bg = safe(b.primaryColor, '#111111');
+  const accent = safe(b.secondaryColor, '#ffffff');
+  const initial = (b.name || 'W').trim().charAt(0).toUpperCase().replace(/[^A-Z0-9]/g, '') || 'W';
+  // Monogram on the brand colour with an accent bar echoing the wordmark's
+  // accent (Calibre's red dashes / Razoryn's ink). Kept inside the maskable
+  // safe zone so it survives circular/rounded OS masks.
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
   <rect width="512" height="512" fill="${bg}"/>
-  <text x="256" y="272" font-family="Arial, Helvetica, sans-serif" font-size="300" font-weight="700" fill="#ffffff" text-anchor="middle" dominant-baseline="central">${initial}</text>
+  <text x="256" y="246" font-family="Arial, Helvetica, sans-serif" font-size="290" font-weight="800" fill="#ffffff" text-anchor="middle" dominant-baseline="central">${initial}</text>
+  <rect x="176" y="372" width="160" height="22" rx="11" fill="${accent}"/>
 </svg>`;
   res.type('image/svg+xml').set('Cache-Control', 'public, max-age=3600').send(svg);
 });
