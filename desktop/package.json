@@ -1,0 +1,46 @@
+{
+  "name": "calibre-warehouse-desktop",
+  "version": "1.0.0",
+  "description": "Calibre Auto Parts — Warehouse Hub desktop app",
+  "author": "Calibre Auto Parts Ltd",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "uk.co.calibreautoparts.warehouse",
+    "productName": "Calibre Warehouse Hub",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "mac": {
+      "target": ["dmg"],
+      "category": "public.app-category.business"
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Office"
+    }
+  },
+  "devDependencies": {
+    "electron": "^31.7.6",
+    "electron-builder": "^24.13.3"
+  }
+}

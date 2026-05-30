@@ -1,0 +1,61 @@
+name: Build desktop app
+
+# Builds the Calibre Warehouse Hub desktop installers (.dmg / .exe / .AppImage)
+# on real macOS, Windows and Linux runners. Trigger by pushing a tag like
+# `desktop-v1.0.0`, or run manually from the Actions tab. Installers are attached
+# to the run as artifacts and (for tag pushes) to a GitHub Release.
+
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: '*.dmg'
+          - os: windows-latest
+            artifact: '*.exe'
+          - os: ubuntu-latest
+            artifact: '*.AppImage'
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build installer
+        run: npm run dist
+        env:
+          # Don't try to code-sign in CI (no certs configured). Remove these once
+          # you add signing certificates as repo secrets.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: warehouse-${{ matrix.os }}
+          path: desktop/dist/${{ matrix.artifact }}
+          if-no-files-found: warn
+
+      - name: Attach to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/dist/${{ matrix.artifact }}
