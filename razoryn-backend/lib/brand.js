@@ -37,8 +37,8 @@ const BRANDS = {
     name: 'Calibre Auto Parts',
     fullName: 'Calibre Auto Parts Ltd',
     domain: 'calibreautoparts.co.uk',
-    logoUrl: '/logo-calibre.png',
-    logoUrlDark: '/logo-calibre-dark.png',  // shown when dark theme is active
+    logoUrl: '/logo-calibre.png',           // transparent PNG — clean on the light UI
+    logoUrlDark: '/logo-calibre-dark.jpeg',  // white-bg version stays visible on the dark top bar
     primaryColor: '#0D1B2A',         // navy — sidebar, headings
     primaryColorDark: '#4a7fc0',     // legible blue for dark mode (navy is invisible on dark bg)
     secondaryColor: '#E30613',        // red accent — primary buttons, links
