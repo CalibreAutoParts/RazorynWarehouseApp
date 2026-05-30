@@ -129,15 +129,18 @@ async function pullShopify() {
         ship.city, ship.province, ship.zip, ship.country,
       ].filter(Boolean).join('\n') : null;
 
-      // Generate REP reference (Shopify orders are card or shopify-pay; mark as S)
-      const paymentRef = 'REP-' + Math.random().toString(36).slice(2,6).toUpperCase()
-                        + Math.random().toString(36).slice(2,6).toUpperCase() + '-S';
+      // Unified reference: <PREFIX>-S-<Shopify order #> (CAP for Calibre, REP for
+      // Razoryn). Same value in invoice_number and payment_reference.
+      const brand = require('../lib/brand');
+      const prefix = brand.invoicePrefix || 'REP';
+      const orderNum = order.order_number || order.name || order.id;
+      const paymentRef = `${prefix}-S-${orderNum}`;
 
       const sale = await c.query(
         `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
                             subtotal, vat, shipping, total, status, occurred_at, shipping_address,
-                            payment_method, payment_reference, order_number)
-         VALUES ('shopify',$1,$2,$3,$4,$5,$6,$7,$8,'paid',$9,$10,$11,$12,$13) RETURNING id`,
+                            payment_method, payment_reference, order_number, invoice_number)
+         VALUES ('shopify',$1,$2,$3,$4,$5,$6,$7,$8,'paid',$9,$10,$11,$12,$13,$14) RETURNING id`,
         [
           String(order.id),
           [order.customer?.first_name, order.customer?.last_name].filter(Boolean).join(' ') || ship?.first_name + ' ' + ship?.last_name || null,
@@ -146,7 +149,7 @@ async function pullShopify() {
           subtotal, vat, shipping, total,
           order.created_at,
           shipAddr,
-          'shopify', paymentRef, order.name || String(order.order_number || order.id),
+          'shopify', paymentRef, order.name || String(order.order_number || order.id), paymentRef,
         ]
       );
 
@@ -236,10 +239,10 @@ async function pullEbay() {
         const shipping = parseFloat(order.pricingSummary?.deliveryCost?.value || 0);
         const total = parseFloat(order.pricingSummary?.total?.value || 0);
 
-        // Use the brand's invoice prefix instead of hard-coded REP-.
+        // Unified reference: <PREFIX>-E-<eBay order #>. Same value in
+        // invoice_number and payment_reference.
         const prefix = brand.invoicePrefix || 'REP';
-        const paymentRef = prefix + '-' + Math.random().toString(36).slice(2,6).toUpperCase()
-                          + Math.random().toString(36).slice(2,6).toUpperCase() + '-E';
+        const paymentRef = `${prefix}-E-${order.orderId}`;
 
         // Channel = the store's channelCode (ebay_em / ebay_cl / etc.).
         const channelCode = store.channelCode || 'ebay_em';
@@ -247,8 +250,8 @@ async function pullEbay() {
         const sale = await c.query(
           `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
                               subtotal, vat, shipping, total, status, occurred_at, shipping_address,
-                              payment_method, payment_reference, order_number)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'paid',$10,$11,$12,$13,$14) RETURNING id`,
+                              payment_method, payment_reference, order_number, invoice_number)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'paid',$10,$11,$12,$13,$14,$15) RETURNING id`,
           [
             channelCode,
             order.orderId,
@@ -258,7 +261,7 @@ async function pullEbay() {
             subtotal, vat, shipping, total,
             order.creationDate,
             order.shippingAddress || null,
-            'ebay', paymentRef, order.orderId,
+            'ebay', paymentRef, order.orderId, paymentRef,
           ]
         );
 

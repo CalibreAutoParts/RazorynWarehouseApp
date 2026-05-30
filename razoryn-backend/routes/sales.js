@@ -3,6 +3,7 @@ const express = require('express');
 const { query, withTx } = require('../db');
 const { requireAuth, requireAdmin, requirePermission } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
+const brand = require('../lib/brand');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -10,26 +11,67 @@ router.use(requireAuth);
 const CHANNELS = ['shopify', 'ebay_em', 'ebay_cl', 'direct_cash', 'direct_bank'];
 
 // ----- helpers -----
-function genReference(paymentMethod) {
-  // REP-{8 alnum chars}-{suffix}
-  const suffix = ({ cash: 'C', bank: 'B', card: 'S', shopify: 'O', ebay: 'E' })[paymentMethod] || 'X';
-  const rand = Math.random().toString(36).slice(2, 6).toUpperCase()
-            + Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `REP-${rand.slice(0, 8)}-${suffix}`;
+// Build the single customer-facing reference for a sale. One unified value used
+// for BOTH invoice_number and payment_reference (replacing the old separate
+// RZN-<date>-<seq> and REP-<rand>-<suffix> pair). PREFIX is the brand's
+// invoicePrefix — CAP for Calibre, REP for Razoryn.
+//   eBay sale    → <PREFIX>-E-<eBay order #>
+//   Shopify sale → <PREFIX>-S-<Shopify order #>
+//   Direct sale  → <PREFIX>-#### (brand-shared sequence from 0700)
+async function buildSaleReference(client, { channel, orderNumber }) {
+  const prefix = brand.invoicePrefix || 'REP';
+  const isEbay = channel === 'ebay_em' || channel === 'ebay_cl';
+  const isShopify = channel === 'shopify';
+  if (isEbay && orderNumber) return `${prefix}-E-${orderNumber}`;
+  if (isShopify && orderNumber) return `${prefix}-S-${orderNumber}`;
+  const next = await nextDirectNumber(client, prefix);
+  return `${prefix}-${String(next).padStart(4, '0')}`;
 }
 
-async function nextInvoiceNumber(client) {
-  const today = new Date();
-  const datePart = today.toISOString().slice(0, 10).replace(/-/g, '');
+// Next number in the brand's direct-sale sequence. Floors at 700 so the first
+// direct sale is <PREFIX>-0700. Matches references of the form PREFIX-#### only
+// (4+ digits), so channel refs like CAP-E-123 never collide with it.
+async function nextDirectNumber(client, prefix) {
   const runQuery = client ? client.query.bind(client) : query;
-  const seq = await runQuery(
-    `SELECT COALESCE(MAX(SUBSTRING(invoice_number FROM '\\d+$')::int), 0) + 1 AS next
-     FROM sales WHERE invoice_number LIKE $1`,
-    [`RZN-${datePart}-%`]
+  const r = await runQuery(
+    `SELECT COALESCE(MAX(SUBSTRING(payment_reference FROM ('^' || $1 || '-([0-9]{4,})$'))::int), 699) + 1 AS next
+       FROM sales
+      WHERE payment_reference ~ ('^' || $1 || '-[0-9]{4,}$')`,
+    [prefix]
   );
-  const next = seq.rows[0].next;
-  return `RZN-${datePart}-${String(next).padStart(4, '0')}`;
+  return r.rows[0].next;
 }
+
+// One-time backfill: assign the new <PREFIX>-#### scheme to existing DIRECT
+// (cash/bank) sales, oldest first, continuing the shared sequence. eBay/Shopify
+// sales are intentionally NOT backfilled. Idempotent — rows already on the new
+// scheme are skipped, so it's safe to run on every boot.
+let _backfilledDirect = false;
+async function backfillDirectReferences() {
+  if (_backfilledDirect) return;
+  try {
+    const prefix = brand.invoicePrefix || 'REP';
+    const { rows } = await query(
+      `SELECT id FROM sales
+        WHERE channel IN ('direct_cash','direct_bank')
+          AND (payment_reference IS NULL OR payment_reference !~ ('^' || $1 || '-[0-9]{4,}$'))
+        ORDER BY occurred_at ASC, id ASC`,
+      [prefix]
+    );
+    if (!rows.length) { _backfilledDirect = true; return; }
+    let n = await nextDirectNumber(null, prefix);
+    for (const row of rows) {
+      const ref = `${prefix}-${String(n).padStart(4, '0')}`;
+      await query(`UPDATE sales SET payment_reference = $1, invoice_number = $2 WHERE id = $3`, [ref, ref, row.id]);
+      n++;
+    }
+    console.log(`[sales] backfilled ${rows.length} direct (cash/bank) references to ${prefix}-#### scheme`);
+    _backfilledDirect = true;
+  } catch (e) {
+    console.warn('[sales] direct-reference backfill warning:', e.message);
+  }
+}
+backfillDirectReferences();
 
 // GET /api/sales?channel=&from=&to=&page=
 router.get('/', requireAdmin, async (req, res) => {
@@ -333,9 +375,11 @@ router.post('/', requireAdmin, async (req, res) => {
     const shipping = parseFloat(b.shipping || 0);
     const total = +(subtotal + shipping).toFixed(2);  // subtotal IS gross — no VAT added
 
-    // Generate identifiers
-    const invoiceNumber = isEstimate ? null : await nextInvoiceNumber(c);
-    const paymentReference = genReference(paymentMethod);
+    // Generate identifiers — one unified reference for both columns. Estimates
+    // reserve a reference but keep invoice_number null until converted.
+    const reference = await buildSaleReference(c, { channel: b.channel, orderNumber: b.orderNumber });
+    const invoiceNumber = isEstimate ? null : reference;
+    const paymentReference = reference;
 
     // Resolve customer link — either an existing customer_id (picked from
     // autocomplete) or a freshly-created record via b.createCustomer payload.
@@ -427,8 +471,12 @@ router.post('/:id/convert-to-invoice', requireAdmin, async (req, res) => {
     if (!s.rows[0]) return { error: 'not_found' };
     if (!s.rows[0].is_estimate) return { error: 'not_an_estimate' };
 
-    const invoiceNumber = await nextInvoiceNumber(c);
-    const paymentReference = genReference(paymentMethod);
+    // Promote the estimate's existing reserved reference to its invoice number —
+    // keep the number it was quoted under rather than issuing a new one.
+    const reference = s.rows[0].payment_reference
+      || await buildSaleReference(c, { channel: s.rows[0].channel, orderNumber: s.rows[0].order_number });
+    const invoiceNumber = reference;
+    const paymentReference = reference;
 
     // Decrement stock now that it's paid
     const items = await c.query(`SELECT * FROM sale_items WHERE sale_id = $1`, [req.params.id]);
