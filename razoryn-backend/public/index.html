@@ -8031,7 +8031,7 @@ async function openCreateEbayListing(productId) {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field">
           <label>Category ID *</label>
-          <input id="ce-category" value="${escapeAttr(cfg.ebayDefaultCategoryId || '')}" placeholder="picked from search, or type">
+          <input id="ce-category" value="${escapeAttr(cfg.ebayDefaultCategoryId || '')}" placeholder="picked from search, or type" oninput="ceCategoryManual(this.value)">
           <div id="ce-cat-path" style="font-size:11px;color:var(--ink-soft);margin-top:4px"></div>
         </div>
         <div class="field">
@@ -8052,15 +8052,8 @@ async function openCreateEbayListing(productId) {
         <div class="field"><label>Quantity</label><input id="ce-qty" type="number" min="1" step="1" value="${escapeAttr(product.qty_on_hand || 1)}"></div>
       </div>
       <div style="font-weight:600;font-size:13px;margin:12px 0 6px">Item specifics</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="field"><label>Manufacturer Part No. (MPN) *</label><input id="ce-mpn" value="${escapeAttr(product.part_number || '')}" placeholder="required by eBay for parts"></div>
-        <div class="field"><label>Brand</label><input id="ce-brand" value="${escapeAttr(cfg.ebayDefaultBrand || 'Unbranded')}"></div>
-        <div class="field"><label>Make (vehicle)</label><input id="ce-make" value="${escapeAttr(product.brand || '')}" placeholder="e.g. Volkswagen"></div>
-        <div class="field"><label>Model</label><input id="ce-model" value="${escapeAttr(product.model || '')}" placeholder="e.g. Tiguan"></div>
-        <div class="field"><label>Year</label><input id="ce-year" placeholder="e.g. 2020-2025"></div>
-        <div class="field"><label>Placement on vehicle</label><input id="ce-placement" value="${escapeAttr(product.position || '')}" placeholder="e.g. Front Left"></div>
-      </div>
-      <div style="font-size:11px;color:var(--ink-soft);margin:4px 0 8px"><strong>MPN is required by eBay for car parts</strong> — leaving it blank is what caused the failure. Blank Make/Model/Year auto-fill from the product &amp; title.</div>
+      <div id="ce-specifics"></div>
+      <div style="font-size:11px;color:var(--ink-soft);margin:4px 0 8px"><strong>Required (*) specifics must be filled</strong> or eBay rejects the listing. Values auto-fill from the product where known; pick a category above to load that category's full set.</div>
       <div class="field">
         <label>Description <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— leave blank to use the Shopify description</span></label>
         <textarea id="ce-desc" rows="5" placeholder="Type or paste a description (HTML allowed). Leave blank and the Shopify product description is used."></textarea>
@@ -8086,12 +8079,16 @@ async function openCreateEbayListing(productId) {
       { label: 'Create listing', primary: true, onClick: () => submitCreateEbayListing(productId) },
     ],
   });
+  // Context for the dynamic specifics loader (used by global handlers).
+  State._ceCtx = { product, cfg };
   // Populate the policy dropdowns from the seller's eBay account (async).
   loadEbayPolicies({
     shipping: policies.shipping || cfg.ebayPolicyShipping,
     payment:  policies.payment  || cfg.ebayPolicyPayment,
     return:   policies.return   || cfg.ebayPolicyReturn,
   });
+  // Load the item-specific fields for the (default) category.
+  ceLoadSpecifics(el('ce-category')?.value || '');
 }
 
 // Fetch the seller's eBay business policies and fill the listing dropdowns,
@@ -8152,6 +8149,56 @@ function ceCategoryPick(id, path) {
   if (el('ce-cat-path')) el('ce-cat-path').textContent = path || '';
   if (el('ce-cat-suggest')) el('ce-cat-suggest').innerHTML = '';
   if (el('ce-cat-search')) el('ce-cat-search').value = path ? path.split(' › ').pop() : id;
+  ceLoadSpecifics(id);
+}
+let _ceSpecTimer = null;
+function ceCategoryManual(v) {
+  clearTimeout(_ceSpecTimer);
+  _ceSpecTimer = setTimeout(() => ceLoadSpecifics((v || '').trim()), 500);
+}
+
+// Map an eBay specific name to a value we already know from the product.
+function cePrefillSpec(name) {
+  const ctx = State._ceCtx || {}; const p = ctx.product || {}; const cfg = ctx.cfg || {};
+  const n = (name || '').toLowerCase();
+  if (n.includes('manufacturer part') || n === 'mpn') return p.part_number || '';
+  if (n.includes('oe/oem') || n.includes('oem number') || n.includes('reference oe')) return p.part_number || '';
+  if (n === 'brand') return cfg.ebayDefaultBrand || 'Unbranded';
+  if (n === 'make') return p.brand || '';
+  if (n === 'model') return p.model || '';
+  if (n.includes('placement')) return p.position || '';
+  return '';
+}
+function ceSpecsGrid(specs) {
+  return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' + specs.map(s => {
+    const req = s.required ? ' <span style="color:var(--red)">*</span>' : '';
+    const lid = (s.values && s.values.length) ? 'cl' + Math.random().toString(36).slice(2, 8) : '';
+    const dl = lid ? `<datalist id="${lid}">${s.values.slice(0, 60).map(v => `<option value="${escapeAttr(v)}">`).join('')}</datalist>` : '';
+    return `<div class="field"><label>${escapeHtml(s.name)}${req}</label>
+      <input data-spec="${escapeAttr(s.name)}" value="${escapeAttr(cePrefillSpec(s.name))}" ${lid ? `list="${lid}"` : ''} placeholder="${s.required ? 'required' : 'optional'}">${dl}</div>`;
+  }).join('') + '</div>';
+}
+async function ceLoadSpecifics(categoryId) {
+  const wrap = el('ce-specifics');
+  if (!wrap) return;
+  const core = [{ name: 'Manufacturer Part Number', required: true, values: [] }, { name: 'Brand', required: true, values: [] }];
+  if (!categoryId) { wrap.innerHTML = ceSpecsGrid(core); return; }
+  wrap.innerHTML = '<div style="font-size:12px;color:var(--ink-soft);padding:6px 0">Loading this category’s specifics…</div>';
+  let specs = [];
+  try {
+    const store = el('ce-store')?.value || '';
+    const r = await Api.get('/api/listings/category-specifics?categoryId=' + encodeURIComponent(categoryId) + (store ? '&storeCode=' + encodeURIComponent(store) : ''));
+    specs = r.specifics || [];
+  } catch (e) {}
+  const have = new Set(specs.map(s => (s.name || '').toLowerCase()));
+  const merged = [...specs];
+  if (!have.has('brand')) merged.unshift({ name: 'Brand', required: true, values: [] });
+  if (!have.has('manufacturer part number')) merged.unshift({ name: 'Manufacturer Part Number', required: true, values: [] });
+  const reqN = merged.filter(s => s.required).length;
+  const head = specs.length
+    ? `<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">${reqN} required · ${merged.length} specifics for this category</div>`
+    : '<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Couldn’t load the category’s specifics (eBay not connected) — fill the core fields.</div>';
+  wrap.innerHTML = head + ceSpecsGrid(merged);
 }
 
 async function submitCreateEbayListing(productId) {
@@ -8167,22 +8214,24 @@ async function submitCreateEbayListing(productId) {
     paymentId:  el('ce-policy-payment')?.value || undefined,
     returnId:   el('ce-policy-return')?.value || undefined,
   };
-  // Editable item specifics — only send the ones with a value.
+  // Collect every dynamic item-specific field that has a value.
   const itemSpecifics = [];
-  const addSpec = (name, id) => { const v = (el(id)?.value || '').trim(); if (v) itemSpecifics.push({ name, value: v }); };
-  addSpec('Manufacturer Part Number', 'ce-mpn');
-  addSpec('Brand', 'ce-brand');
-  addSpec('Make', 'ce-make');
-  addSpec('Model', 'ce-model');
-  addSpec('Year', 'ce-year');
-  addSpec('Placement on Vehicle', 'ce-placement');
+  let mpnFilled = false;
+  document.querySelectorAll('#ce-specifics [data-spec]').forEach(inp => {
+    const name = inp.getAttribute('data-spec');
+    const v = (inp.value || '').trim();
+    if (name && v) {
+      itemSpecifics.push({ name, value: v });
+      if (/manufacturer part/i.test(name)) mpnFilled = true;
+    }
+  });
   const descriptionOverride = (el('ce-desc')?.value || '').trim() || undefined;
 
   if (!storeCode)   { toast('Pick a store', 'warn'); return; }
   if (!title)       { toast('Title required', 'warn'); return; }
   if (!categoryId)  { toast('Category required — search by name or type the ID', 'warn'); return; }
   if (!price || isNaN(price)) { toast('Valid price required', 'warn'); return; }
-  if (!el('ce-mpn')?.value.trim() && !confirm('No Manufacturer Part Number (MPN) entered. eBay usually rejects car-part listings without it. Continue anyway?')) return;
+  if (!mpnFilled && !confirm('No Manufacturer Part Number (MPN) entered. eBay usually rejects car-part listings without it. Continue anyway?')) return;
 
   const taskId = Task.start(preview ? 'Validating listing…' : 'Creating eBay listing…');
   try {
