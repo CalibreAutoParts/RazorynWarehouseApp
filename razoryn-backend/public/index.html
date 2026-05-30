@@ -3008,7 +3008,7 @@ function handleScan(code) {
 }
 function handleManualSearch(q) {
   q = q.trim().toLowerCase(); if (!q) return;
-  const p = State.products.find(x => x.sku.toLowerCase().includes(q) || x.partNumber?.toLowerCase().includes(q) || x.title.toLowerCase().includes(q));
+  const p = State.products.find(x => matchesKeywords(q, x.sku, x.partNumber, x.title));
   if (!p) { toast('No match found', 'warn'); return; }
   showProductScanCard(p);
 }
@@ -3769,10 +3769,7 @@ function renderLabels() {
     const wrap = el('lab-suggest');
     if (!q || q.length < 2) { wrap.innerHTML = ''; return; }
     const matches = (State.products || []).filter(p =>
-      (p.sku || '').toLowerCase().includes(q) ||
-      (p.title || '').toLowerCase().includes(q) ||
-      (p.partNumber || '').toLowerCase().includes(q) ||
-      (p.barcode || '').toLowerCase().includes(q)
+      matchesKeywords(q, p.sku, p.title, p.partNumber, p.barcode)
     ).slice(0, 12);
     wrap.innerHTML = matches.length
       ? `<div style="position:absolute;top:4px;left:0;right:0;background:var(--white);border:1px solid var(--line);border-radius:6px;max-height:280px;overflow-y:auto;z-index:20;box-shadow:var(--shadow)">
@@ -5882,9 +5879,7 @@ function manualSaleAddRow() {
     const q = searchInput.value.trim().toLowerCase();
     if (!q || q.length < 2) { suggest.style.display = 'none'; return; }
     const matches = (State.products || []).filter(p =>
-      (p.sku || '').toLowerCase().includes(q) ||
-      (p.title || '').toLowerCase().includes(q) ||
-      (p.partNumber || '').toLowerCase().includes(q)
+      matchesKeywords(q, p.sku, p.title, p.partNumber)
     ).slice(0, 12);
     if (!matches.length) {
       suggest.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--ink-soft)">No matches — use "Custom item" below for non-inventory items</div>';
@@ -6259,8 +6254,7 @@ function renderQuoteBuilder() {
     const q = el('qb-q').value.trim().toLowerCase();
     if (!q) { el('qb-list').innerHTML = ''; return; }
     const matches = State.products.filter(p =>
-      p.title.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) ||
-      (p.partNumber||'').toLowerCase().includes(q) || (p.brand+' '+p.model).toLowerCase().includes(q)
+      matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model)
     ).slice(0, 6);
     el('qb-list').innerHTML = matches.length ? matches.map(p => `
       <div onclick="qbSelectProduct('${p.id}')" style="padding:12px;border-top:1px solid var(--line);cursor:pointer;display:flex;align-items:center;gap:12px">
@@ -7132,7 +7126,7 @@ function renderKB() {
     const q = el('kb-search').value.toLowerCase();
     const items = State.knowledge.filter(k => {
       if (k.sensitive && !canSensitive) return false;
-      return !q || k.title.toLowerCase().includes(q) || k.cat.toLowerCase().includes(q) || k.desc.toLowerCase().includes(q);
+      return matchesKeywords(q, k.title, k.cat, k.desc);
     });
     const groups = {};
     items.forEach(k => { (groups[k.cat] = groups[k.cat] || []).push(k); });
@@ -7739,9 +7733,7 @@ function renderLinkStatus() {
 
   const search = (State.linkSearch || '').toLowerCase().trim();
   if (search) filtered = filtered.filter(p =>
-    (p.sku || '').toLowerCase().includes(search) ||
-    (p.title || '').toLowerCase().includes(search) ||
-    (p.part_number || '').toLowerCase().includes(search)
+    matchesKeywords(search, p.sku, p.title, p.part_number)
   );
 
   el('links-content').innerHTML = `
@@ -8734,10 +8726,7 @@ function paintMirrorList() {
   const statusFilter = MirrorState.statusFilter;
   const filtered = MirrorState.listings.filter(l => {
     if (filter) {
-      const matchText = (l.title || '').toLowerCase().includes(filter) ||
-        (l.sku || '').toLowerCase().includes(filter) ||
-        (l.itemId || '').toString().includes(filter);
-      if (!matchText) return false;
+      if (!matchesKeywords(filter, l.title, l.sku, String(l.itemId || ''))) return false;
     }
     if (statusFilter === 'new' && l.existsOnShopify) return false;
     if (statusFilter === 'mirrored' && !l.existsOnShopify) return false;
@@ -10767,9 +10756,7 @@ async function openLinkProduct(saleId, itemId, sku, decrementStockEligible) {
       const q = search.value.trim().toLowerCase();
       if (!q || q.length < 2) { results.style.display = 'none'; return; }
       const matches = products.filter(p =>
-        (p.sku || '').toLowerCase().includes(q) ||
-        (p.title || '').toLowerCase().includes(q) ||
-        (p.partNumber || '').toLowerCase().includes(q)
+        matchesKeywords(q, p.sku, p.title, p.partNumber)
       ).slice(0, 10);
       if (!matches.length) { results.innerHTML = '<div style="padding:10px;font-size:12px;color:var(--ink-soft)">No matches</div>'; results.style.display = 'block'; return; }
       results.innerHTML = matches.map(p => `
