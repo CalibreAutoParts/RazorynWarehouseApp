@@ -52,6 +52,10 @@ async function ensureSocialColumns() {
     // inline avoids needing a file-host; size is capped client-side at ~500KB.
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS logo_data_url TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS logo_filename TEXT`);
+    // Separate dark-mode logo so a navy/dark wordmark can have a light variant
+    // that stays visible on the dark top bar.
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS logo_dark_data_url TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS logo_dark_filename TEXT`);
     // Stock-check reminder — fires once per month on the configured day of
     // month. Day stored 1-31; empty/null = disabled. The actual "did the user
     // dismiss it this month" tracking lives in localStorage per-device.
@@ -266,8 +270,10 @@ router.get('/pricing-config', async (req, res) => {
     ebayPolicyReturn:       r.ebay_policy_return || '',
     // Logo — uploaded image data URL (base64). Front-end overrides
     // brand.logoUrl with this when present. Empty string when no upload.
-    logoDataUrl:    r.logo_data_url || '',
-    logoFilename:   r.logo_filename || '',
+    logoDataUrl:      r.logo_data_url || '',
+    logoFilename:     r.logo_filename || '',
+    logoDarkDataUrl:  r.logo_dark_data_url || '',
+    logoDarkFilename: r.logo_dark_filename || '',
     // Stock-check reminder — fires once per month on this day of month.
     // Disabled when stock_check_enabled is false OR day is null.
     stockCheckDay:     r.stock_check_day || null,
@@ -501,14 +507,20 @@ router.post('/logo', requireAdmin, async (req, res) => {
     return res.status(413).json({ error: 'too_large', message: `Logo is ~${(decodedSize/1024).toFixed(0)} KB — please use an image under 500 KB. Consider resizing or compressing.` });
   }
   const safeFilename = (filename || 'logo.png').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 100);
-  await query(`UPDATE app_settings SET logo_data_url = $1, logo_filename = $2 WHERE id = 1`, [dataUrl, safeFilename]);
-  await audit(req, 'upload_logo', null, null, { filename: safeFilename, sizeKb: Math.round(decodedSize/1024) });
-  res.json({ ok: true, filename: safeFilename, sizeKb: Math.round(decodedSize/1024) });
+  const dark = req.body?.variant === 'dark';
+  const dataCol = dark ? 'logo_dark_data_url' : 'logo_data_url';
+  const nameCol = dark ? 'logo_dark_filename' : 'logo_filename';
+  await query(`UPDATE app_settings SET ${dataCol} = $1, ${nameCol} = $2 WHERE id = 1`, [dataUrl, safeFilename]);
+  await audit(req, 'upload_logo', null, null, { variant: dark ? 'dark' : 'light', filename: safeFilename, sizeKb: Math.round(decodedSize/1024) });
+  res.json({ ok: true, variant: dark ? 'dark' : 'light', filename: safeFilename, sizeKb: Math.round(decodedSize/1024) });
 });
 
 router.delete('/logo', requireAdmin, async (req, res) => {
-  await query(`UPDATE app_settings SET logo_data_url = NULL, logo_filename = NULL WHERE id = 1`);
-  await audit(req, 'delete_logo', null, null, {});
+  const dark = req.query?.variant === 'dark';
+  const dataCol = dark ? 'logo_dark_data_url' : 'logo_data_url';
+  const nameCol = dark ? 'logo_dark_filename' : 'logo_filename';
+  await query(`UPDATE app_settings SET ${dataCol} = NULL, ${nameCol} = NULL WHERE id = 1`);
+  await audit(req, 'delete_logo', null, null, { variant: dark ? 'dark' : 'light' });
   res.json({ ok: true });
 });
 
@@ -518,20 +530,21 @@ router.delete('/logo', requireAdmin, async (req, res) => {
 // uploaded — the front-end then falls back to the brand's static /logo.png
 // file in public/.
 const publicLogoRouter = express.Router();
-publicLogoRouter.get('/public-logo', async (req, res) => {
+async function serveLogo(col, res) {
   try {
-    const { rows } = await query(`SELECT logo_data_url FROM app_settings WHERE id = 1`);
-    const dataUrl = rows[0]?.logo_data_url;
+    const { rows } = await query(`SELECT ${col} AS d FROM app_settings WHERE id = 1`);
+    const dataUrl = rows[0]?.d;
     if (!dataUrl) return res.status(404).end();
     const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
     if (!m) return res.status(500).end();
-    const buf = Buffer.from(m[2], 'base64');
     res.setHeader('Content-Type', m[1]);
     res.setHeader('Cache-Control', 'public, max-age=300');  // short cache so updates show quickly
-    res.end(buf);
+    res.end(Buffer.from(m[2], 'base64'));
   } catch (e) {
     res.status(500).end();
   }
-});
+}
+publicLogoRouter.get('/public-logo', (req, res) => serveLogo('logo_data_url', res));
+publicLogoRouter.get('/public-logo-dark', (req, res) => serveLogo('logo_dark_data_url', res));
 module.exports = router;
 module.exports.publicLogoRouter = publicLogoRouter;

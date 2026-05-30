@@ -1596,16 +1596,20 @@ async function loadBrand() {
     // Prefer the explicit dark URL from the brand config; fall back to deriving
     // it by inserting "-dark" before the extension (legacy convention).
     const darkUrl = b.logoUrlDark || lightUrl.replace(/(\.[a-z]+)$/i, '-dark$1');
-    // If a .png logo isn't deployed yet, fall back to the legacy .jpeg so the
-    // logo never breaks (e.g. before a new logo-calibre.png is uploaded).
-    const jpegFallback = (el, url) => {
-      el.addEventListener('error', () => {
-        const jpeg = url.replace(/\.png$/i, '.jpeg');
-        if (jpeg !== url && !el.dataset.fb) { el.dataset.fb = '1'; el.src = jpeg; }
-      }, { once: true });
+    // Logo source order: admin-uploaded logo (via the public route — works even
+    // on the login screen) → brand's bundled file → legacy .jpeg. Light and dark
+    // have independent chains so each theme stays legible.
+    const setWithFallback = (el, urls) => {
+      let i = 0;
+      el.alt = b.name;
+      el.onerror = () => { i++; if (i < urls.length) el.src = urls[i]; else el.onerror = null; };
+      el.src = urls[0];
     };
-    document.querySelectorAll('[data-brand-logo-light]').forEach(el => { el.alt = b.name; jpegFallback(el, lightUrl); el.src = lightUrl; });
-    document.querySelectorAll('[data-brand-logo-dark]').forEach(el => { el.alt = b.name; jpegFallback(el, darkUrl); el.src = darkUrl; });
+    const uniq = (a) => a.filter((v, i) => v && a.indexOf(v) === i);
+    const lightUrls = uniq(['/public-logo', lightUrl, lightUrl.replace(/\.png$/i, '.jpeg')]);
+    const darkUrls  = uniq(['/public-logo-dark', darkUrl, darkUrl.replace(/\.png$/i, '.jpeg')]);
+    document.querySelectorAll('[data-brand-logo-light]').forEach(el => setWithFallback(el, lightUrls));
+    document.querySelectorAll('[data-brand-logo-dark]').forEach(el => setWithFallback(el, darkUrls));
     // Brand colours. The primary is theme-aware (see applyBrandColors) — Calibre
     // navy is invisible on a dark background, so dark mode uses primaryColorDark.
     const root = document.documentElement.style;
@@ -9401,21 +9405,31 @@ function renderSettings() {
         </div>
       </div>
 
-      <!-- Brand logo upload — overrides the static /logo.png for invoices + topbar -->
+      <!-- Brand logo upload — overrides the bundled logo for login, topbar, invoices -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-head">
           <h3>🖼️ Brand logo</h3>
-          <div class="card-desc">Upload a PNG/JPG/SVG used on every invoice, the app topbar, and email previews. Max 500 KB. When not set, the brand's bundled default logo is used.</div>
+          <div class="card-desc">Shown on the login screen, app top bar, invoices and email previews. Upload a light-mode logo and (optionally) a light-coloured dark-mode version. PNG/JPG/SVG, max 500 KB each. When not set, the brand's bundled default is used.</div>
         </div>
         <div class="card-body">
-          <div id="logo-current-wrap" style="display:none;margin-bottom:12px;padding:14px;background:var(--bg-soft);border-radius:8px">
-            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Current logo</div>
-            <img id="logo-current-img" src="" alt="Current logo" style="max-height:80px;max-width:300px;background:var(--white);padding:8px;border:1px solid var(--line);border-radius:6px;display:block">
+          <div style="font-size:12px;font-weight:600;margin-bottom:8px">Light mode</div>
+          <div id="logo-current-wrap" style="display:none;margin-bottom:10px;padding:14px;background:var(--bg-soft);border-radius:8px">
+            <img id="logo-current-img" src="" alt="Current logo" style="max-height:70px;max-width:280px;background:var(--white);padding:8px;border:1px solid var(--line);border-radius:6px;display:block">
             <div id="logo-current-name" style="font-size:11px;color:var(--ink-soft);margin-top:6px;font-family:ui-monospace,monospace"></div>
           </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:18px">
+            <input type="file" id="logo-upload-file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml,.png,.jpg,.jpeg,.gif,.webp,.svg" onchange="onLogoUpload(this,'light')" style="font-size:12px">
+            <button class="btn btn-ghost btn-sm" id="logo-remove-btn" onclick="deleteUploadedLogo('light')" style="display:none;color:var(--red)">Remove</button>
+          </div>
+
+          <div style="font-size:12px;font-weight:600;margin-bottom:8px">Dark mode <span style="font-weight:400;color:var(--ink-soft)">— use a light/white version so it shows on the dark top bar</span></div>
+          <div id="logo-dark-current-wrap" style="display:none;margin-bottom:10px;padding:14px;background:#1a1d23;border-radius:8px">
+            <img id="logo-dark-current-img" src="" alt="Current dark logo" style="max-height:70px;max-width:280px;padding:8px;display:block">
+            <div id="logo-dark-current-name" style="font-size:11px;color:#9aa3b2;margin-top:6px;font-family:ui-monospace,monospace"></div>
+          </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-            <input type="file" id="logo-upload-file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml,.png,.jpg,.jpeg,.gif,.webp,.svg" onchange="onLogoUpload(this)" style="font-size:12px">
-            <button class="btn btn-ghost btn-sm" id="logo-remove-btn" onclick="deleteUploadedLogo()" style="display:none;color:var(--red)">Remove logo</button>
+            <input type="file" id="logo-dark-upload-file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml,.png,.jpg,.jpeg,.gif,.webp,.svg" onchange="onLogoUpload(this,'dark')" style="font-size:12px">
+            <button class="btn btn-ghost btn-sm" id="logo-dark-remove-btn" onclick="deleteUploadedLogo('dark')" style="display:none;color:var(--red)">Remove</button>
           </div>
         </div>
       </div>
@@ -10027,33 +10041,36 @@ async function saveEbayListingDefaults() {
 // (no follow-up HTTP request from the print/email template).
 // ──────────────────────────────────────────────────────────────────────────
 function hydrateLogoUI(cfg) {
-  const wrap = el('logo-current-wrap');
-  const img = el('logo-current-img');
-  const nameEl = el('logo-current-name');
-  const removeBtn = el('logo-remove-btn');
-  if (!wrap || !img) return;
-  if (cfg.logoDataUrl) {
-    img.src = cfg.logoDataUrl;
-    if (nameEl) nameEl.textContent = cfg.logoFilename || '';
-    wrap.style.display = '';
-    if (removeBtn) removeBtn.style.display = '';
-  } else {
-    wrap.style.display = 'none';
-    if (removeBtn) removeBtn.style.display = 'none';
-  }
-  // Topbar logo — swap to the uploaded one if present, on EVERY page
-  applyTopbarLogo(cfg.logoDataUrl);
+  const fill = (prefix, dataUrl, filename) => {
+    const wrap = el(prefix + 'current-wrap');
+    const img = el(prefix + 'current-img');
+    const nameEl = el(prefix + 'current-name');
+    const removeBtn = el(prefix + 'remove-btn');
+    if (!wrap || !img) return;
+    if (dataUrl) {
+      img.src = dataUrl;
+      if (nameEl) nameEl.textContent = filename || '';
+      wrap.style.display = '';
+      if (removeBtn) removeBtn.style.display = '';
+    } else {
+      wrap.style.display = 'none';
+      if (removeBtn) removeBtn.style.display = 'none';
+    }
+  };
+  fill('logo-', cfg.logoDataUrl, cfg.logoFilename);
+  fill('logo-dark-', cfg.logoDarkDataUrl, cfg.logoDarkFilename);
+  // Topbar logo — swap to the uploaded ones (theme-aware), on EVERY page.
+  applyTopbarLogo(cfg.logoDataUrl, cfg.logoDarkDataUrl);
 }
 
-// Look for the topbar logo image and swap its src. Safe to call multiple times.
-function applyTopbarLogo(dataUrl) {
-  if (!dataUrl) return;
-  document.querySelectorAll('img.topbar-logo, .topbar img, .sidebar-logo img, img[data-app-logo]').forEach(img => {
-    img.src = dataUrl;
-  });
+// Swap the light/dark logo imgs to the uploaded versions (theme-aware) without
+// a reload. Safe to call multiple times.
+function applyTopbarLogo(lightDataUrl, darkDataUrl) {
+  if (lightDataUrl) document.querySelectorAll('[data-brand-logo-light]').forEach(img => { img.onerror = null; img.src = lightDataUrl; });
+  if (darkDataUrl) document.querySelectorAll('[data-brand-logo-dark]').forEach(img => { img.onerror = null; img.src = darkDataUrl; });
 }
 
-async function onLogoUpload(input) {
+async function onLogoUpload(input, variant) {
   const file = input.files?.[0];
   if (!file) return;
   // Size cap: 500KB raw. Base64 inflates ~33%, so the stored data URL is
@@ -10077,8 +10094,8 @@ async function onLogoUpload(input) {
       reader.onerror = () => reject(reader.error || new Error('Read failed'));
       reader.readAsDataURL(file);
     });
-    const r = await Api.post('/api/settings/logo', { dataUrl, filename: file.name });
-    toast(`Logo uploaded (${r.sizeKb} KB)`, 'success');
+    const r = await Api.post('/api/settings/logo', { dataUrl, filename: file.name, variant: variant === 'dark' ? 'dark' : 'light' });
+    toast(`${variant === 'dark' ? 'Dark-mode logo' : 'Logo'} uploaded (${r.sizeKb} KB)`, 'success');
     // Refresh cached config + UI
     State.pricingConfig = await Api.get('/api/settings/pricing-config');
     hydrateLogoUI(State.pricingConfig);
@@ -10090,10 +10107,10 @@ async function onLogoUpload(input) {
   }
 }
 
-async function deleteUploadedLogo() {
+async function deleteUploadedLogo(variant) {
   if (!confirm('Remove the uploaded logo? The brand-default logo will be used instead.')) return;
   try {
-    await Api.delete('/api/settings/logo');
+    await Api.delete('/api/settings/logo' + (variant === 'dark' ? '?variant=dark' : ''));
     toast('Logo removed', 'success');
     State.pricingConfig = await Api.get('/api/settings/pricing-config');
     hydrateLogoUI(State.pricingConfig);
