@@ -90,6 +90,7 @@ if (settingsModule.publicLogoRouter) {
 // Defined BEFORE the static/SPA fallback so they aren't swallowed by index.html.
 app.get('/manifest.webmanifest', (req, res) => {
   const b = require('./lib/brand');
+  const code = b.code || 'razoryn';
   res.type('application/manifest+json').json({
     name: b.appTitle || 'Warehouse Hub',
     short_name: b.name || 'Warehouse',
@@ -101,10 +102,22 @@ app.get('/manifest.webmanifest', (req, res) => {
     background_color: '#ffffff',
     theme_color: b.primaryColor || '#111111',
     icons: [
+      { src: `/icons/${code}-192.png`, sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
+      { src: `/icons/${code}-512.png`, sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
       { src: '/app-icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
-      { src: '/app-icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'maskable' },
     ],
   });
+});
+
+// iOS home-screen icon — served per-brand so "Add to Home Screen" uses the
+// proper PNG (iOS doesn't render SVG apple-touch icons).
+app.get('/apple-touch-icon.png', (req, res) => {
+  const code = require('./lib/brand').code || 'razoryn';
+  res.sendFile(path.join(__dirname, 'public', 'icons', `${code}-180.png`));
+});
+app.get('/apple-touch-icon-precomposed.png', (req, res) => {
+  const code = require('./lib/brand').code || 'razoryn';
+  res.sendFile(path.join(__dirname, 'public', 'icons', `${code}-180.png`));
 });
 
 // Brand-aware app icon — a clean monogram (brand colour + white initial). SVG so
