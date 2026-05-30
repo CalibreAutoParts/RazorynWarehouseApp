@@ -5323,6 +5323,10 @@ function renderSales() {
         <button data-sf="estimates">Estimates</button>
       </div>
 
+      <div class="toolbar" style="margin-bottom:12px">
+        <input type="search" class="search-input" id="sales-search" placeholder="Search invoice / reference, customer, item, order #…" value="${escapeAttr(State.salesSearch || '')}">
+      </div>
+
       <div id="sales-bulk-bar" style="display:none;padding:10px 14px;background:var(--bg-soft);border:1px solid var(--line);border-radius:8px;margin-bottom:10px;align-items:center;gap:10px;flex-wrap:wrap">
         <span id="sales-bulk-count" style="font-weight:600">0 selected</span>
         <span style="margin-left:auto"></span>
@@ -5347,11 +5351,15 @@ function renderSales() {
   `;
 
   function applyFilter(filter) {
-    if (filter === 'estimates') return State.sales.filter(s => s.isEstimate);
-    if (filter === 'all') return State.sales.filter(s => !s.isEstimate);
+    let list;
+    if (filter === 'estimates') list = State.sales.filter(s => s.isEstimate);
+    else if (filter === 'all') list = State.sales.filter(s => !s.isEstimate);
     // 'ebay' is the legacy single-store bucket — matches any ebay_* channel.
-    if (filter === 'ebay') return State.sales.filter(s => (s.channel || '').startsWith('ebay') && !s.isEstimate);
-    return State.sales.filter(s => s.channel === filter && !s.isEstimate);
+    else if (filter === 'ebay') list = State.sales.filter(s => (s.channel || '').startsWith('ebay') && !s.isEstimate);
+    else list = State.sales.filter(s => s.channel === filter && !s.isEstimate);
+    const q = (State.salesSearch || '').trim();
+    if (q) list = list.filter(s => matchesKeywords(q, s.invoice, s.paymentReference, s.customer, s.customerEmail, s.title, s.orderNumber, s.externalOrderId));
+    return list;
   }
 
   function paintStats(filter='all') {
