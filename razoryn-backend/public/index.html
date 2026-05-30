@@ -8054,6 +8054,8 @@ async function openCreateEbayListing(productId) {
       <div style="font-weight:600;font-size:13px;margin:12px 0 6px">Item specifics</div>
       <div id="ce-specifics"></div>
       <div style="font-size:11px;color:var(--ink-soft);margin:4px 0 8px"><strong>Required (*) specifics must be filled</strong> or eBay rejects the listing. Values auto-fill from the product where known; pick a category above to load that category's full set.</div>
+      <div id="ce-custom-list"></div>
+      <button type="button" class="btn btn-outline btn-sm" onclick="ceAddCustomSpec()" style="margin-bottom:10px">+ Add custom specific</button>
       <div class="field">
         <label>Description <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— leave blank to use the Shopify description</span></label>
         <textarea id="ce-desc" rows="5" placeholder="Type or paste a description (HTML allowed). Leave blank and the Shopify product description is used."></textarea>
@@ -8170,6 +8172,19 @@ function cePrefillSpec(name) {
   if (n.includes('placement')) return p.position || '';
   return '';
 }
+// Add a free-form custom item-specific row (name + value), separate from the
+// category-loaded set so it survives category changes.
+function ceAddCustomSpec(name = '', value = '') {
+  const list = el('ce-custom-list');
+  if (!list) return;
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;margin-bottom:6px;align-items:center';
+  row.innerHTML = `<input class="ce-cust-name" placeholder="Specific name (e.g. Fitment Position)" value="${escapeAttr(name)}" style="flex:1">
+    <input class="ce-cust-val" placeholder="Value" value="${escapeAttr(value)}" style="flex:1">
+    <button type="button" class="btn btn-ghost btn-sm" onclick="this.parentElement.remove()" style="color:var(--red)" title="Remove">×</button>`;
+  list.appendChild(row);
+  row.querySelector('.ce-cust-name').focus();
+}
 function ceSpecsGrid(specs) {
   return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' + specs.map(s => {
     const req = s.required ? ' <span style="color:var(--red)">*</span>' : '';
@@ -8242,6 +8257,15 @@ async function submitCreateEbayListing(productId) {
     const v = (inp.value || '').trim();
     if (name && v) {
       itemSpecifics.push({ name, value: v });
+      if (/manufacturer part/i.test(name)) mpnFilled = true;
+    }
+  });
+  // Custom (free-form) specifics added by the user.
+  document.querySelectorAll('#ce-custom-list > div').forEach(row => {
+    const name = (row.querySelector('.ce-cust-name')?.value || '').trim();
+    const value = (row.querySelector('.ce-cust-val')?.value || '').trim();
+    if (name && value) {
+      itemSpecifics.push({ name, value });
       if (/manufacturer part/i.test(name)) mpnFilled = true;
     }
   });
