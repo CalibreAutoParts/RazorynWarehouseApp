@@ -7816,12 +7816,50 @@ async function openCreateEbayListing(productId) {
           <strong>⚠ No business policies set</strong> for ${escapeHtml(stores.length > 1 ? 'this store' : 'eBay')}. The listing will likely fail because eBay requires payment / shipping / return policies. Set them in Settings → eBay listing defaults first.
         </div>
       `}
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:6px">
+        <div class="field"><label>Shipping policy</label><select id="ce-policy-shipping"><option value="">Saved default</option></select></div>
+        <div class="field"><label>Payment policy</label><select id="ce-policy-payment"><option value="">Saved default</option></select></div>
+        <div class="field"><label>Return policy</label><select id="ce-policy-return"><option value="">Saved default</option></select></div>
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:-2px">Leave as "Saved default" to use your Settings policy. Loading your eBay policies…</div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:8px 0 2px">
+        <input type="checkbox" id="ce-preview">
+        Preview only — validate &amp; show fees without creating a live listing
+      </label>
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
       { label: 'Create listing', primary: true, onClick: () => submitCreateEbayListing(productId) },
     ],
   });
+  // Populate the policy dropdowns from the seller's eBay account (async).
+  loadEbayPolicies({
+    shipping: policies.shipping || cfg.ebayPolicyShipping,
+    payment:  policies.payment  || cfg.ebayPolicyPayment,
+    return:   policies.return   || cfg.ebayPolicyReturn,
+  });
+}
+
+// Fetch the seller's eBay business policies and fill the listing dropdowns,
+// pre-selecting whichever matches the saved Settings default.
+async function loadEbayPolicies(saved) {
+  let r;
+  try { r = await Api.get('/api/listings/business-policies'); }
+  catch (e) { return; }  // leave "Saved default" only
+  const fill = (selId, list, savedId) => {
+    const sel = el(selId);
+    if (!sel) return;
+    for (const p of (list || [])) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = `${p.name} (${p.id})`;
+      if (savedId && String(savedId) === String(p.id)) opt.selected = true;
+      sel.appendChild(opt);
+    }
+  };
+  fill('ce-policy-shipping', r.shipping, saved?.shipping);
+  fill('ce-policy-payment',  r.payment,  saved?.payment);
+  fill('ce-policy-return',   r.return,   saved?.return);
 }
 
 async function submitCreateEbayListing(productId) {
@@ -7832,18 +7870,32 @@ async function submitCreateEbayListing(productId) {
   const price     = parseFloat(el('ce-price')?.value);
   const quantity  = parseInt(el('ce-qty')?.value);
   const useShopifyDescription = !!el('ce-use-shopify-desc')?.checked;
+  const preview = !!el('ce-preview')?.checked;
+  const businessPolicies = {
+    shippingId: el('ce-policy-shipping')?.value || undefined,
+    paymentId:  el('ce-policy-payment')?.value || undefined,
+    returnId:   el('ce-policy-return')?.value || undefined,
+  };
 
   if (!storeCode)   { toast('Pick a store', 'warn'); return; }
   if (!title)       { toast('Title required', 'warn'); return; }
   if (!categoryId)  { toast('Category ID required', 'warn'); return; }
   if (!price || isNaN(price)) { toast('Valid price required', 'warn'); return; }
 
-  const taskId = Task.start('Creating eBay listing…');
+  const taskId = Task.start(preview ? 'Validating listing…' : 'Creating eBay listing…');
   try {
     const r = await Api.post('/api/listings/create-ebay', {
       productId, storeCode, categoryId, conditionId,
       price, quantity, titleOverride: title, useShopifyDescription,
+      businessPolicies, preview,
     });
+    // Preview mode: nothing was listed — show fees, keep the modal open so the
+    // user can untick Preview and publish.
+    if (r.preview) {
+      Task.done(taskId, 'Validated');
+      toast(`✓ Preview OK — no live listing created${r.fees ? ` · fees: £${r.fees}` : ''}. Untick "Preview only" to publish.`, 'success', 9000);
+      return;
+    }
     Task.done(taskId, 'Listed');
     closeModal();
     toast(`✓ Created on eBay — ItemID ${r.itemId}`, 'success', 8000);
@@ -7853,7 +7905,9 @@ async function submitCreateEbayListing(productId) {
   } catch (e) {
     Task.fail(taskId, 'Failed');
     const msg = e.data?.message || e.message || 'Unknown error';
-    if (msg.includes('Insufficient permissions') || msg.includes('21916')) {
+    if (e.data?.error === 'missing_item_specifics') {
+      toast('eBay needs these item specifics: ' + (e.data.missing || []).join(', ') + '. Add them in inventory, or they may need filling per-category.', 'error', 12000);
+    } else if (msg.includes('Insufficient permissions') || msg.includes('21916')) {
       toast('Insufficient eBay permissions. Token may have expired or lacks the right scopes. Check Railway env vars.', 'error', 10000);
     } else if (msg.includes('SellerProfile') || msg.includes('20596') || msg.includes('20597') || msg.includes('20598')) {
       toast('Business policy IDs invalid or seller not opted into business policies. Configure in Settings → eBay listing defaults.', 'error', 10000);

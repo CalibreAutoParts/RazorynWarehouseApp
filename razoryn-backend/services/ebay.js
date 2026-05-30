@@ -821,6 +821,10 @@ async function addItem(storeArg, opts = {}) {
     price, quantity = 1, currency = 'GBP',
     imageUrls = [], businessPolicies = {}, location = {},
     itemSpecifics = [], brand, mpn,
+    // verify=true runs VerifyAddItem instead of AddItem: same validation +
+    // fee preview, but creates NO live listing. eBay's Trading API has no
+    // Seller-Hub "draft" concept, so this is the safe dry-run equivalent.
+    verify = false,
   } = opts;
 
   if (!sku)        throw new Error('sku required');
@@ -895,23 +899,52 @@ async function addItem(storeArg, opts = {}) {
       ${policiesXml}
     </Item>`;
 
+  const callName = verify ? 'VerifyAddItem' : 'AddItem';
   let xml;
   try {
-    xml = await tradingCall('AddItem', bodyInner, storeArg);
+    xml = await tradingCall(callName, bodyInner, storeArg);
   } catch (e) {
     const body = e.response?.data || '';
-    throw new Error(`AddItem HTTP error: ${e.message}${typeof body === 'string' && body.includes('<ShortMessage>') ? ' / ' + (body.match(/<ShortMessage>([^<]+)<\/ShortMessage>/)?.[1] || '') : ''}`);
+    throw new Error(`${callName} HTTP error: ${e.message}${typeof body === 'string' && body.includes('<ShortMessage>') ? ' / ' + (body.match(/<ShortMessage>([^<]+)<\/ShortMessage>/)?.[1] || '') : ''}`);
   }
 
   const ack = extractOne(xml, 'Ack') || '';
   if (ack === 'Success' || ack === 'Warning') {
     const itemId = extractOne(xml, 'ItemID');
-    return { ok: true, ack, itemId, fees: extractOne(xml, 'Fee') };
+    // VerifyAddItem returns no real ItemID (it's a validation), but does return fees.
+    return { ok: true, verified: verify, ack, itemId: verify ? null : itemId, fees: extractOne(xml, 'Fee') };
   }
   // Failure — return the most useful error code + message
   const errCode = extractOne(xml, 'ErrorCode') || 'unknown';
   const errMsg  = extractOne(xml, 'ShortMessage') || extractOne(xml, 'LongMessage') || 'eBay returned Failure';
-  throw new Error(`AddItem ${ack} [${errCode}]: ${errMsg}`);
+  throw new Error(`${callName} ${ack} [${errCode}]: ${errMsg}`);
+}
+
+// List the seller's eBay business policies (payment / fulfillment[shipping] /
+// return) via the REST Account API, so the listing UI can offer dropdowns.
+// Uses the shared OAuth token (scope sell.account.readonly), so it returns the
+// OAuth-linked account's policies (the primary store). marketplace defaults to
+// EBAY_GB. Each list is best-effort — a failure on one returns [] for it.
+async function getBusinessPolicies(marketplaceId = 'EBAY_GB') {
+  const token = await getAccessToken();
+  const headers = { Authorization: `Bearer ${token}` };
+  const params = { marketplace_id: marketplaceId };
+  const base = `${BASE}/sell/account/v1`;
+  async function fetchList(path, listKey, idKey) {
+    try {
+      const r = await axios.get(`${base}/${path}`, { headers, params, timeout: 20000 });
+      return (r.data?.[listKey] || []).map(p => ({ id: p[idKey], name: p.name }));
+    } catch (e) {
+      console.warn(`[ebay] getBusinessPolicies ${path} failed:`, e.response?.data?.errors?.[0]?.message || e.message);
+      return [];
+    }
+  }
+  const [payment, shipping, returns] = await Promise.all([
+    fetchList('payment_policy', 'paymentPolicies', 'paymentPolicyId'),
+    fetchList('fulfillment_policy', 'fulfillmentPolicies', 'fulfillmentPolicyId'),
+    fetchList('return_policy', 'returnPolicies', 'returnPolicyId'),
+  ]);
+  return { payment, shipping, return: returns };
 }
 
 // GetCategorySpecifics — fetch the item-specific names eBay recommends/requires
@@ -1120,6 +1153,7 @@ module.exports = {
   completeSale,
   addItem,
   getCategorySpecifics,
+  getBusinessPolicies,
   getRateLimits,
   itemBelongsToStore,
   getStoreUserId,

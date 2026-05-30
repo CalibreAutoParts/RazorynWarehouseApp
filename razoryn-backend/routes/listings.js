@@ -54,6 +54,16 @@ router.get('/category-specifics', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/listings/business-policies?marketplaceId=EBAY_GB
+// The seller's payment / shipping / return policies, for listing-time dropdowns.
+router.get('/business-policies', requireAdmin, async (req, res) => {
+  try {
+    res.json(await ebay.getBusinessPolicies(req.query.marketplaceId || 'EBAY_GB'));
+  } catch (e) {
+    res.status(502).json({ error: 'ebay_error', message: e.message });
+  }
+});
+
 // ──────────────────────────────────────────────────────────────────────────
 // Self-healing migration: adds the store_code column to mirror_links if it
 // doesn't already exist. Lets us track which eBay account each link belongs
@@ -1108,7 +1118,15 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
       brand: ebayBrand,
       mpn: product.part_number,
       itemSpecifics: mergedSpecifics,
+      verify: !!b.preview,
     });
+
+    // Preview mode (VerifyAddItem) — validated only, no live listing, nothing
+    // persisted. Returns the fees + ack so the user can review before listing.
+    if (b.preview) {
+      return res.json({ ok: true, preview: true, ack: result.ack, fees: result.fees,
+        message: 'Validated successfully — no live listing was created. Untick Preview to publish.' });
+    }
 
     if (!result.itemId) throw new Error('AddItem succeeded but returned no ItemID');
 
