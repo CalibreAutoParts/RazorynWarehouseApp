@@ -218,8 +218,10 @@
     width: 36px; height: 36px; border-radius: 8px;
     display: flex; align-items: center; justify-content: center;
     color: var(--ink-soft); position: relative;
+    transition: background .14s ease, color .14s ease;
   }
   .icon-btn:hover { background: var(--line-2); color: var(--ink); }
+  .icon-btn:active { transform: scale(.94); }
   .badge {
     position: absolute; top: 4px; right: 4px;
     background: var(--red); color: white;
@@ -253,14 +255,20 @@
     color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.06em;
   }
   .nav-item {
-    display: flex; align-items: center; gap: 10px;
-    padding: 9px 12px; border-radius: 8px; font-size: 14px;
+    display: flex; align-items: center; gap: 11px;
+    padding: 10px 12px; border-radius: 8px; font-size: 14px;
     color: var(--ink-2); font-weight: 500; width: 100%; text-align: left;
-    cursor: pointer; margin-bottom: 1px;
+    cursor: pointer; margin-bottom: 2px; position: relative;
+    transition: background .14s ease, color .14s ease;
   }
   .nav-item:hover { background: var(--line-2); }
   .nav-item.active { background: var(--brand-primary-light); color: var(--brand-primary); font-weight: 600; }
-  .nav-item .ic { width: 18px; height: 18px; flex-shrink: 0; }
+  /* Accent bar marks the current page at a glance. */
+  .nav-item.active::before {
+    content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+    width: 3px; height: 20px; border-radius: 0 3px 3px 0; background: var(--brand-primary);
+  }
+  .nav-item .ic { width: 18px; height: 18px; flex-shrink: 0; opacity: .9; }
   .nav-item .ct {
     margin-left: auto; background: var(--line-2); color: var(--ink-soft);
     font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 10px;
@@ -304,16 +312,16 @@
     border-radius: var(--radius); padding: 16px;
   }
   .stat .label { font-size: 12px; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
-  .stat .value { font-size: 24px; font-weight: 700; margin-top: 4px; letter-spacing: -0.02em; }
+  .stat .value { font-size: 26px; font-weight: 800; margin-top: 4px; letter-spacing: -0.02em; }
   .stat .delta { font-size: 12px; margin-top: 2px; color: var(--green); font-weight: 600; }
   .stat .delta.down { color: var(--red); }
-  .stat-clickable { cursor: pointer; transition: transform .12s, border-color .12s, box-shadow .12s; }
+  .stat-clickable { cursor: pointer; transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease; }
   .stat-clickable:hover { transform: translateY(-2px); border-color: var(--ink-soft); box-shadow: var(--shadow-lg); }
-  .stat-clickable:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+  .stat-clickable:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 2px; }
   .stat .icon-wrap {
-    width: 36px; height: 36px; border-radius: 8px; background: var(--red-light);
-    color: var(--red); display: flex; align-items: center; justify-content: center;
-    margin-bottom: 10px;
+    width: 38px; height: 38px; border-radius: var(--radius-sm); background: var(--brand-primary-light);
+    color: var(--brand-primary); display: flex; align-items: center; justify-content: center;
+    margin-bottom: 12px;
   }
 
   /* Tables */
