@@ -397,7 +397,79 @@ async function runFullSync() {
     console.error('[sync] stock push failed:', e.message);
     results.shopifyStock = { error: e.message };
   }
+
+  try { results.autoDispatch = await autoMarkDispatched(); }
+  catch (e) {
+    console.error('[sync] auto-dispatch failed:', e.message);
+    results.autoDispatch = { error: e.message };
+  }
   return results;
+}
+
+// --------- AUTO-DISPATCH: mark orders shipped ON the platform ---------
+// If an outstanding order has been fulfilled/shipped (with tracking) directly on
+// Shopify or eBay, mark it dispatched in the warehouse so it drops off the
+// dispatch worklist. We pull the tracking IN but never push it back out (the
+// platform already has it). dispatched_by stays NULL = system/auto.
+async function autoMarkDispatched() {
+  const result = { shopify: 0, ebay: 0, errors: [] };
+  const { rows: outstanding } = await query(`
+    SELECT id, channel, external_order_id FROM sales
+    WHERE is_estimate = false AND dispatched_at IS NULL AND collected_at IS NULL
+      AND status NOT IN ('refunded','cancelled','dispatched')
+      AND external_order_id IS NOT NULL
+  `);
+  if (!outstanding.length) return result;
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+  // ----- Shopify -----
+  const shopifyOut = outstanding.filter(s => s.channel === 'shopify');
+  if (shopifyOut.length && shopify.isConfigured()) {
+    try {
+      const { orders } = await shopify.getRecentOrders(since);
+      const fulfilled = {};
+      for (const o of orders) {
+        if (o.fulfillment_status === 'fulfilled' || o.fulfillment_status === 'partial') {
+          const f = (o.fulfillments || []).find(x => x.tracking_number) || (o.fulfillments || [])[0] || {};
+          fulfilled[String(o.id)] = { tracking: f.tracking_number || null, carrier: f.tracking_company || null };
+        }
+      }
+      for (const s of shopifyOut) {
+        const hit = fulfilled[String(s.external_order_id)];
+        if (hit) { await markAutoDispatched(s.id, 'Shopify', hit.tracking, hit.carrier); result.shopify++; }
+      }
+    } catch (e) { result.errors.push('shopify: ' + e.message); }
+  }
+
+  // ----- eBay -----
+  const ebayOut = outstanding.filter(s => (s.channel || '').startsWith('ebay'));
+  if (ebayOut.length && ebay.isConfigured()) {
+    try {
+      const fulfilledIds = await ebay.getFulfilledOrderIds(since);
+      for (const s of ebayOut) {
+        if (!fulfilledIds.has(s.external_order_id)) continue;
+        const { tracking, carrier } = await ebay.getOrderTracking(s.external_order_id);
+        await markAutoDispatched(s.id, 'eBay', tracking, carrier);
+        result.ebay++;
+      }
+    } catch (e) { result.errors.push('ebay: ' + e.message); }
+  }
+
+  if (result.shopify || result.ebay) {
+    console.log(`[sync] auto-dispatched ${result.shopify} Shopify + ${result.ebay} eBay order(s) from platform fulfillment`);
+  }
+  return result;
+}
+
+async function markAutoDispatched(saleId, platform, tracking, carrier) {
+  await query(`
+    UPDATE sales
+       SET dispatched_at = now(), status = 'dispatched',
+           tracking_number = COALESCE($2, tracking_number),
+           carrier = COALESCE($3, carrier),
+           dispatch_notes = $4
+     WHERE id = $1 AND dispatched_at IS NULL
+  `, [saleId, tracking, carrier, `Auto-detected from ${platform}`]);
 }
 
 module.exports = {
@@ -408,4 +480,5 @@ module.exports = {
   pushAllStockToShopify,
   recordLowStockIfNeeded,
   resolveProductBySku,
+  autoMarkDispatched,
 };

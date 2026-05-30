@@ -947,6 +947,34 @@ async function getBusinessPolicies(marketplaceId = 'EBAY_GB') {
   return { payment, shipping, return: returns };
 }
 
+// Auto-dispatch support: which recent orders have been shipped/fulfilled ON
+// eBay (so the warehouse app can auto-mark them dispatched). Returns a Set of
+// orderIds with orderFulfillmentStatus === FULFILLED. Needs the OAuth Sell
+// Fulfillment API; returns an empty Set if that isn't configured.
+async function getFulfilledOrderIds(sinceISO) {
+  const ids = new Set();
+  if (!(REFRESH_TOKEN && CLIENT_ID && CLIENT_SECRET)) return ids;
+  const filter = `creationdate:[${sinceISO}..]`;
+  const r = await http('GET', `/sell/fulfillment/v1/order?filter=${encodeURIComponent(filter)}&limit=200`);
+  for (const o of (r.data.orders || [])) {
+    if (o.orderFulfillmentStatus === 'FULFILLED') ids.add(o.orderId);
+  }
+  return ids;
+}
+
+// Best-effort tracking lookup for one eBay order (called only for orders we're
+// about to auto-dispatch, so the call volume stays small).
+async function getOrderTracking(orderId) {
+  try {
+    const r = await http('GET', `/sell/fulfillment/v1/order/${encodeURIComponent(orderId)}/shipping_fulfillment`);
+    const f = (r.data.fulfillments || [])[0];
+    if (!f) return { tracking: null, carrier: null };
+    return { tracking: f.shipmentTrackingNumber || null, carrier: f.shippingCarrierCode || null };
+  } catch (e) {
+    return { tracking: null, carrier: null };
+  }
+}
+
 // GetCategorySpecifics — fetch the item-specific names eBay recommends/requires
 // for a category, so we can pre-validate an AddItem before submitting it (and
 // surface exactly which required specifics are missing). Returns:
@@ -1154,6 +1182,8 @@ module.exports = {
   addItem,
   getCategorySpecifics,
   getBusinessPolicies,
+  getFulfilledOrderIds,
+  getOrderTracking,
   getRateLimits,
   itemBelongsToStore,
   getStoreUserId,
