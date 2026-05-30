@@ -741,9 +741,53 @@ async function bulkSetBarcodeToSku({ dryRun = true } = {}) {
   return { dryRun, totalVariants, candidates, updated, skippedNoSku, sample, errors, errorCount: errors.length };
 }
 
+// ---------- Custom collections (shop categories) ----------
+// Shopify has SMART collections (auto-populated by rules — can't add manually)
+// and CUSTOM collections (manual). The app manages CUSTOM ones via collects.
+async function getCustomCollections() {
+  if (!isConfigured()) return [];
+  const out = [];
+  let pageInfo = null, guard = 0;
+  while (guard++ < 20) {
+    const params = pageInfo ? { limit: 250, page_info: pageInfo } : { limit: 250 };
+    const r = await shopifyRequest('get', '/custom_collections.json', { params });
+    for (const c of (r.data.custom_collections || [])) out.push({ id: String(c.id), title: c.title, handle: c.handle });
+    const link = r.headers['link'] || r.headers['Link'];
+    const m = link && link.match(/<([^>]+)>;\s*rel="next"/);
+    if (!m) break;
+    pageInfo = new URL(m[1]).searchParams.get('page_info');
+    if (!pageInfo) break;
+  }
+  return out;
+}
+
+// Which custom collections a product belongs to. Returns collect rows
+// ({ collectId, collectionId }) so a membership can be removed by collectId.
+async function getProductCollects(productId) {
+  if (!isConfigured()) return [];
+  const r = await shopifyRequest('get', '/collects.json', { params: { product_id: productId, limit: 250 } });
+  return (r.data.collects || []).map(c => ({ collectId: String(c.id), collectionId: String(c.collection_id) }));
+}
+
+async function addProductToCollection(productId, collectionId) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const r = await shopifyRequest('post', '/collects.json', { data: { collect: { product_id: Number(productId), collection_id: Number(collectionId) } } });
+  return { collectId: String(r.data.collect.id) };
+}
+
+async function removeCollect(collectId) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  await shopifyRequest('delete', `/collects/${encodeURIComponent(collectId)}.json`);
+  return { ok: true };
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
+  getCustomCollections,
+  getProductCollects,
+  addProductToCollection,
+  removeCollect,
   bulkSetBarcodeToSku,
   getLocations,
   setInventoryLevel,

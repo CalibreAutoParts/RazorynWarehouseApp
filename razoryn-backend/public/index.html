@@ -2966,6 +2966,7 @@ function openProductModal(id) {
       </div>
       <div class="field"><label>Storage location</label><input id="m-loc" value="${p.location||''}" placeholder="Aisle B, Rack 3, Shelf 2"></div>
       <div class="field"><label>Storage notes</label><textarea id="m-locdesc" rows="2">${p.locationDesc||''}</textarea></div>
+      ${id ? `<div class="field"><label>Shopify shop categories (collections)</label><div id="m-collections" style="font-size:12px;color:var(--ink-soft)">Loading…</div></div>` : ''}
     `,
     actions: [
       { label: id ? 'Save changes' : 'Add product', primary: true, onClick: async () => {
