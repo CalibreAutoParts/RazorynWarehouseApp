@@ -914,6 +914,31 @@ async function addItem(storeArg, opts = {}) {
   throw new Error(`AddItem ${ack} [${errCode}]: ${errMsg}`);
 }
 
+// GetCategorySpecifics — fetch the item-specific names eBay recommends/requires
+// for a category, so we can pre-validate an AddItem before submitting it (and
+// surface exactly which required specifics are missing). Returns:
+//   { categoryId, specifics: [{ name, required, values: [...] }] }
+// `required` = the specific has MinValues >= 1 in its validation rules.
+async function getCategorySpecifics(storeArg, categoryId) {
+  if (!categoryId) throw new Error('categoryId required');
+  const xml = await tradingCall('GetCategorySpecifics',
+    `<CategoryID>${escapeXml(String(categoryId))}</CategoryID>`, storeArg);
+  const ack = extractOne(xml, 'Ack') || '';
+  if (ack !== 'Success' && ack !== 'Warning') {
+    const errMsg = extractOne(xml, 'ShortMessage') || extractOne(xml, 'LongMessage') || 'GetCategorySpecifics failed';
+    throw new Error(`GetCategorySpecifics [${extractOne(xml, 'ErrorCode') || '?'}]: ${decodeEntities(errMsg)}`);
+  }
+  const specifics = [];
+  for (const block of extractAll(xml, 'NameRecommendation')) {
+    const name = decodeEntities(extractOne(block, 'Name') || '').trim();
+    if (!name) continue;
+    const minValues = parseInt(extractOne(block, 'MinValues') || '0', 10) || 0;
+    const values = extractAll(block, 'Value').map(v => decodeEntities(v).trim()).filter(Boolean);
+    specifics.push({ name, required: minValues >= 1, values });
+  }
+  return { categoryId: String(categoryId), specifics };
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // getRateLimits — query the eBay Developer Analytics API for the App's
 // current API call quotas + usage. Per-app (EBAY_CLIENT_ID), not per-store.
@@ -1094,6 +1119,7 @@ module.exports = {
   reviseItem,
   completeSale,
   addItem,
+  getCategorySpecifics,
   getRateLimits,
   itemBelongsToStore,
   getStoreUserId,

@@ -10,6 +10,50 @@ const router = express.Router();
 
 router.use(requireAuth);
 
+// Best-effort parse of vehicle Make / Model / Year(range) from a product title,
+// used to auto-populate eBay item specifics. Conservative — only emits a value
+// when reasonably confident (make matched against a known list, etc.).
+const VEHICLE_MAKES = ['Abarth','Alfa Romeo','Aston Martin','Audi','Bentley','BMW','Citroen','Citroën','Cupra','Dacia','DS','Ferrari','Fiat','Ford','Honda','Hyundai','Jaguar','Jeep','Kia','Lamborghini','Land Rover','Lexus','Maserati','Mazda','McLaren','Mercedes-Benz','Mercedes','MG','Mini','Mitsubishi','Nissan','Peugeot','Polestar','Porsche','Renault','Seat','Skoda','Škoda','Smart','SsangYong','Subaru','Suzuki','Tesla','Toyota','Vauxhall','Volkswagen','VW','Volvo'];
+function parseVehicleFromTitle(title) {
+  const t = ' ' + String(title || '') + ' ';
+  let make = null, makeRe = null;
+  for (const m of VEHICLE_MAKES) {
+    const re = new RegExp('\\b' + m.replace(/-/g, '[- ]?') + '\\b', 'i');
+    if (re.test(t)) { make = (m === 'VW' ? 'Volkswagen' : m); makeRe = re; break; }
+  }
+  // Year range (2019-2024, 2019–2024, 2019 to 2024) else single year.
+  let year = null;
+  const range = t.match(/\b((?:19|20)\d{2})\s*(?:[-–]|to)\s*((?:19|20)\d{2})\b/i);
+  if (range) year = `${range[1]}-${range[2]}`;
+  else { const single = t.match(/\b((?:19|20)\d{2})\b/); if (single) year = single[1]; }
+  // Model — the 1-2 tokens after the make, up to a year or a part-type keyword.
+  let model = null;
+  if (makeRe) {
+    const after = t.split(makeRe)[1] || '';
+    const stopIdx = after.search(/\b(?:19|20)\d{2}\b|\b(?:front|rear|left|right|lh|rh|bumper|bonnet|hood|headlight|headlamp|taillight|wing|fender|door|mirror|grille|grill|tailgate|panel|arch|spoiler|skirt|sill)\b/i);
+    const seg = (stopIdx > 0 ? after.slice(0, stopIdx) : after).trim();
+    const tokens = seg.split(/\s+/).filter(Boolean).slice(0, 2);
+    if (tokens.length) model = tokens.join(' ');
+  }
+  return { make, model, year };
+}
+
+// GET /api/listings/category-specifics?categoryId=&storeCode=
+// eBay's recommended/required item specifics for a category, so the UI can show
+// which fields are required before creating a listing.
+router.get('/category-specifics', requireAdmin, async (req, res) => {
+  const brand = require('../lib/brand');
+  const categoryId = req.query.categoryId;
+  if (!categoryId) return res.status(400).json({ error: 'categoryId required' });
+  const primary = brand.getPrimaryStore();
+  const storeCode = req.query.storeCode || (primary && primary.code);
+  try {
+    res.json(await ebay.getCategorySpecifics(storeCode, categoryId));
+  } catch (e) {
+    res.status(502).json({ error: 'ebay_error', message: e.message });
+  }
+});
+
 // ──────────────────────────────────────────────────────────────────────────
 // Self-healing migration: adds the store_code column to mirror_links if it
 // doesn't already exist. Lets us track which eBay account each link belongs
@@ -947,7 +991,7 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
 
   if (!b.productId)  return res.status(400).json({ error: 'productId required' });
   if (!b.storeCode)  return res.status(400).json({ error: 'storeCode required' });
-  if (!b.categoryId) return res.status(400).json({ error: 'categoryId required — eBay needs a numeric category for the listing' });
+  // categoryId is resolved after settings load (falls back to the Settings default).
   if (b.price == null || isNaN(parseFloat(b.price))) return res.status(400).json({ error: 'valid price required' });
 
   // Look up the product. We need at minimum: sku, title, image_url, brand, mpn.
@@ -1003,12 +1047,48 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
   const title = (b.titleOverride || product.title || '').trim();
   if (!title) return res.status(400).json({ error: 'no_title', message: 'Product has no title — set one in inventory before listing.' });
 
+  // Resolve category — fall back to the Settings default if none was passed.
+  const categoryId = b.categoryId || settings.ebay_default_category_id;
+  if (!categoryId) return res.status(400).json({ error: 'no_category', message: 'No eBay category — pass categoryId or set a default in Settings.' });
+
+  // Derive item specifics from the product + title. eBay auto-parts categories
+  // commonly require these. User-supplied b.itemSpecifics override the derived
+  // ones (addItem dedupes by name, later entries win).
+  const vehicle = parseVehicleFromTitle(title);
+  const derivedSpecifics = [];
+  if (product.position) derivedSpecifics.push({ name: 'Placement on Vehicle', value: product.position });
+  if (vehicle.make)  derivedSpecifics.push({ name: 'Make',  value: vehicle.make });
+  if (vehicle.model) derivedSpecifics.push({ name: 'Model', value: vehicle.model });
+  if (vehicle.year)  derivedSpecifics.push({ name: 'Year',  value: vehicle.year });
+  const mergedSpecifics = [...derivedSpecifics, ...(Array.isArray(b.itemSpecifics) ? b.itemSpecifics : [])];
+
+  // Pre-validate the category's REQUIRED item specifics (best-effort — if the
+  // lookup itself fails we don't block the listing). Surfaces exactly which
+  // required specifics are missing instead of letting AddItem fail cryptically.
+  if (!b.skipSpecificsCheck) {
+    try {
+      const { specifics } = await ebay.getCategorySpecifics(store.code, categoryId);
+      const provided = new Set(mergedSpecifics.filter(s => s.name && s.value).map(s => s.name.toLowerCase()));
+      if (product.brand) provided.add('brand');
+      if (product.part_number) provided.add('manufacturer part number');
+      const missing = specifics.filter(s => s.required && !provided.has(s.name.toLowerCase())).map(s => s.name);
+      if (missing.length) {
+        return res.status(422).json({
+          error: 'missing_item_specifics', missing,
+          message: `eBay category ${categoryId} requires item specifics you haven't provided: ${missing.join(', ')}. Add them via itemSpecifics, or resend with skipSpecificsCheck=true.`,
+        });
+      }
+    } catch (e) {
+      console.warn('[create-ebay] category-specifics validation skipped:', e.message);
+    }
+  }
+
   try {
     const result = await ebay.addItem(store.code, {
       sku: product.sku,
       title,
       description,
-      categoryId: b.categoryId,
+      categoryId,
       conditionId: b.conditionId || 1000,
       price: parseFloat(b.price),
       quantity: parseInt(b.quantity) || product.qty_on_hand || 1,
@@ -1018,7 +1098,7 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
       location: loc,
       brand: product.brand,
       mpn: product.part_number,
-      itemSpecifics: Array.isArray(b.itemSpecifics) ? b.itemSpecifics : [],
+      itemSpecifics: mergedSpecifics,
     });
 
     if (!result.itemId) throw new Error('AddItem succeeded but returned no ItemID');
