@@ -35,6 +35,7 @@ async function ensureSocialColumns() {
     // brands (Calibre) have different defaults per eBay account.
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_category_id TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_description_template TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_markup_pct NUMERIC`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_condition_id TEXT DEFAULT '1000'`);
     // Default eBay "Brand" item specific. For aftermarket parts this should be
     // the seller's company name or "Unbranded" — NOT the vehicle make (which
@@ -262,6 +263,7 @@ router.get('/pricing-config', async (req, res) => {
     // Defaults the modal pre-fills so users don't have to type them every time.
     ebayDefaultCategoryId:  r.ebay_default_category_id || '',
     ebayDescriptionTemplate: r.ebay_description_template || '',
+    ebayMarkupPct: r.ebay_markup_pct != null ? parseFloat(r.ebay_markup_pct) : 15,
     ebayDefaultBrand:       r.ebay_default_brand || 'Unbranded',
     ebayDefaultConditionId: r.ebay_default_condition_id || '1000',
     ebayLocationCountry:    r.ebay_location_country || 'GB',
@@ -334,6 +336,7 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       // eBay listing defaults
       ebayDefaultCategoryId:  'ebay_default_category_id',
       ebayDescriptionTemplate: 'ebay_description_template',
+      ebayMarkupPct: 'ebay_markup_pct',
       ebayDefaultBrand:       'ebay_default_brand',
       ebayDefaultConditionId: 'ebay_default_condition_id',
       ebayLocationCountry:    'ebay_location_country',
@@ -350,7 +353,7 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
       if (b[bodyKey] === undefined) continue;
       let val = b[bodyKey];
-      if (['cash_discount_pct','bank_transfer_pct','free_delivery_threshold','ebay_buyer_protection_markup','vat_rate'].includes(dbCol)) {
+      if (['cash_discount_pct','bank_transfer_pct','free_delivery_threshold','ebay_buyer_protection_markup','vat_rate','ebay_markup_pct'].includes(dbCol)) {
         val = parseFloat(val);
       }
       // Stock-check day → INTEGER (or null if empty). Day stored 1-31.

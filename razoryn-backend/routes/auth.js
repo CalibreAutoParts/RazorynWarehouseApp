@@ -57,7 +57,7 @@ router.post('/login-pin', authLimiter, async (req, res) => {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
-    maxAge: 12 * 60 * 60 * 1000,
+    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days — stay signed in per device
   });
 
   await audit({ user: matched, ip: req.ip }, 'login_pin');
@@ -102,7 +102,7 @@ router.post('/login', authLimiter, async (req, res) => {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
-    maxAge: 12 * 60 * 60 * 1000,
+    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days — stay signed in per device
   });
 
   await audit({ user: u, ip: req.ip }, 'login_password');

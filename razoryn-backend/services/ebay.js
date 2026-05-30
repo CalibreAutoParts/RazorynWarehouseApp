@@ -946,25 +946,52 @@ async function addItem(storeArg, opts = {}) {
 // Uses the shared OAuth token (scope sell.account.readonly), so it returns the
 // OAuth-linked account's policies (the primary store). marketplace defaults to
 // EBAY_GB. Each list is best-effort — a failure on one returns [] for it.
-async function getBusinessPolicies(marketplaceId = 'EBAY_GB') {
-  const token = await getAccessToken();
-  const headers = { Authorization: `Bearer ${token}` };
-  const params = { marketplace_id: marketplaceId };
-  const base = `${BASE}/sell/account/v1`;
-  async function fetchList(path, listKey, idKey) {
+async function getBusinessPolicies(marketplaceId = "EBAY_GB", storeArg) {
+  // Primary: Trading API GetUserPreferences — works with the per-store
+  // Auth'n'Auth token (the REST Account API needs OAuth, which isn't set up
+  // for Calibre, so it returned nothing). Falls back to REST if a refresh token
+  // exists (Razoryn).
+  const payment = [], shipping = [], returns = [];
+  try {
+    const xml = await tradingCall("GetUserPreferences",
+      "<ShowSellerProfilePreferences>true</ShowSellerProfilePreferences>", storeArg);
+    for (const block of extractAll(xml, "SupportedSellerProfile")) {
+      const id = extractOne(block, "ProfileID");
+      const name = decodeEntities(extractOne(block, "ProfileName") || "");
+      const type = (extractOne(block, "ProfileType") || "").toUpperCase();
+      if (!id) continue;
+      const entry = { id, name: name || id };
+      if (type.includes("PAYMENT")) payment.push(entry);
+      else if (type.includes("RETURN")) returns.push(entry);
+      else if (type.includes("SHIPPING")) shipping.push(entry);
+    }
+    if (payment.length || shipping.length || returns.length) {
+      return { payment, shipping, return: returns };
+    }
+  } catch (e) {
+    console.warn("[ebay] GetUserPreferences profiles failed:", e.message);
+  }
+  // REST fallback (OAuth refresh token).
+  if (REFRESH_TOKEN && CLIENT_ID && CLIENT_SECRET) {
     try {
-      const r = await axios.get(`${base}/${path}`, { headers, params, timeout: 20000 });
-      return (r.data?.[listKey] || []).map(p => ({ id: p[idKey], name: p.name }));
+      const token = await getAccessToken();
+      const headers = { Authorization: `Bearer ${token}` };
+      const params = { marketplace_id: marketplaceId };
+      const base = `${BASE}/sell/account/v1`;
+      const fetchList = async (path, listKey, idKey) => {
+        const r = await axios.get(`${base}/${path}`, { headers, params, timeout: 20000 });
+        return (r.data?.[listKey] || []).map(p => ({ id: p[idKey], name: p.name }));
+      };
+      const [p2, s2, r2] = await Promise.all([
+        fetchList("payment_policy", "paymentPolicies", "paymentPolicyId").catch(() => []),
+        fetchList("fulfillment_policy", "fulfillmentPolicies", "fulfillmentPolicyId").catch(() => []),
+        fetchList("return_policy", "returnPolicies", "returnPolicyId").catch(() => []),
+      ]);
+      return { payment: p2, shipping: s2, return: r2 };
     } catch (e) {
-      console.warn(`[ebay] getBusinessPolicies ${path} failed:`, e.response?.data?.errors?.[0]?.message || e.message);
-      return [];
+      console.warn("[ebay] REST business policies failed:", e.message);
     }
   }
-  const [payment, shipping, returns] = await Promise.all([
-    fetchList('payment_policy', 'paymentPolicies', 'paymentPolicyId'),
-    fetchList('fulfillment_policy', 'fulfillmentPolicies', 'fulfillmentPolicyId'),
-    fetchList('return_policy', 'returnPolicies', 'returnPolicyId'),
-  ]);
   return { payment, shipping, return: returns };
 }
 

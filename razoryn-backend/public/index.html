@@ -9776,6 +9776,11 @@ function renderSettings() {
               </div>
             </div>
             <div class="field" style="margin-top:10px">
+              <label>eBay price markup over Shopify (%)</label>
+              <input id="set-ebay-markup" type="number" step="0.1" placeholder="e.g. 15">
+              <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Used by the "From Shopify +%" button when creating an eBay listing (Shopify price × (1 + this%)).</div>
+            </div>
+            <div class="field" style="margin-top:10px">
               <label>eBay description template</label>
               <textarea id="set-ebay-desc-template" rows="6" placeholder="Paste your eBay-formatted HTML. Placeholders: {title} {sku} {mpn} {brand} {make} {model} {year}"></textarea>
               <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Pre-fills the listing description (placeholders replaced from the product; editable per listing). Leave blank to use the Shopify description.</div>
@@ -10170,6 +10175,7 @@ async function loadPricingConfig() {
     setVal('set-ebay-category',  r.ebayDefaultCategoryId  || '');
     setVal('set-ebay-brand',     r.ebayDefaultBrand       || 'Unbranded');
     setVal('set-ebay-desc-template', r.ebayDescriptionTemplate || '');
+    setVal('set-ebay-markup', r.ebayMarkupPct != null ? r.ebayMarkupPct : 15);
     setVal('set-ebay-condition', r.ebayDefaultConditionId || '1000');
     setVal('set-ebay-country',   r.ebayLocationCountry    || 'GB');
     setVal('set-ebay-city',      r.ebayLocationCity       || '');
@@ -10816,6 +10822,7 @@ async function savePricingConfig() {
     ebayDefaultCategoryId:  getStr('set-ebay-category'),
     ebayDefaultBrand:       getStr('set-ebay-brand'),
     ebayDescriptionTemplate: getStr('set-ebay-desc-template'),
+    ebayMarkupPct: getNum('set-ebay-markup'),
     ebayDefaultConditionId: getStr('set-ebay-condition'),
     ebayLocationCountry:    getStr('set-ebay-country'),
     ebayLocationCity:       getStr('set-ebay-city'),

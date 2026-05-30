@@ -77,8 +77,11 @@ router.get('/category-search', requireAdmin, async (req, res) => {
 // GET /api/listings/business-policies?marketplaceId=EBAY_GB
 // The seller's payment / shipping / return policies, for listing-time dropdowns.
 router.get('/business-policies', requireAdmin, async (req, res) => {
+  const brand = require('../lib/brand');
+  const primary = brand.getPrimaryStore();
+  const storeCode = req.query.storeCode || (primary && primary.code);
   try {
-    res.json(await ebay.getBusinessPolicies(req.query.marketplaceId || 'EBAY_GB'));
+    res.json(await ebay.getBusinessPolicies(req.query.marketplaceId || 'EBAY_GB', storeCode));
   } catch (e) {
     res.status(502).json({ error: 'ebay_error', message: e.message });
   }
