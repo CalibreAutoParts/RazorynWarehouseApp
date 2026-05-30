@@ -68,4 +68,14 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   res.json({ checks: rows });
 });
 
+// GET /api/stock-checks/this-month — product IDs counted in the current calendar
+// month, for the monthly stock-take checklist (progress + resume across devices).
+router.get('/this-month', requirePermission('scan'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT DISTINCT product_id FROM stock_checks
+     WHERE created_at >= date_trunc('month', now())`
+  );
+  res.json({ productIds: rows.map(r => r.product_id) });
+});
+
 module.exports = router;

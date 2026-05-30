@@ -2194,6 +2194,7 @@ function hasPerm(page) {
     dashboard:     true,
     inventory:    'inventory',
     scan:         'scan',
+    stocktake:    'scan',
     locations:    'locations',
     returns:     'returns',
     dispatch:    'dispatch',
@@ -2231,6 +2232,7 @@ function routeTo(page) {
 
   const pages = {
     dashboard: renderDashboard, inventory: renderInventory, scan: renderScan,
+    stocktake: renderStockTake,
     locations: renderLocations, returns: renderReturns, sales: renderSales,
     pricing: renderQuoteBuilder, schedule: renderSchedule, videos: renderVideos,
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror,
@@ -2247,6 +2249,128 @@ function routeTo(page) {
     </div></div></div>`;
   }
   document.getElementById('content').scrollTo(0, 0);
+}
+
+/* ==================== MONTHLY STOCK-TAKE CHECKLIST ==================== */
+// A guided checklist: every item listed, tick each as you physically count it.
+// Progress is saved server-side (a stock_checks row per counted item this
+// month), so it resumes across reloads and devices.
+function renderStockTake() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Monthly stock-take</h1><div class="desc">Walk the warehouse and tick off each item as you count it — progress is saved.</div></div>
+        <div class="actions"><button class="btn btn-outline" onclick="routeTo('scan')">← Stock Check</button></div>
+      </div>
+      <div class="card" style="margin-bottom:14px"><div class="card-body" style="padding:14px 18px">
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px">
+          <span id="st-progress-text">Loading…</span><span id="st-progress-pct" style="font-weight:700"></span>
+        </div>
+        <div style="height:10px;background:var(--line-2);border-radius:6px;overflow:hidden"><div id="st-progress-bar" style="height:100%;width:0;background:var(--brand-primary);transition:width .25s"></div></div>
+      </div></div>
+      <div class="toolbar">
+        <input type="search" class="search-input" id="st-search" placeholder="Search by name, SKU, part #...">
+        <select class="filter-select" id="st-filter">
+          <option value="remaining">Remaining to count</option>
+          <option value="all">All items</option>
+          <option value="counted">Counted ✓</option>
+        </select>
+      </div>
+      <div class="card"><div id="st-list"></div></div>
+      <div id="st-sentinel" style="height:1px"></div>
+    </div>`;
+
+  State._stChecked = State._stChecked || new Set();
+  Api.get('/api/stock-checks/this-month')
+    .then(r => { State._stChecked = new Set((r.productIds || []).map(String)); stPaint(); })
+    .catch(() => stPaint());
+
+  el('st-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    stCount(btn.getAttribute('data-pid'), btn.getAttribute('data-act') === 'adjust');
+  });
+  if (State._stObserver) State._stObserver.disconnect();
+  State._stObserver = new IntersectionObserver((en) => { if (en.some(x => x.isIntersecting)) stFill(); }, { rootMargin: '300px' });
+  const s = el('st-sentinel'); if (s) State._stObserver.observe(s);
+  ['st-search', 'st-filter'].forEach(id => el(id).addEventListener('input', stPaint));
+}
+function stFiltered() {
+  const q = (el('st-search')?.value || '');
+  const filter = el('st-filter')?.value || 'remaining';
+  const checked = State._stChecked || new Set();
+  return (State.products || []).filter(p => {
+    if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model)) return false;
+    const isChecked = checked.has(String(p.id));
+    if (filter === 'remaining' && isChecked) return false;
+    if (filter === 'counted' && !isChecked) return false;
+    return true;
+  });
+}
+function stProgress() {
+  const total = (State.products || []).length;
+  const done = (State.products || []).filter(p => State._stChecked.has(String(p.id))).length;
+  const pct = total ? Math.round(done / total * 100) : 0;
+  if (el('st-progress-text')) el('st-progress-text').textContent = `${done} of ${total} items counted`;
+  if (el('st-progress-pct')) el('st-progress-pct').textContent = pct + '%';
+  if (el('st-progress-bar')) el('st-progress-bar').style.width = pct + '%';
+}
+function stRowHtml(p) {
+  const checked = State._stChecked.has(String(p.id));
+  return `
+    <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line-2);${checked ? 'opacity:.55' : ''}">
+      <button data-act="count" data-pid="${p.id}" title="${checked ? 'Counted' : 'Mark counted'}" style="width:34px;height:34px;border-radius:8px;flex-shrink:0;border:2px solid ${checked ? 'var(--green)' : 'var(--line)'};background:${checked ? 'var(--green)' : 'transparent'};color:#fff;font-size:16px;font-weight:700;cursor:pointer">${checked ? '✓' : ''}</button>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:13px">${escapeHtml(p.title)}</div>
+        <div style="color:var(--ink-soft);font-size:12px">${escapeHtml(p.sku)} · ${escapeHtml(p.location || 'No location')}</div>
+      </div>
+      <div style="text-align:right;font-size:11px;color:var(--ink-soft)">System<br><strong style="font-size:15px;color:var(--ink)">${totalQty(p)}</strong></div>
+      <button class="btn btn-ghost btn-sm" data-act="adjust" data-pid="${p.id}">Adjust</button>
+    </div>`;
+}
+function stRenderChunk() {
+  const list = State._stItems || [];
+  const shown = State._stShown || 0;
+  if (shown >= list.length) return;
+  const slice = list.slice(shown, shown + 50);
+  el('st-list').insertAdjacentHTML('beforeend', slice.map(stRowHtml).join(''));
+  State._stShown = shown + slice.length;
+}
+function stFill() {
+  const s = el('st-sentinel'); if (!s) return;
+  if ((State._stShown || 0) >= (State._stItems || []).length) return;
+  if (s.getBoundingClientRect().top < window.innerHeight + 300) { stRenderChunk(); requestAnimationFrame(stFill); }
+}
+function stPaint() {
+  const list = stFiltered();
+  State._stItems = list; State._stShown = 0;
+  const wrap = el('st-list');
+  if (!wrap) return;
+  wrap.innerHTML = list.length ? '' : '<div class="empty" style="padding:24px;text-align:center"><div class="t">Nothing to show</div>All counted, or none match your search.</div>';
+  if (list.length) { stRenderChunk(); requestAnimationFrame(stFill); }
+  stProgress();
+}
+async function stCount(pid, adjust) {
+  const p = (State.products || []).find(x => String(x.id) === String(pid));
+  if (!p) return;
+  let actualQty = totalQty(p);
+  if (adjust) {
+    const v = prompt(`Counted quantity for "${p.title}"?\nThe system shows ${actualQty}.`, String(actualQty));
+    if (v === null) return;
+    const n = parseInt(v, 10);
+    if (isNaN(n) || n < 0) { toast('Enter a valid quantity', 'error'); return; }
+    actualQty = n;
+  }
+  const changed = actualQty !== totalQty(p);
+  try {
+    await Api.post('/api/stock-checks', { productId: pid, actualQty, reason: 'stock_take' });
+    State._stChecked.add(String(pid));
+    if (changed) await Store.refresh('products');
+    stPaint();
+    toast(adjust && changed ? `Counted — adjusted to ${actualQty}` : 'Counted ✓', 'success', 1500);
+  } catch (e) {
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 function refreshNavCounts() {
@@ -2902,6 +3026,7 @@ function renderScan() {
       <div class="page-head">
         <div><h1>Stock Check & Scan</h1><div class="desc">${isMobile ? 'Use your camera to scan' : 'Use a USB barcode scanner or your camera'}</div></div>
         <div class="actions">
+          <button class="btn btn-primary" onclick="routeTo('stocktake')" title="Guided checklist — count every item">📋 Monthly stock-take</button>
           <button class="btn btn-outline" onclick="routeTo('labels')" title="Generate thermal barcode labels for items you've counted">🏷 Print labels</button>
         </div>
       </div>
@@ -10223,9 +10348,9 @@ function showStockTakeBanner(day, monthKey, dismissedKey) {
     <div style="font-size:22px">📋</div>
     <div style="flex:1;min-width:200px">
       <strong>Monthly stock-take reminder</strong>
-      <div style="font-size:12px;margin-top:2px;color:#7a5a00">You scheduled a physical stock check for day ${day} of each month. Time to walk the warehouse and verify counts against the system.</div>
+      <div style="font-size:12px;margin-top:2px;color:#7a5a00">You scheduled a physical stock check for day ${day} of each month. Start the guided checklist and tick off each item as you count it.</div>
     </div>
-    <button class="btn btn-primary btn-sm" onclick="routeTo('inventory'); dismissStockTakeBanner('${dismissedKey}');" style="background:#5a4400;color:#fff;border:0">Go to Inventory</button>
+    <button class="btn btn-primary btn-sm" onclick="routeTo('stocktake'); dismissStockTakeBanner('${dismissedKey}');" style="background:#5a4400;color:#fff;border:0">Start stock-take</button>
     <button class="btn btn-ghost btn-sm" onclick="dismissStockTakeBanner('${dismissedKey}')" style="color:#5a4400">Dismiss for this month</button>
   `;
   // Insert at the top of the main content area. The dashboard has an outer
