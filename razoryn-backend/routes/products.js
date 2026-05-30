@@ -607,4 +607,83 @@ router.delete('/:id/collections/:collectId', requireAdmin, async (req, res) => {
   } catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
 });
 
+// ---------- SEO optimiser (search-engine listing) ----------
+const _brand = () => require('../lib/brand');
+const _seo = () => require('../lib/seo');
+
+// POST /api/products/seo/preview  { ids?: [productId,...] }
+// Generates proposed SEO (title/meta/handle/category) for the given products
+// (or all Shopify-linked active products if ids omitted) and pairs it with each
+// product's CURRENT Shopify values, so the UI can show a before/after table.
+// Read-only — writes nothing.
+router.post('/seo/preview', requireAdmin, async (req, res) => {
+  const brandCfg = _brand();
+  const seo = _seo();
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
+  const params = [];
+  let where = 'active = true AND shopify_product_id IS NOT NULL';
+  if (ids && ids.length) { params.push(ids); where += ` AND id = ANY($1)`; }
+  const { rows } = await query(
+    `SELECT id, sku, title, brand, model, part_number, shopify_product_id
+       FROM products WHERE ${where} ORDER BY title LIMIT 500`, params);
+
+  const shopify = require('../services/shopify');
+  const out = [];
+  for (const p of rows) {
+    const proposed = seo.buildSeo(p, brandCfg);
+    let current = null, category = null;
+    try { current = await shopify.getProductSeo(p.shopify_product_id); } catch (e) { /* surfaced as null */ }
+    if (proposed.categoryQuery) {
+      try { category = await shopify.findTaxonomyCategory(proposed.categoryQuery); } catch (e) {}
+    }
+    out.push({
+      id: p.id, sku: p.sku, title: p.title, shopifyProductId: p.shopify_product_id,
+      proposed: {
+        pageTitle: proposed.pageTitle,
+        metaDescription: proposed.metaDescription,
+        handle: proposed.handle,
+        partType: proposed.partType,
+        categoryId: category?.id || null,
+        categoryName: category?.fullName || null,
+        categoryQuery: proposed.categoryQuery,
+      },
+      current: current ? {
+        handle: current.handle,
+        pageTitle: current.seoTitle,
+        metaDescription: current.seoDescription,
+        categoryName: current.categoryName,
+      } : null,
+      unrecognisedPartType: !proposed.partType,
+    });
+  }
+  res.json({ items: out, count: out.length });
+});
+
+// POST /api/products/seo/apply  { items: [{ shopifyProductId, pageTitle, metaDescription, handle, categoryId }] }
+// Writes the (user-reviewed) SEO fields to Shopify. Each item is applied
+// independently so one failure doesn't abort the batch.
+router.post('/seo/apply', requireAdmin, async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) return res.status(400).json({ error: 'no_items' });
+  const shopify = require('../services/shopify');
+  const results = [];
+  for (const it of items) {
+    if (!it.shopifyProductId) { results.push({ id: it.id, ok: false, error: 'missing shopifyProductId' }); continue; }
+    try {
+      const r = await shopify.applyProductSeo(it.shopifyProductId, {
+        seoTitle: it.pageTitle,
+        seoDescription: it.metaDescription,
+        handle: it.handle || undefined,
+        categoryId: it.categoryId || undefined,
+      });
+      results.push({ id: it.id, ok: r.ok, userErrors: r.userErrors, newHandle: r.product?.handle });
+    } catch (e) {
+      results.push({ id: it.id, ok: false, error: e.message });
+    }
+  }
+  const okCount = results.filter(r => r.ok).length;
+  await audit(req, 'seo_bulk_apply', 'product', null, { applied: okCount, total: items.length });
+  res.json({ applied: okCount, total: items.length, results });
+});
+
 module.exports = router;

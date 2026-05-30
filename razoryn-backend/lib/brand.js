@@ -22,6 +22,7 @@ const BRANDS = {
     invoicePrefix: 'REP',
     appTitle: 'Razoryn Warehouse Hub',
     tagline: 'Quality aftermarket vehicle parts',
+    collectionArea: 'Watford, London & Hertfordshire',
     stores: [
       {
         code: 'razoryn',
@@ -46,6 +47,7 @@ const BRANDS = {
     invoicePrefix: 'CAP',
     appTitle: 'Calibre Warehouse Hub',
     tagline: 'EV and modern vehicle body parts',
+    collectionArea: 'Watford, London & Hertfordshire',
     stores: [
       {
         code: 'evbodyparts',

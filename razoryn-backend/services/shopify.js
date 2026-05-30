@@ -791,9 +791,95 @@ async function removeCollect(collectId) {
   return { ok: true };
 }
 
+// ---------- Search-engine listing (SEO) ----------
+// Read a product's current SEO fields + category, so the optimiser can show a
+// before/after preview. Uses GraphQL (REST doesn't expose seo/category cleanly).
+async function getProductSeo(productGid) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const id = String(productGid).startsWith('gid://') ? productGid : `gid://shopify/Product/${productGid}`;
+  const query = `query($id: ID!) {
+    product(id: $id) {
+      id title handle
+      seo { title description }
+      category { id fullName }
+    }
+  }`;
+  const r = await shopifyRequest('post', '/graphql.json', { data: { query, variables: { id } } });
+  if (r.data.errors) throw new Error('graphql: ' + JSON.stringify(r.data.errors));
+  const p = r.data.data?.product;
+  if (!p) return null;
+  return {
+    id: p.id,
+    handle: p.handle,
+    seoTitle: p.seo?.title || '',
+    seoDescription: p.seo?.description || '',
+    categoryId: p.category?.id || null,
+    categoryName: p.category?.fullName || null,
+  };
+}
+
+// Look up a Shopify standard taxonomy category by a search term (e.g. "Fog
+// Lights"), preferring matches under Vehicles & Parts. Returns { id, fullName }
+// or null. Cached per term for the process lifetime.
+const _categoryCache = new Map();
+async function findTaxonomyCategory(term) {
+  if (!term) return null;
+  const key = term.toLowerCase();
+  if (_categoryCache.has(key)) return _categoryCache.get(key);
+  const query = `query($q: String!) {
+    taxonomy { categories(search: $q, first: 25) { edges { node { id fullName } } } }
+  }`;
+  let result = null;
+  try {
+    const r = await shopifyRequest('post', '/graphql.json', { data: { query, variables: { q: term } } });
+    if (r.data.errors) throw new Error(JSON.stringify(r.data.errors));
+    const nodes = (r.data.data?.taxonomy?.categories?.edges || []).map(e => e.node);
+    // Prefer categories under the vehicle-parts branch; then an exact leaf-name
+    // match; otherwise the first result.
+    const vehicle = nodes.filter(n => /vehicle|automotive|motor/i.test(n.fullName));
+    const pool = vehicle.length ? vehicle : nodes;
+    const leaf = (n) => (n.fullName.split('>').pop() || '').trim().toLowerCase();
+    result = pool.find(n => leaf(n) === term.toLowerCase()) || pool[0] || null;
+  } catch (e) {
+    console.warn('[shopify] findTaxonomyCategory failed for', term, '-', e.message);
+  }
+  _categoryCache.set(key, result);
+  return result;
+}
+
+// Apply SEO fields to a product. Any field left undefined is not touched.
+//   { seoTitle, seoDescription, handle, categoryId }
+// Returns { ok, userErrors }.
+async function applyProductSeo(productGid, { seoTitle, seoDescription, handle, categoryId } = {}) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const id = String(productGid).startsWith('gid://') ? productGid : `gid://shopify/Product/${productGid}`;
+  const input = { id };
+  if (seoTitle !== undefined || seoDescription !== undefined) {
+    input.seo = {};
+    if (seoTitle !== undefined) input.seo.title = seoTitle;
+    if (seoDescription !== undefined) input.seo.description = seoDescription;
+  }
+  if (handle !== undefined && handle) input.handle = handle;
+  if (categoryId !== undefined && categoryId) input.category = categoryId;
+
+  const mutation = `mutation($input: ProductInput!) {
+    productUpdate(input: $input) {
+      product { id handle }
+      userErrors { field message }
+    }
+  }`;
+  const r = await shopifyRequest('post', '/graphql.json', { data: { query: mutation, variables: { input } } });
+  if (r.data.errors) throw new Error('graphql: ' + JSON.stringify(r.data.errors));
+  const ue = r.data.data?.productUpdate?.userErrors || [];
+  return { ok: ue.length === 0, userErrors: ue, product: r.data.data?.productUpdate?.product || null };
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
+  getProductSeo,
+  findTaxonomyCategory,
+  applyProductSeo,
   getInventoryLevel,
   getCustomCollections,
   getProductCollects,
