@@ -9118,6 +9118,75 @@ async function runEbayPolicyDiag() {
   alert(lines.join('\n'));
 }
 
+// ── Shopify SEO optimiser ───────────────────────────────────────────────────
+let SeoPreview = [];
+
+async function seoGeneratePreview() {
+  const status = el('seo-status');
+  if (status) status.textContent = 'Generating preview (reading live Shopify values)…';
+  try {
+    const r = await Api.post('/api/products/seo/preview', {});
+    SeoPreview = (r.items || []).map(it => ({ ...it, selected: true }));
+    if (status) status.textContent = `${SeoPreview.length} product${SeoPreview.length === 1 ? '' : 's'} — review and apply.`;
+    el('seo-preview-wrap').style.display = SeoPreview.length ? 'block' : 'none';
+    seoPaint();
+  } catch (e) {
+    if (status) status.textContent = 'Failed: ' + (e.data?.message || e.message);
+    toast('SEO preview failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+function seoPaint() {
+  const tb = el('seo-tbody');
+  if (!tb) return;
+  tb.innerHTML = SeoPreview.map((it, i) => {
+    const p = it.proposed, c = it.current || {};
+    const changed = (a, b) => (a || '') !== (b || '') ? 'style="color:var(--green);font-weight:600"' : '';
+    const catCell = p.categoryName
+      ? `<span ${changed(p.categoryName, c.categoryName)}>${escapeHtml(p.categoryName.split('>').pop().trim())}</span>`
+      : (it.unrecognisedPartType ? '<span style="color:var(--amber)">part type not recognised</span>' : '<span style="color:var(--ink-soft)">—</span>');
+    return `<tr>
+      <td><input type="checkbox" ${it.selected ? 'checked' : ''} onchange="SeoPreview[${i}].selected=this.checked"></td>
+      <td><div style="font-weight:600">${escapeHtml(it.title)}</div><div style="color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')}</div></td>
+      <td><div ${changed(p.pageTitle, c.pageTitle)}>${escapeHtml(p.pageTitle)}</div>${c.pageTitle ? `<div style="color:var(--ink-soft);text-decoration:line-through">${escapeHtml(c.pageTitle)}</div>` : ''}</td>
+      <td style="max-width:280px"><div ${changed(p.metaDescription, c.metaDescription)}>${escapeHtml(p.metaDescription)}</div></td>
+      <td><div ${changed(p.handle, c.handle)} style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(p.handle)}</div>${c.handle && c.handle !== p.handle ? `<div style="color:var(--ink-soft);font-family:ui-monospace,monospace;font-size:11px;text-decoration:line-through">${escapeHtml(c.handle)}</div>` : ''}</td>
+      <td>${catCell}</td>
+    </tr>`;
+  }).join('');
+}
+
+function seoToggleAll(on) {
+  SeoPreview.forEach(it => { it.selected = on; });
+  seoPaint();
+}
+
+async function seoApplySelected() {
+  const inclHandle = el('seo-incl-handle')?.checked;
+  const chosen = SeoPreview.filter(it => it.selected);
+  if (!chosen.length) { toast('Nothing selected', 'warn'); return; }
+  if (!confirm(`Apply SEO changes to ${chosen.length} product${chosen.length === 1 ? '' : 's'} on Shopify?${inclHandle ? '\n\nThis includes rewriting URL handles (old URLs auto-redirect).' : ''}`)) return;
+  const items = chosen.map(it => ({
+    id: it.id,
+    shopifyProductId: it.shopifyProductId,
+    pageTitle: it.proposed.pageTitle,
+    metaDescription: it.proposed.metaDescription,
+    handle: inclHandle ? it.proposed.handle : undefined,
+    categoryId: it.proposed.categoryId || undefined,
+  }));
+  const taskId = Task.start(`Applying SEO to ${items.length} products…`);
+  try {
+    const r = await Api.post('/api/products/seo/apply', { items });
+    Task.done(taskId, `Applied ${r.applied}/${r.total}`);
+    const failed = (r.results || []).filter(x => !x.ok);
+    toast(`SEO applied to ${r.applied}/${r.total} products` + (failed.length ? ` · ${failed.length} failed` : ''), failed.length ? 'warn' : 'success', 6000);
+    if (failed.length) console.warn('[seo] failures:', failed);
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Apply failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
 function removeMetafield(idx) {
   MirrorState.metafields.splice(idx, 1);
   paintMetafields();
@@ -9859,6 +9928,38 @@ function renderSettings() {
 
           <div style="margin-top:14px">
             <button class="btn btn-primary" onclick="savePricingConfig()">Save eBay defaults</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Shopify SEO optimiser — clean page title / meta / URL handle / category -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>🔎 Shopify SEO optimiser</h3>
+          <div class="card-desc">Generates a clean page title, a consistent meta description (part number, business name, UK + Watford-area collection), a tidy URL handle, and the correct product category for your Shopify listings. Preview the proposed changes first, untick anything you don't want, then apply. Rewriting a handle changes the live URL — Shopify auto-creates a redirect from the old one.</div>
+        </div>
+        <div class="card-body">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-primary" onclick="seoGeneratePreview()">Generate SEO preview</button>
+            <span id="seo-status" style="font-size:12px;color:var(--ink-soft)"></span>
+          </div>
+          <div id="seo-preview-wrap" style="display:none;margin-top:14px">
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+              <button class="btn btn-outline btn-sm" onclick="seoToggleAll(true)">Select all</button>
+              <button class="btn btn-outline btn-sm" onclick="seoToggleAll(false)">Select none</button>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px"><input type="checkbox" id="seo-incl-handle" checked> Include URL handle changes</label>
+              <span style="margin-left:auto"></span>
+              <button class="btn btn-primary btn-sm" onclick="seoApplySelected()">Apply selected to Shopify</button>
+            </div>
+            <div class="table-wrap" style="max-height:520px;overflow:auto">
+              <table class="table" style="font-size:12px">
+                <thead><tr>
+                  <th style="width:28px"></th>
+                  <th>Product</th><th>Page title</th><th>Meta description</th><th>URL handle</th><th>Category</th>
+                </tr></thead>
+                <tbody id="seo-tbody"></tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
