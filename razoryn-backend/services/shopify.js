@@ -675,9 +675,56 @@ async function getShopifyProductFull(shopifyProductId) {
   };
 }
 
+// Bulk-set every Shopify variant's barcode = its SKU. Many products had random
+// Shopify auto-generated barcodes (≠ SKU), which breaks scanning. dryRun=true
+// (the default) returns what WOULD change without writing anything. Writes are
+// throttled to ~4/sec to stay under Shopify's REST bucket.
+async function bulkSetBarcodeToSku({ dryRun = true } = {}) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  let pageInfo = null, pageCount = 0;
+  let totalVariants = 0, candidates = 0, updated = 0, skippedNoSku = 0;
+  const sample = [];
+  const errors = [];
+
+  while (true) {
+    if (++pageCount > 100) break;  // safety bound
+    const params = pageInfo ? { limit: 250, page_info: pageInfo } : { limit: 250 };
+    const r = await shopifyRequest('get', '/products.json', { params });
+    for (const p of r.data.products || []) {
+      for (const v of p.variants || []) {
+        totalVariants++;
+        const sku = (v.sku || '').trim();
+        const barcode = (v.barcode || '').trim();
+        if (!sku) { skippedNoSku++; continue; }   // never set an empty barcode
+        if (barcode === sku) continue;             // already correct
+        candidates++;
+        if (sample.length < 25) sample.push({ product: p.title, sku, currentBarcode: barcode || '(empty)' });
+        if (!dryRun) {
+          try {
+            await shopifyRequest('put', `/variants/${v.id}.json`, { data: { variant: { id: v.id, barcode: sku } } });
+            updated++;
+            await sleep(250);
+          } catch (e) {
+            if (errors.length < 50) errors.push({ sku, variantId: String(v.id), error: e.response?.data?.errors || e.message });
+          }
+        }
+      }
+    }
+    const link = r.headers['link'] || r.headers['Link'];
+    if (!link || !link.includes('rel="next"')) break;
+    const m = link.match(/<([^>]+)>;\s*rel="next"/);
+    if (!m) break;
+    pageInfo = new URL(m[1]).searchParams.get('page_info');
+    if (!pageInfo) break;
+  }
+  return { dryRun, totalVariants, candidates, updated, skippedNoSku, sample, errors, errorCount: errors.length };
+}
+
 module.exports = {
   isConfigured,
   getAccessToken,
+  bulkSetBarcodeToSku,
   getLocations,
   setInventoryLevel,
   getRecentOrders,

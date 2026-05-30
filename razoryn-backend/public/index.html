@@ -9100,6 +9100,16 @@ function renderSettings() {
             <button class="btn btn-outline" onclick="clearCatalogue()" style="margin-left:auto;color:var(--red);border-color:var(--red)">🗑 Clear all products &amp; locations</button>
           </div>
           <div id="shopify-result" style="font-size:12px;color:var(--ink-soft)"></div>
+
+          <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">Barcode = SKU on Shopify</div>
+            <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">Many products have random Shopify-generated barcodes that don't match the SKU, which breaks scanning. Preview first, then push to set every variant's barcode to its SKU, then re-import (⬇ above) to pull the new barcodes back into the warehouse.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-outline" onclick="barcodeSkuPreview()">🔍 Preview changes</button>
+              <button class="btn btn-primary" onclick="barcodeSkuPush()">⬆ Push barcodes to Shopify</button>
+            </div>
+            <div id="barcode-sync-result" style="font-size:12px;color:var(--ink-soft);margin-top:10px"></div>
+          </div>
         </div>
       </div>
 
@@ -9528,6 +9538,48 @@ async function importFromShopify() {
   } catch (e) {
     Task.fail(taskId, 'Import failed');
     if (out) out.innerHTML = '<span style="color:var(--red)">Import failed: ' + (e.data?.message || e.message) + '</span>';
+  }
+}
+async function barcodeSkuPreview() {
+  const out = el('barcode-sync-result');
+  if (out) out.innerHTML = 'Scanning Shopify variants…';
+  const taskId = Task.start('Previewing barcode changes');
+  try {
+    const r = await Api.post('/api/settings/barcode-sku-sync', { dryRun: true });
+    Task.done(taskId, 'Preview ready');
+    renderBarcodeSyncResult(r, true);
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    if (out) out.innerHTML = '<span style="color:var(--red)">Failed: ' + (e.data?.message || e.message) + '</span>';
+  }
+}
+async function barcodeSkuPush() {
+  if (!confirm('Set barcode = SKU on EVERY matching Shopify variant? This writes to Shopify. Run Preview first if unsure.')) return;
+  const out = el('barcode-sync-result');
+  if (out) out.innerHTML = 'Pushing barcodes to Shopify… this can take a few minutes for large catalogues.';
+  const taskId = Task.start('Pushing barcodes to Shopify');
+  try {
+    const r = await Api.post('/api/settings/barcode-sku-sync', { dryRun: false });
+    Task.done(taskId, `Updated ${r.updated} variants`);
+    renderBarcodeSyncResult(r, false);
+    toast(`Pushed ${r.updated} barcodes. Now re-import to pull them into the warehouse.`, 'success', 8000);
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    if (out) out.innerHTML = '<span style="color:var(--red)">Failed: ' + (e.data?.message || e.message) + '</span>';
+  }
+}
+function renderBarcodeSyncResult(r, isPreview) {
+  const out = el('barcode-sync-result');
+  if (!out) return;
+  const sampleHtml = (r.sample || []).slice(0, 10).map(s =>
+    `<div style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(s.sku)} <span style="color:var(--ink-soft)">(was ${escapeHtml(s.currentBarcode)})</span></div>`).join('');
+  if (isPreview) {
+    out.innerHTML = `<strong>${r.candidates}</strong> of ${r.totalVariants} variants will change (barcode → SKU). ${r.skippedNoSku} skipped (no SKU).` +
+      (r.candidates ? `<div style="margin-top:8px">${sampleHtml}${r.candidates > 10 ? `<div style="color:var(--ink-soft)">…and ${r.candidates - 10} more</div>` : ''}</div><div style="margin-top:8px">Click <strong>⬆ Push barcodes to Shopify</strong> to apply.</div>` : ' Nothing to change — all good.');
+  } else {
+    out.innerHTML = `<strong style="color:var(--green)">Updated ${r.updated}</strong> of ${r.candidates} variants` +
+      (r.errorCount ? `, <span style="color:var(--red)">${r.errorCount} errors</span>` : '') +
+      `. Now click <strong>⬇ Import all products</strong> above to pull the new barcodes into the warehouse.`;
   }
 }
 async function saveSettings() {

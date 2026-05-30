@@ -378,6 +378,24 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
   }
 });
 
+// POST /api/settings/barcode-sku-sync (admin) — set every Shopify variant's
+// barcode = its SKU. Body { dryRun: true } previews the change without writing;
+// { dryRun: false } performs the push. Follow a real push with import-shopify to
+// pull the new barcodes back into the warehouse.
+router.post('/barcode-sku-sync', requireAdmin, async (req, res) => {
+  const shopify = require('../services/shopify');
+  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+  const dryRun = req.body?.dryRun !== false;  // default to dry-run for safety
+  try {
+    const result = await shopify.bulkSetBarcodeToSku({ dryRun });
+    if (!dryRun) await audit(req, 'barcode_sku_push', 'shopify', null, { updated: result.updated, errors: result.errorCount });
+    res.json(result);
+  } catch (e) {
+    console.error('[barcode-sku-sync] failed:', e.message);
+    res.status(500).json({ error: 'sync_failed', message: e.message });
+  }
+});
+
 // POST /api/settings/import-shopify (admin) — pull all products from Shopify into the warehouse DB.
 // Upsert by shopify_variant_id (so re-running it is safe and updates titles/prices/images).
 router.post('/import-shopify', requireAdmin, async (req, res) => {
