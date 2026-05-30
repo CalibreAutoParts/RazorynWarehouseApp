@@ -218,12 +218,6 @@ router.get('/shopify-collections', requireAdmin, async (req, res) => {
   catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
 });
 
-// GET /api/products/shopify-collections — all Shopify custom collections.
-router.get('/shopify-collections', requireAdmin, async (req, res) => {
-  try { res.json({ collections: await _shopify().getCustomCollections() }); }
-  catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
-});
-
 // GET /api/products/:id
 router.get('/:id', requirePermission('inventory'), async (req, res) => {
   const { rows } = await query(
