@@ -16,7 +16,8 @@
     "publish": {
       "provider": "github",
       "owner": "CalibreAutoParts",
-      "repo": "RazorynWarehouseApp"
+      "repo": "RazorynWarehouseApp",
+      "releaseType": "release"
     },
     "directories": {
       "output": "dist",
