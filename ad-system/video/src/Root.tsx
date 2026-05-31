@@ -2,7 +2,7 @@ import React from 'react';
 import {Composition} from 'remotion';
 import {PartsShowcase} from './PartsShowcase';
 import {SiteShowcase} from './SiteShowcase';
-import {PARTS} from './brand';
+import {PARTS, MODELS} from './brand';
 
 const FPS = 30;
 const INTRO = 48;   // 1.6s
@@ -24,11 +24,11 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="SiteShowcase"
         component={SiteShowcase}
-        durationInFrames={9 * FPS}
+        durationInFrames={11 * FPS}
         fps={FPS}
         width={1080}
         height={1920}
-        defaultProps={{parts: PARTS}}
+        defaultProps={{models: MODELS}}
       />
     </>
   );
