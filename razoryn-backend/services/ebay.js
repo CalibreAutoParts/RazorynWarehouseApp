@@ -842,6 +842,10 @@ async function addItem(storeArg, opts = {}) {
     price, quantity = 1, currency = 'GBP',
     imageUrls = [], businessPolicies = {}, location = {},
     itemSpecifics = [], brand, mpn,
+    // Optional extras — each only added to the XML when supplied, so existing
+    // listings (which pass none of these) build exactly as before.
+    storeCategoryId = null,   // eBay shop/store category (Storefront)
+    vatPercent = null,        // VAT percent charged on the item (e.g. 20)
     // verify=true runs VerifyAddItem instead of AddItem: same validation +
     // fee preview, but creates NO live listing. eBay's Trading API has no
     // Seller-Hub "draft" concept, so this is the safe dry-run equivalent.
@@ -863,16 +867,26 @@ async function addItem(storeArg, opts = {}) {
   }
 
   // Auto-add Brand and MPN to item specifics if supplied separately, dedupe
-  // by name so the user-provided list wins.
+  // by name so the user-provided list wins. A specific's value may be a single
+  // string OR an array of strings (multi-value aspects like "Placement on
+  // Vehicle" — e.g. ["Front","Left"]). Stored as arrays internally.
   const specsByName = new Map();
-  for (const s of itemSpecifics) if (s.name && s.value) specsByName.set(s.name, String(s.value));
-  if (brand && !specsByName.has('Brand')) specsByName.set('Brand', String(brand));
-  if (mpn   && !specsByName.has('Manufacturer Part Number')) specsByName.set('Manufacturer Part Number', String(mpn));
+  for (const s of itemSpecifics) {
+    if (!s.name || s.value == null) continue;
+    const vals = (Array.isArray(s.value) ? s.value : [s.value])
+      .map(v => String(v).trim()).filter(Boolean);
+    if (vals.length) specsByName.set(s.name, vals);
+  }
+  if (brand && !specsByName.has('Brand')) specsByName.set('Brand', [String(brand)]);
+  if (mpn   && !specsByName.has('Manufacturer Part Number')) specsByName.set('Manufacturer Part Number', [String(mpn)]);
 
   // Build ItemSpecifics XML — required for most parts/accessories categories.
+  // Multi-value aspects emit several <Value> elements under one <NameValueList>.
   const itemSpecificsXml = specsByName.size > 0
-    ? `<ItemSpecifics>${[...specsByName.entries()].map(([name, value]) =>
-        `<NameValueList><Name>${escapeXml(name)}</Name><Value>${escapeXml(value)}</Value></NameValueList>`
+    ? `<ItemSpecifics>${[...specsByName.entries()].map(([name, values]) =>
+        `<NameValueList><Name>${escapeXml(name)}</Name>${
+          values.map(v => `<Value>${escapeXml(v)}</Value>`).join('')
+        }</NameValueList>`
       ).join('')}</ItemSpecifics>`
     : '';
 
@@ -897,6 +911,19 @@ async function addItem(storeArg, opts = {}) {
   const postalCode = location.postalCode || '';
   const city       = location.city || '';
 
+  // eBay shop/store category — places the listing into the seller's custom
+  // storefront category. Only emitted when a category was chosen.
+  const storefrontXml = storeCategoryId
+    ? `<Storefront><StoreCategoryID>${escapeXml(storeCategoryId)}</StoreCategoryID></Storefront>`
+    : '';
+
+  // VAT — charge a VAT percentage on the item (business sellers). Only emitted
+  // when a positive percent is supplied; eBay shows it as VAT-inclusive pricing.
+  const vatNum = vatPercent != null ? parseFloat(vatPercent) : NaN;
+  const vatXml = (!isNaN(vatNum) && vatNum > 0)
+    ? `<VATDetails><VATPercent>${vatNum.toFixed(1)}</VATPercent></VATDetails>`
+    : '';
+
   // AddItem XML body. ListingDuration GTC = Good Till Cancelled, the standard
   // for fixed-price listings. DispatchTimeMax=1 means we ship within 1 business day.
   const bodyInner = `
@@ -917,6 +944,8 @@ async function addItem(storeArg, opts = {}) {
       <DispatchTimeMax>1</DispatchTimeMax>
       ${pictureXml}
       ${itemSpecificsXml}
+      ${storefrontXml}
+      ${vatXml}
       ${policiesXml}
     </Item>`;
 
@@ -939,6 +968,133 @@ async function addItem(storeArg, opts = {}) {
   const errCode = extractOne(xml, 'ErrorCode') || 'unknown';
   const errMsg  = extractOne(xml, 'ShortMessage') || extractOne(xml, 'LongMessage') || 'eBay returned Failure';
   throw new Error(`${callName} ${ack} [${errCode}]: ${errMsg}`);
+}
+
+// ---------- eBay shop/store categories ----------
+// Fetch the seller's custom storefront categories via the Trading API GetStore
+// call, so the listing UI can offer a "Shop category" dropdown. Returns a flat
+// list of { id, name } (top-level + nested categories), best-effort.
+async function getStoreCategories(storeArg) {
+  let xml;
+  try {
+    xml = await tradingCall('GetStore', `<CategoryStructureOnly>true</CategoryStructureOnly>`, storeArg);
+  } catch (e) {
+    throw new Error('GetStore failed: ' + e.message);
+  }
+  const ack = extractOne(xml, 'Ack') || '';
+  if (ack !== 'Success' && ack !== 'Warning') {
+    const msg = extractOne(xml, 'ShortMessage') || extractOne(xml, 'LongMessage') || 'GetStore returned Failure';
+    throw new Error(msg);
+  }
+  // CustomCategory blocks can be nested; rather than parse the tree, pull every
+  // (CategoryID, Name) pair regardless of element order. ID 0 is the store root
+  // ("Other") — keep it out of the picker.
+  const found = new Map();
+  const add = (id, name) => {
+    const cid = String(id).trim();
+    if (cid && cid !== '0' && !found.has(cid)) found.set(cid, decodeEntities(String(name).trim()));
+  };
+  let m;
+  const reA = /<CategoryID>(\d+)<\/CategoryID>\s*<Name>([^<]+)<\/Name>/g;
+  while ((m = reA.exec(xml)) !== null) add(m[1], m[2]);
+  const reB = /<Name>([^<]+)<\/Name>\s*<CategoryID>(\d+)<\/CategoryID>/g;
+  while ((m = reB.exec(xml)) !== null) add(m[2], m[1]);
+  return [...found.entries()].map(([id, name]) => ({ id, name }));
+}
+
+// ---------- Promoted Listings (General) ----------
+// Promoted Listings General (formerly "Standard") uses the Marketing API and a
+// separate OAuth scope (sell.marketing) that the SHARED token deliberately does
+// NOT request — adding it there could break every eBay call if the refresh
+// token isn't consented for it. So promotion uses its own isolated token: if
+// the scope isn't granted the promotion step fails on its own and listing
+// creation is unaffected.
+let _mktToken = null, _mktExpiresAt = 0;
+async function getMarketingToken() {
+  if (_mktToken && Date.now() < _mktExpiresAt - 60_000) return _mktToken;
+  const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
+  const r = await axios.post(
+    `${BASE}/identity/v1/oauth2/token`,
+    new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: REFRESH_TOKEN,
+      scope: 'https://api.ebay.com/oauth/api_scope/sell.marketing',
+    }),
+    { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 }
+  );
+  _mktToken = r.data.access_token;
+  _mktExpiresAt = Date.now() + (r.data.expires_in * 1000);
+  return _mktToken;
+}
+
+async function marketingApi(method, path, data) {
+  const token = await getMarketingToken();
+  return axios({
+    method, url: `${BASE}${path}`, data,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Content-Language': 'en-GB',
+      'X-EBAY-C-MARKETPLACE-ID': process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB',
+    },
+    timeout: 30000,
+  });
+}
+
+// Find (or create) a reusable "Promoted Listings General" campaign for this
+// marketplace, returning its campaignId. eBay General uses the COST_PER_SALE
+// funding model (you pay an ad fee only when the item sells).
+const GENERAL_CAMPAIGN_NAME = 'General Promotion';
+async function ensureGeneralCampaign() {
+  const mkt = process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
+  // Look for an existing COST_PER_SALE campaign we can reuse.
+  try {
+    const r = await marketingApi('get', `/sell/marketing/v1/ad_campaign?limit=100`);
+    const campaigns = r.data?.campaigns || [];
+    const match = campaigns.find(c =>
+      (c.fundingStrategy?.fundingModel === 'COST_PER_SALE') &&
+      (c.campaignStatus === 'RUNNING' || c.campaignStatus === 'SCHEDULED' || c.campaignStatus === 'PAUSED') &&
+      (c.campaignName === GENERAL_CAMPAIGN_NAME || campaigns.length === 1)
+    ) || campaigns.find(c => c.fundingStrategy?.fundingModel === 'COST_PER_SALE');
+    if (match) return match.campaignId;
+  } catch (e) { /* fall through to create */ }
+
+  const body = {
+    campaignName: `${GENERAL_CAMPAIGN_NAME} ${new Date().toISOString().slice(0, 10)}`,
+    fundingStrategy: { fundingModel: 'COST_PER_SALE' },
+    marketplaceId: mkt,
+    startDate: new Date().toISOString(),
+  };
+  const cr = await marketingApi('post', `/sell/marketing/v1/ad_campaign`, body);
+  // 201 returns the new campaign URL in the Location header; the id is its tail.
+  const loc = cr.headers?.location || cr.headers?.Location || '';
+  const id = loc.split('/').pop();
+  if (id) return id;
+  // Fallback: re-list and grab the newest COST_PER_SALE campaign.
+  const r2 = await marketingApi('get', `/sell/marketing/v1/ad_campaign?limit=100`);
+  const c2 = (r2.data?.campaigns || []).find(c => c.fundingStrategy?.fundingModel === 'COST_PER_SALE');
+  if (!c2) throw new Error('campaign created but could not resolve campaignId');
+  return c2.campaignId;
+}
+
+// Promote a freshly-created listing with Promoted Listings General at the given
+// ad rate (%). Best-effort and fully isolated — callers should treat a thrown
+// error as "listing is live but not promoted" rather than a hard failure.
+//   bidPercent: e.g. 10 → "10.0" ad rate.
+async function promoteListing(storeArg, { itemId, bidPercent }) {
+  if (!itemId) throw new Error('itemId required');
+  const pct = parseFloat(bidPercent);
+  if (isNaN(pct) || pct <= 0) throw new Error('valid bidPercent required');
+  const campaignId = await ensureGeneralCampaign();
+  const body = { requests: [{ listingId: String(itemId), bidPercentage: pct.toFixed(1) }] };
+  const r = await marketingApi('post',
+    `/sell/marketing/v1/ad_campaign/${encodeURIComponent(campaignId)}/bulk_create_ads_by_listing_id`, body);
+  const resp = (r.data?.responses || [])[0] || {};
+  if (resp.statusCode && resp.statusCode >= 400) {
+    const msg = (resp.errors || []).map(e => e.message).join('; ') || `ad creation failed (${resp.statusCode})`;
+    throw new Error(msg);
+  }
+  return { ok: true, campaignId, adId: resp.adId || null, bidPercent: pct };
 }
 
 // List the seller's eBay business policies (payment / fulfillment[shipping] /
@@ -1279,6 +1435,8 @@ module.exports = {
   reviseItem,
   completeSale,
   addItem,
+  getStoreCategories,
+  promoteListing,
   getCategorySpecifics,
   getSuggestedCategories,
   getBusinessPolicies,

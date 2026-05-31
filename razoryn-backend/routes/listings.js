@@ -54,6 +54,19 @@ router.get('/category-specifics', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/listings/store-categories?storeCode=
+// The seller's custom shop/store categories, for the listing-time dropdown.
+router.get('/store-categories', requireAdmin, async (req, res) => {
+  const brand = require('../lib/brand');
+  const primary = brand.getPrimaryStore();
+  const storeCode = req.query.storeCode || (primary && primary.code);
+  try {
+    res.json({ categories: await ebay.getStoreCategories(storeCode) });
+  } catch (e) {
+    res.status(502).json({ error: 'ebay_error', message: e.message });
+  }
+});
+
 // GET /api/listings/category-search?q=grille&carPartsOnly=1
 // Search eBay categories by NAME and (optionally) keep only vehicle-parts ones.
 router.get('/category-search', requireAdmin, async (req, res) => {
@@ -1115,6 +1128,13 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
   if (vMake)  derivedSpecifics.push({ name: 'Make',  value: vMake });
   if (vModel) derivedSpecifics.push({ name: 'Model', value: vModel });
   if (vYear)  derivedSpecifics.push({ name: 'Year',  value: vYear });
+  // Country of Origin — default from Settings (configurable; default "China"),
+  // overridable per listing. Product Number — the Shopify product ID, so the
+  // eBay listing carries the same item number as Shopify.
+  const countryOfOrigin = (b.countryOfOrigin != null ? b.countryOfOrigin : (settings.ebay_country_of_origin || 'China'));
+  if (countryOfOrigin) derivedSpecifics.push({ name: 'Country of Origin', value: countryOfOrigin });
+  if (product.shopify_product_id) derivedSpecifics.push({ name: 'Product Number', value: String(product.shopify_product_id) });
+  // User-provided specifics win on name collisions (addItem dedupes, last wins).
   const mergedSpecifics = [...derivedSpecifics, ...(Array.isArray(b.itemSpecifics) ? b.itemSpecifics : [])];
 
   // eBay "Brand" = who MADE the part (company name / "Unbranded"), NOT the
@@ -1158,6 +1178,13 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
       brand: ebayBrand,
       mpn: product.part_number,
       itemSpecifics: mergedSpecifics,
+      // Shop/store category — per-listing choice, else the saved default.
+      storeCategoryId: b.storeCategoryId || settings.ebay_default_store_category_id || null,
+      // VAT — per-listing override, else dedicated eBay VAT %, else the general
+      // VAT rate, else 20%. Sent only when > 0 (addItem omits it otherwise).
+      vatPercent: b.vatPercent != null ? b.vatPercent
+        : (settings.ebay_vat_percent != null ? settings.ebay_vat_percent
+        : (settings.vat_rate != null ? settings.vat_rate : 20)),
       verify: !!b.preview,
     });
 
@@ -1190,12 +1217,28 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
       sku: product.sku, itemId: result.itemId, store: store.code, categoryId: b.categoryId,
     });
 
+    // Promoted Listings (General) — best-effort. Runs only when the user asked,
+    // and only on a live listing. A failure here (e.g. marketing scope not
+    // granted) never fails the listing — it's surfaced in the response so the
+    // user knows the item is live but wasn't promoted.
+    let promotion = null;
+    if (b.promote?.enabled && result.itemId) {
+      try {
+        const pr = await ebay.promoteListing(store.code, { itemId: result.itemId, bidPercent: b.promote.percent });
+        promotion = { ok: true, ...pr };
+      } catch (e) {
+        console.warn('[create-ebay] promotion failed:', e.message);
+        promotion = { ok: false, message: e.message };
+      }
+    }
+
     res.json({
       ok: true,
       itemId: result.itemId,
       url: `https://www.ebay.co.uk/itm/${result.itemId}`,
       fees: result.fees,
       ack: result.ack,
+      promotion,
     });
   } catch (e) {
     console.error('[create-ebay]', e.message);

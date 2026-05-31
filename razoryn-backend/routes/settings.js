@@ -49,6 +49,15 @@ async function ensureSocialColumns() {
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_payment TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_shipping TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_return TEXT`);
+    // Country of Origin item specific (default China), default shop category,
+    // VAT percent charged on listings (default 20), promoted-listings defaults,
+    // and named description templates (JSON array of { name, body }).
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_country_of_origin TEXT DEFAULT 'China'`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_store_category_id TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_vat_percent NUMERIC DEFAULT 20`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_promote_default BOOLEAN DEFAULT false`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_promote_percent NUMERIC DEFAULT 10`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_description_templates TEXT`);
     // Logo — uploaded image stored as base64 data URL. Used on invoices + the
     // app's top-bar logo (overrides the static /logo.png fallback). Storing
     // inline avoids needing a file-host; size is capped client-side at ~500KB.
@@ -272,6 +281,17 @@ router.get('/pricing-config', async (req, res) => {
     ebayPolicyPayment:      r.ebay_policy_payment || '',
     ebayPolicyShipping:     r.ebay_policy_shipping || '',
     ebayPolicyReturn:       r.ebay_policy_return || '',
+    // Country of origin (item specific), default shop category, VAT %, promote
+    // defaults, and named description templates.
+    ebayCountryOfOrigin:    r.ebay_country_of_origin || 'China',
+    ebayDefaultStoreCategoryId: r.ebay_default_store_category_id || '',
+    ebayVatPercent:         r.ebay_vat_percent != null ? parseFloat(r.ebay_vat_percent) : 20,
+    ebayPromoteDefault:     !!r.ebay_promote_default,
+    ebayPromotePercent:     r.ebay_promote_percent != null ? parseFloat(r.ebay_promote_percent) : 10,
+    ebayDescriptionTemplates: (() => {
+      try { const a = JSON.parse(r.ebay_description_templates || '[]'); return Array.isArray(a) ? a : []; }
+      catch { return []; }
+    })(),
     // Logo — uploaded image data URL (base64). Front-end overrides
     // brand.logoUrl with this when present. Empty string when no upload.
     logoDataUrl:      r.logo_data_url || '',
@@ -345,6 +365,12 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       ebayPolicyPayment:      'ebay_policy_payment',
       ebayPolicyShipping:     'ebay_policy_shipping',
       ebayPolicyReturn:       'ebay_policy_return',
+      // eBay country of origin / shop category / VAT / promote defaults
+      ebayCountryOfOrigin:        'ebay_country_of_origin',
+      ebayDefaultStoreCategoryId: 'ebay_default_store_category_id',
+      ebayVatPercent:             'ebay_vat_percent',
+      ebayPromoteDefault:         'ebay_promote_default',
+      ebayPromotePercent:         'ebay_promote_percent',
       // Stock-check reminder
       stockCheckDay:          'stock_check_day',
       stockCheckEnabled:      'stock_check_enabled',
@@ -353,7 +379,7 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
       if (b[bodyKey] === undefined) continue;
       let val = b[bodyKey];
-      if (['cash_discount_pct','bank_transfer_pct','free_delivery_threshold','ebay_buyer_protection_markup','vat_rate','ebay_markup_pct'].includes(dbCol)) {
+      if (['cash_discount_pct','bank_transfer_pct','free_delivery_threshold','ebay_buyer_protection_markup','vat_rate','ebay_markup_pct','ebay_vat_percent','ebay_promote_percent'].includes(dbCol)) {
         val = parseFloat(val);
       }
       // Stock-check day → INTEGER (or null if empty). Day stored 1-31.
@@ -361,12 +387,24 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
         const n = parseInt(val);
         val = (Number.isFinite(n) && n >= 1 && n <= 31) ? n : null;
       }
-      // Stock-check enabled → BOOLEAN
-      if (dbCol === 'stock_check_enabled') {
+      // Booleans
+      if (dbCol === 'stock_check_enabled' || dbCol === 'ebay_promote_default') {
         val = (val === true || val === 'true' || val === 1 || val === '1');
       }
       params.push(val);
       updates.push(`${dbCol} = $${params.length}`);
+    }
+    // Named description templates — JSON array of { name, body }. Stored as text.
+    if (b.ebayDescriptionTemplates !== undefined) {
+      let arr = b.ebayDescriptionTemplates;
+      if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch { arr = []; } }
+      if (!Array.isArray(arr)) arr = [];
+      const clean = arr
+        .filter(t => t && (t.name || t.body))
+        .map(t => ({ name: String(t.name || 'Untitled').slice(0, 60), body: String(t.body || '') }))
+        .slice(0, 30);
+      params.push(JSON.stringify(clean));
+      updates.push(`ebay_description_templates = $${params.length}`);
     }
     // Per-store policy overrides — shape: { storeCode: { payment, shipping, return } }
     // Sent under body.ebayPerStorePolicies. Column names are ebay_policy_{store}_{kind}
