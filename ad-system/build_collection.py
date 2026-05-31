@@ -44,7 +44,7 @@ def norm(p):
 
 def qr_block(P, label="SCAN TO BUY"):
     if not P.get('handle'): return ''
-    svg = QR.qr_svg(QR.go_url(P['code']))
+    svg = QR.qr_svg(QR.product_url(P['handle']))
     return (f'<div class="qr"><div class="qrbox">{svg}</div>'
             f'<div class="qrl">{H.escape(label)}</div></div>')
 
@@ -87,22 +87,15 @@ SCHEMES=[("s-white","White · Light"),("s-red","Red · Brand"),("s-navy","Navy �
 
 def build(collection_title, index, products, out_path, meta=None):
     items=[norm(p) for p in products]
-    body=[]; links=[]
-    slug=(meta or {}).get('slug') or re.sub(r'[^a-z0-9]+','-',collection_title.lower()).strip('-')
+    body=[]
     for P in items:
         qrhtml=qr_block(P)
-        if P.get('handle'):
-            links.append(QR.link(P['code'], QR.product_url(P['handle']), 'product',
-                                 label=f'{P["mm"]} {P["desc"].title()}', utm_campaign=slug))
         body.append(f'<h2 class="ph2">{H.escape(P["mm"])} · {H.escape(P["desc"].title())} · {P["web"]}</h2>')
         for label,idx in [("Front",0),("Back",1)]:
             if len(P['imgs'])>idx and P['imgs'][idx]:
                 body.append(f'<div class="cap">{label}</div><div class="group">')
                 for cls,_ in SCHEMES: body.append(slide(cls,P,P['imgs'][idx],qrhtml))
                 body.append('</div>')
-    if links:
-        lp=os.path.join(WORK,'data',f'qr-links-{index}.json')
-        json.dump(links, open(lp,'w'), indent=2, ensure_ascii=False)
     doc=(f'<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
       f'<meta name="viewport" content="width=device-width, initial-scale=1.0">'
       f'<title>Razoryn — {H.escape(collection_title)}</title>'

@@ -78,13 +78,6 @@ app.use('/api/dispatch',     require('./routes/dispatch'));
 app.use('/api/messages',     require('./routes/messages'));
 app.use('/api/customers',    require('./routes/customers'));
 app.use('/api/desktop',      require('./routes/desktop'));
-app.use('/api/qr',           require('./routes/qr').apiRouter);
-
-// Public QR redirect — customer-facing, NO auth. Mounted at /go (outside /api and
-// before the SPA fallback) so scanning a printed code logs the scan and redirects
-// to the product/collection/site with UTM tags. See routes/qr.js.
-app.use('/go', require('./routes/qr').goRouter);
-
 // Public logo serving — mounted at /public-logo (NOT /api/settings) so it
 // completely bypasses the auth middleware that the settings router applies
 // to its whole namespace. Used by <img src="/public-logo"> in invoice HTML

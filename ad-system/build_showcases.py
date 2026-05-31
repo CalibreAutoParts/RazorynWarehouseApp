@@ -18,7 +18,6 @@ def collection_url(handle):
     return QR.collection_url(handle) if handle else QR.SITE
 
 def main():
-    links = []
     built = []
     for path in sorted(glob.glob(os.path.join(WORK, 'data', '[0-9]*-*.json'))):
         cfg = json.load(open(path))
@@ -32,21 +31,15 @@ def main():
         frm = min(float(p['price']) for p in prods)
         P = {'model': cfg['title'], 'count': len(prods), 'from': frm, 'parts': parts}
 
-        code = f"sc-{slug}"
-        handle = cfg.get('collection_handle')
-        links.append(QR.link(code, collection_url(handle), 'collection',
-                             label=f"{cfg['title']} — all parts", utm_campaign=code))
-        qrhtml = qr_block(code, "SCAN: ALL PARTS")
-
+        # QR links straight to the collection page
+        qrhtml = qr_block(collection_url(cfg.get('collection_handle')), "SCAN: ALL PARTS")
         heading = f"Showcase · {cfg['title']}"
         out = f"promo-showcase-{index}-{slug}.html"
         write(out, doc(heading, [(heading, render_showcase(P, qrhtml=qrhtml))]))
         built.append(out)
         print("built", out, f"({len(prods)} parts, from £{frm:,.2f})")
 
-    json.dump(links, open(os.path.join(WORK, 'data', 'qr-links-showcases.json'), 'w'),
-              indent=2, ensure_ascii=False)
-    print(f"\n{len(built)} showcases · qr-links-showcases.json: {len(links)} links")
+    print(f"\n{len(built)} showcases built")
 
 if __name__ == '__main__':
     main()

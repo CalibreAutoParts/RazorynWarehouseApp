@@ -56,8 +56,8 @@ def ctabar(line2="Same-Day Dispatch · Fitment Support · 30-Day Returns", qrhtm
             f'<div class="csub">{H.escape(line2)}</div></div>{qrhtml}'
             f'<div class="cta-r">{ic("phone","ph")}<span>{PHONE}</span></div></div>')
 
-def qr_block(code, label="SCAN TO SHOP"):
-    svg = QR.qr_svg(QR.go_url(code))
+def qr_block(url, label="SCAN TO SHOP"):
+    svg = QR.qr_svg(url)
     return f'<div class="qr"><div class="qrbox">{svg}</div><div class="qrl">{H.escape(label)}</div></div>'
 
 def photocard(img, alt, cls="hero"):
@@ -305,31 +305,24 @@ SHOWCASE = {
 
 if __name__ == "__main__":
     pile = {"imgs":THUMBS}
-    SITE_URL = QR.SITE
     YC_COLLECTION = "toyota-yaris-cross-2020"   # collection handle
-    links = []   # qr_links rows to register with the backend
 
-    def site_qr(code, label="SCAN TO SHOP"):
-        links.append(QR.link(code, SITE_URL, 'site', label='Razoryn storefront', utm_campaign=code))
-        return qr_block(code, label)
-    def coll_qr(code, handle, label):
-        links.append(QR.link(code, QR.collection_url(handle), 'collection', label=label, utm_campaign=code))
-        return qr_block(code, label)
-
-    # Site-level promos -> website home; showcase -> collection page
+    # QR links directly: site-level promos -> storefront home; showcase -> collection page
+    site = qr_block(QR.SITE, "SCAN TO SHOP")
+    coll = qr_block(QR.collection_url(YC_COLLECTION), "SCAN: ALL PARTS")
     FILES = [
       ("promo-website-exclusive.html","Website Exclusive · Buy Direct (save 7%)",
-         render_website_exclusive(HERO, qrhtml=site_qr("ig-website-exclusive"))),
+         render_website_exclusive(HERO, qrhtml=site)),
       ("promo-same-day.html",         "Same-Day Dispatch · Order by 12pm",
-         render_same_day(pile, qrhtml=site_qr("ig-same-day"))),
+         render_same_day(pile, qrhtml=site)),
       ("promo-free-delivery.html",    "Free UK Delivery over £50",
-         render_free_delivery(pile, qrhtml=site_qr("ig-free-delivery"))),
+         render_free_delivery(pile, qrhtml=site)),
       ("promo-showcase-yaris-cross.html","Model Showcase · Yaris Cross",
-         render_showcase(SHOWCASE, qrhtml=coll_qr("yaris-cross", YC_COLLECTION, "SCAN: ALL PARTS"))),
+         render_showcase(SHOWCASE, qrhtml=coll)),
       ("promo-fitment.html",          "Fitment Support · Quality Reassurance",
-         render_fitment({}, qrhtml=site_qr("ig-fitment"))),
+         render_fitment({}, qrhtml=site)),
       ("promo-brand-cover.html",      "Brand / Carousel Cover",
-         render_cover({}, qrhtml=site_qr("ig-cover"))),
+         render_cover({}, qrhtml=site)),
     ]
     for fn, heading, inner in FILES:
         write(fn, doc(heading, [(heading, inner)]))
@@ -337,5 +330,4 @@ if __name__ == "__main__":
     # combined review sheet (all promos x 3 schemes, one print job)
     write("razoryn-promos.html", doc("Razoryn e-Parts — Promo Pack",
           [(h, inner) for _, h, inner in FILES]))
-    json.dump(links, open(os.path.join(WORK,'data','qr-links-promos.json'),'w'), indent=2, ensure_ascii=False)
-    print("built razoryn-promos.html  (", len(FILES), "promos x 3 schemes ); qr-links-promos.json:", len(links))
+    print("built razoryn-promos.html  (", len(FILES), "promos x 3 schemes )")

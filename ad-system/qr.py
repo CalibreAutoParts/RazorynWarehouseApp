@@ -1,25 +1,14 @@
 #!/usr/bin/env python3
-"""Shared QR helpers for the Razoryn ad builders.
+"""QR helpers for the Razoryn ad builders.
 
-Every QR encodes a *dynamic redirect* — `<QR_BASE>/go/<code>` — not the destination
-directly. The razoryn-backend `/go/:code` route logs the scan and 302-redirects to
-the real target (product / collection / site) with UTM tags appended, so:
-  • scan count   = rows in qr_scans for that code   (owned by us, free)
-  • conversion   = Shopify orders attributed to utm_content=<code>
-
-`QR_BASE` must resolve to the backend (e.g. a `go.razoryn.co.uk` subdomain or a
-reverse-proxy rule that sends /go/* to the Express app). Override via env QR_BASE_URL.
-`SITE` is the public Shopify storefront the redirect lands on.
+Each QR links DIRECTLY to its destination page (product / collection / storefront).
+No redirect, no tracking, no backend — scanning just opens the page in a browser.
 """
 import io, os, re
 import segno
 
-QR_BASE = os.environ.get("QR_BASE_URL", "https://go.razoryn.co.uk").rstrip("/")
-SITE    = os.environ.get("SITE_URL", "https://www.razoryn.co.uk").rstrip("/")
-QR_DARK = "#0f1318"   # always dark-on-white (the card supplies the white) so it scans on every scheme
-
-def go_url(code):
-    return f"{QR_BASE}/go/{code}"
+SITE = os.environ.get("SITE_URL", "https://www.razoryn.co.uk").rstrip("/")
+QR_DARK = "#0f1318"   # dark-on-white so it scans on every scheme (the card supplies the white)
 
 def qr_svg(data, dark=QR_DARK):
     """Inline, responsive SVG QR (viewBox only — sized by CSS)."""
@@ -33,10 +22,5 @@ def qr_svg(data, dark=QR_DARK):
     s = s.replace('<svg ', f'<svg viewBox="0 0 {n} {n}" preserveAspectRatio="xMidYMid meet" ', 1)
     return s
 
-def product_url(handle): return f"{SITE}/products/{handle}"
+def product_url(handle):    return f"{SITE}/products/{handle}"
 def collection_url(handle): return f"{SITE}/collections/{handle}"
-
-def link(code, target_url, kind, label=None, utm_campaign=None):
-    """A row for qr_links — POST these to the backend /api/qr/import."""
-    return {"code": code, "target_url": target_url, "kind": kind,
-            "label": label, "utm_campaign": utm_campaign}
