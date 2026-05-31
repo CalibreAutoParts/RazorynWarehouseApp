@@ -40,6 +40,11 @@ def ic(name, cls='ic'):
 def money(v): return f"£{float(v):,.2f}"
 def ebay(v):  return round(float(v)*1.07, 2)
 
+def hires(url, w=1600):
+    """Request a high-res render from the Shopify CDN (keeps photos crisp at 1080px)."""
+    if 'cdn.shopify.com' not in url or 'width=' in url: return url
+    return url + ('&' if '?' in url else '?') + f'width={w}'
+
 # ---- shared scaffold -------------------------------------------------------
 def head(logo_pill=True):
     pill = (f'<div class="pill">{ic("phone","ph")}<span>CALL {PHONE}</span></div>') if logo_pill else ''
@@ -51,7 +56,7 @@ def ctabar(line2="Same-Day Dispatch · Fitment Support · 30-Day Returns"):
             f'<div class="cta-r">{ic("phone","ph")}<span>{PHONE}</span></div></div>')
 
 def photocard(img, alt, cls="hero"):
-    return f'<div class="{cls}"><img loading="lazy" src="{img}" alt="{H.escape(alt)}"></div>'
+    return f'<div class="{cls}"><img loading="lazy" src="{hires(img)}" alt="{H.escape(alt)}"></div>'
 
 # ---- promo renderers (return inner HTML of one .post) ----------------------
 def render_website_exclusive(P):
@@ -96,7 +101,7 @@ def render_free_delivery(P):
 def render_showcase(P):
     cells = []
     for it in P['parts'][:6]:
-        cells.append(f'<div class="gcell"><div class="gimg"><img loading="lazy" src="{it["img"]}" alt=""></div>'
+        cells.append(f'<div class="gcell"><div class="gimg"><img loading="lazy" src="{hires(it["img"],900)}" alt=""></div>'
                      f'<div class="gtag">{money(it["price"])}</div></div>')
     return (head()
       + '<div class="pwrap top">'

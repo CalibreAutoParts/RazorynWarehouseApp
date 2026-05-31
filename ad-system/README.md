@@ -37,6 +37,21 @@ python3 build_promos.py                 # rebuilds all promo-*.html + razoryn-pr
 python3 build_collection.py data/03-yaris-cross.json   # rebuilds a listing file
 ```
 
+## Export ready-to-post PNGs (high resolution)
+
+`export_png.js` renders each ad at the true **1080×1350** frame, at **2× (2160×2700)**
+for extra sharpness — post these directly to Instagram, no Canva needed.
+
+```bash
+node export_png.js                      # all promo-*.html -> export/<name>_<scheme>.png
+node export_png.js razoryn-03-toyota-yaris-cross.html   # a listing file
+```
+
+> Run this on a machine with normal internet so the Shopify product photos load.
+> Photos are requested at `width=1600` from the CDN, so they stay crisp at 1080px.
+> The small preview screenshots shared in chat are NOT the deliverable — use these PNGs
+> (or the print → PDF route) for anything you post.
+
 ## Canva workflow
 
 Open a file in a browser → **Print → Save as PDF** (Margins: None, Background graphics: **ON**)

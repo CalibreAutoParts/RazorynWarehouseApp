@@ -16,6 +16,11 @@ PHONE_SVG=('<svg class="ph" viewBox="0 0 24 24" fill="currentColor"><path d="M6.
 def _b64(p): return base64.b64encode(open(os.path.join(WORK,p),'rb').read()).decode()
 RED_LOGO=_b64('logo_red.png'); WHITE_LOGO=_b64('logo_white.png')
 
+def hires(url, w=1600):
+    """Request a high-res render from the Shopify CDN (keeps photos crisp at 1080px)."""
+    if 'cdn.shopify.com' not in url or 'width=' in url: return url
+    return url + ('&' if '?' in url else '?') + f'width={w}'
+
 def parse(title, finish):
     m=re.search(r'(\d{4})\s*[-–]\s*(\d{4})', title)
     years=f"{m.group(1)}–{m.group(2)}" if m else ""
@@ -38,7 +43,7 @@ def norm(p):
 def slide(cls, P, img):
     return (f'<div class="stage"><div class="post {cls}">'
       f'<div class="head"><div class="logo"></div><div class="pill">{PHONE_SVG}<span>CALL {PHONE}</span></div></div>'
-      f'<div class="rule"></div><div class="photo"><img loading="lazy" src="{img}" alt="{H.escape(P["mm"])}"></div>'
+      f'<div class="rule"></div><div class="photo"><img loading="lazy" src="{hires(img)}" alt="{H.escape(P["mm"])}"></div>'
       f'<div class="meta"><div class="eyebrow">{H.escape(P["desc"])}</div><div class="title">{H.escape(P["mm"])}</div>'
       f'<div class="sub">{H.escape(P["sub"])}</div></div>'
       f'<div class="specs"><div class="spec"><div class="l">FINISH</div><div class="v">{H.escape(P["finish"])}</div></div>'
