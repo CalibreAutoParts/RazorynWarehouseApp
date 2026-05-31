@@ -89,7 +89,7 @@ def render_same_day(P, qrhtml=''):
       + '<div class="collage">' + ''.join(photocard(i, '', 'thumb') for i in P['imgs'][:3]) + '</div>'
       + '<div class="pillrow"><span class="ipill">'+ic("pin","ip")+'Watford, WD24 5RR</span>'
         '<span class="ipill">'+ic("check","ip")+'Mon–Fri 10–5 · Sat 10–2</span></div>'
-      + '</div>' + ctabar("Free UK delivery over £50 · 30-day returns", qrhtml=qrhtml))
+      + '</div>' + ctabar("Free UK delivery over £50* · 30-day returns", qrhtml=qrhtml))
 
 def render_free_delivery(P, qrhtml=''):
     return (head()
@@ -97,10 +97,11 @@ def render_free_delivery(P, qrhtml=''):
       + f'<div class="bigicon">{ic("truck","biggi")}</div>'
       + '<div class="eyebrow2">ACROSS THE UK</div>'
       + '<h2 class="hl">FREE UK DELIVERY<br><span class="hl-accent">OVER £50</span></h2>'
-      + '<div class="subh">Spend £50 or more and shipping is on us. Dispatched same day when you order before 12pm.</div>'
+      + '<div class="subh">Spend £50+ on standard parts and UK shipping is on us. Large body panels ship at a flat £50 per item.</div>'
       + '<div class="collage">' + ''.join(photocard(i, '', 'thumb') for i in P['imgs'][:3]) + '</div>'
       + '<div class="pillrow"><span class="ipill">'+ic("bolt","ip")+'Same-day dispatch</span>'
         '<span class="ipill">'+ic("shield","ip")+'Tracked & insured</span></div>'
+      + '<div class="sub" style="margin-top:2.4cqw;font-size:2.2cqw">*Large body panels ship at a flat £50 per item</div>'
       + '</div>' + ctabar("Order before 12pm · Dispatched today", qrhtml=qrhtml))
 
 def render_showcase(P, qrhtml=''):
@@ -141,7 +142,7 @@ def render_cover(P, qrhtml=''):
       + '<div class="subh">Toyota · Hyundai · Kia · Nissan · Peugeot · Vauxhall — bumpers, wings, grilles, lights &amp; more.</div>'
       + '</div>'
       + f'<div class="cv-foot"><div class="cv-foot-l"><div class="site big">{SITE}</div>'
-        f'<div class="csub">Same-Day Dispatch · Fitment Support · Free UK Delivery over £50</div></div>{qrhtml}</div>'
+        f'<div class="csub">Same-Day Dispatch · Fitment Support · Free UK delivery over £50*</div></div>{qrhtml}</div>'
       + '</div>')
 
 # ---- CSS (literal hex; logos injected after) -------------------------------

@@ -124,8 +124,9 @@ export const OrderStory: React.FC<{parts: Part[]}> = ({parts}) => {
         <div style={{marginTop: 36}}>
           <InfoRow><b style={{fontFamily: barlow, fontSize: 46}}>{SITE}</b></InfoRow>
           <InfoRow>Call 01923 372432 · WhatsApp +44 7494 589542</InfoRow>
-          <InfoRow>Same-day dispatch before 12pm · Free UK delivery over £50</InfoRow>
+          <InfoRow>Same-day dispatch before 12pm · Free UK delivery over £50*</InfoRow>
           <InfoRow>Aftermarket · UK stock · Fitment support</InfoRow>
+          <div style={{fontFamily: inter, fontWeight: 500, fontSize: 24, color: 'rgba(255,255,255,.6)', marginTop: 10}}>*Large body panels ship at a flat £50 per item</div>
         </div>
       </AbsoluteFill>
 

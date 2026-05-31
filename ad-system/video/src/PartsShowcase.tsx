@@ -55,7 +55,7 @@ const Outro: React.FC = () => {
       <Img src={staticFile('logo_white.png')} style={{height: 110}} />
       <div style={{fontFamily: barlow, fontWeight: 800, fontSize: 120, marginTop: 30}}>{SITE}</div>
       <div style={{fontFamily: inter, fontWeight: 600, fontSize: 40, color: MUT, marginTop: 16, textAlign: 'center'}}>
-        Same-day dispatch · Free UK delivery over £50
+        Same-day dispatch · Free UK delivery over £50*
       </div>
       <div style={{fontFamily: inter, fontWeight: 700, fontSize: 34, color: '#fff', background: RED, padding: '14px 44px', borderRadius: 100, marginTop: 40}}>
         Order before 12pm — dispatched today

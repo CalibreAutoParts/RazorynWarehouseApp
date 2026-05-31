@@ -58,7 +58,8 @@ export const SameDayDispatch: React.FC = () => {
         <Img src={staticFile('logo_white.png')} style={{height: 80}} />
         <div style={{fontFamily: barlow, fontWeight: 800, fontSize: 110, color: '#fff', textTransform: 'uppercase', lineHeight: 0.95, marginTop: 24}}>Order today,<br /><span style={{color: RED}}>gone today</span></div>
         <div style={{fontFamily: inter, fontWeight: 700, fontSize: 36, color: '#fff', marginTop: 24}}>{SITE}</div>
-        <div style={{fontFamily: inter, fontWeight: 600, fontSize: 32, color: 'rgba(255,255,255,.8)', marginTop: 8}}>Free UK delivery over £50 · 30-day returns</div>
+        <div style={{fontFamily: inter, fontWeight: 600, fontSize: 32, color: 'rgba(255,255,255,.8)', marginTop: 8}}>Free UK delivery over £50* · 30-day returns</div>
+        <div style={{fontFamily: inter, fontWeight: 500, fontSize: 24, color: 'rgba(255,255,255,.6)', marginTop: 10}}>*Large body panels: flat £50 per item</div>
       </AbsoluteFill>
 
       <Captions cues={cues} bottom={250} />

@@ -132,7 +132,7 @@ export const SiteShowcase: React.FC<{models: Model[]}> = ({models}) => {
       <div style={{position: 'absolute', bottom: 0, width: '100%', padding: '0 0 90px', textAlign: 'center', opacity: cta, transform: `translateY(${interpolate(cta, [0, 1], [40, 0])}px)`}}>
         <Img src={staticFile('logo_white.png')} style={{height: 60}} />
         <div style={{fontFamily: barlow, fontWeight: 800, fontSize: 104, color: '#fff', marginTop: 14}}>{SITE}</div>
-        <div style={{fontFamily: inter, fontWeight: 700, fontSize: 32, color: '#fff', background: RED, display: 'inline-block', padding: '12px 40px', borderRadius: 100, marginTop: 14}}>Free UK delivery over £50</div>
+        <div style={{fontFamily: inter, fontWeight: 700, fontSize: 32, color: '#fff', background: RED, display: 'inline-block', padding: '12px 40px', borderRadius: 100, marginTop: 14}}>Free UK delivery over £50*</div>
       </div>
     </AbsoluteFill>
   );

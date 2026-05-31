@@ -66,7 +66,8 @@ export const PriceReveal: React.FC<{parts: Part[]}> = ({parts}) => {
       <AbsoluteFill style={{alignItems: 'center', justifyContent: 'center', opacity: ctaIn, textAlign: 'center', transform: `translateY(${interpolate(ctaIn, [0, 1], [40, 0])}px)`}}>
         <Img src={staticFile('logo_white.png')} style={{height: 84}} />
         <div style={{fontFamily: barlow, fontWeight: 800, fontSize: 120, color: '#fff', marginTop: 20}}>{SITE}</div>
-        <div style={{fontFamily: inter, fontWeight: 700, fontSize: 36, color: '#fff', background: RED, display: 'inline-block', padding: '14px 44px', borderRadius: 100, marginTop: 18}}>Free UK delivery over £50</div>
+        <div style={{fontFamily: inter, fontWeight: 700, fontSize: 36, color: '#fff', background: RED, display: 'inline-block', padding: '14px 44px', borderRadius: 100, marginTop: 18}}>Free UK delivery over £50*</div>
+        <div style={{fontFamily: inter, fontWeight: 500, fontSize: 24, color: 'rgba(255,255,255,.65)', marginTop: 12}}>*Large body panels: flat £50 per item</div>
       </AbsoluteFill>
 
       <Captions cues={cues} bottom={210} />
