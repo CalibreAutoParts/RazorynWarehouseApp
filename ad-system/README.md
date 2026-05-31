@@ -54,18 +54,27 @@ python3 build_collection.py data/03-yaris-cross.json   # rebuilds a listing file
 Requirements: **Node 18+** and a normal internet connection (product photos load from
 the Shopify CDN; a browser downloads on first run).
 
+**macOS / Linux:**
 ```bash
 cd ad-system
 bash make.sh          # → all JPEGs in export/  +  both MP4s in video/out/
 ```
-…or step by step with npm:
+
+**Windows (PowerShell):**
+```powershell
+cd ad-system
+powershell -ExecutionPolicy Bypass -File make.ps1
+```
+
+**Any OS, step by step with npm** (works in PowerShell, cmd, bash):
 ```bash
 cd ad-system
 npm install           # installs Playwright + Chromium
-npm run export        # every ad → export/*.jpg
+npm run export        # every ad → export/*.jpg   (npm run export:png for PNG)
 npm run video         # both videos → video/out/*.mp4
-# npm run all         # export + video in one go
+npm run all           # export + video in one go
 ```
+> On Windows use `npm run export:png` for PNGs (the `FORMAT=png …` form is bash-only).
 
 ## Export ready-to-post images (high resolution)
 
