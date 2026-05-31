@@ -1,0 +1,16 @@
+{
+  "name": "razoryn-ads",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Razoryn e-Parts ad exporter — HTML ads -> high-res JPEG/PNG",
+  "scripts": {
+    "postinstall": "playwright install chromium",
+    "export": "node export_jpg.js",
+    "export:png": "node export_png.js",
+    "video": "npm --prefix video install && npm --prefix video run render",
+    "all": "npm run export && npm run video"
+  },
+  "dependencies": {
+    "playwright": "^1.56.0"
+  }
+}

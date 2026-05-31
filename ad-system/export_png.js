@@ -3,13 +3,16 @@
  * Usage: node export_png.js <file1.html> [file2.html ...]   (defaults to all promo-*.html)
  * Output: ad-system/export/<basename>_<scheme>.png
  */
-const { chromium } = require('/opt/node22/lib/node_modules/playwright');
+let chromium;
+try { ({ chromium } = require('playwright')); }
+catch (e) { try { ({ chromium } = require('/opt/node22/lib/node_modules/playwright')); }
+  catch (e2) { console.error('Playwright not found. Run:  npm install  (then: npx playwright install chromium)'); process.exit(1); } }
 const fs = require('fs'); const path = require('path');
 const SCHEMES = ['white','red','navy'];
 (async () => {
   const dir = __dirname;
   let files = process.argv.slice(2);
-  if (!files.length) files = fs.readdirSync(dir).filter(f => f.startsWith('promo-') && f.endsWith('.html')).map(f => path.join(dir,f));
+  if (!files.length) files = fs.readdirSync(dir).filter(f => f.endsWith('.html') && (f.startsWith('promo-')||f.startsWith('razoryn-'))).map(f => path.join(dir,f));
   const out = path.join(dir,'export'); fs.mkdirSync(out,{recursive:true});
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport:{width:1200,height:1500}, deviceScaleFactor:2 });
