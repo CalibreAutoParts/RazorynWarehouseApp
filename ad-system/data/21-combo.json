@@ -1,0 +1,37 @@
+{
+  "title": "Vauxhall Combo 2020+",
+  "index": "21",
+  "slug": "combo",
+  "out": "ad-system/razoryn-21-combo.html",
+  "collection_handle": "vauxhall-combo-2020",
+  "products": [
+    {
+      "title": "Vauxhall Combo 2019-2025 Rear Left Brake Lamp Light",
+      "finish": null,
+      "position": "Left Side",
+      "secondary": "Rear",
+      "part": "9819649280",
+      "price": "74.20",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_0b91da06-39e0-43ce-aac0-f0f383b2011a.jpg?v=1778420092",
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_486ff13c-dde7-4ea5-af08-3b6d988d5e8a.jpg?v=1778420092"
+      ],
+      "sku": "9819649280",
+      "handle": "vauxhall-combo-2019-2025-rear-left-brake-lamp-light"
+    },
+    {
+      "title": "Vauxhall Combo 2019-2025 Rear Right Brake Lamp Light",
+      "finish": null,
+      "position": "Right",
+      "secondary": "Rear",
+      "part": "9820555080",
+      "price": "74.20",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_f87215ad-2752-4c50-9b3e-e725b50d41d3.jpg?v=1778420098",
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_a614d9fa-3ed1-40fd-840e-d82f15586c63.jpg?v=1778420098"
+      ],
+      "sku": "9820555080",
+      "handle": "vauxhall-combo-2019-2025-rear-right-brake-lamp-light"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "title": "Vauxhall Astra 2022+",
+  "index": "22",
+  "slug": "astra",
+  "out": "ad-system/razoryn-22-astra.html",
+  "collection_handle": "vauxhall-astra-2022",
+  "products": [
+    {
+      "title": "Vauxhall Astra L 2022-2026 front bumper upper grille",
+      "finish": "Glossy",
+      "position": "Front",
+      "secondary": "Upper",
+      "part": "9839640080",
+      "price": "83.68",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_72bb0764-075e-4e45-b8e6-cf2fc6dfd75e.jpg?v=1778419999",
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_cd17ef1c-2a7f-498c-9c4d-6533eb8e989d.jpg?v=1778419999"
+      ],
+      "sku": "9839640080",
+      "handle": "vauxhall-astra-l-2022-2026-front-bumper-upper-grille"
+    }
+  ]
+}

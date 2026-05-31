@@ -1,0 +1,48 @@
+{
+  "title": "Nissan X-Trail T33 2022-2026",
+  "index": "19",
+  "slug": "x-trail",
+  "out": "ad-system/razoryn-19-x-trail.html",
+  "collection_handle": "nissan-x-trail-t33",
+  "products": [
+    {
+      "title": "Nissan X-TRAIL 2022-2026 Primed Bonnet Hood",
+      "finish": "Primed",
+      "position": "Front",
+      "secondary": null,
+      "part": "651006RR0A",
+      "price": "464.99",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_00a170e1-1f55-4321-abf7-b5206d4a8fe1.jpg?v=1778418923"
+      ],
+      "sku": "651006RR0A",
+      "handle": "nissan-x-trail-2022-2026-primed-bonnet-hood"
+    },
+    {
+      "title": "Nissan X-TRAIL 2022-2026 Primed Front Left Wing Fender",
+      "finish": "Primed",
+      "position": "Left Side",
+      "secondary": "Front",
+      "part": "631016RR0A",
+      "price": "185.99",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_4b9f0c52-ef19-4d8f-a805-f3b55ad9b9ff.jpg?v=1778418918"
+      ],
+      "sku": "631016RR0A",
+      "handle": "nissan-x-trail-2022-2026-primed-front-left-wing-fender"
+    },
+    {
+      "title": "Nissan X-TRAIL 2022-2026 Primed Front Right Wing Fender",
+      "finish": "Primed",
+      "position": "Right Side",
+      "secondary": "Front",
+      "part": "631006RR0A",
+      "price": "185.99",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_380aefd1-c74f-4a78-81ad-0d514841cec1.jpg?v=1778418913"
+      ],
+      "sku": "631006RR0A",
+      "handle": "nissan-x-trail-2022-2026-primed-front-right-wing-fender"
+    }
+  ]
+}

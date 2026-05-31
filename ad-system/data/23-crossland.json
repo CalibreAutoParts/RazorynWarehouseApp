@@ -1,0 +1,23 @@
+{
+  "title": "Vauxhall Crossland 2022+",
+  "index": "23",
+  "slug": "crossland",
+  "out": "ad-system/razoryn-23-crossland.html",
+  "collection_handle": "vauxhall-crossland-2022",
+  "products": [
+    {
+      "title": "VAUXHALL CROSSLAND X 2022-2026 FRONT BUMPER GRILLE Complete W/ Chrome & Trims",
+      "finish": "Glossy",
+      "position": "Front",
+      "secondary": null,
+      "part": "39172214",
+      "price": "185.99",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_1006d82b-3edb-4fbe-9186-ed8db45dc228.jpg?v=1778420497",
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_23702847-54ba-4ef1-ab87-48aef78e0ed7.jpg?v=1778420497"
+      ],
+      "sku": "39172214",
+      "handle": "vauxhall-crossland-x-2022-2026-front-bumper-grille-complete-w-chrome"
+    }
+  ]
+}
