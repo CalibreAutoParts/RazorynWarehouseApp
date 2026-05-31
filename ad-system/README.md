@@ -49,26 +49,44 @@ python3 build_promos.py                 # rebuilds all promo-*.html + razoryn-pr
 python3 build_collection.py data/03-yaris-cross.json   # rebuilds a listing file
 ```
 
-## Export ready-to-post PNGs (high resolution)
+## Export ready-to-post images (high resolution)
 
-`export_png.js` renders each ad at the true **1080×1350** frame, at **2× (2160×2700)**
-for extra sharpness — post these directly to Instagram, no Canva needed.
+Render each ad straight from the HTML with headless Chrome — **pixel-identical to the
+browser, no PDF step** (so nothing in the design shifts). True 1080×1350 at **2×
+(2160×2700)**.
 
 ```bash
-node export_png.js                      # all promo-*.html -> export/<name>_<scheme>.png
-node export_png.js razoryn-03-toyota-yaris-cross.html   # a listing file
+node export_jpg.js                      # JPEG (quality 92) — all promos + showcases
+node export_jpg.js razoryn-03-*.html    # specific file(s)
+FORMAT=png node export_jpg.js           # PNG instead (transparent-safe)
+node export_png.js                      # (PNG-only sibling, same output)
 ```
+Output: `export/<name>_<scheme>.{jpg,png}` (white / red / navy).
 
-> Run this on a machine with normal internet so the Shopify product photos load.
-> Photos are requested at `width=1600` from the CDN, so they stay crisp at 1080px.
-> The small preview screenshots shared in chat are NOT the deliverable — use these PNGs
-> (or the print → PDF route) for anything you post.
+> Run on a machine with normal internet so the Shopify product photos load
+> (requested at `width=1600`, crisp at 1080px). These exports — **not** the small
+> chat previews — are the deliverable. Drag the JPEGs straight into Canva (Uploads),
+> post directly, or hand them to a design tool.
+
+## Video templates (Remotion) — `video/`
+
+Two vertical 1080×1920 social videos (parts montage + storefront showcase), same brand
+system. See `video/README.md`.
+```bash
+cd video && npm install && npm run dev      # preview in Remotion Studio
+npm run render                              # -> out/parts-showcase.mp4 + site-showcase.mp4
+```
 
 ## Canva workflow
 
-Open a file in a browser → **Print → Save as PDF** (Margins: None, Background graphics: **ON**)
-→ Canva **Create design → Import** the PDF (becomes an editable multi-page design).
-Each ad is its own clean 1080×1350 page via `@page` + `@media print`.
+Two options:
+1. **Drag-in (keeps the design exactly):** export JPEGs (`node export_jpg.js`) → in Canva,
+   **Uploads → upload** the JPEGs → drop onto a 1080×1350 design. No quality loss, no PDF.
+2. **Editable text:** open a file → **Print → Save as PDF** (Margins: None, Background
+   graphics: ON) → Canva **Create design → Import** the PDF. (PDF can shift fonts slightly —
+   use option 1 if you only need the image.)
+
+## QR codes (direct links — no tracking)
 
 ## QR codes (direct links — no tracking)
 
