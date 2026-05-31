@@ -1,0 +1,23 @@
+{
+  "title": "Kia EV6",
+  "index": "15",
+  "slug": "ev6",
+  "out": "ad-system/razoryn-15-ev6.html",
+  "collection_handle": "kia-ev6",
+  "products": [
+    {
+      "title": "Kia EV6 2021-2025 Front Reinforcement Crash Bar Beam",
+      "finish": null,
+      "position": "Front",
+      "secondary": null,
+      "part": "64900-CV000",
+      "price": "185.99",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_5ebe1630-b93b-4614-b7aa-7a431f150c13.jpg?v=1778420078",
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_668276d2-6cae-4d41-9813-4c4166db6578.jpg?v=1778420078"
+      ],
+      "sku": "64900-CV000",
+      "handle": "kia-ev6-2021-2025-front-reinforcement-crash-bar-beam"
+    }
+  ]
+}

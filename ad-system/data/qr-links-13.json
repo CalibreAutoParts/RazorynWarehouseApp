@@ -1,0 +1,65 @@
+[
+  {
+    "code": "66311-AT000",
+    "target_url": "https://www.razoryn.co.uk/products/kia-niro-2-2022-2026-primed-front-left-wing-fender",
+    "kind": "product",
+    "label": "KIA NIRO 2 Front Left Wing Fender",
+    "utm_campaign": "niro-sg2"
+  },
+  {
+    "code": "66321-AT000",
+    "target_url": "https://www.razoryn.co.uk/products/kia-niro-2-2022-2026-primed-front-right-wing-fender",
+    "kind": "product",
+    "label": "KIA NIRO 2 Front Right Wing Fender",
+    "utm_campaign": "niro-sg2"
+  },
+  {
+    "code": "865B5-AT000",
+    "target_url": "https://www.razoryn.co.uk/products/kia-niro-2022-2025-front-bumper-upper-moulding-trim",
+    "kind": "product",
+    "label": "KIA NIRO Front Bumper Upper Moulding Trim",
+    "utm_campaign": "niro-sg2"
+  },
+  {
+    "code": "92101-AT020",
+    "target_url": "https://www.razoryn.co.uk/products/kia-niro-2022-2026-mk2-sg2-front-left-headlight-headlamp",
+    "kind": "product",
+    "label": "KIA NIRO Mk2 Sg2 Front Left Headlight Headlamp",
+    "utm_campaign": "niro-sg2"
+  },
+  {
+    "code": "92102-AT020",
+    "target_url": "https://www.razoryn.co.uk/products/kia-niro-2022-2026-mk2-sg2-front-right-headlight",
+    "kind": "product",
+    "label": "KIA NIRO Mk2 Sg2 Front Right Headlight",
+    "utm_campaign": "niro-sg2"
+  },
+  {
+    "code": "66400-AT000",
+    "target_url": "https://www.razoryn.co.uk/products/kia-niro-2022-2026-primed-bonnet-hood",
+    "kind": "product",
+    "label": "KIA NIRO Bonnet Hood",
+    "utm_campaign": "niro-sg2"
+  },
+  {
+    "code": "86511-AT000",
+    "target_url": "https://www.razoryn.co.uk/products/kia-niro-2022-2026-primed-front-upper-bumper-skin",
+    "kind": "product",
+    "label": "KIA NIRO Front Upper Bumper Skin",
+    "utm_campaign": "niro-sg2"
+  },
+  {
+    "code": "86350-AT100",
+    "target_url": "https://www.razoryn.co.uk/products/kia-niro-mk2-sg2-2021-2025-front-bumper-lower-grille",
+    "kind": "product",
+    "label": "KIA NIRO MK2 SG2 Front Bumper Lower Grille",
+    "utm_campaign": "niro-sg2"
+  },
+  {
+    "code": "86512-AT000",
+    "target_url": "https://www.razoryn.co.uk/products/kia-niro-sg2-2022-2026-front-bumper-lower-trim-set",
+    "kind": "product",
+    "label": "KIA NIRO SG2 Front Bumper Lower Trim Set",
+    "utm_campaign": "niro-sg2"
+  }
+]
