@@ -960,6 +960,10 @@
           Notifications
           <span class="ct" id="nav-notif-count">0</span>
         </button>
+        <button class="nav-item admin-only" data-page="qr">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><line x1="14" y1="14" x2="14" y2="21"/><line x1="18" y1="14" x2="18" y2="18"/><line x1="21" y1="17" x2="21" y2="21"/></svg>
+          QR Codes
+        </button>
       </div>
 
       <div class="nav-section admin-only">
@@ -2212,6 +2216,7 @@ function hasPerm(page) {
     mirror:       false,
     staff:        false,
     settings:     false,
+    qr:           false,
   };
   const v = map[page];
   if (v === true) return true;
@@ -2236,7 +2241,8 @@ function routeTo(page) {
     locations: renderLocations, returns: renderReturns, sales: renderSales,
     pricing: renderQuoteBuilder, schedule: renderSchedule, videos: renderVideos,
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror,
-    labels: renderLabels, notes: renderNotes, dispatch: renderDispatch
+    labels: renderLabels, notes: renderNotes, dispatch: renderDispatch,
+    qr: renderQR
   };
   try {
     (pages[page] || renderDashboard)();
@@ -2249,6 +2255,73 @@ function routeTo(page) {
     </div></div></div>`;
   }
   document.getElementById('content').scrollTo(0, 0);
+}
+
+/* ==================== QR CODES — SCAN TRACKING ==================== */
+// Scan counts come from our own /go/:code redirect (qr_scans table). Conversion
+// rate is read in Shopify Analytics via the utm_content=<code> tag on each redirect.
+function qrStat(label, val) {
+  return `<div class="card"><div class="card-body" style="padding:16px">
+    <div style="font-size:12px;color:var(--ink-soft);font-weight:700;text-transform:uppercase;letter-spacing:.05em">${escapeHtml(label)}</div>
+    <div style="font-size:28px;font-weight:800;margin-top:4px">${escapeHtml(String(val))}</div></div></div>`;
+}
+async function renderQR() {
+  const days = State.qrDays || 30;
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>QR Codes</h1><div class="desc">Scans of printed &amp; posted QR codes (from our /go redirect). Conversion rate is in Shopify Analytics, attributed by <code>utm_content</code>.</div></div>
+        <div class="actions">
+          <select class="filter-select" id="qr-days" onchange="State.qrDays=+this.value;renderQR()">
+            <option value="7">Last 7 days</option>
+            <option value="30">Last 30 days</option>
+            <option value="90">Last 90 days</option>
+            <option value="365">Last 12 months</option>
+          </select>
+          <button class="btn btn-outline" onclick="renderQR()">Refresh</button>
+        </div>
+      </div>
+      <div class="grid-4" id="qr-stats" style="margin-bottom:14px"></div>
+      <div class="card"><div class="card-body" style="padding:0;overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="text-align:left;border-bottom:1px solid var(--line)">
+            <th style="padding:12px 14px">Code</th>
+            <th style="padding:12px 14px">Label</th>
+            <th style="padding:12px 14px">Type</th>
+            <th style="padding:12px 14px;text-align:right">Scans (window)</th>
+            <th style="padding:12px 14px;text-align:right">Scans (all-time)</th>
+            <th style="padding:12px 14px">Last scan</th>
+          </tr></thead>
+          <tbody id="qr-rows"><tr><td colspan="6" style="padding:18px;text-align:center;color:var(--ink-soft)">Loading…</td></tr></tbody>
+        </table>
+      </div></div>
+    </div>`;
+  const sel = el('qr-days'); if (sel) sel.value = String(days);
+  try {
+    const [stats, links] = await Promise.all([
+      Api.get('/api/qr/stats?days=' + days),
+      Api.get('/api/qr/links?days=' + days),
+    ]);
+    const t = (stats && stats.totals) || {};
+    const rows = (links && links.links) || [];
+    el('qr-stats').innerHTML =
+      qrStat('Scans · ' + days + 'd', t.scans || 0) +
+      qrStat('Codes scanned', t.codes_scanned || 0) +
+      qrStat('Registered codes', rows.length) +
+      qrStat('Top code', rows[0] ? rows[0].code : '—');
+    el('qr-rows').innerHTML = rows.length ? rows.map(l => `
+      <tr style="border-bottom:1px solid var(--line-2)">
+        <td style="padding:10px 14px;font-family:ui-monospace,monospace">${escapeHtml(l.code)}</td>
+        <td style="padding:10px 14px">${escapeHtml(l.label || '—')}</td>
+        <td style="padding:10px 14px"><span style="font-size:11px;font-weight:700;text-transform:uppercase;color:var(--ink-soft)">${escapeHtml(l.kind || '')}</span></td>
+        <td style="padding:10px 14px;text-align:right;font-weight:700">${l.scans_window || 0}</td>
+        <td style="padding:10px 14px;text-align:right">${l.scans_total || 0}</td>
+        <td style="padding:10px 14px;color:var(--ink-soft)">${l.last_scan ? new Date(l.last_scan).toLocaleDateString('en-GB') : '—'}</td>
+      </tr>`).join('') :
+      `<tr><td colspan="6" style="padding:18px;text-align:center;color:var(--ink-soft)">No QR codes registered yet. Build the ads, then import a <code>data/qr-links-*.json</code> seed via <code>POST /api/qr/import</code>.</td></tr>`;
+  } catch (e) {
+    el('qr-rows').innerHTML = `<tr><td colspan="6" style="padding:18px;text-align:center;color:var(--red)">${escapeHtml(e.message || 'Failed to load')}</td></tr>`;
+  }
 }
 
 /* ==================== MONTHLY STOCK-TAKE CHECKLIST ==================== */

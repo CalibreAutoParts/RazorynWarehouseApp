@@ -12,7 +12,7 @@ import qr as QR
 from build_promos import render_showcase, doc, write, qr_block
 
 WORK = os.path.dirname(__file__)
-MIN = 6  # minimum products to warrant an "all parts" grid
+MIN = 1  # include every collection (grids fill as stock grows)
 
 def collection_url(handle):
     return QR.collection_url(handle) if handle else QR.SITE
