@@ -120,7 +120,7 @@ def render_showcase(P, qrhtml=''):
 def render_fitment(P, qrhtml=''):
     badges = [('shield','AFTERMARKET QUALITY','Built to fit & last'),
               ('check','REAL FITMENT SUPPORT','We help you order right'),
-              ('truck','GENUINE UK STOCK','Dispatched from Watford')]
+              ('truck','UK WAREHOUSE STOCK','Dispatched from Watford')]
     bhtml = ''.join(f'<div class="badge">{ic(n,"bi")}<div class="bt">{t}</div><div class="bd">{d}</div></div>'
                     for n,t,d in badges)
     return (head()
@@ -267,7 +267,16 @@ def doc(title, sections):
       '<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700;800;900&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">'
       f'<style>{CSS}</style></head><body>{"".join(body)}</body></html>')
 
+# Copy rule (from the brief): stock is aftermarket — never claim "genuine"/"OEM".
+import re as _re
+_BANNED = _re.compile(r'\b(genuine|oem)\b', _re.I)
+def check_copy(html, path):
+    hits = set(m.group(0) for m in _BANNED.finditer(_re.sub(r'<[^>]+>', ' ', html)))
+    if hits:
+        print(f"  ⚠️  COPY RULE: {path} contains banned term(s): {', '.join(sorted(hits))}")
+
 def write(path, html):
+    check_copy(html, path)
     open(os.path.join(WORK, path),'w').write(html); return path
 
 # ---- live product data (pulled from Shopify, tag K2010) --------------------
