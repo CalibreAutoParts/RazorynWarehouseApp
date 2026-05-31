@@ -8124,11 +8124,33 @@ async function openCreateEbayListing(productId) {
           </div>
         </div>
       </div>
+      <div class="field">
+        <label>Shop category <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— your eBay storefront category</span></label>
+        <select id="ce-store-category"><option value="">Loading your shop categories…</option></select>
+      </div>
       <div style="font-weight:600;font-size:13px;margin:12px 0 6px">Item specifics</div>
       <div id="ce-specifics"></div>
       <div style="font-size:11px;color:var(--ink-soft);margin:4px 0 8px"><strong>Required (*) specifics must be filled</strong> or eBay rejects the listing. Values auto-fill from the product where known; pick a category above to load that category's full set.</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field"><label>Country of origin</label>
+          <input id="ce-country-origin" list="ce-coo-list" placeholder="e.g. China">
+          <datalist id="ce-coo-list">
+            <option value="China"><option value="United Kingdom"><option value="Germany"><option value="South Korea"><option value="Japan"><option value="Turkey"><option value="Taiwan"><option value="India"><option value="Czech Republic"><option value="Poland">
+          </datalist>
+        </div>
+        <div class="field"><label>Product number <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— Shopify item number</span></label>
+          <input id="ce-product-number" readonly style="background:var(--bg-soft);color:var(--ink-soft)" placeholder="(linked Shopify product ID)">
+        </div>
+      </div>
       <div id="ce-custom-list"></div>
       <button type="button" class="btn btn-outline btn-sm" onclick="ceAddCustomSpec()" style="margin-bottom:10px">+ Add custom specific</button>
+      <div class="field">
+        <label>Description template</label>
+        <div style="display:flex;gap:6px">
+          <select id="ce-template" style="flex:1" onchange="ceApplySelectedTemplate()"><option value="">— No template (use Shopify description) —</option></select>
+          <button type="button" class="btn btn-outline btn-sm" onclick="ceApplySelectedTemplate()">Apply</button>
+        </div>
+      </div>
       <div class="field">
         <label>Description <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— leave blank to use the Shopify description</span></label>
         <textarea id="ce-desc" rows="5" placeholder="Type or paste a description (HTML allowed). Leave blank and the Shopify product description is used."></textarea>
@@ -8144,6 +8166,23 @@ async function openCreateEbayListing(productId) {
         <div class="field"><label>Return policy</label><select id="ce-policy-return"><option value="">Saved default</option></select></div>
       </div>
       <div id="ce-policy-note" style="font-size:11px;color:var(--ink-soft);margin-top:-2px">Leave as "Saved default" to use your Settings policy. Loading your eBay policies…</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+        <div class="field"><label>VAT charged (%)</label>
+          <input id="ce-vat" type="number" step="0.1" min="0" max="100" placeholder="20">
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Leave blank to charge no VAT.</div>
+        </div>
+        <div class="field"><label>Promoted listing</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:6px">
+            <input type="checkbox" id="ce-promote" onchange="el('ce-promote-pct-wrap').style.display=this.checked?'block':'none'">
+            Promote (General) at
+          </label>
+          <div id="ce-promote-pct-wrap" style="display:none;margin-top:6px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <input id="ce-promote-pct" type="number" step="0.1" min="2" max="100" style="width:90px"> <span style="font-size:13px">% ad rate</span>
+            </div>
+          </div>
+        </div>
+      </div>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:8px 0 2px">
         <input type="checkbox" id="ce-preview">
         Preview only — validate &amp; show fees without creating a live listing
@@ -8157,6 +8196,20 @@ async function openCreateEbayListing(productId) {
   // Context for the dynamic specifics loader (used by global handlers).
   State._ceCtx = { product, cfg };
   ceApplyTemplate(product, cfg);
+  // Country of origin (default from settings), Shopify product number (readonly).
+  if (el('ce-country-origin')) el('ce-country-origin').value = cfg.ebayCountryOfOrigin || 'China';
+  if (el('ce-product-number')) el('ce-product-number').value = product.shopify_product_id || '';
+  // VAT default (blank means "no VAT"); promoted-listings defaults.
+  if (el('ce-vat')) el('ce-vat').value = (cfg.ebayVatPercent != null ? cfg.ebayVatPercent : 20);
+  if (cfg.ebayPromoteDefault && el('ce-promote')) {
+    el('ce-promote').checked = true;
+    el('ce-promote-pct-wrap').style.display = 'block';
+  }
+  if (el('ce-promote-pct')) el('ce-promote-pct').value = (cfg.ebayPromotePercent != null ? cfg.ebayPromotePercent : 10);
+  // Description templates (named) — populate the picker.
+  ceFillTemplatePicker(cfg);
+  // Shop/store categories — load from the seller's eBay storefront (async).
+  ceLoadStoreCategories(cfg.ebayDefaultStoreCategoryId || '');
   // Populate the policy dropdowns from the seller's eBay account (async).
   loadEbayPolicies({
     shipping: policies.shipping || cfg.ebayPolicyShipping,
@@ -8165,6 +8218,58 @@ async function openCreateEbayListing(productId) {
   });
   // Load the item-specific fields for the (default) category.
   ceLoadSpecifics(el('ce-category')?.value || '');
+}
+
+// Load the seller's eBay shop categories into the picker (best-effort).
+async function ceLoadStoreCategories(selectedId) {
+  const sel = el('ce-store-category');
+  if (!sel) return;
+  try {
+    const store = el('ce-store')?.value || '';
+    const r = await Api.get('/api/listings/store-categories' + (store ? '?storeCode=' + encodeURIComponent(store) : ''));
+    const cats = r.categories || [];
+    sel.innerHTML = '<option value="">— None —</option>' +
+      cats.map(c => `<option value="${escapeAttr(c.id)}" ${String(c.id) === String(selectedId) ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
+    if (!cats.length) sel.innerHTML = '<option value="">— No shop categories found —</option>';
+  } catch (e) {
+    sel.innerHTML = '<option value="">— Couldn’t load shop categories —</option>';
+  }
+}
+
+// Build the description-template picker from saved named templates.
+function ceFillTemplatePicker(cfg) {
+  const sel = el('ce-template');
+  if (!sel) return;
+  const tpls = Array.isArray(cfg.ebayDescriptionTemplates) ? cfg.ebayDescriptionTemplates : [];
+  // Back-compat: if no named templates but a legacy single template exists, offer it.
+  if (!tpls.length && cfg.ebayDescriptionTemplate) tpls.push({ name: 'Default', body: cfg.ebayDescriptionTemplate });
+  sel.innerHTML = '<option value="">— No template (use Shopify description) —</option>' +
+    tpls.map((t, i) => `<option value="${i}">${escapeHtml(t.name || ('Template ' + (i + 1)))}</option>`).join('');
+  State._ceTemplates = tpls;
+}
+
+// Apply the currently-selected template to the description box, substituting
+// {placeholders} from the product (same tokens as the legacy single template).
+function ceApplySelectedTemplate() {
+  const sel = el('ce-template');
+  const ta = el('ce-desc');
+  if (!sel || !ta) return;
+  const idx = sel.value;
+  if (idx === '') return; // "no template" — leave the box as-is
+  const tpl = (State._ceTemplates || [])[parseInt(idx)];
+  if (!tpl) return;
+  const ctx = State._ceCtx || {};
+  const product = ctx.product || {}, cfg = ctx.cfg || {};
+  let year = '';
+  const m = (product.title || '').match(/((?:19|20)\d{2})\s*[-–]\s*((?:19|20)\d{2})/) || (product.title || '').match(/\b((?:19|20)\d{2})\b/);
+  if (m) year = m[2] ? `${m[1]}-${m[2]}` : m[1];
+  const vals = {
+    title: product.title || '', sku: product.sku || '',
+    mpn: product.part_number || '', part_number: product.part_number || '',
+    brand: cfg.ebayDefaultBrand || '', make: product.brand || '',
+    model: product.model || '', year,
+  };
+  ta.value = String(tpl.body || '').replace(/\{(\w+)\}/g, (mm, k) => (vals[k] != null ? vals[k] : mm));
 }
 
 // Fetch the seller's eBay business policies and fill the listing dropdowns,
@@ -8278,9 +8383,23 @@ function ceAddCustomSpec(name = '', value = '') {
   list.appendChild(row);
   row.querySelector('.ce-cust-name').focus();
 }
+// Atomic placement values the user can combine (e.g. Front + Left for a fender).
+const PLACEMENT_OPTIONS = ['Front', 'Rear', 'Left', 'Right', 'Upper', 'Lower', 'Centre', 'Inner', 'Outer'];
 function ceSpecsGrid(specs) {
   return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' + specs.map(s => {
     const req = s.required ? ' <span style="color:var(--red)">*</span>' : '';
+    // Placement on Vehicle → multi-select checkboxes (a part can be e.g. Front
+    // AND Left). Pre-checks from the product's saved position.
+    if (/placement on vehicle/i.test(s.name)) {
+      const pre = (cePrefillSpec(s.name) || '').toLowerCase();
+      const boxes = PLACEMENT_OPTIONS.map(opt => {
+        const checked = new RegExp('\\b' + opt.toLowerCase() + '\\b').test(pre) ? 'checked' : '';
+        return `<label style="display:inline-flex;align-items:center;gap:4px;margin:0 10px 4px 0;font-size:13px">
+          <input type="checkbox" class="ce-placement" value="${escapeAttr(opt)}" ${checked}> ${escapeHtml(opt)}</label>`;
+      }).join('');
+      return `<div class="field" style="grid-column:1 / -1"><label>${escapeHtml(s.name)}${req} <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— tick all that apply</span></label>
+        <div style="padding:4px 0">${boxes}</div></div>`;
+    }
     const lid = (s.values && s.values.length) ? 'cl' + Math.random().toString(36).slice(2, 8) : '';
     const dl = lid ? `<datalist id="${lid}">${s.values.slice(0, 60).map(v => `<option value="${escapeAttr(v)}">`).join('')}</datalist>` : '';
     return `<div class="field"><label>${escapeHtml(s.name)}${req}</label>
@@ -8391,6 +8510,9 @@ async function submitCreateEbayListing(productId) {
       if (/manufacturer part/i.test(name)) mpnFilled = true;
     }
   });
+  // Placement on Vehicle — multi-select checkboxes → array value.
+  const placements = [...document.querySelectorAll('.ce-placement:checked')].map(c => c.value);
+  if (placements.length) itemSpecifics.push({ name: 'Placement on Vehicle', value: placements });
   // Custom (free-form) specifics added by the user.
   document.querySelectorAll('#ce-custom-list > div').forEach(row => {
     const name = (row.querySelector('.ce-cust-name')?.value || '').trim();
@@ -8401,12 +8523,20 @@ async function submitCreateEbayListing(productId) {
     }
   });
   const descriptionOverride = (el('ce-desc')?.value || '').trim() || undefined;
+  const countryOfOrigin = (el('ce-country-origin')?.value || '').trim();
+  const vatRaw = (el('ce-vat')?.value || '').trim();
+  const vatPercent = vatRaw === '' ? null : parseFloat(vatRaw);
+  const storeCategoryId = el('ce-store-category')?.value || undefined;
+  const promote = el('ce-promote')?.checked
+    ? { enabled: true, percent: parseFloat(el('ce-promote-pct')?.value) || 0 }
+    : { enabled: false };
 
   if (!storeCode)   { toast('Pick a store', 'warn'); return; }
   if (!title)       { toast('Title required', 'warn'); return; }
   if (!categoryId)  { toast('Category required — search by name or type the ID', 'warn'); return; }
   if (!price || isNaN(price)) { toast('Valid price required', 'warn'); return; }
   if (!mpnFilled && !confirm('No Manufacturer Part Number (MPN) entered. eBay usually rejects car-part listings without it. Continue anyway?')) return;
+  if (promote.enabled && (!promote.percent || promote.percent < 2)) { toast('Promoted listing ad rate must be at least 2%', 'warn'); return; }
 
   const taskId = Task.start(preview ? 'Validating listing…' : 'Creating eBay listing…');
   try {
@@ -8415,6 +8545,8 @@ async function submitCreateEbayListing(productId) {
       price, quantity, titleOverride: title,
       useShopifyDescription: !descriptionOverride, descriptionOverride,
       itemSpecifics, businessPolicies, preview,
+      countryOfOrigin: countryOfOrigin || undefined,
+      vatPercent, storeCategoryId, promote,
     });
     // Preview mode: nothing was listed — show fees, keep the modal open so the
     // user can untick Preview and publish.
@@ -8426,6 +8558,11 @@ async function submitCreateEbayListing(productId) {
     Task.done(taskId, 'Listed');
     closeModal();
     toast(`✓ Created on eBay — ItemID ${r.itemId}`, 'success', 8000);
+    // Surface promoted-listing outcome (best-effort on the server).
+    if (r.promotion) {
+      if (r.promotion.ok) toast(`✓ Promoted at ${r.promotion.bidPercent}% ad rate`, 'success', 6000);
+      else toast(`Listing is live, but promotion didn’t apply: ${r.promotion.message}`, 'warn', 11000);
+    }
     // Reload listing mirror to reflect the new link
     if (typeof refreshLinkStatus === 'function') await refreshLinkStatus();
     else if (typeof renderLinkStatus === 'function') renderLinkStatus();
@@ -9901,10 +10038,38 @@ function renderSettings() {
               <input id="set-ebay-markup" type="number" step="0.1" placeholder="e.g. 15">
               <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Used by the "From Shopify +%" button when creating an eBay listing (Shopify price × (1 + this%)).</div>
             </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:10px">
+              <div class="field"><label>Country of origin (default)</label>
+                <input id="set-ebay-coo" placeholder="China">
+                <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Added as an item specific; editable per listing.</div>
+              </div>
+              <div class="field"><label>VAT charged (%)</label>
+                <input id="set-ebay-vat" type="number" step="0.1" min="0" max="100" placeholder="20">
+                <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Default VAT % on new listings. Blank = none.</div>
+              </div>
+              <div class="field"><label>Default shop category ID</label>
+                <input id="set-ebay-store-cat" placeholder="(optional)">
+                <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Pre-selected in the listing form's shop-category picker.</div>
+              </div>
+            </div>
             <div class="field" style="margin-top:10px">
-              <label>eBay description template</label>
-              <textarea id="set-ebay-desc-template" rows="6" placeholder="Paste your eBay-formatted HTML. Placeholders: {title} {sku} {mpn} {brand} {make} {model} {year}"></textarea>
-              <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Pre-fills the listing description (placeholders replaced from the product; editable per listing). Leave blank to use the Shopify description.</div>
+              <label style="display:flex;align-items:center;gap:8px">
+                <input type="checkbox" id="set-ebay-promote-default"> Promote new listings by default (Promoted Listings General)
+              </label>
+              <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+                <span style="font-size:13px">Default ad rate</span>
+                <input id="set-ebay-promote-pct" type="number" step="0.1" min="2" max="100" style="width:90px" placeholder="10"> <span style="font-size:13px">%</span>
+              </div>
+              <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Requires the eBay <code>sell.marketing</code> permission to be granted to the app. If not, the listing is still created and a notice is shown.</div>
+            </div>
+
+            <div style="margin-top:14px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+                <label style="font-weight:600">eBay description templates</label>
+                <button type="button" class="btn btn-outline btn-sm" onclick="ebayAddTemplate()">+ Add template</button>
+              </div>
+              <div style="font-size:11px;color:var(--ink-soft);margin-bottom:8px">Save several named templates and pick one in the listing form. Placeholders: <code>{title} {sku} {mpn} {brand} {make} {model} {year}</code>. Leave none to use the Shopify description.</div>
+              <div id="set-ebay-templates"></div>
             </div>
           </div>
 
@@ -10327,8 +10492,16 @@ async function loadPricingConfig() {
     // eBay listing defaults
     setVal('set-ebay-category',  r.ebayDefaultCategoryId  || '');
     setVal('set-ebay-brand',     r.ebayDefaultBrand       || 'Unbranded');
-    setVal('set-ebay-desc-template', r.ebayDescriptionTemplate || '');
     setVal('set-ebay-markup', r.ebayMarkupPct != null ? r.ebayMarkupPct : 15);
+    setVal('set-ebay-coo',       r.ebayCountryOfOrigin || 'China');
+    setVal('set-ebay-vat',       r.ebayVatPercent != null ? r.ebayVatPercent : 20);
+    setVal('set-ebay-store-cat', r.ebayDefaultStoreCategoryId || '');
+    setVal('set-ebay-promote-pct', r.ebayPromotePercent != null ? r.ebayPromotePercent : 10);
+    if (el('set-ebay-promote-default')) el('set-ebay-promote-default').checked = !!r.ebayPromoteDefault;
+    // Named description templates — migrate a legacy single template into the list.
+    let _tpls = Array.isArray(r.ebayDescriptionTemplates) ? r.ebayDescriptionTemplates.slice() : [];
+    if (!_tpls.length && r.ebayDescriptionTemplate) _tpls = [{ name: 'Default', body: r.ebayDescriptionTemplate }];
+    ebayRenderTemplates(_tpls);
     setVal('set-ebay-condition', r.ebayDefaultConditionId || '1000');
     setVal('set-ebay-country',   r.ebayLocationCountry    || 'GB');
     setVal('set-ebay-city',      r.ebayLocationCity       || '');
@@ -10944,6 +11117,45 @@ async function submitNewTemplate() {
   }
 }
 
+// ── eBay description-template manager (Settings) ─────────────────────────────
+function ebayTemplateRow(name = '', body = '') {
+  const row = document.createElement('div');
+  row.className = 'ebay-tpl-row';
+  row.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px';
+  row.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+      <input class="ebay-tpl-name" placeholder="Template name (e.g. Bumpers)" value="${escapeAttr(name)}" style="flex:1;font-weight:600">
+      <button type="button" class="btn btn-ghost btn-sm" style="color:var(--red)" title="Remove" onclick="this.closest('.ebay-tpl-row').remove()">×</button>
+    </div>
+    <textarea class="ebay-tpl-body" rows="5" placeholder="eBay-formatted HTML. Placeholders: {title} {sku} {mpn} {brand} {make} {model} {year}">${escapeHtml(body)}</textarea>`;
+  return row;
+}
+function ebayRenderTemplates(tpls) {
+  const wrap = el('set-ebay-templates');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  (Array.isArray(tpls) ? tpls : []).forEach(t => wrap.appendChild(ebayTemplateRow(t.name, t.body)));
+  if (!wrap.children.length) wrap.innerHTML = '<div style="font-size:12px;color:var(--ink-soft)">No templates yet — click "Add template".</div>';
+}
+function ebayAddTemplate() {
+  const wrap = el('set-ebay-templates');
+  if (!wrap) return;
+  // Clear the "no templates" placeholder if present.
+  if (wrap.querySelector('div') && !wrap.querySelector('.ebay-tpl-row')) wrap.innerHTML = '';
+  const row = ebayTemplateRow('', '');
+  wrap.appendChild(row);
+  row.querySelector('.ebay-tpl-name').focus();
+}
+function ebayCollectTemplates() {
+  const out = [];
+  document.querySelectorAll('#set-ebay-templates .ebay-tpl-row').forEach(row => {
+    const name = (row.querySelector('.ebay-tpl-name')?.value || '').trim();
+    const body = (row.querySelector('.ebay-tpl-body')?.value || '').trim();
+    if (name || body) out.push({ name: name || 'Untitled', body });
+  });
+  return out;
+}
+
 async function savePricingConfig() {
   const getNum = (id) => { const e = el(id); return e && e.value !== '' ? parseFloat(e.value) : undefined; };
   const getStr = (id) => { const e = el(id); return e ? e.value : undefined; };
@@ -10974,8 +11186,13 @@ async function savePricingConfig() {
     // eBay listing defaults
     ebayDefaultCategoryId:  getStr('set-ebay-category'),
     ebayDefaultBrand:       getStr('set-ebay-brand'),
-    ebayDescriptionTemplate: getStr('set-ebay-desc-template'),
     ebayMarkupPct: getNum('set-ebay-markup'),
+    ebayCountryOfOrigin:    getStr('set-ebay-coo'),
+    ebayVatPercent:         getNum('set-ebay-vat'),
+    ebayDefaultStoreCategoryId: getStr('set-ebay-store-cat'),
+    ebayPromoteDefault:     !!el('set-ebay-promote-default')?.checked,
+    ebayPromotePercent:     getNum('set-ebay-promote-pct'),
+    ebayDescriptionTemplates: ebayCollectTemplates(),
     ebayDefaultConditionId: getStr('set-ebay-condition'),
     ebayLocationCountry:    getStr('set-ebay-country'),
     ebayLocationCity:       getStr('set-ebay-city'),
