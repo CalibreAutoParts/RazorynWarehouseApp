@@ -2,12 +2,14 @@
   "name": "razoryn-video",
   "version": "1.0.0",
   "private": true,
-  "description": "Razoryn e-Parts — Remotion video templates (parts montage + webpage showcase)",
+  "description": "Razoryn e-Parts — Remotion video ad templates",
   "scripts": {
     "dev": "remotion studio",
+    "render:order": "remotion render OrderStory out/order-story.mp4",
+    "render:price": "remotion render PriceReveal out/price-reveal.mp4",
     "render:parts": "remotion render PartsShowcase out/parts-showcase.mp4",
     "render:site": "remotion render SiteShowcase out/site-showcase.mp4",
-    "render": "npm run render:parts && npm run render:site"
+    "render": "npm run render:order && npm run render:price && npm run render:parts && npm run render:site"
   },
   "dependencies": {
     "@remotion/cli": "^4.0.0",

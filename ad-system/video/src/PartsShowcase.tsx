@@ -1,5 +1,5 @@
 import React from 'react';
-import {AbsoluteFill, Img, Series, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
+import {AbsoluteFill, Audio, Img, Sequence, Series, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
 import {barlow, inter, NAVY, RED, RED_DARK, MUT, SITE, Part} from './brand';
 
 const Logo: React.FC = () => (
@@ -67,6 +67,9 @@ const Outro: React.FC = () => {
 export const PartsShowcase: React.FC<{parts: Part[]; intro: number; per: number; outro: number}> = ({parts, intro, per, outro}) => {
   return (
     <AbsoluteFill style={{backgroundColor: NAVY, color: '#fff', fontFamily: inter}}>
+      <Audio src={staticFile('audio/beat.wav')} loop volume={0.3} />
+      <Sequence from={0}><Audio src={staticFile('audio/whoosh.wav')} /></Sequence>
+      <Sequence from={intro + parts.length * per}><Audio src={staticFile('audio/chime.wav')} /></Sequence>
       <Logo />
       <Series>
         <Series.Sequence durationInFrames={intro}>

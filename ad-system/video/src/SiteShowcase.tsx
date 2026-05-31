@@ -1,5 +1,5 @@
 import React from 'react';
-import {AbsoluteFill, Easing, Img, interpolate, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
+import {AbsoluteFill, Audio, Easing, Img, Sequence, interpolate, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
 import {barlow, inter, NAVY, RED, RED_DARK, INK, SITE, Model} from './brand';
 
 const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
@@ -52,6 +52,10 @@ export const SiteShowcase: React.FC<{models: Model[]}> = ({models}) => {
 
   return (
     <AbsoluteFill style={{backgroundColor: NAVY, fontFamily: inter, alignItems: 'center', opacity: fade}}>
+      <Audio src={staticFile('audio/beat.wav')} loop volume={0.3} />
+      <Sequence from={48}><Audio src={staticFile('audio/tap.wav')} /></Sequence>
+      <Sequence from={104}><Audio src={staticFile('audio/whoosh.wav')} /></Sequence>
+      <Sequence from={300}><Audio src={staticFile('audio/pop.wav')} /></Sequence>
       <div style={{position: 'absolute', top: 100, width: VW, borderRadius: 28, overflow: 'hidden', boxShadow: '0 50px 120px rgba(0,0,0,.55)', background: '#fff'}}>
         {/* chrome */}
         <div style={{display: 'flex', alignItems: 'center', gap: 12, padding: '20px 24px', background: '#e9ecef', height: 72, boxSizing: 'border-box'}}>
