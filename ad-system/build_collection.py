@@ -3,7 +3,8 @@
 Usage: import build; build(collection_title, index, products, out_path)
 products: list of dicts {title, finish, position, secondary, part, price, imgs:[urls]}
 """
-import base64, re, html as H, os
+import base64, re, html as H, os, json
+import qr as QR
 
 WORK = os.path.dirname(__file__)
 RED='#c8202d'; RED_DARK='#e83948'; INK='#2c353e'; MUT='#6b7785'
@@ -38,9 +39,16 @@ def norm(p):
     price=float(p['price']); ebay=round(price*1.07,2)
     return dict(mm=mm.upper(), desc=(desc or "Aftermarket Part").upper(),
         sub=sub, finish=p.get('finish') or "—", position=position, part=p['part'],
-        web=f"£{price:,.2f}", ebay=f"£{ebay:,.2f}", imgs=p['imgs'])
+        web=f"£{price:,.2f}", ebay=f"£{ebay:,.2f}", imgs=p['imgs'],
+        handle=p.get('handle'), code=p.get('sku') or p['part'])
 
-def slide(cls, P, img):
+def qr_block(P, label="SCAN TO BUY"):
+    if not P.get('handle'): return ''
+    svg = QR.qr_svg(QR.go_url(P['code']))
+    return (f'<div class="qr"><div class="qrbox">{svg}</div>'
+            f'<div class="qrl">{H.escape(label)}</div></div>')
+
+def slide(cls, P, img, qrhtml=''):
     return (f'<div class="stage"><div class="post {cls}">'
       f'<div class="head"><div class="logo"></div><div class="pill">{PHONE_SVG}<span>CALL {PHONE}</span></div></div>'
       f'<div class="rule"></div><div class="photo"><img loading="lazy" src="{hires(img)}" alt="{H.escape(P["mm"])}"></div>'
@@ -51,8 +59,8 @@ def slide(cls, P, img):
       f'<div class="spec"><div class="l">PART NO.</div><div class="v">{H.escape(P["part"])}</div></div></div>'
       f'<div class="bottom"><div class="buy"><div class="exl">WEBSITE EXCLUSIVE PRICE</div><div class="amt">{P["web"]}</div>'
       f'<div class="cmp">{P["ebay"]} on eBay · save 7%</div></div>'
-      f'<div class="contact"><div class="site">RAZORYN.CO.UK</div><div class="c">{EMAIL}</div>'
-      f'<div class="c muted">Same-Day Dispatch · Fitment Support</div></div></div></div></div>')
+      f'<div class="contact">{qrhtml}<div class="ctext"><div class="site">RAZORYN.CO.UK</div><div class="c">{EMAIL}</div>'
+      f'<div class="c muted">Same-Day Dispatch · Fitment Support</div></div></div></div></div></div>')
 
 CSS=f''':root{{--red:{RED};--red-dark:{RED_DARK};--ink:{INK};--mut:{MUT};--border:{BORDER};--darkbg:{DARKBG};--navychip:{NAVYCHIP};--logo-red:url("data:image/png;base64,{RED_LOGO}");--logo-white:url("data:image/png;base64,{WHITE_LOGO}");}}
 *{{margin:0;padding:0;box-sizing:border-box;}}body{{background:#1d2026;font-family:'Inter',sans-serif;padding:24px;min-height:100vh;color:#fff;}}
@@ -68,7 +76,8 @@ h1{{font-family:'Barlow Condensed';font-weight:800;font-size:30px;text-transform
 .meta{{min-height:0;}}.meta .eyebrow{{font-weight:800;font-size:2.45cqw;letter-spacing:.15em;color:var(--eye);line-height:1.25;}}.meta .title{{font-family:'Barlow Condensed';font-weight:800;font-size:9.4cqw;line-height:.9;color:var(--fg);text-transform:uppercase;margin-top:1.1cqw;}}.meta .sub{{font-weight:500;font-size:2.8cqw;color:var(--m);margin-top:1.2cqw;}}
 .specs{{display:grid;grid-template-columns:1fr 1fr 1.25fr;gap:2.4cqw;margin-top:3cqw;padding-top:2.6cqw;border-top:.35cqw solid var(--linec);}}.spec .l{{font-weight:800;font-size:1.8cqw;letter-spacing:.1em;color:var(--m);}}.spec .v{{font-weight:700;font-size:2.45cqw;color:var(--fg);margin-top:.6cqw;word-break:break-word;line-height:1.1;}}
 .bottom{{display:flex;align-items:stretch;justify-content:space-between;gap:3cqw;margin-top:3.4cqw;}}.buy{{background:var(--chipbg);border-radius:2.4cqw;padding:2.4cqw 3.2cqw;color:var(--chiptx);display:flex;flex-direction:column;justify-content:center;}}.buy .exl{{font-weight:800;font-size:1.8cqw;letter-spacing:.1em;opacity:.85;}}.buy .amt{{font-family:'Barlow Condensed';font-weight:800;font-size:8cqw;line-height:.86;margin-top:.4cqw;}}.buy .cmp{{font-weight:600;font-size:1.95cqw;opacity:.85;margin-top:.5cqw;}}
-.contact{{text-align:right;display:flex;flex-direction:column;justify-content:center;}}.contact .site{{font-family:'Barlow Condensed';font-weight:700;font-size:4.3cqw;color:var(--fg);text-transform:uppercase;}}.contact .c{{font-weight:600;font-size:2.25cqw;color:var(--fg);margin-top:.6cqw;}}.contact .muted{{color:var(--m);}}
+.contact{{display:flex;flex-direction:row;align-items:center;justify-content:flex-end;gap:2.6cqw;text-align:right;}}.ctext{{display:flex;flex-direction:column;justify-content:center;}}.contact .site{{font-family:'Barlow Condensed';font-weight:700;font-size:4.3cqw;color:var(--fg);text-transform:uppercase;}}.contact .c{{font-weight:600;font-size:2.25cqw;color:var(--fg);margin-top:.6cqw;}}.contact .muted{{color:var(--m);}}
+.qr{{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:.8cqw;}}.qrbox{{width:16cqw;height:16cqw;background:#fff;border-radius:1.8cqw;padding:1.1cqw;box-shadow:0 1cqw 2.6cqw rgba(0,0,0,.18);}}.qrbox svg{{display:block;width:100%;height:100%;}}.qrl{{font-weight:800;font-size:1.5cqw;letter-spacing:.12em;color:var(--fg);white-space:nowrap;}}
 .post.s-red{{--bg:var(--red);--fg:#fff;--m:rgba(255,255,255,.8);--eye:#fff;--rulec:rgba(255,255,255,.55);--boxbg:#fff;--boxbd:transparent;--linec:rgba(255,255,255,.28);--pillbg:#fff;--pilltx:var(--red);--chipbg:var(--navychip);--chiptx:#fff;--logo:var(--logo-white);}}
 .post.s-navy{{--bg:var(--darkbg);--fg:#f0f2f5;--m:rgba(255,255,255,.66);--eye:var(--red-dark);--rulec:var(--red-dark);--boxbg:#fff;--boxbd:transparent;--linec:rgba(255,255,255,.16);--pillbg:var(--red-dark);--pilltx:#fff;--chipbg:var(--red-dark);--chiptx:#fff;--logo:var(--logo-white);}}
 @page{{size:1080px 1350px;margin:0;}}
@@ -76,16 +85,24 @@ h1{{font-family:'Barlow Condensed';font-weight:800;font-size:30px;text-transform
 
 SCHEMES=[("s-white","White · Light"),("s-red","Red · Brand"),("s-navy","Navy · Dark")]
 
-def build(collection_title, index, products, out_path):
+def build(collection_title, index, products, out_path, meta=None):
     items=[norm(p) for p in products]
-    body=[]
+    body=[]; links=[]
+    slug=(meta or {}).get('slug') or re.sub(r'[^a-z0-9]+','-',collection_title.lower()).strip('-')
     for P in items:
+        qrhtml=qr_block(P)
+        if P.get('handle'):
+            links.append(QR.link(P['code'], QR.product_url(P['handle']), 'product',
+                                 label=f'{P["mm"]} {P["desc"].title()}', utm_campaign=slug))
         body.append(f'<h2 class="ph2">{H.escape(P["mm"])} · {H.escape(P["desc"].title())} · {P["web"]}</h2>')
         for label,idx in [("Front",0),("Back",1)]:
             if len(P['imgs'])>idx and P['imgs'][idx]:
                 body.append(f'<div class="cap">{label}</div><div class="group">')
-                for cls,_ in SCHEMES: body.append(slide(cls,P,P['imgs'][idx]))
+                for cls,_ in SCHEMES: body.append(slide(cls,P,P['imgs'][idx],qrhtml))
                 body.append('</div>')
+    if links:
+        lp=os.path.join(WORK,'data',f'qr-links-{index}.json')
+        json.dump(links, open(lp,'w'), indent=2, ensure_ascii=False)
     doc=(f'<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
       f'<meta name="viewport" content="width=device-width, initial-scale=1.0">'
       f'<title>Razoryn — {H.escape(collection_title)}</title>'
@@ -101,5 +118,5 @@ def build(collection_title, index, products, out_path):
 if __name__=='__main__':
     import json,sys
     cfg=json.load(open(sys.argv[1]))
-    p,n=build(cfg['title'],cfg['index'],cfg['products'],cfg['out'])
+    p,n=build(cfg['title'],cfg['index'],cfg['products'],cfg['out'],meta=cfg)
     print('built',p,'with',n,'products')

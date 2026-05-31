@@ -1,0 +1,44 @@
+[
+  {
+    "code": "ig-website-exclusive",
+    "target_url": "https://www.razoryn.co.uk",
+    "kind": "site",
+    "label": "Razoryn storefront",
+    "utm_campaign": "ig-website-exclusive"
+  },
+  {
+    "code": "ig-same-day",
+    "target_url": "https://www.razoryn.co.uk",
+    "kind": "site",
+    "label": "Razoryn storefront",
+    "utm_campaign": "ig-same-day"
+  },
+  {
+    "code": "ig-free-delivery",
+    "target_url": "https://www.razoryn.co.uk",
+    "kind": "site",
+    "label": "Razoryn storefront",
+    "utm_campaign": "ig-free-delivery"
+  },
+  {
+    "code": "yaris-cross",
+    "target_url": "https://www.razoryn.co.uk/collections/toyota-yaris-cross-2020",
+    "kind": "collection",
+    "label": "SCAN: ALL PARTS",
+    "utm_campaign": "yaris-cross"
+  },
+  {
+    "code": "ig-fitment",
+    "target_url": "https://www.razoryn.co.uk",
+    "kind": "site",
+    "label": "Razoryn storefront",
+    "utm_campaign": "ig-fitment"
+  },
+  {
+    "code": "ig-cover",
+    "target_url": "https://www.razoryn.co.uk",
+    "kind": "site",
+    "label": "Razoryn storefront",
+    "utm_campaign": "ig-cover"
+  }
+]

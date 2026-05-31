@@ -463,3 +463,38 @@ END $$;
 
 -- citext extension for case-insensitive emails
 CREATE EXTENSION IF NOT EXISTS citext;
+
+-- ---------- QR redirect links + scan tracking (marketing ads) ----------
+-- Dynamic QR: printed/posted codes encode <QR_BASE>/go/<code>. The /go/:code route
+-- (routes/qr.js) logs the scan and 302-redirects to target_url with UTM tags, so a
+-- printed code can be repointed without reprinting. scans = COUNT(qr_scans); the
+-- conversion rate is read from Shopify analytics via utm_content=<code>.
+CREATE TABLE IF NOT EXISTS qr_links (
+  code         TEXT PRIMARY KEY,
+  target_url   TEXT NOT NULL,
+  kind         TEXT NOT NULL DEFAULT 'product'
+                 CHECK (kind IN ('product','collection','site','promo')),
+  label        TEXT,
+  utm_campaign TEXT,
+  active       BOOLEAN NOT NULL DEFAULT true,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One row per scan (a hit on /go/:code).
+CREATE TABLE IF NOT EXISTS qr_scans (
+  id          BIGSERIAL PRIMARY KEY,
+  code        TEXT NOT NULL,
+  scanned_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  user_agent  TEXT,
+  referer     TEXT,
+  ip          TEXT
+);
+CREATE INDEX IF NOT EXISTS qr_scans_code_idx ON qr_scans (code, scanned_at DESC);
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'qr_links_set_updated') THEN
+    CREATE TRIGGER qr_links_set_updated BEFORE UPDATE ON qr_links
+      FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+END $$;

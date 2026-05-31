@@ -58,6 +58,40 @@ Open a file in a browser → **Print → Save as PDF** (Margins: None, Backgroun
 → Canva **Create design → Import** the PDF (becomes an editable multi-page design).
 Each ad is its own clean 1080×1350 page via `@page` + `@media print`.
 
+## QR codes + scan / conversion tracking
+
+Every ad carries a QR in a white card (scannable on all three schemes). Each QR
+encodes a **dynamic redirect** — `<QR_BASE>/go/<code>` — handled by the backend:
+
+- **Listings** → the product page (`code` = SKU).
+- **Model showcase** → the collection page (`code` = collection slug, e.g. `yaris-cross`).
+- **Website/promo ads** → the storefront home (`code` = `ig-<promo>`).
+
+`qr.py` builds the codes and writes a `qr_links` seed alongside each output:
+`data/qr-links-<NN>.json` (listings) and `data/qr-links-promos.json` (promos).
+
+**Two metrics, two mechanisms:**
+- **Scan count** — the `/go/:code` route logs every hit to `qr_scans` (owned by us, free).
+- **Conversion rate** — the redirect appends UTM tags (`utm_source=qr … utm_content=<code>`),
+  so Shopify Analytics attributes sessions → orders per code/campaign.
+
+### Backend (in `razoryn-backend`)
+- `db/schema.sql` — adds `qr_links` + `qr_scans` (applied by `scripts/migrate.js`).
+- `routes/qr.js` — public `GET /go/:code` (log + 302 redirect) and admin `GET/POST /api/qr/*`.
+- Env: `QR_BASE_URL` (public base that routes to the backend, e.g. `https://go.razoryn.co.uk`)
+  and `SITE_URL` (storefront, default `https://www.razoryn.co.uk`).
+- **Routing:** `/go/*` must reach the Express app — easiest is a `go.razoryn.co.uk`
+  subdomain pointed at the backend, or a proxy rule. Then set `QR_BASE_URL` to match.
+
+### Register the codes (once per build)
+```bash
+# after building, POST the seed to the backend (admin auth required)
+curl -X POST https://<backend>/api/qr/import -H 'Content-Type: application/json' \
+     -b cookies.txt --data @ad-system/data/qr-links-promos.json
+# read scan stats / conversion attribution lives in Shopify
+curl https://<backend>/api/qr/stats?days=30 -b cookies.txt
+```
+
 ## Notes
 
 - Product photos are loaded live from the Shopify CDN — they render in any normal browser

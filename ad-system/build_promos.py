@@ -11,7 +11,8 @@ so White / Red / Navy work everywhere with no per-promo overrides.
 
 Usage:  python3 build_promos.py
 """
-import base64, html as H, os
+import base64, html as H, os, json
+import qr as QR
 
 WORK = os.path.dirname(__file__)
 RED='#c8202d'; RED_DARK='#e83948'; INK='#2c353e'; MUT='#6b7785'
@@ -50,16 +51,20 @@ def head(logo_pill=True):
     pill = (f'<div class="pill">{ic("phone","ph")}<span>CALL {PHONE}</span></div>') if logo_pill else ''
     return f'<div class="head"><div class="logo"></div>{pill}</div>'
 
-def ctabar(line2="Same-Day Dispatch · Fitment Support · 30-Day Returns"):
+def ctabar(line2="Same-Day Dispatch · Fitment Support · 30-Day Returns", qrhtml=''):
     return (f'<div class="cta"><div class="cta-l"><div class="site">{SITE}</div>'
-            f'<div class="csub">{H.escape(line2)}</div></div>'
+            f'<div class="csub">{H.escape(line2)}</div></div>{qrhtml}'
             f'<div class="cta-r">{ic("phone","ph")}<span>{PHONE}</span></div></div>')
+
+def qr_block(code, label="SCAN TO SHOP"):
+    svg = QR.qr_svg(QR.go_url(code))
+    return f'<div class="qr"><div class="qrbox">{svg}</div><div class="qrl">{H.escape(label)}</div></div>'
 
 def photocard(img, alt, cls="hero"):
     return f'<div class="{cls}"><img loading="lazy" src="{hires(img)}" alt="{H.escape(alt)}"></div>'
 
 # ---- promo renderers (return inner HTML of one .post) ----------------------
-def render_website_exclusive(P):
+def render_website_exclusive(P, qrhtml=''):
     eb = money(ebay(P['price'])); web = money(P['price'])
     return (head()
       + '<div class="pwrap center">'
@@ -72,9 +77,9 @@ def render_website_exclusive(P):
       + f'<div class="cmpcell ebay"><div class="cl">OUR EBAY STORE</div><div class="cv">{eb}</div></div>'
       + '<div class="cmparrow"><span class="vs">save<br>7%</span></div>'
       + f'<div class="cmpcell direct"><div class="cl">DIRECT ONLINE</div><div class="cv">{web}</div><div class="cnote">our best price</div></div>'
-      + '</div></div>' + ctabar())
+      + '</div></div>' + ctabar(qrhtml=qrhtml))
 
-def render_same_day(P):
+def render_same_day(P, qrhtml=''):
     return (head()
       + '<div class="pwrap center">'
       + f'<div class="bigicon">{ic("clock","biggi")}</div>'
@@ -84,9 +89,9 @@ def render_same_day(P):
       + '<div class="collage">' + ''.join(photocard(i, '', 'thumb') for i in P['imgs'][:3]) + '</div>'
       + '<div class="pillrow"><span class="ipill">'+ic("pin","ip")+'Watford, WD24 5RR</span>'
         '<span class="ipill">'+ic("check","ip")+'Mon–Fri 10–5 · Sat 10–2</span></div>'
-      + '</div>' + ctabar("Free UK delivery over £50 · 30-day returns"))
+      + '</div>' + ctabar("Free UK delivery over £50 · 30-day returns", qrhtml=qrhtml))
 
-def render_free_delivery(P):
+def render_free_delivery(P, qrhtml=''):
     return (head()
       + '<div class="pwrap center">'
       + f'<div class="bigicon">{ic("truck","biggi")}</div>'
@@ -96,9 +101,9 @@ def render_free_delivery(P):
       + '<div class="collage">' + ''.join(photocard(i, '', 'thumb') for i in P['imgs'][:3]) + '</div>'
       + '<div class="pillrow"><span class="ipill">'+ic("bolt","ip")+'Same-day dispatch</span>'
         '<span class="ipill">'+ic("shield","ip")+'Tracked & insured</span></div>'
-      + '</div>' + ctabar("Order before 12pm · Dispatched today"))
+      + '</div>' + ctabar("Order before 12pm · Dispatched today", qrhtml=qrhtml))
 
-def render_showcase(P):
+def render_showcase(P, qrhtml=''):
     cells = []
     for it in P['parts'][:6]:
         cells.append(f'<div class="gcell"><div class="gimg"><img loading="lazy" src="{hires(it["img"],900)}" alt=""></div>'
@@ -110,9 +115,9 @@ def render_showcase(P):
       + f'<div class="subh left">{P["count"]} aftermarket parts in stock · from {money(P["from"])} · panels, bumpers, trims &amp; more.</div>'
       + '<div class="grid6">' + ''.join(cells) + '</div>'
       + f'<div class="shopline">Shop the full range &rarr; <b>{SITE}</b></div>'
-      + '</div>' + ctabar())
+      + '</div>' + ctabar(qrhtml=qrhtml))
 
-def render_fitment(P):
+def render_fitment(P, qrhtml=''):
     badges = [('shield','AFTERMARKET QUALITY','Built to fit & last'),
               ('check','REAL FITMENT SUPPORT','We help you order right'),
               ('truck','GENUINE UK STOCK','Dispatched from Watford')]
@@ -126,17 +131,17 @@ def render_fitment(P):
       + f'<div class="badges">{bhtml}</div>'
       + f'<div class="pillrow"><span class="ipill">{ic("phone","ip")}{PHONE}</span>'
         f'<span class="ipill">{ic("spark","ip")}WhatsApp {WHATSAPP}</span></div>'
-      + '</div>' + ctabar("Mon–Fri 10–5 · Sat 10–2 · 30-day returns"))
+      + '</div>' + ctabar("Mon–Fri 10–5 · Sat 10–2 · 30-day returns", qrhtml=qrhtml))
 
-def render_cover(P):
+def render_cover(P, qrhtml=''):
     return ('<div class="cover">' + head(logo_pill=False)
       + '<div class="cv-mid">'
       + '<div class="eyebrow2">AFTERMARKET BODY PANELS &amp; TRIM</div>'
       + '<h2 class="hl xl">QUALITY CAR PARTS<br><span class="hl-accent">WITHOUT THE MARKUP</span></h2>'
       + '<div class="subh">Toyota · Hyundai · Kia · Nissan · Peugeot · Vauxhall — bumpers, wings, grilles, lights &amp; more.</div>'
       + '</div>'
-      + f'<div class="cv-foot"><div class="site big">{SITE}</div>'
-        f'<div class="csub">Same-Day Dispatch · Fitment Support · Free UK Delivery over £50</div></div>'
+      + f'<div class="cv-foot"><div class="cv-foot-l"><div class="site big">{SITE}</div>'
+        f'<div class="csub">Same-Day Dispatch · Fitment Support · Free UK Delivery over £50</div></div>{qrhtml}</div>'
       + '</div>')
 
 # ---- CSS (literal hex; logos injected after) -------------------------------
@@ -223,9 +228,17 @@ h1{font-family:'Barlow Condensed';font-weight:800;font-size:30px;text-transform:
 /* cover */
 .cover{flex:1 1 0;display:flex;flex-direction:column;}
 .cv-mid{flex:1 1 0;display:flex;flex-direction:column;justify-content:center;gap:2.6cqw;}
-.cv-foot{flex:0 0 auto;border-top:.4cqw solid var(--linec);padding-top:3cqw;}
+.cv-foot{flex:0 0 auto;border-top:.4cqw solid var(--linec);padding-top:3cqw;display:flex;align-items:flex-end;justify-content:space-between;gap:4cqw;}
+.cv-foot-l{flex:1;}
 .cv-foot .site.big{font-family:'Barlow Condensed';font-weight:800;font-size:8cqw;color:var(--fg);text-transform:uppercase;line-height:.9;}
 .cv-foot .csub{font-weight:600;font-size:2.3cqw;color:var(--m);margin-top:.8cqw;}
+/* QR card (scannable on every scheme — always dark-on-white) */
+.cta-l{flex:1;}
+.qr{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:.7cqw;}
+.qrbox{width:13.5cqw;height:13.5cqw;background:#fff;border-radius:1.6cqw;padding:1cqw;box-shadow:0 1cqw 2.6cqw rgba(0,0,0,.2);}
+.qrbox svg{display:block;width:100%;height:100%;}
+.qrl{font-weight:800;font-size:1.5cqw;letter-spacing:.1em;color:var(--fg);white-space:nowrap;}
+.cover .qrbox{width:16cqw;height:16cqw;}
 @page{size:1080px 1350px;margin:0;}
 @media print{html,body{background:#fff !important;padding:0 !important;}h1,.ph2,.cap{display:none !important;}
  .group{display:block !important;gap:0 !important;}.stage{width:1080px !important;max-width:none !important;break-after:page;}
@@ -283,13 +296,31 @@ SHOWCASE = {
 
 if __name__ == "__main__":
     pile = {"imgs":THUMBS}
+    SITE_URL = QR.SITE
+    YC_COLLECTION = "toyota-yaris-cross-2020"   # collection handle
+    links = []   # qr_links rows to register with the backend
+
+    def site_qr(code, label="SCAN TO SHOP"):
+        links.append(QR.link(code, SITE_URL, 'site', label='Razoryn storefront', utm_campaign=code))
+        return qr_block(code, label)
+    def coll_qr(code, handle, label):
+        links.append(QR.link(code, QR.collection_url(handle), 'collection', label=label, utm_campaign=code))
+        return qr_block(code, label)
+
+    # Site-level promos -> website home; showcase -> collection page
     FILES = [
-      ("promo-website-exclusive.html","Website Exclusive · Buy Direct (save 7%)", render_website_exclusive(HERO)),
-      ("promo-same-day.html",         "Same-Day Dispatch · Order by 12pm", render_same_day(pile)),
-      ("promo-free-delivery.html",    "Free UK Delivery over £50",         render_free_delivery(pile)),
-      ("promo-showcase-yaris-cross.html","Model Showcase · Yaris Cross",   render_showcase(SHOWCASE)),
-      ("promo-fitment.html",          "Fitment Support · Quality Reassurance", render_fitment({})),
-      ("promo-brand-cover.html",      "Brand / Carousel Cover",            render_cover({})),
+      ("promo-website-exclusive.html","Website Exclusive · Buy Direct (save 7%)",
+         render_website_exclusive(HERO, qrhtml=site_qr("ig-website-exclusive"))),
+      ("promo-same-day.html",         "Same-Day Dispatch · Order by 12pm",
+         render_same_day(pile, qrhtml=site_qr("ig-same-day"))),
+      ("promo-free-delivery.html",    "Free UK Delivery over £50",
+         render_free_delivery(pile, qrhtml=site_qr("ig-free-delivery"))),
+      ("promo-showcase-yaris-cross.html","Model Showcase · Yaris Cross",
+         render_showcase(SHOWCASE, qrhtml=coll_qr("yaris-cross", YC_COLLECTION, "SCAN: ALL PARTS"))),
+      ("promo-fitment.html",          "Fitment Support · Quality Reassurance",
+         render_fitment({}, qrhtml=site_qr("ig-fitment"))),
+      ("promo-brand-cover.html",      "Brand / Carousel Cover",
+         render_cover({}, qrhtml=site_qr("ig-cover"))),
     ]
     for fn, heading, inner in FILES:
         write(fn, doc(heading, [(heading, inner)]))
@@ -297,4 +328,5 @@ if __name__ == "__main__":
     # combined review sheet (all promos x 3 schemes, one print job)
     write("razoryn-promos.html", doc("Razoryn e-Parts — Promo Pack",
           [(h, inner) for _, h, inner in FILES]))
-    print("built razoryn-promos.html  (", len(FILES), "promos x 3 schemes )")
+    json.dump(links, open(os.path.join(WORK,'data','qr-links-promos.json'),'w'), indent=2, ensure_ascii=False)
+    print("built razoryn-promos.html  (", len(FILES), "promos x 3 schemes ); qr-links-promos.json:", len(links))

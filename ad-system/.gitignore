@@ -1,1 +1,4 @@
-export/qa_*
+# Generated artifacts — rebuild with `node export_png.js`
+export/
+__pycache__/
+*.pyc
