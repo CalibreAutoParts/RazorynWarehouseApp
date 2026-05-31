@@ -14,8 +14,20 @@ Built from the design tokens in `razoryn-theme-v16-2`: **Barlow Condensed** (dis
 | `build_collection.py` | Canonical **listing** builder (one product per slide, front + back). |
 | `build_promos.py` | **Promotional ad** builder — 6 high-converting formats. |
 | `logo_red.png` / `logo_white.png` | Trimmed wordmark (red for light bg, white for Red/Navy). |
-| `data/03-yaris-cross.json` | Live Shopify data for the Yaris Cross collection. |
-| `razoryn-03-toyota-yaris-cross.html` | Listing file (18 products × 3 schemes, front/back). |
+| `data/NN-<slug>.json` | Live Shopify data per collection (normalised). |
+| `data/raw/NN-<slug>.json` | Verbatim GraphQL pull (provenance / re-gen without re-querying). |
+| `tools/normalize.py` | Converts a raw GraphQL pull into builder data format. |
+| `razoryn-NN-<slug>.html` | Listing file per collection (×3 schemes, front/back, per-product QR). |
+
+**Collections built (03–24):** Toyota Yaris Cross · Hyundai i20 / Kona SX2 / Tucson /
+Ioniq 5 / Ioniq / Bayon / Kona (2018-23) · Kia Sportage NX5 / Picanto / Niro SG2 /
+Niro (2018-22) / EV6 · Peugeot 208 / 2008 · Nissan Qashqai / X-Trail / Juke ·
+Vauxhall Combo / Astra / Crossland / Grandland. (01 C-HR, 02 Yaris were done earlier.)
+
+Rebuild every collection at once:
+```bash
+for f in data/[0-9]*-*.json; do python3 build_collection.py "$f"; done
+```
 | `promo-*.html` | One file per promo (each × 3 schemes). |
 | `razoryn-promos.html` | Combined review sheet — all 6 promos × 3 schemes in one print job. |
 
