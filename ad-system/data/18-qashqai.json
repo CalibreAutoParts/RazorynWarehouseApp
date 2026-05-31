@@ -1,0 +1,104 @@
+{
+  "title": "Nissan Qashqai J12 2021-2026",
+  "index": "18",
+  "slug": "qashqai",
+  "out": "ad-system/razoryn-18-qashqai.html",
+  "collection_handle": "nissan-qashqai-j12",
+  "products": [
+    {
+      "title": "Nissan Qashqai 2023-2026 Primed Bonnet Hood",
+      "finish": "Primed",
+      "position": "Front",
+      "secondary": null,
+      "part": "F5100-6URMA-D410",
+      "price": "232.49",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_890aba18-9005-44e4-9ee6-79ea4753c9af.jpg?v=1778418898"
+      ],
+      "sku": "F5100-6URMA-D410",
+      "handle": "nissan-qashqai-2023-2026-primed-bonnet-hood"
+    },
+    {
+      "title": "Nissan Qashqai 2023-2026 Primed Front Left Wing Fender",
+      "finish": "Primed",
+      "position": "Left Side",
+      "secondary": "Front",
+      "part": "F3101-6URMA-D410",
+      "price": "111.59",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_568e1b20-f596-4804-87a6-893038c8ebb2.jpg?v=1778418903"
+      ],
+      "sku": "F3101-6URMA-D410",
+      "handle": "nissan-qashqai-2023-2026-primed-front-left-wing-fender"
+    },
+    {
+      "title": "Nissan Qashqai 2023-2026 Primed Front Right Wing Fender",
+      "finish": "Primed",
+      "position": "Right Side",
+      "secondary": "Front",
+      "part": "F3100-6URMA-D410",
+      "price": "111.59",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_57f5a856-2579-4154-a87e-696a01c7956b.jpg?v=1778418908"
+      ],
+      "sku": "F3100-6URMA-D410",
+      "handle": "nissan-qashqai-2023-2026-primed-front-right-wing-fender"
+    },
+    {
+      "title": "NISSAN QASHQAI J12 2021-2026 FRONT LEFT WHEEL ARCH TRIM COVER FENDER FLARE",
+      "finish": null,
+      "position": "Left Side",
+      "secondary": "Front",
+      "part": "63811-6UA0A",
+      "price": "86.95",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_0f17c9db-199b-4ce2-952d-3dec95a72d2c.png?v=1778420131",
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_bf87ec7f-4905-45dc-b102-255982479783.png?v=1778420131"
+      ],
+      "sku": "63811-6UA0A",
+      "handle": "nissan-qashqai-j12-2021-2026-front-left-wheel-arch-trim-cover-fender"
+    },
+    {
+      "title": "NISSAN QASHQAI J12 2021-2026 FRONT RIGHT WHEEL ARCH TRIM COVER FENDER FLARE",
+      "finish": null,
+      "position": "Right Side",
+      "secondary": "Front",
+      "part": "63810-6UA0A",
+      "price": "83.23",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_4baafad0-55d8-42eb-bd43-4b9493d708fe.png?v=1778420139",
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_2f9d496d-fd6a-4214-b465-63afa1f08d59.png?v=1778420139"
+      ],
+      "sku": "63810-6UA0A",
+      "handle": "nissan-qashqai-j12-2021-2026-front-right-wheel-arch-trim-cover-fender"
+    },
+    {
+      "title": "NISSAN QASHQAI J12 2021-2026 REAR LEFT WHEEL ARCH TRIM COVER FENDER FLARE",
+      "finish": null,
+      "position": "Left Side",
+      "secondary": "Rear",
+      "part": "63829-6UA0A",
+      "price": "83.23",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_0102f86f-187e-424d-a945-a283f10a6449.png?v=1778420155",
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_43ae5414-ae8a-4fec-b8a6-fd412b1bb1ef.png?v=1778420155"
+      ],
+      "sku": "63829-6UA0A",
+      "handle": "nissan-qashqai-j12-2021-2026-rear-left-wheel-arch-trim-cover-fender"
+    },
+    {
+      "title": "NISSAN QASHQAI J12 2021-2026 REAR RIGHT WHEEL ARCH TRIM COVER FENDER FLARE",
+      "finish": null,
+      "position": "Right Side",
+      "secondary": "Rear",
+      "part": "63828-6UA0A",
+      "price": "83.23",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_dfdfc43f-b06f-4228-a783-ac689d8b326d.png?v=1778420146",
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_e1b49c56-d2be-4b84-86a7-7411d49dead1.png?v=1778420146"
+      ],
+      "sku": "63828-6UA0A",
+      "handle": "nissan-qashqai-j12-2021-2026-rear-right-wheel-arch-trim-cover-fender"
+    }
+  ]
+}

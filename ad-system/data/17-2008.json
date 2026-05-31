@@ -1,0 +1,61 @@
+{
+  "title": "Peugeot 2008 2020+",
+  "index": "17",
+  "slug": "2008",
+  "out": "ad-system/razoryn-17-2008.html",
+  "collection_handle": "peugeot-2008-2020",
+  "products": [
+    {
+      "title": "Peugeot 2008 2020-2026 Primed Front Left Door Shell",
+      "finish": "Primed",
+      "position": "Left Side",
+      "secondary": "Front",
+      "part": "9831047780",
+      "price": "232.49",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_f07ee2bd-34b1-47e6-b318-410b45ef5de4.jpg?v=1778418976"
+      ],
+      "sku": "9831047780",
+      "handle": "peugeot-2008-2020-2026-primed-front-left-door-shell"
+    },
+    {
+      "title": "Peugeot 2008 2020-2026 Primed Front Right Door Shell",
+      "finish": "Primed",
+      "position": "Right Side",
+      "secondary": "Front",
+      "part": "9831047380",
+      "price": "232.49",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_c27ee1dc-3275-409f-b702-e72fbd75511b.jpg?v=1778418981"
+      ],
+      "sku": "9831047380",
+      "handle": "peugeot-2008-2020-2026-primed-front-right-door-shell"
+    },
+    {
+      "title": "Peugeot 2008 2020-2026 Primed Rear Left Door Shell",
+      "finish": "Primed",
+      "position": "Left Side",
+      "secondary": "Rear",
+      "part": "9831048680",
+      "price": "232.49",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_63d919c1-232b-49b4-a586-2404760f6825.jpg?v=1778418986"
+      ],
+      "sku": "9831048680",
+      "handle": "peugeot-2008-2020-2026-primed-rear-left-door-shell"
+    },
+    {
+      "title": "Peugeot 2008 2020-2026 Primed Rear Right Door Shell",
+      "finish": "Primed",
+      "position": "Right Side",
+      "secondary": "Rear",
+      "part": "9831048080",
+      "price": "232.49",
+      "imgs": [
+        "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/57_cb9294e9-acbc-4254-a910-ebaee921794d.jpg?v=1778418991"
+      ],
+      "sku": "9831048080",
+      "handle": "peugeot-2008-2020-2026-primed-rear-right-door-shell"
+    }
+  ]
+}
