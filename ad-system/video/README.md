@@ -3,10 +3,14 @@
 Two short vertical (1080×1920) social videos, on-brand (Barlow Condensed + Inter,
 brand red/navy, white logo):
 
-- **PartsShowcase** — animated montage of parts (photo + name + price) with intro &
-  CTA. ~`intro + parts×2.6s + outro` (≈25s with 6 parts).
-- **SiteShowcase** — "shop the full range online": a stylised browser window of
-  `razoryn.co.uk` with product tiles popping in, ending on the URL + offers. ~14s.
+- **PartsShowcase** — snappy montage: each part (model + name + price) on a card, ~1.6s
+  each, with intro & CTA (≈23s for 12 parts).
+- **SiteShowcase** — quick & snappy (~9s): the address bar **types `razoryn.co.uk`**, the
+  homepage loads, then it **scrolls down through the product range** (live grid of parts),
+  ending on the URL + free-delivery offer.
+
+Both pull their parts from the collection data — run `python3 gen_parts.py` to refresh
+`src/parts.json` (one hero part per model, premium-first).
 
 ## Run
 ```bash
@@ -22,8 +26,8 @@ npm run render:site
 > Chromium (Remotion downloads it on first render).
 
 ## Customise
-- **Parts shown:** edit `PARTS` in `src/brand.ts` (image URL + name + price). Pull
-  fresh ones from `../data/*.json` (each product has `imgs`, a name and `price`).
+- **Parts shown:** `python3 gen_parts.py` regenerates `src/parts.json` from the
+  collections. Edit `CAP` (count) / selection logic there, or hand-edit `parts.json`.
 - **Colours/fonts/site URL:** `src/brand.ts`.
 - **Timing/size:** `src/Root.tsx` (durations, fps, 1080×1920).
 - **Real webpage footage:** drop a screen-recording or homepage screenshot into

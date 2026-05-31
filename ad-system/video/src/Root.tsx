@@ -5,9 +5,9 @@ import {SiteShowcase} from './SiteShowcase';
 import {PARTS} from './brand';
 
 const FPS = 30;
-const INTRO = 90;   // 3s
-const PER = 78;     // ~2.6s per part
-const OUTRO = 96;   // 3.2s
+const INTRO = 48;   // 1.6s
+const PER = 48;     // 1.6s per part — snappy montage
+const OUTRO = 66;   // 2.2s
 
 export const RemotionRoot: React.FC = () => {
   return (
@@ -24,7 +24,7 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="SiteShowcase"
         component={SiteShowcase}
-        durationInFrames={14 * FPS}
+        durationInFrames={9 * FPS}
         fps={FPS}
         width={1080}
         height={1920}

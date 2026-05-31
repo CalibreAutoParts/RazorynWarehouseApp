@@ -1,6 +1,6 @@
 import React from 'react';
 import {AbsoluteFill, Img, Series, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
-import {barlow, inter, NAVY, RED, MUT, SITE, Part} from './brand';
+import {barlow, inter, NAVY, RED, RED_DARK, MUT, SITE, Part} from './brand';
 
 const Logo: React.FC = () => (
   <Img src={staticFile('logo_white.png')} style={{position: 'absolute', top: 70, left: 70, height: 70}} />
@@ -36,9 +36,10 @@ const PartCard: React.FC<{part: Part}> = ({part}) => {
       <div style={{width: 860, height: 860, background: '#fff', borderRadius: 48, overflow: 'hidden', boxShadow: '0 40px 90px rgba(0,0,0,.45)', transform: `scale(${cardScale})`, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
         <Img src={part.img} style={{width: '100%', height: '100%', objectFit: 'contain', padding: 60, transform: `scale(${imgScale})`}} />
       </div>
-      <div style={{transform: `translateY(${slide}px)`, textAlign: 'center', marginTop: 56}}>
-        <div style={{fontFamily: barlow, fontWeight: 800, fontSize: 86, textTransform: 'uppercase', lineHeight: 0.95}}>{part.name}</div>
-        <div style={{display: 'inline-block', background: RED, color: '#fff', fontFamily: barlow, fontWeight: 800, fontSize: 78, padding: '10px 40px', borderRadius: 24, marginTop: 24}}>{part.price}</div>
+      <div style={{transform: `translateY(${slide}px)`, textAlign: 'center', marginTop: 50}}>
+        <div style={{fontFamily: inter, fontWeight: 800, fontSize: 32, letterSpacing: 4, color: RED_DARK, textTransform: 'uppercase'}}>{part.model}</div>
+        <div style={{fontFamily: barlow, fontWeight: 800, fontSize: 78, textTransform: 'uppercase', lineHeight: 0.95, marginTop: 6}}>{part.name}</div>
+        <div style={{display: 'inline-block', background: RED, color: '#fff', fontFamily: barlow, fontWeight: 800, fontSize: 76, padding: '8px 40px', borderRadius: 24, marginTop: 22}}>{part.price}</div>
       </div>
     </AbsoluteFill>
   );
