@@ -1,9 +1,16 @@
 import React from 'react';
 import {AbsoluteFill, Audio, Img, Sequence, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
 import {barlow, inter, NAVY, RED, INK, SITE, Part} from './brand';
+import {Captions, Cue} from './Captions';
 
 const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 const sfx = (n: string) => staticFile(`audio/${n}.wav`);
+
+const cues: Cue[] = [
+  {text: 'Order in *seconds*', start: 10, end: 84},
+  {text: 'Out before *12pm*', start: 90, end: 116},
+  {text: 'On your *doorstep* fast', start: 196, end: 246},
+];
 
 // ---- phone with the Razoryn order screen ----
 const Phone: React.FC<{part: Part; frame: number; fps: number}> = ({part, frame, fps}) => {
@@ -121,6 +128,8 @@ export const OrderStory: React.FC<{parts: Part[]}> = ({parts}) => {
           <InfoRow>Aftermarket · UK stock · Fitment support</InfoRow>
         </div>
       </AbsoluteFill>
+
+      <Captions cues={cues} bottom={200} />
     </AbsoluteFill>
   );
 };

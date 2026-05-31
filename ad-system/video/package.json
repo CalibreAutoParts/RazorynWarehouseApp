@@ -7,9 +7,12 @@
     "dev": "remotion studio",
     "render:order": "remotion render OrderStory out/order-story.mp4",
     "render:price": "remotion render PriceReveal out/price-reveal.mp4",
+    "render:trade": "remotion render TradeAccount out/trade-account.mp4",
+    "render:fitment": "remotion render FitmentSupport out/fitment-support.mp4",
+    "render:dispatch": "remotion render SameDayDispatch out/same-day-dispatch.mp4",
     "render:parts": "remotion render PartsShowcase out/parts-showcase.mp4",
     "render:site": "remotion render SiteShowcase out/site-showcase.mp4",
-    "render": "npm run render:order && npm run render:price && npm run render:parts && npm run render:site"
+    "render": "npm run render:order && npm run render:price && npm run render:trade && npm run render:fitment && npm run render:dispatch && npm run render:parts && npm run render:site"
   },
   "dependencies": {
     "@remotion/cli": "^4.0.0",

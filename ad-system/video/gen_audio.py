@@ -103,4 +103,12 @@ for i in range(fade):
     bed[i]*=i/fade; bed[total-1-i]*=i/fade
 save('beat.wav', [0.5*x for x in bed])
 
+# --- tick (clock) ---
+tk=[]
+n=int(SR*0.05)
+for i in range(n):
+    t=i/SR
+    tk.append(0.4*math.exp(-90*t)*math.sin(2*math.pi*2000*t) + 0.2*math.exp(-120*t)*random.uniform(-1,1))
+save('tick.wav', tk)
+
 print("audio written to public/audio/")

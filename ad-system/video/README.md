@@ -1,13 +1,18 @@
 # Razoryn e-Parts — Remotion video templates
 
-Four vertical (1080×1920) **sound-on** social videos, on-brand (Barlow Condensed + Inter,
-brand red/navy, white logo):
+Seven vertical (1080×1920) **sound-on, captioned** social videos, on-brand (Barlow
+Condensed + Inter, brand red/navy, white logo):
 
 - **OrderStory** (~13s) — story ad: order a part on the phone → **"ORDER PLACED ✓"** →
   the **doorbell rings** → camera **zooms out** to a Razoryn parcel at the door → cuts to
   **"ORDER FROM RAZORYN E-PARTS"** with all the contact/offer info.
 - **PriceReveal** (~10s) — punchy hook "Paying too much for car parts?" → part reveal →
-  **price slam** → CTA. High-retention.
+  **price slam** → CTA.
+- **TradeAccount** (~10s) — "Run a garage or bodyshop?" → trade benefits (pricing, priority
+  dispatch, account billing, support) → **"Apply for a trade account"**.
+- **FitmentSupport** (~10s) — "Will it fit your car?" → send your reg (number-plate + chat) →
+  **"✓ Confirmed before you buy"** → CTA.
+- **SameDayDispatch** (~9s) — clock ticks to **12:00** → **"DISPATCHED TODAY"** stamp → CTA.
 - **PartsShowcase** (~23s) — snappy montage: each part (model + name + price) on a card.
 - **SiteShowcase** (~11s) — address bar **types `razoryn.co.uk`**, the homepage loads, then
   **scrolls the "Shop by vehicle model" range** → URL + free-delivery CTA.
@@ -15,20 +20,26 @@ brand red/navy, white logo):
 Data is pulled from the collections:
 `python3 gen_parts.py` → `src/parts.json`, `python3 gen_models.py` → `src/models.json`.
 
+## Captions (muted-autoplay)
+`src/Captions.tsx` renders big bottom captions; each message ad passes a `cues` array
+(`{text, start, end}` in frames; wrap a word in `*asterisks*` to colour it red). Edit the
+`cues` at the top of each composition to retime/reword.
+
 ## Audio
 Royalty-free SFX + a light beat bed are **synthesized** (no licensing) into `public/audio/`
-by `python3 gen_audio.py`: `doorbell, tap, pop, whoosh, chime, beat`. Each composition wires
-them via `<Audio>`. **To use your own music**, drop a file in `public/audio/` and swap the
-`beat.wav` reference (or add another `<Audio>`), e.g. in `OrderStory.tsx`.
+by `python3 gen_audio.py`: `doorbell, tap, pop, whoosh, chime, tick, beat`. Each composition
+wires them via `<Audio>`. **To use your own music**, drop a file in `public/audio/` and swap
+the `beat.wav` reference (or add another `<Audio>`).
 
 ## Run
 ```bash
 cd ad-system/video
 npm install
-npm run dev                 # Remotion Studio — preview/scrub all 4 (with sound)
+npm run dev                 # Remotion Studio — preview/scrub all 7 (with sound)
 npm run render              # render every composition to out/*.mp4
 # individually:
-npm run render:order  ·  render:price  ·  render:parts  ·  render:site
+npm run render:order · render:price · render:trade · render:fitment
+npm run render:dispatch · render:parts · render:site
 ```
 > Needs internet at render time (product photos load from the Shopify CDN) and
 > Chromium (Remotion downloads it on first render). Output is MP4 (H.264 + AAC audio).

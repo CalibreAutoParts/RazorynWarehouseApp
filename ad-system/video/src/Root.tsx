@@ -4,6 +4,9 @@ import {PartsShowcase} from './PartsShowcase';
 import {SiteShowcase} from './SiteShowcase';
 import {OrderStory} from './OrderStory';
 import {PriceReveal} from './PriceReveal';
+import {TradeAccount} from './TradeAccount';
+import {FitmentSupport} from './FitmentSupport';
+import {SameDayDispatch} from './SameDayDispatch';
 import {PARTS, MODELS} from './brand';
 
 const FPS = 30;
@@ -50,6 +53,9 @@ export const RemotionRoot: React.FC = () => {
         height={1920}
         defaultProps={{models: MODELS}}
       />
+      <Composition id="TradeAccount" component={TradeAccount} durationInFrames={10 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="FitmentSupport" component={FitmentSupport} durationInFrames={10 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="SameDayDispatch" component={SameDayDispatch} durationInFrames={9 * FPS} fps={FPS} width={1080} height={1920} />
     </>
   );
 };

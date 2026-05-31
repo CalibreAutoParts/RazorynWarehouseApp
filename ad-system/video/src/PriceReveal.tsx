@@ -1,9 +1,16 @@
 import React from 'react';
 import {AbsoluteFill, Audio, Img, Sequence, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
 import {barlow, inter, NAVY, RED, INK, SITE, Part} from './brand';
+import {Captions, Cue} from './Captions';
 
 const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 const sfx = (n: string) => staticFile(`audio/${n}.wav`);
+
+const cues: Cue[] = [
+  {text: '*Stop* overpaying', start: 6, end: 56},
+  {text: 'Brand-new *aftermarket*', start: 64, end: 146},
+  {text: '*Website* exclusive price', start: 152, end: 222},
+];
 
 export const PriceReveal: React.FC<{parts: Part[]}> = ({parts}) => {
   const frame = useCurrentFrame();
@@ -61,6 +68,8 @@ export const PriceReveal: React.FC<{parts: Part[]}> = ({parts}) => {
         <div style={{fontFamily: barlow, fontWeight: 800, fontSize: 120, color: '#fff', marginTop: 20}}>{SITE}</div>
         <div style={{fontFamily: inter, fontWeight: 700, fontSize: 36, color: '#fff', background: RED, display: 'inline-block', padding: '14px 44px', borderRadius: 100, marginTop: 18}}>Free UK delivery over £50</div>
       </AbsoluteFill>
+
+      <Captions cues={cues} bottom={210} />
     </AbsoluteFill>
   );
 };
