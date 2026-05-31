@@ -92,44 +92,57 @@ function titleCase(s) {
   return String(s || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
 }
 
-// ── Main builder ────────────────────────────────────────────────────────────
-// product: { title, brand (= vehicle make), model, part_number, sku }
-// brandCfg: lib/brand.js object (name, collection area wording optional)
-function buildSeo(product = {}, brandCfg = {}) {
-  const sourceText = [product.title, product.brand, product.model].filter(Boolean).join(' ');
-  const { partType, categoryQuery } = detectPartType(product.title || sourceText);
-  const positions = detectPositions(product.title || sourceText);
-  const years = detectYears(product.title || sourceText);
+// Polish a raw product title into a clean, human-readable page title:
+//   - strip the part number if it's embedded in the title (kept for the meta)
+//   - normalise whitespace and separators
+//   - collapse consecutive duplicate words (e.g. "Bumper Bumper")
+//   - trim stray punctuation/dashes from the ends
+// Original casing is preserved — the title already says what the item is, we
+// just tidy it. partNo is removed (case-insensitive) so titles don't end with
+// a code like "64900-Q0400".
+function polishTitle(rawTitle, partNo) {
+  let t = String(rawTitle || '');
+  if (partNo) {
+    const esc = String(partNo).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (esc) t = t.replace(new RegExp('\\s*\\b' + esc + '\\b\\s*', 'gi'), ' ');
+  }
+  t = t.replace(/[\s_]+/g, ' ').trim();
+  t = t.replace(/\s*[-–|,/]\s*$/g, '').replace(/^\s*[-–|,/]\s*/g, '').trim();
+  // Collapse immediate duplicate words (case-insensitive): "Hood Hood" -> "Hood"
+  t = t.replace(/\b(\w+)(\s+\1\b)+/gi, '$1');
+  return t.trim();
+}
 
-  const make = (product.brand || '').trim();
-  const model = (product.model || '').trim();
+// ── Main builder ────────────────────────────────────────────────────────────
+// product: { title, brand, model, part_number, sku }
+// brandCfg: lib/brand.js object (name, fullName, collectionArea optional)
+//
+// The page title and URL handle are derived from the product's OWN title text
+// (which already states make/model/year/part) — not from the brand/model
+// columns, which on this catalogue hold the store brand rather than the vehicle
+// make. The business name appears in the meta description only, never the title.
+function buildSeo(product = {}, brandCfg = {}) {
+  const { partType, categoryQuery } = detectPartType(product.title || '');
+  const positions = detectPositions(product.title || '');
+  const years = detectYears(product.title || '');
+
   const partNo = (product.part_number || '').trim();
   const bizName = brandCfg.fullName || brandCfg.name || 'our store';
 
-  // Human label for the part, e.g. "Front Right Fog Light". Drop any position
-  // word already baked into the part type (e.g. partType "Front Bumper" should
-  // not become "Front Front Bumper").
-  const ptLower = (partType || '').toLowerCase();
-  const labelPositions = positions.filter(p => !ptLower.includes(p.toLowerCase()));
-  const partLabel = [...labelPositions, partType].filter(Boolean).join(' ') || 'Part';
+  // ── Page title: a clean, polished version of the item's own title (≤70).
+  //    No business-name suffix — the title should say what the item is.
+  let pageTitle = polishTitle(product.title, partNo);
+  if (!pageTitle) pageTitle = String(product.sku || '').trim();
+  if (pageTitle.length > 70) pageTitle = pageTitle.slice(0, 70).replace(/\s+\S*$/, '').trim();
 
-  // Vehicle label, e.g. "KIA Niro 2016-2019"
-  const vehicle = [make ? make.toUpperCase() : '', titleCase(model), years]
-    .filter(Boolean).join(' ').trim();
+  // ── Handle: the same as the page title, as a clean URL slug.
+  let handle = slugify(pageTitle);
+  if (!handle) handle = slugify(product.sku || '');
 
-  // ── Page title (≤70). "{Vehicle} {Part Label} | {Brand}" trimmed to fit.
-  let pageTitle = [vehicle, partLabel].filter(Boolean).join(' ').trim() || (product.title || '').trim();
-  const suffix = ` | ${brandCfg.name || bizName}`;
-  if ((pageTitle + suffix).length <= 70) pageTitle = pageTitle + suffix;
-  else if (pageTitle.length > 70) pageTitle = pageTitle.slice(0, 70).trim();
-
-  // ── Meta description (≤160). One consistent template for every listing.
+  // ── Meta description (≤160). Consistent template; business name lives here.
   const area = brandCfg.collectionArea || 'Watford, London & Hertfordshire';
-  const partSentence = vehicle
-    ? `${vehicle} ${partLabel}`
-    : (product.title || partLabel);
   const pieces = [
-    `${partSentence}${partNo ? ` (Part No. ${partNo})` : ''}.`,
+    `${pageTitle}${partNo ? ` (Part No. ${partNo})` : ''}.`,
     `Quality aftermarket parts from ${bizName}.`,
     `UK delivery & collection in ${area}.`,
   ];
@@ -141,16 +154,6 @@ function buildSeo(product = {}, brandCfg = {}) {
     if (metaDescription.length > 160) metaDescription = metaDescription.slice(0, 157).trim() + '…';
   }
 
-  // ── Handle: clean slug, no part numbers / no keyword stuffing.
-  // make-model-years-position-parttype (whichever parts exist).
-  const handleParts = [
-    make, model, years,
-    ...labelPositions.map(p => p.toLowerCase()),
-    partType,
-  ].filter(Boolean);
-  let handle = slugify(handleParts.join(' '));
-  if (!handle) handle = slugify(product.title || product.sku || '');
-
   return {
     pageTitle,
     metaDescription,
@@ -158,7 +161,6 @@ function buildSeo(product = {}, brandCfg = {}) {
     partType,
     positions,
     years,
-    vehicle,
     categoryQuery,
   };
 }
