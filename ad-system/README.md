@@ -21,7 +21,8 @@ Built from the design tokens in `razoryn-theme-v16-2`: **Barlow Condensed** (dis
 
 ## Promo formats (`build_promos.py`)
 
-1. **Beat eBay / Buy Direct** — price-led hero: "SAVE 7% BUY DIRECT", eBay vs website price compare.
+1. **Website Exclusive / Buy Direct** — price-led hero: "BUY DIRECT & SAVE 7%", framed as your own
+   eBay store vs ordering direct (soft, no jabs at the platform).
 2. **Same-Day Dispatch** — "Order by 12 noon, dispatched today".
 3. **Free UK Delivery** — "Free UK delivery over £50".
 4. **Model Showcase** — "All parts for your [MODEL]" + 6-part price grid.

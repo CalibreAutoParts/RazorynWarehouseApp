@@ -54,20 +54,19 @@ def photocard(img, alt, cls="hero"):
     return f'<div class="{cls}"><img loading="lazy" src="{img}" alt="{H.escape(alt)}"></div>'
 
 # ---- promo renderers (return inner HTML of one .post) ----------------------
-def render_beat_ebay(P):
+def render_website_exclusive(P):
     eb = money(ebay(P['price'])); web = money(P['price'])
-    save = money(round(ebay(P['price'])-float(P['price']),2))
     return (head()
       + '<div class="pwrap center">'
-      + '<div class="eyebrow2">WHY PAY EBAY PRICES?</div>'
-      + '<h2 class="hl">SAVE 7%<br><span class="hl-accent">BUY DIRECT</span></h2>'
-      + '<div class="subh">Identical aftermarket part. Same-day dispatch. Lower price — only at RAZORYN.CO.UK</div>'
+      + '<div class="eyebrow2">WEBSITE EXCLUSIVE PRICE</div>'
+      + '<h2 class="hl">BUY DIRECT<br><span class="hl-accent">&amp; SAVE 7%</span></h2>'
+      + '<div class="subh">The same aftermarket part for less when you order direct from RAZORYN.CO.UK — with same-day dispatch.</div>'
       + photocard(P['img'], P['title'], 'hero')
       + f'<div class="partline">{H.escape(P["title"].upper())}</div>'
       + '<div class="compare">'
-      + f'<div class="cmpcell ebay"><div class="cl">ON EBAY</div><div class="cv strike">{eb}</div></div>'
-      + f'<div class="cmparrow">{ic("bolt","ic")}</div>'
-      + f'<div class="cmpcell direct"><div class="cl">DIRECT PRICE</div><div class="cv">{web}</div><div class="cnote">save {save}</div></div>'
+      + f'<div class="cmpcell ebay"><div class="cl">OUR EBAY STORE</div><div class="cv">{eb}</div></div>'
+      + '<div class="cmparrow"><span class="vs">save<br>7%</span></div>'
+      + f'<div class="cmpcell direct"><div class="cl">DIRECT ONLINE</div><div class="cv">{web}</div><div class="cnote">our best price</div></div>'
       + '</div></div>' + ctabar())
 
 def render_same_day(P):
@@ -180,8 +179,9 @@ h1{font-family:'Barlow Condensed';font-weight:800;font-size:30px;text-transform:
 .cmpcell .cv{font-family:'Barlow Condensed';font-weight:800;font-size:9.5cqw;line-height:.9;margin-top:.6cqw;}
 .cmpcell .cv.strike{text-decoration:line-through;text-decoration-thickness:.4cqw;opacity:.6;}
 .cmpcell .cnote{font-weight:700;font-size:2.1cqw;margin-top:.6cqw;letter-spacing:.04em;}
-.cmparrow{display:flex;align-items:center;color:var(--accent);}
-.cmparrow .ic{width:5.5cqw;height:5.5cqw;}
+.cmparrow{display:flex;align-items:center;justify-content:center;}
+.cmparrow .vs{display:flex;flex-direction:column;align-items:center;justify-content:center;width:9.5cqw;height:9.5cqw;border-radius:50%;background:var(--accent);color:#fff;font-family:'Barlow Condensed';font-weight:800;font-size:2.7cqw;line-height:.92;text-transform:uppercase;}
+.post.s-red .cmparrow .vs{background:#fff;color:var(--red);}
 /* big icon promos */
 .bigicon{display:flex;align-items:center;justify-content:center;width:20cqw;height:20cqw;border-radius:50%;background:var(--soft);color:var(--accent);margin-bottom:1cqw;}
 .post.s-red .bigicon{background:rgba(255,255,255,.14);color:#fff;}
@@ -279,7 +279,7 @@ SHOWCASE = {
 if __name__ == "__main__":
     pile = {"imgs":THUMBS}
     FILES = [
-      ("promo-beat-ebay.html",        "Beat eBay · Buy Direct (save 7%)", render_beat_ebay(HERO)),
+      ("promo-website-exclusive.html","Website Exclusive · Buy Direct (save 7%)", render_website_exclusive(HERO)),
       ("promo-same-day.html",         "Same-Day Dispatch · Order by 12pm", render_same_day(pile)),
       ("promo-free-delivery.html",    "Free UK Delivery over £50",         render_free_delivery(pile)),
       ("promo-showcase-yaris-cross.html","Model Showcase · Yaris Cross",   render_showcase(SHOWCASE)),
