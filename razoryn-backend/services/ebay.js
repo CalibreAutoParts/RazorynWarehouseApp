@@ -1013,15 +1013,28 @@ let _mktToken = null, _mktExpiresAt = 0;
 async function getMarketingToken() {
   if (_mktToken && Date.now() < _mktExpiresAt - 60_000) return _mktToken;
   const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
-  const r = await axios.post(
-    `${BASE}/identity/v1/oauth2/token`,
-    new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: REFRESH_TOKEN,
-      scope: 'https://api.ebay.com/oauth/api_scope/sell.marketing',
-    }),
-    { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 }
-  );
+  let r;
+  try {
+    r = await axios.post(
+      `${BASE}/identity/v1/oauth2/token`,
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: REFRESH_TOKEN,
+        scope: 'https://api.ebay.com/oauth/api_scope/sell.marketing',
+      }),
+      { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 }
+    );
+  } catch (e) {
+    // The token endpoint reports OAuth errors as { error, error_description } —
+    // NOT the errors[] array. The most common one here is invalid_scope: the
+    // stored eBay refresh token was never consented for sell.marketing.
+    const b = e.response?.data || {};
+    const code = b.error || `HTTP ${e.response?.status || '?'}`;
+    if (code === 'invalid_scope' || /scope/i.test(b.error_description || '')) {
+      throw new Error("eBay Promoted Listings needs the 'sell.marketing' permission, which this account's eBay connection hasn't granted. Re-authorise the eBay app with the Marketing scope (regenerate the refresh token), then try again. [" + code + ']');
+    }
+    throw new Error('eBay marketing token failed [' + code + ']: ' + (b.error_description || e.message));
+  }
   _mktToken = r.data.access_token;
   _mktExpiresAt = Date.now() + (r.data.expires_in * 1000);
   return _mktToken;
@@ -1031,6 +1044,9 @@ async function getMarketingToken() {
 // pulling out eBay's structured error array (errorId / message / longMessage /
 // parameters) so callers surface the real reason instead of "status code 400".
 function ebayRestError(e, label) {
+  // If it's not an HTTP-response error (e.g. getMarketingToken already threw a
+  // clear, human-readable scope message), pass it through unchanged.
+  if (!e.response) return e instanceof Error ? e : new Error(`${label}: ${e}`);
   const data = e.response?.data;
   const errs = data?.errors || data?.warnings;
   if (Array.isArray(errs) && errs.length) {
