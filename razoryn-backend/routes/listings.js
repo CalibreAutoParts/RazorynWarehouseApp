@@ -221,6 +221,181 @@ router.get('/link-status', requireAdmin, async (req, res) => {
   res.json({ summary, products, orphanMirrors });
 });
 
+// Normalise a part number / code for comparison: uppercase, alphanumerics only,
+// so "92202-G5000", "92202 G5000" and "92202g5000" all compare equal.
+function normCode(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+function pushTo(map, key, val) { if (!map.has(key)) map.set(key, []); map.get(key).push(val); }
+
+// ──────────────────────────────────────────────────────────────────────────
+// GET /api/listings/integrity — read-only data-integrity report (instant).
+// Surfaces:
+//   1. mirror_links where one Shopify product is linked to >1 eBay item
+//   2. mirror_links where one eBay item is linked to >1 Shopify product
+//      (the PK should prevent this, but legacy DBs are checked defensively)
+//   3. multiple warehouse product rows pointing at the SAME Shopify product
+//   4. the same eBay listing id appearing on multiple warehouse products
+//   5. duplicate listings sharing the same part number (normalised)
+//   6. a product's part number appearing in ANOTHER product's title
+// Descriptions aren't stored locally, so part-numbers-in-descriptions is a
+// separate, opt-in scan (POST /integrity/scan-descriptions).
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/integrity', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
+  const { rows: products } = await query(`
+    SELECT id, sku, title, part_number, shopify_product_id,
+           ebay_listing_id_em, ebay_listing_id_cl
+    FROM products WHERE active = true`);
+  const { rows: links } = await query(`
+    SELECT ebay_item_id, shopify_product_id::text AS shopify_product_id,
+           store_code, last_synced_sku, last_synced_title
+    FROM mirror_links`);
+
+  // 1. one Shopify product → many eBay items (in mirror_links)
+  const byShopify = new Map();
+  for (const l of links) if (l.shopify_product_id) pushTo(byShopify, l.shopify_product_id, l);
+  const shopifyLinkedToManyEbay = [...byShopify.entries()]
+    .filter(([, ls]) => new Set(ls.map(x => x.ebay_item_id)).size > 1)
+    .map(([spid, ls]) => ({
+      shopifyProductId: spid,
+      ebayItems: ls.map(x => ({ ebayItemId: x.ebay_item_id, storeCode: x.store_code, sku: x.last_synced_sku, title: x.last_synced_title })),
+    }));
+
+  // 2. one eBay item → many Shopify products (shouldn't happen; defensive)
+  const byEbay = new Map();
+  for (const l of links) if (l.ebay_item_id) pushTo(byEbay, l.ebay_item_id, l);
+  const ebayLinkedToManyShopify = [...byEbay.entries()]
+    .filter(([, ls]) => new Set(ls.map(x => x.shopify_product_id)).size > 1)
+    .map(([eid, ls]) => ({ ebayItemId: eid, shopifyProductIds: [...new Set(ls.map(x => x.shopify_product_id))] }));
+
+  // 3. multiple warehouse rows → same Shopify product
+  const prodByShopify = new Map();
+  for (const p of products) if (p.shopify_product_id) pushTo(prodByShopify, String(p.shopify_product_id), p);
+  const productsSharingShopifyId = [...prodByShopify.entries()]
+    .filter(([, ps]) => ps.length > 1)
+    .map(([spid, ps]) => ({ shopifyProductId: spid, products: ps.map(x => ({ id: x.id, sku: x.sku, title: x.title })) }));
+
+  // 4. same eBay listing id on multiple warehouse products
+  const prodByEbay = new Map();
+  for (const p of products) for (const id of [p.ebay_listing_id_em, p.ebay_listing_id_cl]) if (id) pushTo(prodByEbay, String(id), p);
+  const productsSharingEbayId = [...prodByEbay.entries()]
+    .filter(([, ps]) => new Set(ps.map(x => x.id)).size > 1)
+    .map(([eid, ps]) => ({ ebayListingId: eid, products: ps.map(x => ({ id: x.id, sku: x.sku, title: x.title })) }));
+
+  // 5. duplicate part numbers (normalised; ignore very short / empty codes)
+  const byPN = new Map();
+  for (const p of products) {
+    const pn = normCode(p.part_number);
+    if (pn.length >= 4) pushTo(byPN, pn, p);
+  }
+  const duplicatePartNumbers = [...byPN.entries()]
+    .filter(([, ps]) => ps.length > 1)
+    .map(([pn, ps]) => ({ partNumber: ps[0].part_number, normalised: pn, count: ps.length, products: ps.map(x => ({ id: x.id, sku: x.sku, title: x.title })) }))
+    .sort((a, b) => b.count - a.count);
+
+  // 6. a product's part number found inside another product's title
+  const needles = products
+    .map(p => ({ p, pn: normCode(p.part_number) }))
+    .filter(x => x.pn.length >= 5);
+  const titleNorms = products.map(p => ({ p, t: normCode(p.title) }));
+  const partNumberInOtherTitle = [];
+  for (const { p, pn } of needles) {
+    for (const { p: other, t } of titleNorms) {
+      if (other.id === p.id) continue;
+      if (normCode(other.part_number) === pn) continue; // already caught as a PN dupe
+      if (t.includes(pn)) {
+        partNumberInOtherTitle.push({
+          partNumber: p.part_number,
+          ofProduct: { id: p.id, sku: p.sku, title: p.title },
+          foundInProduct: { id: other.id, sku: other.sku, title: other.title },
+        });
+      }
+    }
+  }
+
+  res.json({
+    counts: {
+      shopifyLinkedToManyEbay: shopifyLinkedToManyEbay.length,
+      ebayLinkedToManyShopify: ebayLinkedToManyShopify.length,
+      productsSharingShopifyId: productsSharingShopifyId.length,
+      productsSharingEbayId: productsSharingEbayId.length,
+      duplicatePartNumbers: duplicatePartNumbers.length,
+      partNumberInOtherTitle: partNumberInOtherTitle.length,
+    },
+    shopifyLinkedToManyEbay,
+    ebayLinkedToManyShopify,
+    productsSharingShopifyId,
+    productsSharingEbayId,
+    duplicatePartNumbers: duplicatePartNumbers.slice(0, 300),
+    partNumberInOtherTitle: partNumberInOtherTitle.slice(0, 300),
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// POST /api/listings/integrity/scan-descriptions { offset, batchSize, includeEbay }
+// Opt-in, paginated scan for part numbers embedded in Shopify (and optionally
+// eBay) listing DESCRIPTIONS — which aren't stored locally, so each page is
+// fetched live. The frontend loops, advancing `offset`, so no single request is
+// long-running or risks the eBay GetItem quota in one shot.
+//
+// For each product in the page we fetch its description and check whether ANY
+// OTHER active product's part number appears in it — a strong duplicate signal
+// when the part number isn't in that product's own part_number field.
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/integrity/scan-descriptions', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
+  const offset = Math.max(0, parseInt(req.body?.offset) || 0);
+  const batchSize = Math.min(40, Math.max(5, parseInt(req.body?.batchSize) || 20));
+  const includeEbay = !!req.body?.includeEbay;
+  const shopify = require('../services/shopify');
+
+  // Needles: every meaningful part number across the catalogue.
+  const { rows: all } = await query(`
+    SELECT id, sku, title, part_number FROM products
+    WHERE active = true AND part_number IS NOT NULL AND part_number <> ''`);
+  const needles = all.map(p => ({ id: p.id, sku: p.sku, title: p.title, pn: p.part_number, n: normCode(p.part_number) }))
+    .filter(x => x.n.length >= 5);
+
+  // The page of products whose descriptions we fetch this call. Scan eBay-linked
+  // products when includeEbay, else Shopify-linked products.
+  const pageSql = includeEbay
+    ? `SELECT p.id, p.sku, p.title, ml.ebay_item_id, ml.store_code
+         FROM products p JOIN mirror_links ml ON ml.shopify_product_id::text = p.shopify_product_id
+        WHERE p.active = true ORDER BY p.id LIMIT $1 OFFSET $2`
+    : `SELECT id, sku, title, shopify_product_id
+         FROM products WHERE active = true AND shopify_product_id IS NOT NULL
+        ORDER BY id LIMIT $1 OFFSET $2`;
+  const { rows: page } = await query(pageSql, [batchSize, offset]);
+  const countSql = includeEbay
+    ? `SELECT COUNT(*)::int AS n FROM products p JOIN mirror_links ml ON ml.shopify_product_id::text = p.shopify_product_id WHERE p.active = true`
+    : `SELECT COUNT(*)::int AS n FROM products WHERE active = true AND shopify_product_id IS NOT NULL`;
+  const total = (await query(countSql)).rows[0].n;
+
+  const matches = [];
+  for (const prod of page) {
+    let desc = '';
+    try {
+      desc = includeEbay
+        ? await ebay.getItemDescription(prod.ebay_item_id, prod.store_code)
+        : (await shopify.getShopifyProductFull(prod.shopify_product_id)).description;
+    } catch (e) { continue; }
+    const dn = normCode(desc);
+    if (!dn) continue;
+    for (const ndl of needles) {
+      if (ndl.id === prod.id) continue;             // a product's own PN in its own desc is normal
+      if (dn.includes(ndl.n)) {
+        matches.push({
+          source: includeEbay ? 'ebay' : 'shopify',
+          foundInProduct: { id: prod.id, sku: prod.sku, title: prod.title },
+          partNumber: ndl.pn,
+          ofProduct: { id: ndl.id, sku: ndl.sku, title: ndl.title },
+        });
+      }
+    }
+  }
+
+  res.json({ matches, scanned: page.length, offset, nextOffset: offset + page.length, total, done: offset + page.length >= total });
+});
+
 // POST /api/listings/link-status/link
 // Creates a mirror_links row. When possible we ALSO fetch the live eBay
 // listing to populate the store_code AND immediately update the warehouse

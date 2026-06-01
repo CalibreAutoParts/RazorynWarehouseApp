@@ -356,6 +356,21 @@ async function getQuantityTradingAPI(itemId, storeArg) {
   return Math.max(0, qty - sold);
 }
 
+// Fetch a single eBay listing's HTML description (Trading API GetItem). Used by
+// the duplicate-listing scan to look for part numbers embedded in descriptions.
+// Best-effort: returns '' on any failure so a scan over many items keeps going.
+async function getItemDescription(itemId, storeArg) {
+  if (!isConfigured(storeArg) || !itemId) return '';
+  try {
+    const xml = await tradingCall('GetItem',
+      `<ItemID>${escapeXml(String(itemId))}</ItemID><DetailLevel>ItemReturnDescription</DetailLevel>`, storeArg);
+    if (xml.includes('<Ack>Failure</Ack>')) return '';
+    return decodeEntities(extractOne(xml, 'Description') || '');
+  } catch (e) {
+    return '';
+  }
+}
+
 // ---------- Trading API (XML) — needed for GetMyeBaySelling ----------
 // The newer Sell APIs only return listings migrated to the inventory model,
 // which most legacy listings aren't. Trading API works for everything.
@@ -1483,6 +1498,7 @@ module.exports = {
   addItem,
   getStoreCategories,
   promoteListing,
+  getItemDescription,
   getCategorySpecifics,
   getSuggestedCategories,
   getBusinessPolicies,

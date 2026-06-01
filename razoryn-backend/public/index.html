@@ -7942,6 +7942,7 @@ function renderLinkStatus() {
           <button class="btn btn-outline" onclick="pullEbayStock()" title="Read live quantities from eBay for every linked product and update the warehouse to match. Use this if the app shows 0 stock but eBay actually has stock.">📦 Pull eBay stock</button>
           <button class="btn btn-outline" onclick="testEbayConnection()" title="Test if eBay tokens still work — surfaces the actual error so you can see if a token has expired or has wrong scopes">🩺 Test eBay connection</button>
           <button class="btn btn-outline" onclick="cleanupDisabledStoreLinks()" title="Delete mirror_links rows tied to disabled stores. Use after temporarily disabling a store via the EBAY_STORE_DISABLED env var.">🗑 Clean stale links</button>
+          <button class="btn btn-outline" onclick="openDataIntegrity()" title="Find duplicate links (one Shopify product linked to several eBay items, etc.) and duplicate listings sharing the same part number. Read-only.">🧮 Data integrity</button>
           <input id="links-search" placeholder="Search by SKU, title or part #…" oninput="debouncedLinkSearch(this.value)" value="${escapeAttr(State.linkSearch || '')}" style="flex:1;min-width:220px">
         </div>
       </div>
@@ -8761,6 +8762,109 @@ async function resolveLegacyLinks() {
       }},
     ],
   });
+}
+
+// ── Data integrity diagnostics ──────────────────────────────────────────────
+let _diScanCancel = false;
+function openDataIntegrity() {
+  modal({
+    title: '🧮 Data integrity',
+    body: `
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:10px">Finds duplicate links and duplicate listings. Read-only — nothing is changed.</div>
+      <div style="margin-bottom:8px"><button class="btn btn-primary btn-sm" onclick="runIntegrityCheck()">Run link &amp; part-number check</button></div>
+      <div id="di-report"></div>
+      <hr style="margin:16px 0;border:none;border-top:1px solid var(--line)">
+      <div style="font-weight:600;font-size:13px;margin-bottom:4px">Scan descriptions for embedded part numbers</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:8px">Fetches each listing's description live and flags any that contain <em>another</em> product's part number — a strong duplicate signal. Shopify by default; eBay uses the per-item API (slower, quota-limited). Results may include legitimate fitment/cross-reference mentions, so review before acting.</div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:8px"><input type="checkbox" id="di-include-ebay"> Scan eBay descriptions instead of Shopify</label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-outline btn-sm" id="di-scan-btn" onclick="runDescriptionScan()">Start description scan</button>
+        <button class="btn btn-ghost btn-sm" onclick="_diScanCancel=true">Stop</button>
+        <span id="di-scan-progress" style="font-size:12px;color:var(--ink-soft)"></span>
+      </div>
+      <div id="di-scan-report" style="margin-top:10px"></div>
+    `,
+    actions: [{ label: 'Close', onClick: () => { _diScanCancel = true; closeModal(); } }],
+  });
+}
+
+function diSection(title, count, innerHtml) {
+  const ok = count === 0;
+  return `<details ${ok ? '' : 'open'} style="margin-bottom:8px;border:1px solid var(--line);border-radius:8px;padding:8px 10px">
+    <summary style="cursor:pointer;font-weight:600;font-size:13px;color:${ok ? 'var(--ink-soft)' : 'var(--ink)'}">
+      ${ok ? '✓' : '⚠'} ${escapeHtml(title)} <span style="color:${ok ? 'var(--green)' : 'var(--red)'}">(${count})</span>
+    </summary>
+    ${ok ? '<div style="font-size:12px;color:var(--ink-soft);padding:6px 0">None found.</div>' : '<div style="padding:6px 0">' + innerHtml + '</div>'}
+  </details>`;
+}
+function diProds(list) {
+  return list.map(p => `<div style="font-size:12px"><span style="font-family:ui-monospace,monospace">${escapeHtml(p.sku || '—')}</span> · ${escapeHtml(p.title || '')}</div>`).join('');
+}
+
+function renderIntegrityReport(r) {
+  const c = r.counts;
+  let html = '';
+  html += diSection('Shopify product linked to multiple eBay items', c.shopifyLinkedToManyEbay,
+    r.shopifyLinkedToManyEbay.map(x => `<div style="margin-bottom:6px;padding:6px;background:var(--bg-soft);border-radius:6px">
+      <div style="font-size:11px;color:var(--ink-soft)">Shopify ${escapeHtml(x.shopifyProductId)}</div>
+      ${x.ebayItems.map(e => `<div style="font-size:12px">→ eBay <span style="font-family:ui-monospace,monospace">${escapeHtml(e.ebayItemId)}</span>${e.storeCode ? ' ['+escapeHtml(e.storeCode)+']' : ''} · ${escapeHtml(e.title || e.sku || '')}</div>`).join('')}
+    </div>`).join(''));
+  html += diSection('eBay item linked to multiple Shopify products', c.ebayLinkedToManyShopify,
+    r.ebayLinkedToManyShopify.map(x => `<div style="font-size:12px">eBay <span style="font-family:ui-monospace,monospace">${escapeHtml(x.ebayItemId)}</span> → ${x.shopifyProductIds.map(escapeHtml).join(', ')}</div>`).join(''));
+  html += diSection('Multiple warehouse products on the same Shopify product', c.productsSharingShopifyId,
+    r.productsSharingShopifyId.map(x => `<div style="margin-bottom:6px;padding:6px;background:var(--bg-soft);border-radius:6px"><div style="font-size:11px;color:var(--ink-soft)">Shopify ${escapeHtml(x.shopifyProductId)}</div>${diProds(x.products)}</div>`).join(''));
+  html += diSection('Same eBay listing id on multiple warehouse products', c.productsSharingEbayId,
+    r.productsSharingEbayId.map(x => `<div style="margin-bottom:6px;padding:6px;background:var(--bg-soft);border-radius:6px"><div style="font-size:11px;color:var(--ink-soft)">eBay ${escapeHtml(x.ebayListingId)}</div>${diProds(x.products)}</div>`).join(''));
+  html += diSection('Duplicate listings sharing the same part number', c.duplicatePartNumbers,
+    r.duplicatePartNumbers.map(x => `<div style="margin-bottom:6px;padding:6px;background:var(--bg-soft);border-radius:6px"><div style="font-size:11px;color:var(--ink-soft)">Part # <strong>${escapeHtml(x.partNumber)}</strong> — ${x.count} products</div>${diProds(x.products)}</div>`).join(''));
+  html += diSection('Part number appearing in another product’s title', c.partNumberInOtherTitle,
+    r.partNumberInOtherTitle.map(x => `<div style="margin-bottom:6px;font-size:12px"><strong>${escapeHtml(x.partNumber)}</strong> (${escapeHtml(x.ofProduct.sku)}) found in title of <span style="font-family:ui-monospace,monospace">${escapeHtml(x.foundInProduct.sku)}</span> · ${escapeHtml(x.foundInProduct.title)}</div>`).join(''));
+  const totalIssues = Object.values(c).reduce((a, b) => a + b, 0);
+  return (totalIssues === 0 ? '<div style="color:var(--green);font-weight:600;margin-bottom:8px">✓ No issues found.</div>' : '') + html;
+}
+
+async function runIntegrityCheck() {
+  const out = el('di-report');
+  if (out) out.innerHTML = '<div style="font-size:12px;color:var(--ink-soft)">Running…</div>';
+  try {
+    const r = await Api.get('/api/listings/integrity');
+    if (out) out.innerHTML = renderIntegrityReport(r);
+  } catch (e) {
+    if (out) out.innerHTML = '<div style="color:var(--red)">Failed: ' + (e.data?.message || e.message) + '</div>';
+  }
+}
+
+function renderScanMatches(matches) {
+  if (!matches.length) return '<div style="font-size:12px;color:var(--ink-soft)">No embedded part numbers found yet.</div>';
+  return matches.map(m => `<div style="font-size:12px;margin-bottom:4px;padding:5px 7px;background:var(--bg-soft);border-radius:6px">
+    Part <strong>${escapeHtml(m.partNumber)}</strong> (of <span style="font-family:ui-monospace,monospace">${escapeHtml(m.ofProduct.sku)}</span>) appears in the ${m.source} description of <span style="font-family:ui-monospace,monospace">${escapeHtml(m.foundInProduct.sku)}</span> · ${escapeHtml(m.foundInProduct.title)}
+  </div>`).join('');
+}
+
+async function runDescriptionScan() {
+  const includeEbay = !!el('di-include-ebay')?.checked;
+  const btn = el('di-scan-btn'), prog = el('di-scan-progress'), rep = el('di-scan-report');
+  if (btn) btn.disabled = true;
+  _diScanCancel = false;
+  const allMatches = [];
+  let offset = 0, total = 0;
+  if (rep) rep.innerHTML = '';
+  try {
+    do {
+      const r = await Api.post('/api/listings/integrity/scan-descriptions', { offset, includeEbay });
+      total = r.total;
+      offset = r.nextOffset;
+      allMatches.push(...(r.matches || []));
+      if (prog) prog.textContent = `Scanned ${Math.min(offset, total)}/${total} · ${allMatches.length} match${allMatches.length === 1 ? '' : 'es'}`;
+      if (rep) rep.innerHTML = renderScanMatches(allMatches);
+      if (r.done) { if (prog) prog.textContent += ' — done'; break; }
+    } while (!_diScanCancel && offset < total);
+    if (_diScanCancel && prog) prog.textContent += ' (stopped)';
+  } catch (e) {
+    if (prog) prog.textContent = 'Failed: ' + (e.data?.message || e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function cleanupDisabledStoreLinks() {
