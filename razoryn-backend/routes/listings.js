@@ -1198,19 +1198,24 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
     if (!result.itemId) throw new Error('AddItem succeeded but returned no ItemID');
 
     // Save the new ItemID into mirror_links so the rest of the system treats
-    // this product as linked to eBay. Self-healing migration ensures store_code
-    // column exists.
+    // this product as linked to eBay. mirror_links is keyed on ebay_item_id;
+    // there is no `sku` column (SKU lives in last_synced_sku).
     try {
       await query(`ALTER TABLE mirror_links ADD COLUMN IF NOT EXISTS store_code TEXT`);
     } catch (e) {}
     await query(`
-      INSERT INTO mirror_links (sku, shopify_product_id, ebay_item_id, store_code, created_at)
-      VALUES ($1, $2, $3, $4, now())
-      ON CONFLICT (sku) DO UPDATE SET ebay_item_id = EXCLUDED.ebay_item_id, store_code = EXCLUDED.store_code
-    `, [product.sku, product.shopify_product_id, result.itemId, store.code]).catch(async () => {
-      // If there's no unique constraint on sku, just insert plainly
-      await query(`INSERT INTO mirror_links (sku, shopify_product_id, ebay_item_id, store_code, created_at) VALUES ($1, $2, $3, $4, now())`,
-        [product.sku, product.shopify_product_id, result.itemId, store.code]);
+      INSERT INTO mirror_links (ebay_item_id, shopify_product_id, store_code, last_mirrored_at, last_synced_sku, last_synced_title)
+      VALUES ($1, $2, $3, now(), $4, $5)
+      ON CONFLICT (ebay_item_id) DO UPDATE
+        SET shopify_product_id = EXCLUDED.shopify_product_id,
+            store_code = EXCLUDED.store_code,
+            last_synced_sku = EXCLUDED.last_synced_sku,
+            last_mirrored_at = now()
+    `, [String(result.itemId), product.shopify_product_id, store.code, product.sku, product.title]).catch(async (e) => {
+      // No unique constraint on ebay_item_id (older schema) — insert plainly.
+      console.warn('[create-ebay] mirror_links upsert fell back to plain insert:', e.message);
+      await query(`INSERT INTO mirror_links (ebay_item_id, shopify_product_id, store_code, last_mirrored_at, last_synced_sku, last_synced_title) VALUES ($1, $2, $3, now(), $4, $5)`,
+        [String(result.itemId), product.shopify_product_id, store.code, product.sku, product.title]);
     });
 
     await audit(req, 'create_ebay_listing', 'product', product.id, {

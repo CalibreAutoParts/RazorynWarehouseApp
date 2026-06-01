@@ -699,6 +699,7 @@ async function getShopifyProductFull(shopifyProductId) {
     vendor: p.vendor,
     productType: p.product_type,
     tags: p.tags,
+    price: p.variants?.[0]?.price != null ? parseFloat(p.variants[0].price) : null,
     imageUrls: (p.images || []).map(img => img.src).filter(Boolean),
     primaryImage: p.image?.src || (p.images?.[0]?.src) || null,
   };

@@ -576,6 +576,26 @@ router.get('/:id/shopify-stock', requireAdmin, async (req, res) => {
   catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
 });
 
+// GET /api/products/:id/shopify-price — live Shopify variant price. Used by the
+// eBay listing form's "From Shopify +%" button when the cached price is absent.
+// Falls back to the stored price_shopify column if the live fetch isn't possible.
+router.get('/:id/shopify-price', requireAdmin, async (req, res) => {
+  const pr = await query('SELECT shopify_product_id, price_shopify FROM products WHERE id = $1', [req.params.id]);
+  const row = pr.rows[0];
+  if (!row) return res.status(404).json({ error: 'not_found' });
+  if (!row.shopify_product_id) {
+    return res.json({ price: row.price_shopify != null ? parseFloat(row.price_shopify) : null, source: 'warehouse', notLinked: true });
+  }
+  try {
+    const full = await _shopify().getShopifyProductFull(row.shopify_product_id);
+    const price = full.price != null ? full.price : (row.price_shopify != null ? parseFloat(row.price_shopify) : null);
+    res.json({ price, source: full.price != null ? 'shopify' : 'warehouse' });
+  } catch (e) {
+    // Live fetch failed — fall back to the stored price rather than erroring.
+    res.json({ price: row.price_shopify != null ? parseFloat(row.price_shopify) : null, source: 'warehouse', error: e.message });
+  }
+});
+
 // GET /api/products/:id/collections — which collections this product is in.
 router.get('/:id/collections', requireAdmin, async (req, res) => {
   const pr = await query('SELECT shopify_product_id FROM products WHERE id = $1', [req.params.id]);

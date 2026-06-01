@@ -8052,11 +8052,12 @@ async function openCreateEbayListing(productId) {
   const product = State.linkStatus?.products.find(p => p.id === productId);
   if (!product) { toast('Product not found in list', 'error'); return; }
 
-  // Pull the latest pricing config so defaults reflect what's saved.
-  let cfg = State.pricingConfig;
-  if (!cfg) {
-    try { cfg = await Api.get('/api/settings/pricing-config'); State.pricingConfig = cfg; } catch (e) { cfg = {}; }
-  }
+  // Always pull the latest pricing config so the modal reflects saved templates
+  // and defaults — a cached copy can predate the user's most recent Settings
+  // save (e.g. newly-added description templates wouldn't otherwise appear).
+  let cfg;
+  try { cfg = await Api.get('/api/settings/pricing-config'); State.pricingConfig = cfg; }
+  catch (e) { cfg = State.pricingConfig || {}; }
 
   const stores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
   const defaultStoreCode = stores.find(s => s.primary)?.code || stores[0]?.code || '';
@@ -8473,14 +8474,27 @@ async function ceMatchQty(source, btn) {
   }
 }
 
-// Calculate the eBay price from the Shopify price + the saved markup %.
-function ceCalcEbayPrice(btn) {
+// Calculate the eBay price from the Shopify price + the saved markup %. The
+// product row from Listing Mirror often has no cached Shopify price, so when
+// it's missing we fetch the live price from Shopify before calculating.
+async function ceCalcEbayPrice(btn) {
   const ctx = State._ceCtx || {};
   const product = ctx.product || {};
   const cfg = ctx.cfg || State.pricingConfig || {};
   const pct = cfg.ebayMarkupPct != null ? parseFloat(cfg.ebayMarkupPct) : 15;
-  const shopifyPrice = parseFloat(product.shopify_price || product.price_shopify || 0);
-  if (!shopifyPrice) { toast('No Shopify price on this product', 'warn'); return; }
+  let shopifyPrice = parseFloat(product.shopify_price || product.price_shopify || 0);
+
+  if (!shopifyPrice && product.id) {
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Fetching…'; }
+    try {
+      const r = await Api.get('/api/products/' + product.id + '/shopify-price');
+      if (r.price != null) { shopifyPrice = parseFloat(r.price); product.shopify_price = shopifyPrice; }
+    } catch (e) { /* handled below */ }
+    finally { if (btn) { btn.disabled = false; btn.textContent = orig; } }
+  }
+
+  if (!shopifyPrice) { toast('No Shopify price found — this product may not be linked to Shopify. Enter the price manually.', 'warn', 5000); return; }
   const ebayPrice = +(shopifyPrice * (1 + pct / 100)).toFixed(2);
   if (el('ce-price')) el('ce-price').value = ebayPrice;
   toast(`eBay price = £${shopifyPrice.toFixed(2)} + ${pct}% = £${ebayPrice.toFixed(2)}`, 'success', 2500);
