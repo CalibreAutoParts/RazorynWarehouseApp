@@ -428,6 +428,65 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
   }
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// eBay description templates — dedicated, isolated endpoints.
+// Kept separate from /pricing-config so saving/viewing templates can never be
+// broken by an unrelated field in the big config save, and so each call
+// guarantees its own column exists. Shape: [{ name, body }].
+// ──────────────────────────────────────────────────────────────────────────
+async function ensureTemplatesColumn() {
+  await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+  await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_description_templates TEXT`);
+}
+function parseTemplates(raw) {
+  try { const a = JSON.parse(raw || '[]'); return Array.isArray(a) ? a : []; }
+  catch { return []; }
+}
+
+// GET — list saved templates.
+router.get('/ebay-templates', async (req, res) => {
+  try {
+    await ensureTemplatesColumn();
+    const { rows } = await query(`SELECT ebay_description_templates, ebay_description_template FROM app_settings WHERE id = 1`);
+    const r = rows[0] || {};
+    let templates = parseTemplates(r.ebay_description_templates);
+    // Migrate a legacy single template into the list on first read.
+    if (!templates.length && r.ebay_description_template) templates = [{ name: 'Default', body: r.ebay_description_template }];
+    res.json({ templates });
+  } catch (e) {
+    res.status(500).json({ error: 'load_failed', message: e.message });
+  }
+});
+
+// POST — replace the whole template list, OR append one ({ name, body }).
+router.post('/ebay-templates', requireAdmin, async (req, res) => {
+  try {
+    await ensureTemplatesColumn();
+    const b = req.body || {};
+    const clean = (arr) => (Array.isArray(arr) ? arr : [])
+      .filter(t => t && (t.name || t.body))
+      .map(t => ({ name: String(t.name || 'Untitled').slice(0, 80), body: String(t.body || '') }))
+      .slice(0, 50);
+
+    let templates;
+    if (b.template && (b.template.name || b.template.body)) {
+      // Append-one mode (the "paste & save" button).
+      const { rows } = await query(`SELECT ebay_description_templates FROM app_settings WHERE id = 1`);
+      const existing = parseTemplates(rows[0]?.ebay_description_templates);
+      templates = clean([...existing, b.template]);
+    } else {
+      // Replace-all mode.
+      templates = clean(b.templates);
+    }
+    await query(`UPDATE app_settings SET ebay_description_templates = $1, updated_at = now() WHERE id = 1`, [JSON.stringify(templates)]);
+    await audit(req, 'update_ebay_templates', null, null, { count: templates.length });
+    res.json({ ok: true, templates });
+  } catch (e) {
+    res.status(500).json({ error: 'save_failed', message: e.message });
+  }
+});
+
+
 // POST /api/settings/barcode-sku-sync (admin) — set every Shopify variant's
 // barcode = its SKU. Body { dryRun: true } previews the change without writing;
 // { dryRun: false } performs the push. Follow a real push with import-shopify to

@@ -1027,6 +1027,23 @@ async function getMarketingToken() {
   return _mktToken;
 }
 
+// Turn an axios error from an eBay REST (Sell) call into a readable message,
+// pulling out eBay's structured error array (errorId / message / longMessage /
+// parameters) so callers surface the real reason instead of "status code 400".
+function ebayRestError(e, label) {
+  const data = e.response?.data;
+  const errs = data?.errors || data?.warnings;
+  if (Array.isArray(errs) && errs.length) {
+    const parts = errs.map(x => {
+      const params = (x.parameters || []).map(p => `${p.name}=${p.value}`).join(', ');
+      return `[${x.errorId}] ${x.longMessage || x.message}${params ? ` (${params})` : ''}`;
+    });
+    return new Error(`${label}: ${parts.join(' | ')}`);
+  }
+  const status = e.response?.status;
+  return new Error(`${label}: ${status ? 'HTTP ' + status + ' — ' : ''}${e.message}`);
+}
+
 async function marketingApi(method, path, data) {
   const token = await getMarketingToken();
   return axios({
@@ -1051,21 +1068,28 @@ async function ensureGeneralCampaign() {
   try {
     const r = await marketingApi('get', `/sell/marketing/v1/ad_campaign?limit=100`);
     const campaigns = r.data?.campaigns || [];
-    const match = campaigns.find(c =>
-      (c.fundingStrategy?.fundingModel === 'COST_PER_SALE') &&
-      (c.campaignStatus === 'RUNNING' || c.campaignStatus === 'SCHEDULED' || c.campaignStatus === 'PAUSED') &&
-      (c.campaignName === GENERAL_CAMPAIGN_NAME || campaigns.length === 1)
-    ) || campaigns.find(c => c.fundingStrategy?.fundingModel === 'COST_PER_SALE');
+    const usable = campaigns.filter(c =>
+      c.fundingStrategy?.fundingModel === 'COST_PER_SALE' && c.campaignStatus !== 'ENDED');
+    const match = usable.find(c => c.campaignName?.startsWith(GENERAL_CAMPAIGN_NAME)) || usable[0];
     if (match) return match.campaignId;
-  } catch (e) { /* fall through to create */ }
+  } catch (e) {
+    throw ebayRestError(e, 'list campaigns failed');
+  }
 
+  // Create a new General campaign. eBay requires the startDate to be in the
+  // future, so we nudge it ~1 minute ahead to avoid "must be in the future".
   const body = {
     campaignName: `${GENERAL_CAMPAIGN_NAME} ${new Date().toISOString().slice(0, 10)}`,
     fundingStrategy: { fundingModel: 'COST_PER_SALE' },
     marketplaceId: mkt,
-    startDate: new Date().toISOString(),
+    startDate: new Date(Date.now() + 60_000).toISOString(),
   };
-  const cr = await marketingApi('post', `/sell/marketing/v1/ad_campaign`, body);
+  let cr;
+  try {
+    cr = await marketingApi('post', `/sell/marketing/v1/ad_campaign`, body);
+  } catch (e) {
+    throw ebayRestError(e, 'create campaign failed');
+  }
   // 201 returns the new campaign URL in the Location header; the id is its tail.
   const loc = cr.headers?.location || cr.headers?.Location || '';
   const id = loc.split('/').pop();
@@ -1084,14 +1108,20 @@ async function ensureGeneralCampaign() {
 async function promoteListing(storeArg, { itemId, bidPercent }) {
   if (!itemId) throw new Error('itemId required');
   const pct = parseFloat(bidPercent);
-  if (isNaN(pct) || pct <= 0) throw new Error('valid bidPercent required');
+  if (isNaN(pct) || pct < 2) throw new Error('ad rate must be at least 2%');
   const campaignId = await ensureGeneralCampaign();
   const body = { requests: [{ listingId: String(itemId), bidPercentage: pct.toFixed(1) }] };
-  const r = await marketingApi('post',
-    `/sell/marketing/v1/ad_campaign/${encodeURIComponent(campaignId)}/bulk_create_ads_by_listing_id`, body);
+  let r;
+  try {
+    r = await marketingApi('post',
+      `/sell/marketing/v1/ad_campaign/${encodeURIComponent(campaignId)}/bulk_create_ads_by_listing_id`, body);
+  } catch (e) {
+    throw ebayRestError(e, 'create ad failed');
+  }
   const resp = (r.data?.responses || [])[0] || {};
+  // Per-item failures come back in the 200 body with a statusCode + errors.
   if (resp.statusCode && resp.statusCode >= 400) {
-    const msg = (resp.errors || []).map(e => e.message).join('; ') || `ad creation failed (${resp.statusCode})`;
+    const msg = (resp.errors || []).map(e => `[${e.errorId}] ${e.message}`).join('; ') || `ad creation failed (${resp.statusCode})`;
     throw new Error(msg);
   }
   return { ok: true, campaignId, adId: resp.adId || null, bidPercent: pct };

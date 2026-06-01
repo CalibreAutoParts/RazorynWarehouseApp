@@ -8207,8 +8207,12 @@ async function openCreateEbayListing(productId) {
     el('ce-promote-pct-wrap').style.display = 'block';
   }
   if (el('ce-promote-pct')) el('ce-promote-pct').value = (cfg.ebayPromotePercent != null ? cfg.ebayPromotePercent : 10);
-  // Description templates (named) — populate the picker.
+  // Description templates (named) — populate the picker from the dedicated
+  // endpoint (robust), falling back to whatever the config carried.
   ceFillTemplatePicker(cfg);
+  Api.get('/api/settings/ebay-templates')
+    .then(r => { if (r && Array.isArray(r.templates)) ceFillTemplatePicker({ ebayDescriptionTemplates: r.templates }); })
+    .catch(() => {});
   // Shop/store categories — load from the seller's eBay storefront (async).
   ceLoadStoreCategories(cfg.ebayDefaultStoreCategoryId || '');
   // Populate the policy dropdowns from the seller's eBay account (async).
@@ -10078,11 +10082,14 @@ function renderSettings() {
             </div>
 
             <div style="margin-top:14px">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;gap:8px;flex-wrap:wrap">
                 <label style="font-weight:600">eBay description templates</label>
-                <button type="button" class="btn btn-outline btn-sm" onclick="ebayAddTemplate()">+ Add template</button>
+                <div style="display:flex;gap:6px">
+                  <button type="button" class="btn btn-outline btn-sm" onclick="ebayAddTemplate()">+ Add template</button>
+                  <button type="button" class="btn btn-primary btn-sm" onclick="ebaySaveTemplates()">Save templates</button>
+                </div>
               </div>
-              <div style="font-size:11px;color:var(--ink-soft);margin-bottom:8px">Save several named templates and pick one in the listing form. Placeholders: <code>{title} {sku} {mpn} {brand} {make} {model} {year}</code>. Leave none to use the Shopify description.</div>
+              <div style="font-size:11px;color:var(--ink-soft);margin-bottom:8px">Paste your eBay-formatted HTML below, give it a name, and click <strong>Save templates</strong> — they save immediately (separate from the other eBay defaults) and appear in the listing form's template picker. Placeholders: <code>{title} {sku} {mpn} {brand} {make} {model} {year}</code>.</div>
               <div id="set-ebay-templates"></div>
             </div>
           </div>
@@ -10512,10 +10519,8 @@ async function loadPricingConfig() {
     setVal('set-ebay-store-cat', r.ebayDefaultStoreCategoryId || '');
     setVal('set-ebay-promote-pct', r.ebayPromotePercent != null ? r.ebayPromotePercent : 10);
     if (el('set-ebay-promote-default')) el('set-ebay-promote-default').checked = !!r.ebayPromoteDefault;
-    // Named description templates — migrate a legacy single template into the list.
-    let _tpls = Array.isArray(r.ebayDescriptionTemplates) ? r.ebayDescriptionTemplates.slice() : [];
-    if (!_tpls.length && r.ebayDescriptionTemplate) _tpls = [{ name: 'Default', body: r.ebayDescriptionTemplate }];
-    ebayRenderTemplates(_tpls);
+    // Named description templates — loaded via their own endpoint (robust).
+    ebayLoadTemplates();
     setVal('set-ebay-condition', r.ebayDefaultConditionId || '1000');
     setVal('set-ebay-country',   r.ebayLocationCountry    || 'GB');
     setVal('set-ebay-city',      r.ebayLocationCity       || '');
@@ -11169,6 +11174,29 @@ function ebayCollectTemplates() {
   });
   return out;
 }
+// Load saved templates from the dedicated endpoint (robust against the big
+// pricing-config save/load). Called when the Settings page opens.
+async function ebayLoadTemplates() {
+  try {
+    const r = await Api.get('/api/settings/ebay-templates');
+    ebayRenderTemplates(r.templates || []);
+  } catch (e) {
+    ebayRenderTemplates([]);
+  }
+}
+// Save the current template rows immediately via the dedicated endpoint.
+async function ebaySaveTemplates() {
+  const templates = ebayCollectTemplates();
+  try {
+    const r = await Api.post('/api/settings/ebay-templates', { templates });
+    ebayRenderTemplates(r.templates || []);
+    // Keep the cached config in sync so the listing picker sees them right away.
+    if (State.pricingConfig) State.pricingConfig.ebayDescriptionTemplates = r.templates || [];
+    toast(`Saved ${(r.templates || []).length} template${(r.templates || []).length === 1 ? '' : 's'}`, 'success');
+  } catch (e) {
+    toast('Couldn’t save templates: ' + (e.data?.message || e.message), 'error');
+  }
+}
 
 async function savePricingConfig() {
   const getNum = (id) => { const e = el(id); return e && e.value !== '' ? parseFloat(e.value) : undefined; };
@@ -11206,7 +11234,8 @@ async function savePricingConfig() {
     ebayDefaultStoreCategoryId: getStr('set-ebay-store-cat'),
     ebayPromoteDefault:     !!el('set-ebay-promote-default')?.checked,
     ebayPromotePercent:     getNum('set-ebay-promote-pct'),
-    ebayDescriptionTemplates: ebayCollectTemplates(),
+    // (eBay description templates are saved separately via the dedicated
+    //  "Save templates" button so the big save can never wipe them.)
     ebayDefaultConditionId: getStr('set-ebay-condition'),
     ebayLocationCountry:    getStr('set-ebay-country'),
     ebayLocationCity:       getStr('set-ebay-city'),
