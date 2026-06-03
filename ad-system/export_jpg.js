@@ -37,6 +37,13 @@ const EXT = FORMAT === 'png' ? 'png' : 'jpg';
       .map(f => path.join(dir, f));
   }
   const out = path.join(dir, 'export'); fs.mkdirSync(out, { recursive: true });
+  // organise output into folders: collections/<slug>, showcases/<slug>, promos/<name>
+  const groupOf = (base) => {
+    if (base.startsWith('razoryn-')) return path.join('collections', base.replace(/^razoryn-\d+-/, ''));
+    if (base.startsWith('promo-showcase-')) return path.join('showcases', base.replace(/^promo-showcase-\d+-/, ''));
+    if (base.startsWith('promo-')) return path.join('promos', base.replace(/^promo-/, ''));
+    return '';
+  };
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1200, height: 1500 }, deviceScaleFactor: 2 });
   let n = 0;
@@ -47,9 +54,11 @@ const EXT = FORMAT === 'png' ? 'png' : 'jpg';
     await page.waitForTimeout(1200);
     const posts = await page.$$('.post');
     const base = path.basename(f, '.html');
+    const groupDir = path.join(out, groupOf(base));
+    fs.mkdirSync(groupDir, { recursive: true });
     for (let i = 0; i < posts.length; i++) {
       const name = `${base}_${SCHEMES[i] || i}.${EXT}`;
-      const opts = { path: path.join(out, name), type: FORMAT };
+      const opts = { path: path.join(groupDir, name), type: FORMAT };
       if (FORMAT === 'jpeg') opts.quality = 92;
       await posts[i].screenshot(opts);
       n++;

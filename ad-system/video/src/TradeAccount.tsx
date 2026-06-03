@@ -36,7 +36,7 @@ export const TradeAccount: React.FC = () => {
 
   return (
     <AbsoluteFill style={{backgroundColor: NAVY, fontFamily: inter, opacity: fade}}>
-      <Audio src={sfx('beat')} loop volume={0.34} />
+      <Audio src={sfx('beat-lofi')} loop volume={0.34} />
       <Sequence from={0}><Audio src={sfx('whoosh')} /></Sequence>
       {[78, 110, 142, 174].map((f, i) => <Sequence key={i} from={f}><Audio src={sfx('pop')} /></Sequence>)}
       <Sequence from={216}><Audio src={sfx('whoosh')} /></Sequence>

@@ -5,16 +5,19 @@
   "description": "Razoryn e-Parts — Remotion video ad templates",
   "scripts": {
     "dev": "remotion studio",
-    "render:order": "remotion render OrderStory out/order-story.mp4",
-    "render:price": "remotion render PriceReveal out/price-reveal.mp4",
-    "render:trade": "remotion render TradeAccount out/trade-account.mp4",
-    "render:fitment": "remotion render FitmentSupport out/fitment-support.mp4",
-    "render:dispatch": "remotion render SameDayDispatch out/same-day-dispatch.mp4",
-    "render:rhd": "remotion render RhdHeadlights out/rhd-headlights.mp4",
-    "render:parts": "remotion render PartsShowcase out/parts-showcase.mp4",
-    "render:site": "remotion render SiteShowcase out/site-showcase.mp4",
+    "render:all": "node render-all.mjs",
     "render:collections": "node render-collections.mjs",
-    "render": "npm run render:order && npm run render:price && npm run render:trade && npm run render:fitment && npm run render:dispatch && npm run render:rhd && npm run render:parts && npm run render:site"
+    "render:order": "remotion render OrderStory out/promos/order-story.mp4",
+    "render:price": "remotion render PriceReveal out/promos/price-reveal.mp4",
+    "render:trade": "remotion render TradeAccount out/promos/trade-account.mp4",
+    "render:fitment": "remotion render FitmentSupport out/promos/fitment-support.mp4",
+    "render:dispatch": "remotion render SameDayDispatch out/promos/same-day-dispatch.mp4",
+    "render:rhd": "remotion render RhdHeadlights out/promos/rhd-headlights.mp4",
+    "render:ebay": "remotion render EbayTrust out/promos/ebay-trust.mp4",
+    "render:genz": "remotion render GenZParts out/promos/genz-parts.mp4",
+    "render:tiktok": "remotion render TikTokDeal out/promos/tiktok-deal.mp4",
+    "render:parts": "remotion render PartsShowcase out/promos/parts-showcase.mp4",
+    "render:site": "remotion render SiteShowcase out/promos/site-showcase.mp4"
   },
   "dependencies": {
     "@remotion/bundler": "^4.0.0",

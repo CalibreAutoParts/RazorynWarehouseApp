@@ -1,6 +1,5 @@
-// Render every per-collection ad (col-*) + the RHD headlights ad in one pass.
-// Bundles once (fast), then renders each composition to out/collections/<id>.mp4.
-// Run: npm run render:collections   (needs internet for the product photos)
+// Render only the per-collection ads → out/collections/<slug>/{showcase,deal}.mp4
+// Run: npm run render:collections
 import {bundle} from '@remotion/bundler';
 import {getCompositions, renderMedia} from '@remotion/renderer';
 import path from 'node:path';
@@ -8,22 +7,20 @@ import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
-const entry = path.join(dir, 'src', 'index.ts');
-const outDir = path.join(dir, 'out', 'collections');
-fs.mkdirSync(outDir, {recursive: true});
-
-console.log('Bundling project…');
-const serveUrl = await bundle({entryPoint: entry});
-const comps = await getCompositions(serveUrl);
-const targets = comps.filter((c) => c.id.startsWith('col-') || c.id === 'RhdHeadlights');
-console.log(`Rendering ${targets.length} videos → out/collections/`);
-
+console.log('Bundling…');
+const serveUrl = await bundle({entryPoint: path.join(dir, 'src', 'index.ts')});
+const comps = (await getCompositions(serveUrl)).filter((c) => c.id.startsWith('col-'));
+console.log(`Rendering ${comps.length} collection videos → out/collections/`);
 let i = 0;
-for (const c of targets) {
+for (const c of comps) {
   i += 1;
-  const file = path.join(outDir, `${c.id}.mp4`);
-  process.stdout.write(`[${i}/${targets.length}] ${c.id} … `);
+  const m = c.id.slice(4);
+  const deal = m.endsWith('-deal');
+  const slug = deal ? m.slice(0, -5) : m;
+  const file = path.join(dir, 'out', 'collections', slug, `${deal ? 'deal' : 'showcase'}.mp4`);
+  fs.mkdirSync(path.dirname(file), {recursive: true});
+  process.stdout.write(`[${i}/${comps.length}] ${c.id} … `);
   await renderMedia({composition: c, serveUrl, codec: 'h264', outputLocation: file});
   console.log('✓');
 }
-console.log(`\nDone. ${targets.length} MP4s in ${outDir}`);
+console.log('\nDone → out/collections/');

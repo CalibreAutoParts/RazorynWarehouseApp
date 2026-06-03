@@ -14,6 +14,12 @@ Condensed + Inter, brand red/navy, white logo):
   **"✓ Confirmed before you buy"** → CTA.
 - **SameDayDispatch** (~9s) — clock ticks to **12:00** → **"DISPATCHED TODAY"** stamp → CTA.
 - **PartsShowcase** (~23s) — snappy montage: each part (model + name + price) on a card.
+- **EbayTrust** (~12s) — eBay credibility (top-rated · 1,700+ sold · 98.2% feedback ·
+  Razoryn e-Parts / “2daypartsuk”) → buy direct on the website.
+- **GenZParts** (~10s) — youth/Gen-Z cut: fast jump-cuts, hand-held shake, trap beat,
+  “POV: your bumper’s wrecked” → price-slam → “we got you”.
+- **TikTokDeal** (~10s) — TikTok-native (action rail + @handle), promotes **code TIKTOK5
+  = 5% off**, viral framing.
 - **SiteShowcase** (~11s) — address bar **types `razoryn.co.uk`**, the homepage loads, then
   **scrolls the "Shop by vehicle model" range** → URL + free-delivery CTA.
 
@@ -27,7 +33,8 @@ Data is pulled from the collections:
 
 ## Audio
 Royalty-free SFX + a light beat bed are **synthesized** (no licensing) into `public/audio/`
-by `python3 gen_audio.py`: `doorbell, tap, pop, whoosh, chime, tick, beat`. Each composition
+by `python3 gen_audio.py`: `doorbell, tap, pop, whoosh, chime, tick` + **four beds** (`beat`, `beat-drive`,
+`beat-lofi`, `beat-trap` via `gen_audio_beds.py`) — each video uses a different bed so they don’t all sound the same. Each composition
 wires them via `<Audio>`. **To use your own music**, drop a file in `public/audio/` and swap
 the `beat.wav` reference (or add another `<Audio>`).
 
@@ -74,3 +81,16 @@ npm run render:collections     # → out/collections/col-*.mp4 + RhdHeadlights.m
 npm run render:rhd             # just the RHD headlights ad
 ```
 Preview/scrub any of them in `npm run dev` (search the composition list for `col-` or `RhdHeadlights`).
+
+## Render everything, organised into folders
+```bash
+npm run render:all          # bundles once → renders ALL videos into:
+#   out/collections/<slug>/showcase.mp4  &  deal.mp4
+#   out/promos/<id>.mp4   (brand, RHD, eBay, Gen-Z, TikTok, etc.)
+npm run render:collections  # just the per-collection ads
+npm run render:tiktok       # single: out/promos/tiktok-deal.mp4  (code TIKTOK5)
+npm run render:ebay         # single: eBay trust
+npm run render:genz         # single: Gen-Z cut
+```
+JPEG ads (from `ad-system/`, `npm run export`) are likewise foldered:
+`export/collections/<slug>/`, `export/showcases/<slug>/`, `export/promos/<name>/`.

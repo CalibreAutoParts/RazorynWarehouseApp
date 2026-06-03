@@ -9,6 +9,9 @@ import {FitmentSupport} from './FitmentSupport';
 import {SameDayDispatch} from './SameDayDispatch';
 import {CollectionAd, Col} from './CollectionAd';
 import {RhdHeadlights} from './RhdHeadlights';
+import {EbayTrust} from './EbayTrust';
+import {GenZParts} from './GenZParts';
+import {TikTokDeal} from './TikTokDeal';
 import collectionsData from './collections.json';
 import {PARTS, MODELS} from './brand';
 
@@ -61,6 +64,9 @@ export const RemotionRoot: React.FC = () => {
       <Composition id="FitmentSupport" component={FitmentSupport} durationInFrames={10 * FPS} fps={FPS} width={1080} height={1920} />
       <Composition id="SameDayDispatch" component={SameDayDispatch} durationInFrames={9 * FPS} fps={FPS} width={1080} height={1920} />
       <Composition id="RhdHeadlights" component={RhdHeadlights} durationInFrames={12 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="EbayTrust" component={EbayTrust} durationInFrames={12 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="GenZParts" component={GenZParts} durationInFrames={10 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="TikTokDeal" component={TikTokDeal} durationInFrames={10 * FPS} fps={FPS} width={1080} height={1920} />
 
       {/* Per-collection conversion ads — two variants each (id: col-<slug> and col-<slug>-deal) */}
       {COLLECTIONS.map((c) => (

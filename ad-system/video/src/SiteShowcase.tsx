@@ -52,7 +52,7 @@ export const SiteShowcase: React.FC<{models: Model[]}> = ({models}) => {
 
   return (
     <AbsoluteFill style={{backgroundColor: NAVY, fontFamily: inter, alignItems: 'center', opacity: fade}}>
-      <Audio src={staticFile('audio/beat.wav')} loop volume={0.3} />
+      <Audio src={staticFile('audio/beat-lofi.wav')} loop volume={0.3} />
       <Sequence from={48}><Audio src={staticFile('audio/tap.wav')} /></Sequence>
       <Sequence from={104}><Audio src={staticFile('audio/whoosh.wav')} /></Sequence>
       <Sequence from={300}><Audio src={staticFile('audio/pop.wav')} /></Sequence>

@@ -50,7 +50,7 @@ export const RhdHeadlights: React.FC = () => {
   ];
   return (
     <AbsoluteFill style={{backgroundColor: NAVY, fontFamily: inter, opacity: fade}}>
-      <Audio src={sfx('beat')} loop volume={0.34} />
+      <Audio src={sfx('beat-drive')} loop volume={0.34} />
       <Sequence from={0}><Audio src={sfx('whoosh')} /></Sequence>
       <Sequence from={mFrom}><Audio src={sfx('whoosh')} /></Sequence>
       <Sequence from={304}><Audio src={sfx('pop')} /></Sequence>

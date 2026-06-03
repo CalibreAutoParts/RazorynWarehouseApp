@@ -28,7 +28,7 @@ export const SameDayDispatch: React.FC = () => {
 
   return (
     <AbsoluteFill style={{backgroundColor: NAVY, fontFamily: inter, opacity: fade}}>
-      <Audio src={sfx('beat')} loop volume={0.32} />
+      <Audio src={sfx('beat-drive')} loop volume={0.32} />
       {/* ticking up to the cutoff */}
       {[40, 60, 80, 100, 120, 138].map((f, i) => <Sequence key={i} from={f}><Audio src={sfx('tick')} /></Sequence>)}
       <Sequence from={150}><Audio src={sfx('chime')} /></Sequence>

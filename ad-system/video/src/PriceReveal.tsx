@@ -31,7 +31,7 @@ export const PriceReveal: React.FC<{parts: Part[]}> = ({parts}) => {
 
   return (
     <AbsoluteFill style={{backgroundColor: NAVY, fontFamily: inter, opacity: fade}}>
-      <Audio src={sfx('beat')} loop volume={0.4} />
+      <Audio src={sfx('beat-drive')} loop volume={0.4} />
       <Sequence from={0}><Audio src={sfx('whoosh')} /></Sequence>
       <Sequence from={62}><Audio src={sfx('whoosh')} /></Sequence>
       <Sequence from={150}><Audio src={sfx('pop')} /></Sequence>
