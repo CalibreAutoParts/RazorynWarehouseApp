@@ -114,12 +114,12 @@ export const CollectionAd: React.FC<{col: Col; variant: 'showcase' | 'deal'}> = 
   const ctaIn = interpolate(frame, [304, 322], [0, 1], clamp);
   const cues: Cue[] = [
     {text: `Parts for your *${col.model}*`, start: 8, end: 66},
-    {text: `*${col.count}* in stock`, start: 250, end: 300},
+    {text: `Shop the *full range*`, start: 250, end: 300},
     {text: 'Shop at *razoryn.co.uk*', start: 312, end: 358},
   ];
   return (
     <AbsoluteFill style={{backgroundColor: NAVY, fontFamily: inter, opacity: fade}}>
-      <Audio src={sfx('beat')} loop volume={0.32} />
+      <Audio src={sfx('beat-cinematic')} loop volume={0.32} />
       <Sequence from={0}><Audio src={sfx('whoosh')} /></Sequence>
       <Sequence from={montageFrom}><Audio src={sfx('whoosh')} /></Sequence>
       <Sequence from={304}><Audio src={sfx('pop')} /></Sequence>
@@ -140,11 +140,11 @@ export const CollectionAd: React.FC<{col: Col; variant: 'showcase' | 'deal'}> = 
           ))}
         </Series>
       </Sequence>
-      {/* value */}
+      {/* value (no stock count — just availability + price-from) */}
       <AbsoluteFill style={{alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: 80, opacity: valIn * valOut}}>
-        <div style={{fontFamily: barlow, fontWeight: 800, fontSize: 240, color: RED, lineHeight: 0.9}}>{col.count}</div>
-        <div style={{fontFamily: barlow, fontWeight: 800, fontSize: 80, color: '#fff', textTransform: 'uppercase'}}>parts in stock</div>
-        <div style={{fontFamily: inter, fontWeight: 600, fontSize: 36, color: 'rgba(255,255,255,.8)', marginTop: 16}}>From {col.from} · UK stock · aftermarket · same-day dispatch</div>
+        <div style={{fontFamily: barlow, fontWeight: 800, fontSize: 150, color: '#fff', textTransform: 'uppercase', lineHeight: 0.9}}>In stock<br /><span style={{color: RED}}>now</span></div>
+        <div style={{fontFamily: inter, fontWeight: 600, fontSize: 40, color: 'rgba(255,255,255,.85)', marginTop: 22}}>Aftermarket · genuine fit · UK stock</div>
+        <div style={{fontFamily: inter, fontWeight: 600, fontSize: 34, color: 'rgba(255,255,255,.7)', marginTop: 10}}>from {col.from} · same-day dispatch</div>
       </AbsoluteFill>
       <CTA col={col} o={ctaIn} />
       <Captions cues={cues} bottom={230} />

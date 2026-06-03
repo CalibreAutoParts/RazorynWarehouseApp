@@ -20,7 +20,7 @@ for (const c of comps) {
   const file = path.join(dir, 'out', 'collections', slug, `${deal ? 'deal' : 'showcase'}.mp4`);
   fs.mkdirSync(path.dirname(file), {recursive: true});
   process.stdout.write(`[${i}/${comps.length}] ${c.id} … `);
-  await renderMedia({composition: c, serveUrl, codec: 'h264', outputLocation: file});
+  await renderMedia({composition: c, serveUrl, codec: 'h264', crf: 18, jpegQuality: 100, outputLocation: file});
   console.log('✓');
 }
 console.log('\nDone → out/collections/');

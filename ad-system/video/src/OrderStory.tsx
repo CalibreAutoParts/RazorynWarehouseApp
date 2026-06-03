@@ -85,7 +85,7 @@ export const OrderStory: React.FC<{parts: Part[]}> = ({parts}) => {
   return (
     <AbsoluteFill style={{backgroundColor: NAVY, fontFamily: inter, opacity: fade}}>
       {/* audio */}
-      <Audio src={sfx('beat-lofi')} loop volume={0.32} />
+      <Audio src={sfx('beat-cinematic')} loop volume={0.32} />
       <Sequence from={70}><Audio src={sfx('tap')} /></Sequence>
       <Sequence from={86}><Audio src={sfx('chime')} /></Sequence>
       <Sequence from={118}><Audio src={sfx('doorbell')} /></Sequence>

@@ -92,3 +92,54 @@ def trap(bed, step, bars):
                 place(bed,hat(0.035,0.16),step,b*4+s)
 save('beat-trap.wav', build(140,4,trap,gain=0.5))
 print("extra beds written")
+
+# ===== CINEMATIC — warm uplifting pad + sub bass + soft pulse (vi-IV-I-V) =====
+def _env(n, atk, rel):
+    out=[]
+    for i in range(n):
+        a = min(1.0, i/atk) if atk else 1.0
+        r = min(1.0, (n-i)/rel) if rel else 1.0
+        out.append(min(a, r))
+    return out
+def chord(freqs, dur, v=0.16):
+    n=int(SR*dur); env=_env(n, int(SR*0.25), int(SR*0.5)); o=[0.0]*n
+    for f in freqs:
+        for i in range(n):
+            t=i/SR
+            o[i]+=v*env[i]*(0.7*math.sin(2*math.pi*f*t)+0.3*math.sin(2*math.pi*2*f*t)*0.4)
+    return [x/len(freqs) for x in o]
+def bassnote(f, dur, v=0.5):
+    n=int(SR*dur); env=_env(n,int(SR*0.02),int(SR*0.2))
+    return [v*env[i]*math.sin(2*math.pi*f*(i/SR)) for i in range(n)]
+def lowpass(sig, a=0.2):
+    out=[]; prev=0.0
+    for s in sig:
+        prev=prev+a*(s-prev); out.append(prev)
+    return out
+def normalize(sig, peak=0.9):
+    m=max(1e-6, max(abs(x) for x in sig)); return [peak*x/m for x in sig]
+
+def cinematic():
+    bpm=84; beat=60/bpm; bar=beat*4
+    prog=[ [220.0,261.63,329.63,110.0],   # Am  (+root A2)
+           [174.61,220.0,261.63,87.31],   # F
+           [261.63,329.63,392.0,130.81],  # C
+           [196.0,246.94,293.66,98.0] ]   # G
+    bars=8; total=int(SR*bar*bars); bed=[0.0]*total
+    k=kick(0.2,90,16); sh=hat(0.05,0.07)
+    for b in range(bars):
+        ch=prog[(b//2)%4]
+        cpos=int(b*bar*SR)
+        c=chord(ch[:3], bar*0.98, 0.16)
+        for i,v in enumerate(c):
+            if cpos+i<total: bed[cpos+i]+=v
+        bn=bassnote(ch[3], bar*0.98, 0.45)
+        for i,v in enumerate(bn):
+            if cpos+i<total: bed[cpos+i]+=v
+        for be in range(4):                     # soft heartbeat kick + offbeat shaker
+            place(bed,[0.5*x for x in k], beat/4, b*16+be*4)
+            place(bed,sh, beat/4, b*16+be*4+2)
+    bed=lowpass(bed, 0.28)
+    return [0.62*x for x in loop_fade(normalize(bed, 0.95))]
+save('beat-cinematic.wav', cinematic())
+print("cinematic bed written")

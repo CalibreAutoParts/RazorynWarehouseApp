@@ -31,7 +31,7 @@ for (const c of comps) {
   const file = target(c.id);
   fs.mkdirSync(path.dirname(file), {recursive: true});
   process.stdout.write(`[${i}/${comps.length}] ${c.id} … `);
-  await renderMedia({composition: c, serveUrl, codec: 'h264', outputLocation: file});
+  await renderMedia({composition: c, serveUrl, codec: 'h264', crf: 18, jpegQuality: 100, outputLocation: file});
   console.log('✓');
 }
 console.log(`\nDone. Videos organised under out/collections/<slug>/ and out/promos/`);

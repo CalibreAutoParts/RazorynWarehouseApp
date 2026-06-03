@@ -39,7 +39,7 @@ export const EbayTrust: React.FC = () => {
 
   return (
     <AbsoluteFill style={{backgroundColor: NAVY, fontFamily: inter, opacity: fade}}>
-      <Audio src={sfx('beat-lofi')} loop volume={0.4} />
+      <Audio src={sfx('beat-cinematic')} loop volume={0.4} />
       <Sequence from={0}><Audio src={sfx('whoosh')} /></Sequence>
       {[80, 116, 152, 188].map((f, i) => <Sequence key={i} from={f}><Audio src={sfx('pop')} /></Sequence>)}
       <Sequence from={262}><Audio src={sfx('whoosh')} /></Sequence>

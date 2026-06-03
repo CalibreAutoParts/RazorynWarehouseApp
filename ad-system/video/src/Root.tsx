@@ -18,7 +18,7 @@ import {PARTS, MODELS} from './brand';
 const FPS = 30;
 const INTRO = 48;   // 1.6s
 const PER = 48;     // 1.6s per part — snappy montage
-const OUTRO = 66;   // 2.2s
+const OUTRO = 102;  // 3.4s — end card holds long enough to read
 const COLLECTIONS = collectionsData as Col[];
 
 export const RemotionRoot: React.FC = () => {
@@ -27,7 +27,7 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="OrderStory"
         component={OrderStory}
-        durationInFrames={13 * FPS}
+        durationInFrames={14 * FPS}
         fps={FPS}
         width={1080}
         height={1920}
@@ -36,7 +36,7 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="PriceReveal"
         component={PriceReveal}
-        durationInFrames={10 * FPS}
+        durationInFrames={12 * FPS}
         fps={FPS}
         width={1080}
         height={1920}
@@ -54,25 +54,25 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="SiteShowcase"
         component={SiteShowcase}
-        durationInFrames={11 * FPS}
+        durationInFrames={14 * FPS}
         fps={FPS}
         width={1080}
         height={1920}
         defaultProps={{models: MODELS}}
       />
-      <Composition id="TradeAccount" component={TradeAccount} durationInFrames={10 * FPS} fps={FPS} width={1080} height={1920} />
-      <Composition id="FitmentSupport" component={FitmentSupport} durationInFrames={10 * FPS} fps={FPS} width={1080} height={1920} />
-      <Composition id="SameDayDispatch" component={SameDayDispatch} durationInFrames={9 * FPS} fps={FPS} width={1080} height={1920} />
-      <Composition id="RhdHeadlights" component={RhdHeadlights} durationInFrames={12 * FPS} fps={FPS} width={1080} height={1920} />
-      <Composition id="EbayTrust" component={EbayTrust} durationInFrames={12 * FPS} fps={FPS} width={1080} height={1920} />
-      <Composition id="GenZParts" component={GenZParts} durationInFrames={10 * FPS} fps={FPS} width={1080} height={1920} />
-      <Composition id="TikTokDeal" component={TikTokDeal} durationInFrames={10 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="TradeAccount" component={TradeAccount} durationInFrames={12 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="FitmentSupport" component={FitmentSupport} durationInFrames={12 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="SameDayDispatch" component={SameDayDispatch} durationInFrames={11 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="RhdHeadlights" component={RhdHeadlights} durationInFrames={14 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="EbayTrust" component={EbayTrust} durationInFrames={13 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="GenZParts" component={GenZParts} durationInFrames={11 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="TikTokDeal" component={TikTokDeal} durationInFrames={11 * FPS} fps={FPS} width={1080} height={1920} />
 
       {/* Per-collection conversion ads — two variants each (id: col-<slug> and col-<slug>-deal) */}
       {COLLECTIONS.map((c) => (
         <React.Fragment key={c.slug}>
-          <Composition id={`col-${c.slug}`} component={CollectionAd} durationInFrames={12 * FPS} fps={FPS} width={1080} height={1920} defaultProps={{col: c, variant: 'showcase'}} />
-          <Composition id={`col-${c.slug}-deal`} component={CollectionAd} durationInFrames={10 * FPS} fps={FPS} width={1080} height={1920} defaultProps={{col: c, variant: 'deal'}} />
+          <Composition id={`col-${c.slug}`} component={CollectionAd} durationInFrames={14 * FPS} fps={FPS} width={1080} height={1920} defaultProps={{col: c, variant: 'showcase'}} />
+          <Composition id={`col-${c.slug}-deal`} component={CollectionAd} durationInFrames={11 * FPS} fps={FPS} width={1080} height={1920} defaultProps={{col: c, variant: 'deal'}} />
         </React.Fragment>
       ))}
     </>

@@ -29,7 +29,7 @@ const ModelCard: React.FC<{m: Model}> = ({m}) => (
     <div style={{height: CARD - CARD_IMG, padding: '0 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, boxSizing: 'border-box'}}>
       <div style={{minWidth: 0}}>
         <div style={{fontFamily: barlow, fontWeight: 800, fontSize: 21, color: INK, textTransform: 'uppercase', lineHeight: 1.05, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden'}}>{m.title}</div>
-        <div style={{fontFamily: inter, fontWeight: 700, fontSize: 16, color: '#6b7785', marginTop: 6}}>{m.parts} PARTS</div>
+        <div style={{fontFamily: inter, fontWeight: 700, fontSize: 16, color: '#6b7785', marginTop: 6}}>IN STOCK</div>
       </div>
       <div style={{color: RED, fontSize: 26, fontWeight: 700, flex: '0 0 auto'}}>→</div>
     </div>
@@ -52,7 +52,7 @@ export const SiteShowcase: React.FC<{models: Model[]}> = ({models}) => {
 
   return (
     <AbsoluteFill style={{backgroundColor: NAVY, fontFamily: inter, alignItems: 'center', opacity: fade}}>
-      <Audio src={staticFile('audio/beat-lofi.wav')} loop volume={0.3} />
+      <Audio src={staticFile('audio/beat-cinematic.wav')} loop volume={0.3} />
       <Sequence from={48}><Audio src={staticFile('audio/tap.wav')} /></Sequence>
       <Sequence from={104}><Audio src={staticFile('audio/whoosh.wav')} /></Sequence>
       <Sequence from={300}><Audio src={staticFile('audio/pop.wav')} /></Sequence>

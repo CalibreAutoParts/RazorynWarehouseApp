@@ -113,7 +113,7 @@ def render_showcase(P, qrhtml=''):
       + '<div class="pwrap top">'
       + '<div class="eyebrow2">EVERYTHING IN ONE PLACE</div>'
       + f'<h2 class="hl sm">ALL PARTS FOR YOUR <span class="hl-accent">{H.escape(P["model"])}</span></h2>'
-      + f'<div class="subh left">{P["count"]} aftermarket part{"s" if P["count"]!=1 else ""} in stock · from {money(P["from"])} · panels, bumpers, trims &amp; more.</div>'
+      + f'<div class="subh left">Aftermarket parts in stock · from {money(P["from"])} · panels, bumpers, lights, trims &amp; more.</div>'
       + '<div class="grid6">' + ''.join(cells) + '</div>'
       + f'<div class="shopline">Shop the full range &rarr; <b>{SITE}</b></div>'
       + '</div>' + ctabar(qrhtml=qrhtml))
