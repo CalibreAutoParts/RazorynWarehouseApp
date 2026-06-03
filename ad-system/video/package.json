@@ -10,13 +10,17 @@
     "render:trade": "remotion render TradeAccount out/trade-account.mp4",
     "render:fitment": "remotion render FitmentSupport out/fitment-support.mp4",
     "render:dispatch": "remotion render SameDayDispatch out/same-day-dispatch.mp4",
+    "render:rhd": "remotion render RhdHeadlights out/rhd-headlights.mp4",
     "render:parts": "remotion render PartsShowcase out/parts-showcase.mp4",
     "render:site": "remotion render SiteShowcase out/site-showcase.mp4",
-    "render": "npm run render:order && npm run render:price && npm run render:trade && npm run render:fitment && npm run render:dispatch && npm run render:parts && npm run render:site"
+    "render:collections": "node render-collections.mjs",
+    "render": "npm run render:order && npm run render:price && npm run render:trade && npm run render:fitment && npm run render:dispatch && npm run render:rhd && npm run render:parts && npm run render:site"
   },
   "dependencies": {
+    "@remotion/bundler": "^4.0.0",
     "@remotion/cli": "^4.0.0",
     "@remotion/google-fonts": "^4.0.0",
+    "@remotion/renderer": "^4.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "remotion": "^4.0.0"

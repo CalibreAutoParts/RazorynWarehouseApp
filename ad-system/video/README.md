@@ -55,3 +55,22 @@ npm run render:dispatch · render:parts · render:site
 ## Notes
 - Logos: `public/logo_white.png` / `public/logo_red.png`.
 - Output: MP4 — ready for Instagram Reels / TikTok / YouTube Shorts.
+
+## Per-collection conversion ads (drive to the website)
+
+A parameterized `CollectionAd` produces a video for **every collection**, in two variants,
+plus a UK-market **RHD headlights** ad — all CTA-to-`razoryn.co.uk`:
+
+- `col-<slug>`        — **showcase**: collection car render → parts montage → "N in stock" → SHOP NOW.
+- `col-<slug>-deal`   — **deal**: "<model> owner? Stop overpaying" → hero price-slam → buy-direct → CTA.
+- `RhdHeadlights`     — right-hand-drive / UK-spec headlights across models → CTA.
+
+Data is generated from the collections: `python3 gen_collections.py` →
+`src/collections.json` + `src/headlights.json`.
+
+Render them all in one pass (bundles once — much faster than 44 separate renders):
+```bash
+npm run render:collections     # → out/collections/col-*.mp4 + RhdHeadlights.mp4
+npm run render:rhd             # just the RHD headlights ad
+```
+Preview/scrub any of them in `npm run dev` (search the composition list for `col-` or `RhdHeadlights`).
