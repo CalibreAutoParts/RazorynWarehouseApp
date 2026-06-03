@@ -94,3 +94,14 @@ npm run render:genz         # single: Gen-Z cut
 ```
 JPEG ads (from `ad-system/`, `npm run export`) are likewise foldered:
 `export/collections/<slug>/`, `export/showcases/<slug>/`, `export/promos/<name>/`.
+
+## TikTok deals per collection (A/B which model converts)
+`TikTokDeal` is now parameterised by collection — one TikTok-native ad (code **TIKTOK5**,
+5% off) **per model**, plus a generic "all cars" one. Product gets its own clean card
+(no image behind text). They render to their **own folder**:
+```bash
+npm run render:tiktok-all   # → out/tiktok/<slug>.mp4  (+ all.mp4)  — every model
+npm run render:tiktok       # just the generic "all cars" one → out/tiktok/all.mp4
+# single model:  npx remotion render tiktok-i20 out/tiktok/i20.mp4
+```
+Run each model as its own TikTok ad and compare interactions to see which collection performs.

@@ -21,6 +21,14 @@ const PER = 48;     // 1.6s per part — snappy montage
 const OUTRO = 102;  // 3.4s — end card holds long enough to read
 const COLLECTIONS = collectionsData as Col[];
 
+// generic "all cars" collection for the brand-level TikTok deal
+const TIKTOK_ALL: Col = {
+  slug: 'all', title: 'Razoryn e-Parts', model: 'your car',
+  img: PARTS[0].img, url: 'https://www.razoryn.co.uk', count: 0,
+  from: PARTS[PARTS.length - 1].price,
+  parts: PARTS.map((p) => ({img: p.img, name: p.name, price: p.price})),
+};
+
 export const RemotionRoot: React.FC = () => {
   return (
     <>
@@ -66,7 +74,7 @@ export const RemotionRoot: React.FC = () => {
       <Composition id="RhdHeadlights" component={RhdHeadlights} durationInFrames={14 * FPS} fps={FPS} width={1080} height={1920} />
       <Composition id="EbayTrust" component={EbayTrust} durationInFrames={13 * FPS} fps={FPS} width={1080} height={1920} />
       <Composition id="GenZParts" component={GenZParts} durationInFrames={11 * FPS} fps={FPS} width={1080} height={1920} />
-      <Composition id="TikTokDeal" component={TikTokDeal} durationInFrames={11 * FPS} fps={FPS} width={1080} height={1920} />
+      <Composition id="TikTokDeal" component={TikTokDeal} durationInFrames={11 * FPS} fps={FPS} width={1080} height={1920} defaultProps={{col: TIKTOK_ALL}} />
 
       {/* Per-collection conversion ads — two variants each (id: col-<slug> and col-<slug>-deal) */}
       {COLLECTIONS.map((c) => (
@@ -74,6 +82,11 @@ export const RemotionRoot: React.FC = () => {
           <Composition id={`col-${c.slug}`} component={CollectionAd} durationInFrames={14 * FPS} fps={FPS} width={1080} height={1920} defaultProps={{col: c, variant: 'showcase'}} />
           <Composition id={`col-${c.slug}-deal`} component={CollectionAd} durationInFrames={11 * FPS} fps={FPS} width={1080} height={1920} defaultProps={{col: c, variant: 'deal'}} />
         </React.Fragment>
+      ))}
+
+      {/* TikTok deal (code TIKTOK5) per collection — for A/B testing which model converts */}
+      {COLLECTIONS.map((c) => (
+        <Composition key={c.slug} id={`tiktok-${c.slug}`} component={TikTokDeal} durationInFrames={11 * FPS} fps={FPS} width={1080} height={1920} defaultProps={{col: c}} />
       ))}
     </>
   );

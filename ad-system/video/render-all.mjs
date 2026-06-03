@@ -12,6 +12,8 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 const out = (...p) => path.join(dir, 'out', ...p);
 
 function target(id) {
+  if (id.startsWith('tiktok-')) return out('tiktok', `${id.slice(7)}.mp4`);
+  if (id === 'TikTokDeal') return out('tiktok', 'all.mp4');
   if (id.startsWith('col-')) {
     const m = id.slice(4);
     const deal = m.endsWith('-deal');

@@ -2,7 +2,7 @@
   "name": "razoryn-video",
   "version": "1.0.0",
   "private": true,
-  "description": "Razoryn e-Parts — Remotion video ad templates",
+  "description": "Razoryn e-Parts \u2014 Remotion video ad templates",
   "scripts": {
     "dev": "remotion studio",
     "render:all": "node render-all.mjs",
@@ -15,9 +15,10 @@
     "render:rhd": "remotion render RhdHeadlights out/promos/rhd-headlights.mp4",
     "render:ebay": "remotion render EbayTrust out/promos/ebay-trust.mp4",
     "render:genz": "remotion render GenZParts out/promos/genz-parts.mp4",
-    "render:tiktok": "remotion render TikTokDeal out/promos/tiktok-deal.mp4",
+    "render:tiktok": "remotion render TikTokDeal out/tiktok/all.mp4",
     "render:parts": "remotion render PartsShowcase out/promos/parts-showcase.mp4",
-    "render:site": "remotion render SiteShowcase out/promos/site-showcase.mp4"
+    "render:site": "remotion render SiteShowcase out/promos/site-showcase.mp4",
+    "render:tiktok-all": "node render-tiktok.mjs"
   },
   "dependencies": {
     "@remotion/bundler": "^4.0.0",
