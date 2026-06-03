@@ -18,7 +18,7 @@ Condensed + Inter, brand red/navy, white logo):
   Razoryn e-Parts / “2daypartsuk”) → buy direct on the website.
 - **GenZParts** (~10s) — youth/Gen-Z cut: fast jump-cuts, hand-held shake, trap beat,
   “POV: your bumper’s wrecked” → price-slam → “we got you”.
-- **TikTokDeal** (~10s) — TikTok-native (action rail + @handle), promotes **code TIKTOK5
+- **TikTokDeal** (~10s) — promotes **code TIKTOK5
   = 5% off**, viral framing.
 - **SiteShowcase** (~11s) — address bar **types `razoryn.co.uk`**, the homepage loads, then
   **scrolls the "Shop by vehicle model" range** → URL + free-delivery CTA.
@@ -96,7 +96,7 @@ JPEG ads (from `ad-system/`, `npm run export`) are likewise foldered:
 `export/collections/<slug>/`, `export/showcases/<slug>/`, `export/promos/<name>/`.
 
 ## TikTok deals per collection (A/B which model converts)
-`TikTokDeal` is now parameterised by collection — one TikTok-native ad (code **TIKTOK5**,
+`TikTokDeal` is now parameterised by collection — one TikTok-style ad (code **TIKTOK5**,
 5% off) **per model**, plus a generic "all cars" one. Product gets its own clean card
 (no image behind text). They render to their **own folder**:
 ```bash

@@ -8,25 +8,6 @@ const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 const sfx = (n: string) => staticFile(`audio/${n}.wav`);
 const CODE = 'TIKTOK5';
 
-// faux TikTok right-action rail + handle (feels native in-feed). Lives ABOVE content.
-const TikTokChrome: React.FC = () => (
-  <>
-    <div style={{position: 'absolute', right: 28, bottom: 380, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 30, zIndex: 60}}>
-      <div style={{width: 92, height: 92, borderRadius: 50, background: RED, border: '3px solid #fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: barlow, fontWeight: 800, fontSize: 50, color: '#fff'}}>R</div>
-      {[['♥', '12.4k'], ['★', 'Save'], ['➤', 'Share']].map(([ic, n], i) => (
-        <div key={i} style={{textAlign: 'center'}}>
-          <div style={{width: 76, height: 76, borderRadius: 50, background: 'rgba(255,255,255,.16)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 38, color: '#fff'}}>{ic}</div>
-          <div style={{fontFamily: inter, fontWeight: 700, fontSize: 22, color: '#fff', marginTop: 6}}>{n}</div>
-        </div>
-      ))}
-    </div>
-    <div style={{position: 'absolute', left: 36, bottom: 150, maxWidth: 700, zIndex: 60}}>
-      <div style={{fontFamily: inter, fontWeight: 800, fontSize: 34, color: '#fff'}}>@razoryn.eparts</div>
-      <div style={{fontFamily: inter, fontWeight: 600, fontSize: 28, color: 'rgba(255,255,255,.92)', marginTop: 8}}>5% off your car parts · code {CODE} #carparts #fyp</div>
-    </div>
-  </>
-);
-
 export const TikTokDeal: React.FC<{col: Col}> = ({col}) => {
   const frame = useCurrentFrame();
   const {fps, durationInFrames} = useVideoConfig();
@@ -93,7 +74,6 @@ export const TikTokDeal: React.FC<{col: Col}> = ({col}) => {
         <div style={{fontFamily: inter, fontWeight: 800, fontSize: 40, color: '#fff', marginTop: 18}}>code <span style={{color: RED}}>{CODE}</span> · 5% off</div>
       </AbsoluteFill>
 
-      <TikTokChrome />
       <Captions cues={cues} bottom={250} />
     </AbsoluteFill>
   );
