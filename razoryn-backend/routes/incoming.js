@@ -70,7 +70,8 @@ router.get('/containers', requirePermission('inventory'), async (req, res) => {
   await ensureTable();
   const { rows } = await query(`
     SELECT container_ref AS ref, COUNT(*)::int AS lines,
-           COALESCE(SUM(GREATEST(qty_ordered - qty_received,0)),0)::int AS units, MIN(expected_date) AS expected
+           COALESCE(SUM(GREATEST(qty_ordered - qty_received,0)),0)::int AS units, MIN(expected_date) AS expected,
+           MAX(supplier) AS supplier, MAX(notes) AS note
     FROM incoming_stock
     WHERE container_ref IS NOT NULL AND container_ref <> '' AND status <> 'cancelled'
     GROUP BY container_ref ORDER BY MIN(expected_date) NULLS LAST`);

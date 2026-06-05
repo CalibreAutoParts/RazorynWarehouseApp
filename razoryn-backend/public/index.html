@@ -2798,7 +2798,11 @@ async function loadIncomingContainers() {
     wrap.innerHTML = `<div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Open containers</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">` + cs.map(c => `
         <div style="border:1px solid var(--line);border-radius:8px;padding:8px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <div><div style="font-weight:600;font-size:13px">${escapeHtml(c.ref)}</div><div style="font-size:11px;color:var(--ink-soft)">${c.lines} line(s) · ${c.units} units${c.expected ? ' · ETA ' + new Date(c.expected).toLocaleDateString('en-GB') : ''}</div></div>
+          <div style="min-width:0">
+            <div style="font-weight:600;font-size:13px">${escapeHtml(c.ref)}${c.supplier ? ` <span style="font-weight:400;color:var(--ink-soft)">· ${escapeHtml(c.supplier)}</span>` : ''}</div>
+            <div style="font-size:11px;color:var(--ink-soft)">${c.lines} line(s) · ${c.units} units${c.expected ? ' · ETA ' + new Date(c.expected).toLocaleDateString('en-GB') : ''}</div>
+            ${c.note ? `<div style="font-size:11px;color:var(--ink-soft)">📝 ${escapeHtml(c.note)}</div>` : ''}
+          </div>
           <button class="btn btn-primary btn-sm" onclick="receiveContainer('${escapeAttr(c.ref)}')" title="Receive every remaining line on this container and push to Shopify + eBay">📦 Receive all</button>
         </div>`).join('') + `</div>`;
   } catch (e) { wrap.innerHTML = ''; }
@@ -2846,6 +2850,7 @@ function paintIncoming(items) {
       <td>${statusPill(i.status)}</td>
       <td style="white-space:nowrap">
         ${remaining > 0 ? `<button class="btn btn-primary btn-sm" onclick="openReceiveIncoming(${i.id})" title="Receive units — adds to stock & pushes to channels">📦 Receive</button>` : ''}
+        <button class="btn btn-ghost btn-sm" onclick="printIncomingLabels(${i.id})" title="Print labels for this item (to apply when the goods arrive)">🏷</button>
         <button class="btn btn-ghost btn-sm" onclick="openEditIncoming(${i.id})" title="Edit">✏️</button>
         <button class="btn btn-ghost btn-sm" onclick="deleteIncoming(${i.id})" title="Delete" style="color:var(--red)">🗑</button>
       </td>
@@ -2883,10 +2888,11 @@ function openAddIncoming() {
     body: `
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Add a whole container at once. Each line links to a product in your inventory — no need to retype SKUs.</div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px">
-        <div class="field"><label>Container / order ref</label><input id="incb-container" placeholder="e.g. CONT-2026-04"></div>
+        <div class="field"><label>Container number / name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— unique, e.g. MSKU1234567</span></label><input id="incb-container" placeholder="Container no. (trackable) or a name"></div>
         <div class="field"><label>Supplier</label><input id="incb-supplier"></div>
         <div class="field"><label>Rough ETA <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(sea freight, approx.)</span></label><input id="incb-expected" type="date"></div>
       </div>
+      <div class="field" style="margin-bottom:6px"><label>Container note <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— what's in it / which suppliers</span></label><input id="incb-note" placeholder="e.g. MG + Tesla body panels — suppliers T&T and ABC"></div>
       <div style="border-top:1px solid var(--line);margin:12px 0;padding-top:10px">
         <div style="font-weight:600;font-size:13px;margin-bottom:6px">Add products</div>
         <div style="position:relative">
@@ -2974,6 +2980,7 @@ async function submitBulkIncoming() {
     containerRef: el('incb-container')?.value || null,
     supplier: el('incb-supplier')?.value || null,
     expectedDate: el('incb-expected')?.value || null,
+    notes: el('incb-note')?.value || null,
     status: 'on_order',
     lines: _incLines.filter(l => (parseInt(l.qty) || 0) > 0).map(l => ({ productId: l.productId, qty: parseInt(l.qty) })),
   };
@@ -3061,6 +3068,7 @@ function openReceiveIncoming(id) {
         <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')} · ${remaining} of ${it.qty_ordered} remaining</div>
       </div>
       <div class="field"><label>Quantity received now</label><input id="inc-recv-qty" type="number" min="1" max="${remaining}" value="${remaining}"></div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:6px"><input type="checkbox" id="inc-recv-labels"> 🏷 Print labels for the received units</label>
       ${it.product_id
         ? '<label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="inc-recv-push" checked> Push to sales channels — makes it available / in stock on Shopify + eBay</label><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Use this when a pre-order item arrives: the quantity is set live on Shopify and on the (hidden, qty-0) eBay listing so it becomes visible and in stock.</div>'
         : '<div style="font-size:12px;color:var(--amber)">Not linked to a warehouse product — stock won\'t update automatically. Edit this line to link it to a product first if you want it pushed.</div>'}
@@ -3075,6 +3083,8 @@ async function submitReceiveIncoming(id) {
   const qty = parseInt(el('inc-recv-qty')?.value);
   if (!Number.isInteger(qty) || qty <= 0) { toast('Enter a quantity', 'warn'); return; }
   const push = el('inc-recv-push') ? el('inc-recv-push').checked : false;
+  const wantLabels = !!el('inc-recv-labels')?.checked;
+  const itForLabels = (State.incoming || []).find(x => x.id === id);
   const taskId = Task.start('Receiving stock…');
   try {
     const r = await Api.post('/api/incoming/' + id + '/receive', { qty, push });
@@ -3084,6 +3094,7 @@ async function submitReceiveIncoming(id) {
     else { const cp = r.channelPush || {}; const ebayOk = (cp.ebay || []).filter(x => x.ok).length; msg += ` · stock updated${push ? `, Shopify ${cp.shopify?.ok ? '✓' : '—'}, eBay ${ebayOk}` : ''}`; }
     toast(msg, 'success', 5000);
     closeModal();
+    if (wantLabels && itForLabels) labelsPrint(incomingLabelItems(itForLabels, qty));
     loadIncoming();
     Store.refresh('products').catch(() => {});
   } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
@@ -3092,6 +3103,21 @@ async function deleteIncoming(id) {
   if (!confirm('Delete this incoming line?')) return;
   try { await Api.delete('/api/incoming/' + id); toast('Deleted', 'success'); loadIncoming(); }
   catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+// #7 — labels for incoming goods so they're ready to apply on arrival.
+function incomingLabelItems(it, qty) {
+  const n = parseInt(qty) || it.qty_ordered || 1;
+  return [{ sku: it.sku || it.product_sku || '', title: it.title || it.product_title || '', partNumber: it.part_number || it.sku || '', barcode: it.sku || '', qty: n }];
+}
+function printIncomingLabels(id) {
+  const it = (State.incoming || []).find(x => x.id === id);
+  if (!it) return;
+  const remaining = Math.max(0, it.qty_ordered - it.qty_received);
+  const n = prompt('How many labels to print for "' + (it.title || it.sku) + '"?', String(remaining || it.qty_ordered || 1));
+  if (n === null) return;
+  const qty = parseInt(n);
+  if (!Number.isInteger(qty) || qty <= 0) { toast('Enter a valid number', 'warn'); return; }
+  labelsPrint(incomingLabelItems(it, qty));
 }
 
 function renderInventory() {
