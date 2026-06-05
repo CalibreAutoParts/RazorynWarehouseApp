@@ -224,6 +224,25 @@ if (cron.validate(returnsCronExpr)) {
   console.log(`[boot] returns auto-pull scheduled: ${returnsCronExpr}`);
 }
 
+// Auto-mark eBay-fulfilled orders as dispatched every 30 min (or per
+// DISPATCH_SYNC_CRON). If tracking was uploaded on eBay and the order shows as
+// FULFILLED, the warehouse worklist drops it automatically (#11). Deliberately
+// infrequent to stay well within eBay API limits.
+const dispatchCronExpr = (process.env.DISPATCH_SYNC_CRON || '*/30 * * * *').trim();
+if (cron.validate(dispatchCronExpr)) {
+  cron.schedule(dispatchCronExpr, async () => {
+    try {
+      const { syncEbayDispatchCore } = require('./routes/dispatch');
+      if (typeof syncEbayDispatchCore !== 'function') return;
+      const result = await syncEbayDispatchCore({ days: 14 });
+      if (result.dispatched) console.log(`[cron dispatch] auto-dispatched ${result.dispatched} eBay order(s)`);
+    } catch (e) {
+      if (!/ebay_not_configured/.test(e.message)) console.error('[cron dispatch] failed:', e.message);
+    }
+  });
+  console.log(`[boot] eBay dispatch auto-sync scheduled: ${dispatchCronExpr}`);
+}
+
 // Nightly cleanup: permanently delete staff_notes older than 31 days.
 // Notes are already filtered out of the GET response after 31 days, but this
 // keeps the table from growing unbounded.

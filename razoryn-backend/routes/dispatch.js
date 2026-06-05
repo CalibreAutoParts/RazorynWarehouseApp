@@ -463,6 +463,64 @@ router.post('/:saleId/retry-push', requireAdmin, async (req, res) => {
   res.json({ ok: true, message: 'Retry queued — check back in a few seconds.' });
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// eBay dispatch sync (#11)
+// Orders marked dispatched ON EBAY (tracking uploaded there) should drop off the
+// warehouse worklist automatically. This polls eBay's fulfillment API for
+// FULFILLED orders and marks the matching warehouse sales dispatched, pulling
+// across the tracking number/carrier. channel_push_state is set to 'na' because
+// the tracking already lives on eBay (we must NOT push it back). Runs on a
+// 30-min cron (server.js) and via the manual button below.
+// ──────────────────────────────────────────────────────────────────────────
+async function syncEbayDispatchCore({ days = 14 } = {}) {
+  const ebay = require('../services/ebay');
+  if (!ebay.isConfigured()) return { checked: 0, dispatched: 0, skipped: 'ebay_not_configured' };
+  const sinceISO = new Date(Date.now() - days * 86400000).toISOString();
+
+  let fulfilledIds;
+  try { fulfilledIds = await ebay.getFulfilledOrderIds(sinceISO); }
+  catch (e) { return { checked: 0, dispatched: 0, error: e.message }; }
+  if (!fulfilledIds || !fulfilledIds.size) return { checked: 0, dispatched: 0 };
+
+  // Undispatched eBay sales whose order is now fulfilled on eBay.
+  const { rows } = await query(
+    `SELECT id, external_order_id FROM sales
+      WHERE channel IN ('ebay_em','ebay_cl') AND is_estimate = false
+        AND dispatched_at IS NULL AND collected_at IS NULL
+        AND external_order_id = ANY($1)`,
+    [[...fulfilledIds]]
+  );
+
+  let dispatched = 0;
+  for (const sale of rows) {
+    let tracking = null, carrier = null;
+    try { const t = await ebay.getOrderTracking(sale.external_order_id); tracking = t.tracking; carrier = t.carrier; } catch (e) { /* best-effort */ }
+    await query(
+      `UPDATE sales SET dispatched_at = now(), status = 'dispatched', channel_push_state = 'na',
+         carrier = COALESCE($2, carrier),
+         tracking_number = COALESCE($3, tracking_number),
+         dispatch_notes = COALESCE(dispatch_notes, 'Auto-dispatched from eBay')
+       WHERE id = $1`,
+      [sale.id, carrier, tracking]
+    );
+    dispatched++;
+  }
+  return { checked: rows.length, dispatched };
+}
+
+// POST /api/dispatch/sync-ebay — manual trigger for the auto-dispatch sync.
+router.post('/sync-ebay', requireAdmin, async (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, parseInt(req.body?.days) || 14));
+    const result = await syncEbayDispatchCore({ days });
+    if (result.dispatched) await audit(req, 'ebay_dispatch_sync', null, null, result);
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(500).json({ error: 'sync_failed', message: e.message });
+  }
+});
+
 module.exports = router;
 module.exports.trackingUrlFor = trackingUrlFor;
 module.exports.CARRIERS = CARRIERS;
+module.exports.syncEbayDispatchCore = syncEbayDispatchCore;

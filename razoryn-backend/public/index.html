@@ -4728,6 +4728,7 @@ function renderDispatch() {
               <option value="90">90 days</option>
             </select>
           </label>
+          <button class="btn btn-outline btn-sm" onclick="syncDispatchFromEbay(this)" title="Check eBay for orders already marked dispatched there (tracking uploaded) and clear them from this worklist. Runs automatically every 30 min.">⟳ Sync from eBay</button>
           <button class="btn btn-outline btn-sm" onclick="loadDispatch()" title="Refresh">↻ Refresh</button>
         </div>
       </div>
@@ -4741,6 +4742,23 @@ function renderDispatch() {
 
 // Fetch the worklist and re-render. Called on page open, after every action,
 // and when the sidebar polls for the dispatch count badge.
+// #11 — manually pull eBay-fulfilled orders so they drop off the worklist.
+async function syncDispatchFromEbay(btn) {
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+  try {
+    const r = await Api.post('/api/dispatch/sync-ebay', {});
+    if (r.skipped === 'ebay_not_configured') toast('eBay isn’t configured', 'warn');
+    else if (r.error) toast('eBay sync issue: ' + r.error, 'warn', 6000);
+    else toast(r.dispatched ? `${r.dispatched} order(s) marked dispatched from eBay` : 'No new eBay dispatches found', r.dispatched ? 'success' : 'info', 4000);
+    await loadDispatch();
+  } catch (e) {
+    toast('Sync failed: ' + (e.data?.message || e.message), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
+}
+
 async function loadDispatch() {
   try {
     const daysSelect = el('dispatch-days');
