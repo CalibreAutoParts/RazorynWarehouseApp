@@ -707,3 +707,6 @@ router.post('/seo/apply', requireAdmin, async (req, res) => {
 });
 
 module.exports = router;
+// Reusable by other routers (e.g. Listing Mirror set-stock) so a quantity edit
+// propagates to Shopify + every linked eBay store consistently.
+module.exports.pushProductStockToChannels = pushProductStockToChannels;

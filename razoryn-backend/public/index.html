@@ -4122,8 +4122,11 @@ function paintLabelsList() {
   `;
 }
 
-function labelsPrint() {
-  const items = State.labels || [];
+function labelsPrint(itemsArg) {
+  // itemsArg lets other features (e.g. Listing Mirror "Print label") print a
+  // one-off label set without touching the Labels page list. Each item:
+  // { sku, title, partNumber, barcode, qty }.
+  const items = Array.isArray(itemsArg) && itemsArg.length ? itemsArg : (State.labels || []);
   if (!items.length) { toast('Add at least one product first', 'warn'); return; }
   const size = el('lab-size').value;
   // For 4x6 the user can choose landscape (default) or portrait.
@@ -7994,6 +7997,7 @@ function renderLinkStatus() {
                     : '<span class="pill amber" style="font-size:10px">⚠ Not linked</span>'}
                   </td>
                   <td style="white-space:nowrap">
+                    <button class="btn btn-outline btn-sm" onclick="openStockLabelForProduct(${p.id})" title="Set stock (pushes to Shopify + eBay) and/or print a stock-check label" style="margin-right:4px">🏷 Stock/label</button>
                     ${!p.ebay_item_id && p.shopify_product_id ? `<button class="btn btn-primary btn-sm" onclick="openCreateEbayListing(${p.id})" title="Create a new eBay listing using this product's Shopify data" style="margin-right:4px">+ Create on eBay</button>` : ''}
                     ${!p.ebay_item_id ? `<button class="btn btn-outline btn-sm" onclick="openLinkProductToEbay(${p.id})" title="Link to an EXISTING eBay listing (use this if you already created the listing manually)">🔗 Link existing</button>` : ''}
                     ${p.ebay_item_id ? `<button class="btn btn-ghost btn-sm" onclick="unlinkEbay('${escapeAttr(p.ebay_item_id)}')" title="Remove link" style="color:var(--red)">✕</button>` : ''}
@@ -9578,6 +9582,7 @@ function paintMirrorList() {
                     <span>Item: ${l.itemId}</span>
                     <span>eBay price: <strong style="color:var(--ink)">${gbp(l.priceEbay)}</strong></span>
                     <span>Qty: <strong style="color:var(--ink)">${l.quantityAvailable != null ? l.quantityAvailable : '—'}</strong></span>
+                    <button class="btn btn-ghost btn-sm" onclick="openStockLabelForListing('${escapeAttr(l.itemId)}')" style="font-size:11px" title="Set warehouse stock (pushes to Shopify + eBay) and/or print a stock-check label">🏷 Stock/label</button>
                   </div>
                 </div>
                 ${renderPriceCell(l)}
@@ -9920,6 +9925,75 @@ function updateMirrorCounter() {
   const t = MirrorState.listings.length;
   const c = el('mr-counter');
   if (c) c.textContent = `${n} of ${t} selected`;
+}
+
+// ── Stock & stock-check label (shared by Listing Mirror + Link status) ───────
+// opts: { productId?, shopifyProductId?, sku, title, partNumber, barcode, qty }
+// Lets the user set the warehouse quantity (pushed to Shopify + eBay) and/or
+// print a stock-check label, at link time.
+function openStockLabelModal(opts) {
+  const o = opts || {};
+  const canStock = !!(o.productId || o.shopifyProductId);
+  modal({
+    title: '🏷 Stock & label',
+    body: `
+      <div style="font-size:13px;background:var(--bg-soft);padding:10px 12px;border-radius:6px;margin-bottom:12px">
+        <div style="font-weight:600">${escapeHtml(o.title || o.sku || '')}</div>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(o.sku || '')}</div>
+      </div>
+      <div class="field">
+        <label>Quantity (new warehouse stock)</label>
+        <input id="sl-qty" type="number" min="0" step="1" value="${escapeAttr(o.qty != null ? o.qty : '')}">
+        ${canStock ? '<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Updating pushes this quantity to Shopify and every linked eBay store.</div>'
+                   : '<div style="font-size:11px;color:var(--amber);margin-top:4px">Not linked to a warehouse product yet — stock update unavailable; you can still print a label.</div>'}
+      </div>
+      <div class="field">
+        <label>Labels to print</label>
+        <input id="sl-label-count" type="number" min="1" step="1" value="1" style="max-width:120px">
+      </div>
+    `,
+    actions: [
+      { label: 'Close', onClick: closeModal },
+      { label: '🏷 Print label', onClick: () => {
+          const n = Math.max(1, parseInt(el('sl-label-count')?.value) || 1);
+          labelsPrint([{ sku: o.sku, title: o.title, partNumber: o.partNumber || o.sku, barcode: o.barcode || o.sku, qty: n }]);
+        } },
+      ...(canStock ? [{ label: 'Update stock →', primary: true, onClick: () => submitStockLabel(o) }] : []),
+    ],
+  });
+}
+
+async function submitStockLabel(o) {
+  const q = parseInt(el('sl-qty')?.value);
+  if (!Number.isInteger(q) || q < 0) { toast('Enter a valid quantity', 'warn'); return; }
+  const taskId = Task.start('Updating stock & pushing to channels…');
+  try {
+    let r;
+    if (o.productId) r = await Api.post('/api/products/' + o.productId + '/set-quantity', { quantity: q, push: true });
+    else r = await Api.post('/api/listings/set-stock', { shopifyProductId: o.shopifyProductId, qty: q });
+    Task.done(taskId, 'Stock updated');
+    const cp = r.channelPush || {};
+    const ebayOk = (cp.ebay || []).filter(x => x.ok).length;
+    const shopMsg = cp.shopify?.ok ? 'Shopify ✓' : (cp.shopify?.error ? 'Shopify ✗' : 'Shopify —');
+    toast(`Stock set to ${q}. ${shopMsg}, eBay ${ebayOk} updated.`, 'success', 5000);
+    closeModal();
+    if (typeof refreshLinkStatus === 'function') refreshLinkStatus();
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Stock update failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+function openStockLabelForProduct(productId) {
+  const p = (State.linkStatus?.products || []).find(x => x.id === productId);
+  if (!p) { toast('Product not found', 'error'); return; }
+  openStockLabelModal({ productId: p.id, sku: p.sku, title: p.title, partNumber: p.part_number, barcode: p.barcode, qty: p.qty_on_hand });
+}
+function openStockLabelForListing(itemId) {
+  const l = (MirrorState.listings || []).find(x => x.itemId === itemId);
+  if (!l) { toast('Listing not found', 'error'); return; }
+  const sku = (MirrorState.skuOverrides[itemId] != null ? MirrorState.skuOverrides[itemId] : l.sku) || '';
+  openStockLabelModal({ shopifyProductId: l.shopifyProductId, sku, title: l.title, partNumber: l.partNumber || sku, barcode: sku, qty: l.quantityAvailable });
 }
 
 async function mirrorSelected() {

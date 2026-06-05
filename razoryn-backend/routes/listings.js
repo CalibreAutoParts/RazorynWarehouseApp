@@ -192,7 +192,7 @@ router.get('/debug-ebay-order', requireAdmin, async (req, res) => {
 router.get('/link-status', requireAdmin, async (req, res) => {
   await ensureMirrorLinksColumns();
   const { rows: products } = await query(`
-    SELECT p.id, p.sku, p.title, p.barcode, p.part_number,
+    SELECT p.id, p.sku, p.title, p.barcode, p.part_number, p.qty_on_hand,
            p.shopify_product_id, p.shopify_inventory_id,
            ml.ebay_item_id, ml.store_code, ml.last_synced_sku, ml.last_synced_title, ml.last_mirrored_at
     FROM products p
@@ -994,6 +994,37 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
     console.error('[listings/ebay-active]', e.message);
     res.status(500).json({ error: 'fetch_failed', message: e.message });
   }
+});
+
+// POST /api/listings/set-stock { shopifyProductId, qty }
+// Set the warehouse stock for the product behind a mirror listing and push the
+// new quantity to Shopify + every linked eBay store. Used by the Listing Mirror
+// "Update stock" control so an edited quantity becomes the single source of
+// truth across channels.
+router.post('/set-stock', requireAdmin, async (req, res) => {
+  const { shopifyProductId } = req.body || {};
+  const qty = parseInt(req.body?.qty);
+  if (!shopifyProductId) return res.status(400).json({ error: 'shopifyProductId required' });
+  if (!Number.isInteger(qty) || qty < 0) return res.status(400).json({ error: 'invalid_qty' });
+
+  const pr = await query(`SELECT id, qty_on_hand FROM products WHERE shopify_product_id = $1 AND active = true LIMIT 1`, [String(shopifyProductId)]);
+  const product = pr.rows[0];
+  if (!product) return res.status(404).json({ error: 'product_not_found', message: 'No warehouse product is linked to this Shopify product.' });
+
+  const delta = qty - product.qty_on_hand;
+  await query(`UPDATE products SET qty_on_hand = $1, updated_at = now() WHERE id = $2`, [qty, product.id]);
+  if (delta !== 0) {
+    await query(`INSERT INTO stock_movements (product_id, delta, reason, notes, performed_by) VALUES ($1,$2,'manual',$3,$4)`,
+      [product.id, delta, 'Set from Listing Mirror', req.user.id]).catch(() => {});
+  }
+  await audit(req, 'set_quantity', 'product', product.id, { quantity: qty, source: 'listing_mirror' });
+
+  let channelPush = null;
+  try {
+    const { pushProductStockToChannels } = require('./products');
+    channelPush = await pushProductStockToChannels(product.id);
+  } catch (e) { channelPush = { error: e.message }; }
+  res.json({ ok: true, productId: product.id, qty, channelPush });
 });
 
 // Persist override (SKU/title/price/metafield edits)
