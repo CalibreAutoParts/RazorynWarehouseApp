@@ -1202,6 +1202,32 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
                  : 'Invoice';
   const subject = `${docLabel} ${sale.invoice_number || sale.payment_reference || ''} — ${brand.name}`;
 
+  // Covering message + brand signature prepended above the invoice (#6). For
+  // eBay orders we also add a friendly nudge to buy direct from the website with
+  // trade benefits — turning marketplace buyers into website customers. Skipped
+  // when includeMessage is explicitly false.
+  const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const isEbayOrder = (sale.channel || '').startsWith('ebay');
+  const site = company.company_website || (brand.domain ? `https://${brand.domain}` : '');
+  const siteLabel = (company.company_website || brand.domain || '').replace(/^https?:\/\//, '');
+  const sigBits = [company.company_phone, company.company_email, siteLabel].filter(Boolean).join(' · ');
+  const wantMessage = req.body?.includeMessage !== false;
+  const cover = !wantMessage ? '' : `
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:660px;margin:0 auto 16px;padding:18px 20px;background:#f6f7f8;border-radius:10px;color:#222;line-height:1.5">
+      <p style="margin:0 0 10px">Hi ${esc(sale.customer_name) || 'there'},</p>
+      <p style="margin:0 0 10px">Please find your ${esc(docLabel.toLowerCase())}${sale.invoice_number ? ` (ref ${esc(sale.invoice_number)})` : ''} from ${esc(brand.name)} below. Any questions, just reply to this email.</p>
+      ${isEbayOrder && site ? `<div style="margin:12px 0;padding:12px 14px;background:#fff;border:1px solid #e4e4e7;border-radius:8px">
+        <strong>Buy direct &amp; save</strong><br>
+        Order straight from <a href="${esc(site)}" style="color:#c8202d;font-weight:600">${esc(siteLabel)}</a> for better prices than the marketplace, faster service, and exclusive <strong>trade benefits</strong> on regular or bulk orders. Reply to this email to set up a trade account.
+      </div>` : ''}
+      <p style="margin:10px 0 0">Thank you for your business.</p>
+      <p style="margin:14px 0 0;font-weight:700">${esc(brand.name)}</p>
+      ${sigBits ? `<p style="margin:3px 0 0;font-size:12px;color:#666">${esc(sigBits)}</p>` : ''}
+    </div>`;
+  const htmlWithCover = cover ? html.replace(/(<body[^>]*>)/i, `$1${cover}`) : html;
+  // If there was no <body> tag to inject into, fall back to prepending.
+  const finalHtml = (cover && htmlWithCover === html) ? cover + html : htmlWithCover;
+
   if (!process.env.RESEND_API_KEY) {
     return res.status(503).json({
       error: 'email_not_configured',
@@ -1215,7 +1241,7 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
       from: `${brand.name} <${fromEmail}>`,
       to: [to],
       subject,
-      html,
+      html: finalHtml,
     }, {
       headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
       timeout: 15000,
