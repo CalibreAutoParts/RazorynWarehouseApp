@@ -1194,6 +1194,10 @@ function adaptSale(s) {
     paymentMethod: s.payment_method,
     paymentReference: s.payment_reference,
     status: s.status,
+    // #13 — payment state. unpaid = issued invoice (parts given) not yet paid.
+    isPaid: s.is_paid !== false,
+    paidAt: s.paid_at || null,
+    unpaid: !s.is_estimate && s.is_paid === false && s.status !== 'refunded' && s.status !== 'cancelled',
     subtotal: parseFloat(s.subtotal || 0),
     vat: parseFloat(s.vat || 0),
     shipping: parseFloat(s.shipping || 0),
@@ -5426,6 +5430,7 @@ function renderSales() {
           : `<button data-sf="ebay">eBay</button>`}
         <button data-sf="cash">Cash</button>
         <button data-sf="bank">Bank</button>
+        <button data-sf="unpaid">⏳ Unpaid${(State.sales||[]).filter(s=>s.unpaid).length ? ' (' + (State.sales||[]).filter(s=>s.unpaid).length + ')' : ''}</button>
         <button data-sf="estimates">Estimates</button>
       </div>
 
@@ -5469,6 +5474,7 @@ function renderSales() {
   function applyFilter(filter) {
     let list;
     if (filter === 'estimates') list = State.sales.filter(s => s.isEstimate);
+    else if (filter === 'unpaid') list = State.sales.filter(s => s.unpaid);
     else if (filter === 'all') list = State.sales.filter(s => !s.isEstimate);
     // 'ebay' is the legacy single-store bucket — matches any ebay_* channel.
     else if (filter === 'ebay') list = State.sales.filter(s => (s.channel || '').startsWith('ebay') && !s.isEstimate);
@@ -5511,6 +5517,7 @@ function renderSales() {
       const dispatchBadge = !s.isEstimate && (s.dispatchedAt || s.collectedAt)
         ? ` <span class="pill green" style="font-size:10px;margin-left:4px" title="${s.collectedAt ? 'Collected ' + new Date(s.collectedAt).toLocaleDateString() : 'Dispatched ' + new Date(s.dispatchedAt).toLocaleDateString()}">${s.collectedAt ? '✓ Collected' : '✓ Shipped'}</span>`
         : '';
+      const unpaidBadge = s.unpaid ? ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="Parts given, payment not received yet">⏳ Unpaid</span>` : '';
       // Quick "Mark dispatched" shortcut: shows for paid non-cash orders that haven't shipped yet
       // AND fall within the dispatch worklist's 10-day cutoff. Older orders are assumed to have
       // been handled on the source channel before this app's dispatch tracking existed.
@@ -5531,7 +5538,7 @@ function renderSales() {
         <td onclick="event.stopPropagation()"><input type="checkbox" class="sale-row-check" data-sid="${s.id}" ${State.salesSelected.has(s.id)?'checked':''} onchange="salesToggleRow('${s.id}',this.checked)"></td>
         <td>${fmtDate(s.date)}</td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${s.invoice||'—'}</td>
-        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}</td>
+        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}${unpaidBadge}</td>
         <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
         <td>${s.customer}</td>
         <td class="num"><strong>${gbp(s.amount)}</strong></td>
@@ -5541,6 +5548,7 @@ function renderSales() {
           <button class="btn btn-ghost btn-sm" onclick="openMessageModal('${s.id}')" title="Message the customer (email / eBay / WhatsApp)">💬</button>
           <button class="btn btn-ghost btn-sm" onclick="openEditSale('${s.id}')" title="Edit customer / reg / VIN / notes">✏️</button>
           ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Mark payment received → decrements stock, generates paid invoice using locked payment method" style="color:var(--green)">✓ Mark paid</button>` : ''}
+          ${s.unpaid ? `<button class="btn btn-ghost btn-sm" onclick="markSalePaid('${s.id}')" title="Record that payment has now been received (stock already given)" style="color:var(--green)">✓ Mark paid</button>` : ''}
           ${dispatchBtn}
           <button class="btn btn-ghost btn-sm" onclick="deleteSale('${s.id}', ${s.isEstimate})" title="Delete this ${s.isEstimate ? 'estimate' : 'invoice'} ${!s.isEstimate ? '(restores stock)' : ''}" style="color:var(--red)">🗑</button>
         </td>
@@ -5601,6 +5609,20 @@ async function salesReload() {
     renderSales();
   } catch (e) {
     toast('Failed to load sales: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// #13 — record payment for an issued-but-unpaid invoice (stock already given).
+async function markSalePaid(id) {
+  if (!confirm('Mark this invoice as PAID? (Stock was already given when it was issued — this only records the payment.)')) return;
+  try {
+    await Api.post('/api/sales/' + id + '/mark-paid', {});
+    toast('Marked as paid', 'success');
+    const sale = (State.sales || []).find(s => String(s.id) === String(id));
+    if (sale) { sale.unpaid = false; sale.isPaid = true; sale.status = sale.status === 'pending' ? 'paid' : sale.status; }
+    renderSales();
+  } catch (e) {
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 
@@ -6091,6 +6113,7 @@ function openManualSale() {
         <div class="field"><label>Document type</label>
           <select id="ms-doctype">
             <option value="invoice">Paid invoice (decrements stock)</option>
+            <option value="unpaid">Issued — awaiting payment (gives parts, follow up)</option>
             <option value="estimate">Estimate / quote only (no stock change)</option>
           </select>
         </div>
@@ -6317,7 +6340,9 @@ function msPickCustomer(i) {
 
 async function submitManualSale() {
   const paymentMethod = el('ms-payment').value;
-  const isEstimate = el('ms-doctype').value === 'estimate';
+  const docType = el('ms-doctype').value;
+  const isEstimate = docType === 'estimate';
+  const isUnpaid = docType === 'unpaid';   // #13: issued invoice, not yet paid
   const channel = paymentMethod === 'cash' ? 'direct_cash' : 'direct_bank';
 
   const rows = document.querySelectorAll('#ms-items > [data-idx]');
@@ -6349,6 +6374,7 @@ async function submitManualSale() {
     shippingAddress: el('ms-address').value || null,
     customerId: _msPickedId || null,
     createCustomer: !_msPickedId && !!el('ms-save-customer')?.checked,
+    paid: !isUnpaid,   // #13 — false = issued but awaiting payment
     orderNumber: el('ms-ordernum').value || null,
     vehicleReg: el('ms-reg').value || null,
     vinNumber: el('ms-vin')?.value || null,
@@ -6359,7 +6385,7 @@ async function submitManualSale() {
   try {
     const r = await Api.post('/api/sales', payload);
     closeModal();
-    toast(isEstimate ? 'Estimate saved' : 'Sale recorded — opening document…', 'success');
+    toast(isEstimate ? 'Estimate saved' : (isUnpaid ? 'Invoice issued — awaiting payment (added to follow-up list)' : 'Sale recorded — opening document…'), 'success');
     await Store.refresh('sales');
     await Store.refresh('products');
     renderSales();

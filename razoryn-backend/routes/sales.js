@@ -7,6 +7,22 @@ const brand = require('../lib/brand');
 
 const router = express.Router();
 router.use(requireAuth);
+
+// #13 — track whether a direct invoice has actually been PAID. is_paid=false on
+// a non-estimate sale = "parts given, awaiting payment" (follow-up list).
+// is_paid defaults to TRUE so every existing invoice stays paid (restart-safe —
+// no backfill that could re-flip intentionally-unpaid rows). paid_at records
+// when payment was taken.
+let _paidColReady = false;
+async function ensurePaidColumn() {
+  if (_paidColReady) return;
+  try {
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_paid BOOLEAN NOT NULL DEFAULT true`);
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ`);
+    _paidColReady = true;
+  } catch (e) { console.warn('[sales] ensurePaidColumn:', e.message); }
+}
+ensurePaidColumn();
 // GDPR: sales/invoices carry customer PII — never let a browser or proxy cache
 // these responses.
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
@@ -413,20 +429,24 @@ router.post('/', requireAdmin, async (req, res) => {
       }
     }
 
+    // #13: an issued-but-unpaid invoice (b.paid === false) still gives the parts
+    // (stock decrements like any invoice) but is flagged for payment follow-up.
+    const isPaid = isEstimate ? true : (b.paid !== false);
+    await ensurePaidColumn();
     const sale = await c.query(
       `INSERT INTO sales (channel, customer_name, customer_phone, customer_email,
                           subtotal, vat, shipping, total, status, invoice_number,
                           notes, recorded_by, payment_method, payment_reference,
                           is_estimate, order_number, vehicle_reg, vin_number, shipping_address,
-                          customer_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *`,
+                          customer_id, is_paid, paid_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
       [b.channel, b.customerName || null, b.customerPhone || null, b.customerEmail || null,
        subtotal, vat, shipping, total,
-       isEstimate ? 'pending' : 'paid',
+       isEstimate ? 'pending' : (isPaid ? 'paid' : 'pending'),
        invoiceNumber, b.notes || null, req.user.id,
        paymentMethod, paymentReference,
        isEstimate, b.orderNumber || null, b.vehicleReg || null, b.vinNumber || null, b.shippingAddress || null,
-       customerId]
+       customerId, isPaid, (!isEstimate && isPaid) ? new Date() : null]
     );
 
     for (const it of itemsResolved) {
@@ -465,6 +485,20 @@ router.post('/', requireAdmin, async (req, res) => {
     });
   }
   res.status(201).json(result);
+});
+
+// POST /api/sales/:id/mark-paid — record payment for an already-issued invoice
+// (#13). Stock was already decremented when the invoice was issued, so this only
+// flips the payment state — no inventory change.
+router.post('/:id/mark-paid', requireAdmin, async (req, res) => {
+  await ensurePaidColumn();
+  const s = await query(`SELECT id, is_estimate, status FROM sales WHERE id = $1`, [req.params.id]);
+  if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
+  if (s.rows[0].is_estimate) return res.status(400).json({ error: 'is_estimate', message: 'Use “Mark paid” on the estimate to convert it to an invoice.' });
+  const newStatus = (s.rows[0].status === 'pending') ? 'paid' : s.rows[0].status;
+  const upd = await query(`UPDATE sales SET is_paid = true, paid_at = now(), status = $2 WHERE id = $1 RETURNING *`, [req.params.id, newStatus]);
+  await audit(req, 'sale_mark_paid', 'sale', req.params.id, null);
+  res.json({ ok: true, sale: upd.rows[0] });
 });
 
 // POST /api/sales/:id/convert-to-invoice — turn an estimate into a paid invoice
