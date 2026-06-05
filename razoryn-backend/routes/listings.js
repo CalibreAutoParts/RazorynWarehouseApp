@@ -67,6 +67,18 @@ router.get('/store-categories', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/listings/shopify-categories?q= — search Shopify's product taxonomy
+// for the Mirror-to-Shopify category picker (#1).
+router.get('/shopify-categories', requireAdmin, async (req, res) => {
+  if (!shopify.isConfigured()) return res.json({ categories: [] });
+  try {
+    const cats = await shopify.searchTaxonomyCategories(req.query.q || '');
+    res.json({ categories: cats.map(c => ({ id: c.id, name: c.fullName })) });
+  } catch (e) {
+    res.status(502).json({ error: 'shopify_error', message: e.message });
+  }
+});
+
 // GET /api/listings/category-search?q=grille&carPartsOnly=1
 // Search eBay categories by NAME and (optionally) keep only vehicle-parts ones.
 router.get('/category-search', requireAdmin, async (req, res) => {
@@ -1121,6 +1133,14 @@ router.post('/mirror', requireAdmin, async (req, res) => {
       } else {
         product = await shopify.createProduct(args);
         results.created++;
+      }
+
+      // Assign the Shopify product category (standard taxonomy) when one was
+      // chosen for this listing. Best-effort — a category failure must not abort
+      // the mirror. categoryId is a taxonomy GID from the category picker.
+      if (item.categoryId && product?.id) {
+        try { await shopify.applyProductSeo(product.id, { categoryId: item.categoryId }); }
+        catch (e) { console.warn('[mirror] category assign failed:', e.message); }
       }
 
       // Record/refresh the mirror link

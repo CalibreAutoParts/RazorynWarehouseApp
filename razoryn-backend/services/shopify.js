@@ -864,6 +864,29 @@ async function findTaxonomyCategory(term) {
   return result;
 }
 
+// Search Shopify's standard product taxonomy by name, returning a list of
+// { id, fullName } for a category picker (vehicle-parts matches first).
+async function searchTaxonomyCategories(term) {
+  if (!term || term.trim().length < 2) return [];
+  const query = `query($q: String!) {
+    taxonomy { categories(search: $q, first: 25) { edges { node { id fullName } } } }
+  }`;
+  try {
+    const r = await shopifyRequest('post', '/graphql.json', { data: { query, variables: { q: term.trim() } } });
+    if (r.data.errors) throw new Error(JSON.stringify(r.data.errors));
+    const nodes = (r.data.data?.taxonomy?.categories?.edges || []).map(e => e.node);
+    nodes.sort((a, b) => {
+      const va = /vehicle|automotive|motor/i.test(a.fullName) ? 0 : 1;
+      const vb = /vehicle|automotive|motor/i.test(b.fullName) ? 0 : 1;
+      return va - vb;
+    });
+    return nodes.slice(0, 20);
+  } catch (e) {
+    console.warn('[shopify] searchTaxonomyCategories failed:', e.message);
+    return [];
+  }
+}
+
 // Apply SEO fields to a product. Any field left undefined is not touched.
 //   { seoTitle, seoDescription, handle, categoryId }
 // Returns { ok, userErrors }.
@@ -896,6 +919,7 @@ module.exports = {
   getAccessToken,
   getProductSeo,
   findTaxonomyCategory,
+  searchTaxonomyCategories,
   applyProductSeo,
   getInventoryLevel,
   getCustomCollections,

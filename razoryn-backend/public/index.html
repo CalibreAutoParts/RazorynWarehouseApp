@@ -8079,6 +8079,16 @@ function renderMirror() {
                 </div>
               </div>
 
+              <div style="margin-top:12px;position:relative">
+                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Shopify category <span style="font-weight:400;text-transform:none">— applied to mirrored products</span></div>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                  <input id="mr-category-search" placeholder="Search Shopify categories (e.g. bumpers, headlights)…" oninput="mrCategorySearch(this.value)" autocomplete="off" style="flex:1;min-width:240px">
+                  <span id="mr-category-current" style="font-size:12px;color:var(--green);font-weight:600"></span>
+                  <button class="btn btn-ghost btn-sm" onclick="mrClearCategory()" style="color:var(--ink-soft)">Clear</button>
+                </div>
+                <div id="mr-category-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:260px;overflow:auto"></div>
+              </div>
+
               <div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
                 <input id="mr-search" placeholder="Filter by title, SKU, or item ID…" oninput="updateFilter(this.value)" style="flex:1;min-width:240px">
                 <div class="seg">
@@ -10247,6 +10257,38 @@ function openStockLabelForListing(itemId) {
   openStockLabelModal({ shopifyProductId: l.shopifyProductId, sku, title: l.title, partNumber: l.partNumber || sku, barcode: sku, qty: l.quantityAvailable });
 }
 
+// #1 — Shopify category picker for Mirror to Shopify.
+let _mrCatTimer = null, _mrCatList = [];
+function mrCategorySearch(q) {
+  clearTimeout(_mrCatTimer);
+  const box = el('mr-category-suggest');
+  if (!q || q.trim().length < 2) { if (box) box.style.display = 'none'; return; }
+  _mrCatTimer = setTimeout(async () => {
+    try {
+      const r = await Api.get('/api/listings/shopify-categories?q=' + encodeURIComponent(q.trim()));
+      _mrCatList = r.categories || [];
+      if (!box) return;
+      if (!_mrCatList.length) { box.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--ink-soft)">No matches</div>'; box.style.display = 'block'; return; }
+      box.innerHTML = _mrCatList.map((c, i) => `<div onclick="mrPickCategory(${i})" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line);font-size:12px" onmouseover="this.style.background='var(--bg-soft)'" onmouseout="this.style.background=''">${escapeHtml(c.name)}</div>`).join('');
+      box.style.display = 'block';
+    } catch (e) { if (box) box.style.display = 'none'; }
+  }, 280);
+}
+function mrPickCategory(i) {
+  const c = _mrCatList[i];
+  if (!c) return;
+  MirrorState.commonCategoryId = c.id;
+  MirrorState.commonCategoryName = c.name;
+  if (el('mr-category-current')) el('mr-category-current').textContent = '✓ ' + (c.name.split('>').pop().trim());
+  if (el('mr-category-search')) el('mr-category-search').value = '';
+  const box = el('mr-category-suggest'); if (box) box.style.display = 'none';
+}
+function mrClearCategory() {
+  MirrorState.commonCategoryId = null; MirrorState.commonCategoryName = null;
+  if (el('mr-category-current')) el('mr-category-current').textContent = '';
+  if (el('mr-category-search')) el('mr-category-search').value = '';
+}
+
 async function mirrorSelected() {
   const selected = MirrorState.listings.filter(l => MirrorState.selected.has(l.itemId));
   if (!selected.length) { toast('Nothing selected', 'warn'); return; }
@@ -10293,6 +10335,7 @@ async function mirrorSelected() {
     tags: MirrorState.itemTags[l.itemId] != null ? MirrorState.itemTags[l.itemId] : (MirrorState.commonTags || null),
     templateSuffix: MirrorState.itemTemplateSuffixes[l.itemId] != null ? MirrorState.itemTemplateSuffixes[l.itemId] : (MirrorState.commonTemplateSuffix || null),
     shippingProfileId: MirrorState.itemShippingProfileIds[l.itemId] != null ? MirrorState.itemShippingProfileIds[l.itemId] : (MirrorState.commonShippingProfileId || null),
+    categoryId: MirrorState.itemCategoryIds?.[l.itemId] != null ? MirrorState.itemCategoryIds[l.itemId] : (MirrorState.commonCategoryId || null),
   }));
 
   const taskId = Task.start(`Mirroring ${items.length} listings to Shopify`);
