@@ -80,7 +80,7 @@ backfillDirectReferences();
 router.get('/', requireAdmin, async (req, res) => {
   const { channel, from, to, status } = req.query;
   const page = Math.max(1, parseInt(req.query.page) || 1);
-  const pageSize = Math.min(200, parseInt(req.query.pageSize) || 50);
+  const pageSize = Math.min(2000, parseInt(req.query.pageSize) || 50);
   const where = [], params = [];
   if (channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
   if (from)    { params.push(from); where.push(`s.occurred_at >= $${params.length}`); }
