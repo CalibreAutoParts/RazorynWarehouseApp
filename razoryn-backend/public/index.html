@@ -970,6 +970,11 @@
           Inventory
           <span class="ct" id="nav-inv-count">0</span>
         </button>
+        <button class="nav-item" data-page="incoming">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16l-4 4-4-4"/><path d="M12 20V4"/><path d="M4 4h16"/></svg>
+          Incoming
+          <span class="ct" id="nav-incoming-count" style="display:none">0</span>
+        </button>
         <button class="nav-item" data-page="scan">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><line x1="7" y1="12" x2="7" y2="12"/><line x1="12" y1="7" x2="12" y2="17"/><line x1="17" y1="12" x2="17" y2="12"/></svg>
           Stock Check
@@ -2306,6 +2311,7 @@ function hasPerm(page) {
   const map = {
     dashboard:     true,
     inventory:    'inventory',
+    incoming:     'inventory',
     scan:         'scan',
     stocktake:    'scan',
     locations:    'locations',
@@ -2351,6 +2357,7 @@ function routeTo(page) {
 
   const pages = {
     dashboard: renderDashboard, inventory: renderInventory, scan: renderScan,
+    incoming: renderIncoming,
     stocktake: renderStockTake,
     locations: renderLocations, returns: renderReturns, sales: renderSales,
     pricing: renderQuoteBuilder, schedule: renderSchedule, videos: renderVideos,
@@ -2710,6 +2717,233 @@ function channelPill(ch) {
 /* ==========================================================
    INVENTORY
    ========================================================== */
+// ── Incoming / on-order stock ────────────────────────────────────────────────
+const INCOMING_STATUS = { on_order: 'On order', in_transit: 'In transit', arrived: 'Arrived', received: 'Received', cancelled: 'Cancelled' };
+function renderIncoming() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Incoming stock</h1><div class="desc">Stock ordered in but not with us yet — receive it when a container is unloaded to update stock and push to Shopify + eBay.</div></div>
+        <div class="actions"><button class="btn btn-primary" onclick="openAddIncoming()">+ Add incoming</button></div>
+      </div>
+      <div class="grid-4" id="incoming-stats" style="margin-bottom:16px"></div>
+      <div class="toolbar" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input type="search" class="search-input" id="incoming-search" placeholder="Search part, SKU, container, supplier…" oninput="incomingDebouncedSearch(this.value)" style="flex:1;min-width:200px">
+        <select id="incoming-status-filter" onchange="loadIncoming()" style="padding:6px 8px;font-size:13px">
+          <option value="open">Open (not yet received)</option>
+          <option value="">All</option>
+          <option value="on_order">On order</option>
+          <option value="in_transit">In transit</option>
+          <option value="arrived">Arrived</option>
+          <option value="received">Received</option>
+        </select>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr>
+              <th>Item</th><th class="num">On hand</th><th class="num">Ordered</th><th class="num">Received</th><th class="num">Remaining</th>
+              <th>Container</th><th>Supplier</th><th>Expected</th><th>Status</th><th></th>
+            </tr></thead>
+            <tbody id="incoming-tbody"><tr><td colspan="10"><div class="empty"><div class="t">Loading…</div></div></td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+  loadIncoming();
+}
+let _incomingSearchTimer = null;
+function incomingDebouncedSearch(v) { clearTimeout(_incomingSearchTimer); _incomingSearchTimer = setTimeout(() => loadIncoming(), 300); }
+async function loadIncoming() {
+  const status = el('incoming-status-filter')?.value ?? 'open';
+  const q = (el('incoming-search')?.value || '').trim();
+  const qs = new URLSearchParams();
+  if (status && status !== 'open') qs.set('status', status);
+  if (q) qs.set('q', q);
+  try {
+    const r = await Api.get('/api/incoming' + (qs.toString() ? '?' + qs.toString() : ''));
+    let items = r.items || [];
+    if (status === 'open') items = items.filter(i => i.status !== 'received');
+    State.incoming = items;
+    paintIncomingStats(r.summary || {});
+    paintIncoming(items);
+    // Nav badge
+    const badge = el('nav-incoming-count');
+    if (badge) { const n = r.summary?.open_lines || 0; badge.textContent = n; badge.style.display = n ? '' : 'none'; }
+  } catch (e) {
+    if (el('incoming-tbody')) el('incoming-tbody').innerHTML = `<tr><td colspan="10"><div class="empty"><div class="t">Failed to load: ${escapeHtml(e.data?.message || e.message)}</div></div></td></tr>`;
+  }
+}
+function paintIncomingStats(s) {
+  const wrap = el('incoming-stats'); if (!wrap) return;
+  wrap.innerHTML = `
+    <div class="stat"><div class="label">Open lines</div><div class="value">${s.open_lines || 0}</div></div>
+    <div class="stat"><div class="label">Units incoming</div><div class="value">${s.units_incoming || 0}</div><div class="delta">not yet received</div></div>
+    <div class="stat"><div class="label">Open containers</div><div class="value">${s.open_containers || 0}</div></div>
+    <div class="stat"><div class="label">&nbsp;</div><div class="value"><button class="btn btn-outline btn-sm" onclick="openAddIncoming()">+ Add incoming</button></div></div>`;
+}
+function paintIncoming(items) {
+  const tb = el('incoming-tbody'); if (!tb) return;
+  if (!items.length) { tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="t">Nothing incoming</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Add stock you\'ve ordered so the team can see what\'s on the way.</div></div></td></tr>'; return; }
+  const statusPill = (st) => {
+    const c = st === 'received' ? 'green' : st === 'arrived' ? 'amber' : st === 'cancelled' ? '' : '';
+    return `<span class="pill ${c}" style="font-size:10px">${INCOMING_STATUS[st] || st}</span>`;
+  };
+  tb.innerHTML = items.map(i => {
+    const remaining = Math.max(0, i.qty_ordered - i.qty_received);
+    const onHand = i.product_qty_on_hand != null ? i.product_qty_on_hand : '—';
+    const exp = i.expected_date ? new Date(i.expected_date).toLocaleDateString('en-GB') : '—';
+    const linked = !!i.product_id;
+    return `<tr>
+      <td><div style="font-weight:600">${escapeHtml(i.title || i.product_title || '(unnamed)')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(i.sku || i.part_number || '')}${linked ? '' : ' · <span style="color:var(--amber)">not linked</span>'}</div></td>
+      <td class="num">${onHand}</td>
+      <td class="num">${i.qty_ordered}</td>
+      <td class="num">${i.qty_received}</td>
+      <td class="num"><strong>${remaining}</strong></td>
+      <td>${escapeHtml(i.container_ref || '—')}</td>
+      <td>${escapeHtml(i.supplier || '—')}</td>
+      <td style="white-space:nowrap">${exp}</td>
+      <td>${statusPill(i.status)}</td>
+      <td style="white-space:nowrap">
+        ${remaining > 0 ? `<button class="btn btn-primary btn-sm" onclick="openReceiveIncoming(${i.id})" title="Receive units — adds to stock & pushes to channels">📦 Receive</button>` : ''}
+        <button class="btn btn-ghost btn-sm" onclick="openEditIncoming(${i.id})" title="Edit">✏️</button>
+        <button class="btn btn-ghost btn-sm" onclick="deleteIncoming(${i.id})" title="Delete" style="color:var(--red)">🗑</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// Add / edit incoming. Product picker searches the loaded inventory; you can
+// also enter a free SKU/part for items not yet created as products.
+let _incPickedProductId = null;
+function incomingModalBody(it) {
+  it = it || {};
+  return `
+    <div class="field" style="position:relative"><label>Product / part <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— search inventory, or type a SKU/part for a new item</span></label>
+      <input id="inc-product" autocomplete="off" value="${escapeAttr(it.title || it.product_title || '')}" oninput="incProductSearch(this.value)" placeholder="Search by title, SKU or part #">
+      <div id="inc-product-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:240px;overflow:auto"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="field"><label>SKU</label><input id="inc-sku" value="${escapeAttr(it.sku || '')}"></div>
+      <div class="field"><label>Part number</label><input id="inc-part" value="${escapeAttr(it.part_number || '')}"></div>
+      <div class="field"><label>Quantity ordered</label><input id="inc-qty" type="number" min="1" step="1" value="${escapeAttr(it.qty_ordered || '')}"></div>
+      <div class="field"><label>Expected date</label><input id="inc-expected" type="date" value="${escapeAttr(it.expected_date ? String(it.expected_date).slice(0,10) : '')}"></div>
+      <div class="field"><label>Container / order ref</label><input id="inc-container" value="${escapeAttr(it.container_ref || '')}" placeholder="e.g. CONT-2026-04"></div>
+      <div class="field"><label>Supplier</label><input id="inc-supplier" value="${escapeAttr(it.supplier || '')}"></div>
+    </div>
+    <div class="field"><label>Status</label>
+      <select id="inc-status">${Object.entries(INCOMING_STATUS).filter(([k]) => k !== 'cancelled').map(([k, v]) => `<option value="${k}" ${(it.status || 'on_order') === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
+    </div>
+    <div class="field"><label>Notes</label><input id="inc-notes" value="${escapeAttr(it.notes || '')}"></div>`;
+}
+function openAddIncoming() {
+  _incPickedProductId = null;
+  modal({ title: '+ Add incoming stock', body: incomingModalBody(), actions: [
+    { label: 'Cancel', onClick: closeModal },
+    { label: 'Add', primary: true, onClick: () => submitIncoming(null) },
+  ]});
+}
+function openEditIncoming(id) {
+  const it = (State.incoming || []).find(x => x.id === id);
+  if (!it) return;
+  _incPickedProductId = it.product_id || null;
+  modal({ title: 'Edit incoming stock', body: incomingModalBody(it), actions: [
+    { label: 'Cancel', onClick: closeModal },
+    { label: 'Save', primary: true, onClick: () => submitIncoming(id) },
+  ]});
+}
+function incProductSearch(q) {
+  const box = el('inc-product-suggest');
+  if (!box) return;
+  q = (q || '').trim().toLowerCase();
+  _incPickedProductId = null;
+  if (q.length < 2) { box.style.display = 'none'; return; }
+  const matches = (State.products || []).filter(p =>
+    (p.title || '').toLowerCase().includes(q) || (p.sku || '').toLowerCase().includes(q) || (p.part_number || '').toLowerCase().includes(q)
+  ).slice(0, 12);
+  if (!matches.length) { box.style.display = 'none'; return; }
+  box.innerHTML = matches.map(p => `<div onclick="incPickProduct(${p.id})" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line);font-size:12px" onmouseover="this.style.background='var(--bg-soft)'" onmouseout="this.style.background=''">
+    <div style="font-weight:600">${escapeHtml(p.title)}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')} · on hand ${p.qty_on_hand ?? 0}</div></div>`).join('');
+  box.style.display = 'block';
+}
+function incPickProduct(id) {
+  const p = (State.products || []).find(x => x.id === id);
+  if (!p) return;
+  _incPickedProductId = p.id;
+  if (el('inc-product')) el('inc-product').value = p.title || '';
+  if (el('inc-sku')) el('inc-sku').value = p.sku || '';
+  if (el('inc-part')) el('inc-part').value = p.part_number || '';
+  const box = el('inc-product-suggest'); if (box) box.style.display = 'none';
+}
+async function submitIncoming(id) {
+  const qty = parseInt(el('inc-qty')?.value);
+  if (!Number.isInteger(qty) || qty <= 0) { toast('Enter a quantity', 'warn'); return; }
+  const payload = {
+    productId: _incPickedProductId || undefined,
+    title: el('inc-product')?.value || null,
+    sku: el('inc-sku')?.value || null,
+    partNumber: el('inc-part')?.value || null,
+    qtyOrdered: qty,
+    containerRef: el('inc-container')?.value || null,
+    supplier: el('inc-supplier')?.value || null,
+    expectedDate: el('inc-expected')?.value || null,
+    status: el('inc-status')?.value || 'on_order',
+    notes: el('inc-notes')?.value || null,
+  };
+  try {
+    if (id) await Api.patch('/api/incoming/' + id, payload);
+    else await Api.post('/api/incoming', payload);
+    toast(id ? 'Updated' : 'Incoming stock added', 'success');
+    closeModal();
+    loadIncoming();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+function openReceiveIncoming(id) {
+  const it = (State.incoming || []).find(x => x.id === id);
+  if (!it) return;
+  const remaining = Math.max(0, it.qty_ordered - it.qty_received);
+  modal({
+    title: '📦 Receive stock',
+    body: `
+      <div style="font-size:13px;background:var(--bg-soft);padding:10px 12px;border-radius:6px;margin-bottom:12px">
+        <div style="font-weight:600">${escapeHtml(it.title || it.product_title || '')}</div>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')} · ${remaining} of ${it.qty_ordered} remaining</div>
+      </div>
+      <div class="field"><label>Quantity received now</label><input id="inc-recv-qty" type="number" min="1" max="${remaining}" value="${remaining}"></div>
+      ${it.product_id
+        ? '<label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="inc-recv-push" checked> Push new stock to Shopify + eBay</label>'
+        : '<div style="font-size:12px;color:var(--amber)">Not linked to a warehouse product — stock won\'t update automatically. Edit this line to link it to a product first if you want it pushed.</div>'}
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Receive', primary: true, onClick: () => submitReceiveIncoming(id) },
+    ],
+  });
+}
+async function submitReceiveIncoming(id) {
+  const qty = parseInt(el('inc-recv-qty')?.value);
+  if (!Number.isInteger(qty) || qty <= 0) { toast('Enter a quantity', 'warn'); return; }
+  const push = el('inc-recv-push') ? el('inc-recv-push').checked : false;
+  const taskId = Task.start('Receiving stock…');
+  try {
+    const r = await Api.post('/api/incoming/' + id + '/receive', { qty, push });
+    Task.done(taskId, 'Received');
+    let msg = `Received ${r.received}`;
+    if (r.notLinked) msg += ' (not linked — stock not changed)';
+    else { const cp = r.channelPush || {}; const ebayOk = (cp.ebay || []).filter(x => x.ok).length; msg += ` · stock updated${push ? `, Shopify ${cp.shopify?.ok ? '✓' : '—'}, eBay ${ebayOk}` : ''}`; }
+    toast(msg, 'success', 5000);
+    closeModal();
+    loadIncoming();
+    Store.refresh('products').catch(() => {});
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function deleteIncoming(id) {
+  if (!confirm('Delete this incoming line?')) return;
+  try { await Api.delete('/api/incoming/' + id); toast('Deleted', 'success'); loadIncoming(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
 function renderInventory() {
   if (!State.invSelected) State.invSelected = new Set();
   el('content').innerHTML = `
