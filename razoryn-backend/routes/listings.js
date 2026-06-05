@@ -942,6 +942,49 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
       }
     }
 
+    // Final fallback: match still-unmatched listings to a Shopify-linked
+    // warehouse product by PART NUMBER. Many eBay listings have NO SKU (or a SKU
+    // that differs from Shopify), so SKU-only matching leaves them looking
+    // un-mirrored even though the product IS on Shopify. Calibre titles end with
+    // "- <part number>" (e.g. "… Diffuser Trim - 11192455"), which usually equals
+    // the Shopify SKU/part number — so we match on that. Local products table
+    // only (no extra Shopify calls); high-precision candidates only.
+    const stillUnmatched = listings.filter(l => !l.existsOnShopify);
+    if (stillUnmatched.length) {
+      const { rows: prodRows } = await query(
+        `SELECT part_number, shopify_product_id, title FROM products
+          WHERE active = true AND shopify_product_id IS NOT NULL
+            AND part_number IS NOT NULL AND part_number <> ''`);
+      const pnMap = new Map();
+      for (const p of prodRows) {
+        const n = normCode(p.part_number);
+        if (n.length >= 5 && !pnMap.has(n)) pnMap.set(n, p);
+      }
+      for (const l of stillUnmatched) {
+        const sku = l.overrideSku || l.sku;
+        const title = l.overrideTitle || l.title || '';
+        const cands = [];
+        if (sku) cands.push(normCode(sku));
+        // Trailing " - CODE" (spaces around the dash, so a year range like
+        // "2022-2025" is NOT matched). CODE may itself contain hyphens.
+        const tail = title.match(/\s[-–]\s+([A-Za-z0-9][A-Za-z0-9-]*)\s*$/);
+        if (tail) cands.push(normCode(tail[1]));
+        const match = cands.map(c => (c.length >= 5 ? pnMap.get(c) : null)).find(Boolean);
+        if (match) {
+          l.existsOnShopify = true;
+          l.shopifyProductId = String(match.shopify_product_id);
+          l.matchedBy = 'part_number';
+          try {
+            await query(`
+              INSERT INTO mirror_links (ebay_item_id, shopify_product_id, last_synced_sku, last_synced_title)
+              VALUES ($1, $2, $3, $4)
+              ON CONFLICT (ebay_item_id) DO NOTHING
+            `, [l.itemId, match.shopify_product_id, sku || null, title]);
+          } catch (e) { /* ignore — non-critical */ }
+        }
+      }
+    }
+
     res.json({ listings, count: listings.length });
   } catch (e) {
     console.error('[listings/ebay-active]', e.message);
