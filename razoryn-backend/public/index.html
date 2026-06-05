@@ -7821,7 +7821,7 @@ function renderMirror() {
                 </div>
                 <div>
                   <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Push to Shopify</div>
-                  <button class="btn btn-primary" onclick="pushToShopify()" id="mr-push-btn">Push selected →</button>
+                  <button class="btn btn-primary" onclick="mirrorSelected()" id="mr-push-btn">Push selected →</button>
                 </div>
               </div>
 
@@ -9144,7 +9144,8 @@ async function pullEbayListings() {
       if (l.overrideSku != null) MirrorState.skuOverrides[l.itemId] = l.overrideSku;
       if (l.overrideTitle != null) MirrorState.titleOverrides[l.itemId] = l.overrideTitle;
       if (l.customPrice != null) MirrorState.customPrices[l.itemId] = l.customPrice;
-      MirrorState.selectedImages[l.itemId] = new Set(l.pictureUrls.length ? [l.pictureUrls[0]] : []);
+      // Default to importing ALL of the listing's photos (untick any unwanted).
+      MirrorState.selectedImages[l.itemId] = new Set(Array.isArray(l.pictureUrls) ? l.pictureUrls : []);
     }
     el('mirror-empty').style.display = 'none';
     el('mirror-toolbar').style.display = 'block';

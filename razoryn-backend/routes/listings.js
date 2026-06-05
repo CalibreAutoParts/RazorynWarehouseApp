@@ -876,7 +876,10 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
     let listings = [];
     for (const s of stores) {
       try {
-        const part = await ebay.getActiveListings(s.code);
+        // enrichPhotos: pull the FULL picture set per listing (a GetItem call
+        // each) so the mirror UI can import every eBay photo, not just the
+        // single gallery image GetMyeBaySelling returns.
+        const part = await ebay.getActiveListings(s.code, { enrichPhotos: true });
         listings = listings.concat(part);
       } catch (e) {
         console.warn(`[mirror.pull] store=${s.code} failed: ${e.message}`);
