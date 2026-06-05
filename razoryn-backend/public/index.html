@@ -211,8 +211,12 @@
     padding-left: 14px; border-left: 1px solid var(--line);
   }
   .topbar .spacer { flex: 1; }
-  .menu-btn.icon-btn { display: none; width: 36px; height: 36px; border-radius: 8px; align-items: center; justify-content: center; }
+  .menu-btn.icon-btn { display: none; width: 36px; height: 36px; border-radius: 8px; align-items: center; justify-content: center; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
   .menu-btn.icon-btn:hover { background: var(--line-2); }
+  /* The icon SVG (thin stroked lines, fill:none) must not swallow taps — on
+     mobile a tap landing on the SVG/line element otherwise misses the button.
+     Make the whole button the event target. */
+  .icon-btn svg, .menu-btn svg { pointer-events: none; }
 
   .topbar-actions { display: flex; align-items: center; gap: 8px; }
   .icon-btn {
@@ -1764,6 +1768,7 @@ function enterApp() {
 
   bindNav();
   bindHeader();
+  initEditingTracker();
   routeTo('dashboard');
   refreshNavCounts();
 
@@ -2178,6 +2183,31 @@ function bindNav() {
   });
 }
 
+// ── Edit tracking (#9) ───────────────────────────────────────────────────────
+// Navigating to a tab re-renders it with fresh data. To avoid silently throwing
+// away an in-progress edit, we track whether the user has typed into a real
+// editable field (not a search/filter box) on the current page, and confirm
+// before leaving if so. Cleared whenever a page renders or a save completes.
+const Editing = { dirty: false };
+function markClean() { Editing.dirty = false; }
+function isSearchLike(elm) {
+  if (!elm) return true;
+  if (elm.matches && elm.matches('[data-no-dirty]')) return true;
+  const t = (elm.type || '').toLowerCase();
+  if (['search', 'checkbox', 'radio', 'button', 'submit', 'range'].includes(t)) return true;
+  const hay = ((elm.id || '') + ' ' + (typeof elm.className === 'string' ? elm.className : '') + ' ' + ((elm.getAttribute && elm.getAttribute('placeholder')) || '')).toLowerCase();
+  return /search|filter|find/.test(hay);
+}
+function initEditingTracker() {
+  const content = document.getElementById('content');
+  if (!content || content._editTrackBound) return;
+  content._editTrackBound = true;
+  content.addEventListener('input', (e) => {
+    const t = e.target;
+    if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && !isSearchLike(t)) Editing.dirty = true;
+  }, true);
+}
+
 function hasPerm(page) {
   if (!State.user) return false;
   if (State.user.role === 'admin') return true;
@@ -2224,6 +2254,12 @@ function hasPerm(page) {
 
 function routeTo(page) {
   if (!hasPerm(page)) { toast('You don\'t have access to this page', 'error'); return; }
+  // #9: confirm before leaving a page with unsaved edits (refresh-on-navigate
+  // would otherwise discard them). Same-page re-render is always allowed.
+  if (Editing.dirty && page !== State.page) {
+    if (!confirm('You have unsaved changes on this page. Leave without saving?')) return;
+  }
+  Editing.dirty = false;
   State.page = page;
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
   // Close mobile sidebar
