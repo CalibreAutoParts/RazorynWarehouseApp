@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#c8202d">
 <title>Warehouse Hub</title>
 <!-- PWA — manifest + icon are served brand-aware by the server. theme-color is
@@ -2168,14 +2168,22 @@ function bindHeader() {
   document.getElementById('notif-btn').addEventListener('click', () => routeTo('notifications'));
   document.getElementById('quick-scan-btn').addEventListener('click', () => routeTo('scan'));
   document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
-  document.getElementById('menu-toggle').addEventListener('click', () => {
-    document.getElementById('sidebar').classList.toggle('open');
-    document.getElementById('sb-backdrop').classList.toggle('open');
-  });
-  document.getElementById('sb-backdrop').addEventListener('click', () => {
-    document.getElementById('sidebar').classList.remove('open');
-    document.getElementById('sb-backdrop').classList.remove('open');
-  });
+  // #3 — the mobile menu toggle is bound by DELEGATION on the document, once,
+  // so it can never be lost to a re-render or a binding that ran before the
+  // element was ready (the old direct binding intermittently failed on first
+  // login, needing a sign-out/in). Works regardless of when bindHeader runs.
+  if (!window._navDelegationBound) {
+    window._navDelegationBound = true;
+    document.addEventListener('click', (e) => {
+      if (e.target.closest('#menu-toggle')) {
+        document.getElementById('sidebar')?.classList.toggle('open');
+        document.getElementById('sb-backdrop')?.classList.toggle('open');
+      } else if (e.target.closest('#sb-backdrop')) {
+        document.getElementById('sidebar')?.classList.remove('open');
+        document.getElementById('sb-backdrop')?.classList.remove('open');
+      }
+    });
+  }
 }
 
 /* ==========================================================

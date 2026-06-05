@@ -947,22 +947,24 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
     }
 
     // Final fallback: match still-unmatched listings to a Shopify-linked
-    // warehouse product by PART NUMBER. Many eBay listings have NO SKU (or a SKU
-    // that differs from Shopify), so SKU-only matching leaves them looking
-    // un-mirrored even though the product IS on Shopify. Calibre titles end with
-    // "- <part number>" (e.g. "… Diffuser Trim - 11192455"), which usually equals
-    // the Shopify SKU/part number — so we match on that. Local products table
-    // only (no extra Shopify calls); high-precision candidates only.
+    // warehouse product by the CODE in the title. Many eBay listings have NO SKU
+    // (or a SKU that differs from Shopify), so SKU-only matching leaves them
+    // looking un-mirrored even though the product IS on Shopify. Calibre titles
+    // end with "- <code>" (e.g. "… Diffuser Trim - 11192455"). That code is the
+    // product's SKU on some products and the part_number on others (the
+    // part_number column is often empty), so we index BOTH. Local products only;
+    // high-precision candidates only.
     const stillUnmatched = listings.filter(l => !l.existsOnShopify);
     if (stillUnmatched.length) {
       const { rows: prodRows } = await query(
-        `SELECT part_number, shopify_product_id, title FROM products
-          WHERE active = true AND shopify_product_id IS NOT NULL
-            AND part_number IS NOT NULL AND part_number <> ''`);
+        `SELECT sku, part_number, shopify_product_id, title FROM products
+          WHERE active = true AND shopify_product_id IS NOT NULL`);
       const pnMap = new Map();
       for (const p of prodRows) {
-        const n = normCode(p.part_number);
-        if (n.length >= 5 && !pnMap.has(n)) pnMap.set(n, p);
+        for (const code of [p.part_number, p.sku]) {
+          const n = normCode(code);
+          if (n.length >= 5 && !pnMap.has(n)) pnMap.set(n, p);
+        }
       }
       for (const l of stillUnmatched) {
         const sku = l.overrideSku || l.sku;
