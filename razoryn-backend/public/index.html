@@ -6082,6 +6082,7 @@ async function printSelectedInvoices() {
 /* ---------- Manual order entry ---------- */
 function openManualSale() {
   if (!State.products.length) { toast('No products in inventory yet', 'warn'); return; }
+  _msPickedId = null; _msCustList = []; // reset saved-buyer state for a fresh sale
   modal({
     title: 'New manual order / estimate',
     body: `
@@ -6100,13 +6101,19 @@ function openManualSale() {
             <option value="card">Card (Stripe) — REP-…-S</option>
           </select>
         </div>
-        <div class="field"><label>Customer name</label><input id="ms-cust"></div>
+        <div class="field" style="position:relative"><label>Customer name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— start typing to find a saved buyer</span></label>
+          <input id="ms-cust" autocomplete="off" oninput="msCustomerSearch(this.value)">
+          <div id="ms-cust-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:240px;overflow:auto"></div>
+        </div>
         <div class="field"><label>Customer phone</label><input id="ms-phone"></div>
         <div class="field" style="grid-column:1/-1"><label>Customer email (for emailing the invoice)</label><input id="ms-email" type="email" placeholder="customer@example.com"></div>
         <div class="field" style="grid-column:1/-1"><label>Shipping / billing address (optional)</label><textarea id="ms-address" rows="2" placeholder="123 Example Road&#10;Town, Postcode"></textarea></div>
         <div class="field"><label>Order No. (optional)</label><input id="ms-ordernum" placeholder="e.g. CAP1234"></div>
         <div class="field"><label>Vehicle Reg. (optional)</label><input id="ms-reg" placeholder="e.g. AB12 CDE"></div>
         <div class="field" style="grid-column:1/-1"><label>VIN (optional)</label><input id="ms-vin" placeholder="17 chars, e.g. WAUZZZ8K9CA123456" style="font-family:ui-monospace,monospace;font-size:12px"></div>
+        <div class="field" style="grid-column:1/-1">
+          <label style="display:flex;align-items:center;gap:6px;font-weight:400;font-size:13px"><input type="checkbox" id="ms-save-customer"> Save this buyer for next time</label>
+        </div>
       </div>
       <div style="border-top:1px solid var(--line);margin:14px 0;padding-top:10px">
         <div style="font-weight:600;font-size:13px;margin-bottom:8px">Line items</div>
@@ -6275,6 +6282,39 @@ function manualSaleRecalc() {
   }
 }
 
+// #14 — saved-buyer autocomplete for the manual-sale form.
+let _msCustTimer = null, _msCustList = [], _msPickedId = null;
+function msCustomerSearch(q) {
+  _msPickedId = null; // editing the name clears any prior pick
+  clearTimeout(_msCustTimer);
+  const box = el('ms-cust-suggest');
+  if (!q || q.trim().length < 2) { if (box) box.style.display = 'none'; return; }
+  _msCustTimer = setTimeout(async () => {
+    try {
+      const r = await Api.get('/api/customers?q=' + encodeURIComponent(q.trim()));
+      _msCustList = r.customers || r || [];
+      if (!box) return;
+      if (!_msCustList.length) { box.style.display = 'none'; return; }
+      box.innerHTML = _msCustList.map((c, i) => `<div onclick="msPickCustomer(${i})" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line);font-size:13px" onmouseover="this.style.background='var(--bg-soft)'" onmouseout="this.style.background=''">
+        <div style="font-weight:600">${escapeHtml(c.name)}${c.business_name ? ' · ' + escapeHtml(c.business_name) : ''}</div>
+        <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(c.phone || '')}${c.phone && c.email ? ' · ' : ''}${escapeHtml(c.email || '')}${c.order_count ? ' · ' + c.order_count + ' orders' : ''}</div>
+      </div>`).join('');
+      box.style.display = 'block';
+    } catch (e) { if (box) box.style.display = 'none'; }
+  }, 250);
+}
+function msPickCustomer(i) {
+  const c = _msCustList[i];
+  if (!c) return;
+  _msPickedId = c.id;
+  if (el('ms-cust')) el('ms-cust').value = c.name || '';
+  if (el('ms-phone') && c.phone) el('ms-phone').value = c.phone;
+  if (el('ms-email') && c.email) el('ms-email').value = c.email;
+  if (el('ms-address') && c.address) el('ms-address').value = c.address;
+  if (el('ms-save-customer')) el('ms-save-customer').checked = false; // already saved
+  const box = el('ms-cust-suggest'); if (box) box.style.display = 'none';
+}
+
 async function submitManualSale() {
   const paymentMethod = el('ms-payment').value;
   const isEstimate = el('ms-doctype').value === 'estimate';
@@ -6307,6 +6347,8 @@ async function submitManualSale() {
     customerPhone: el('ms-phone').value || null,
     customerEmail: el('ms-email').value || null,
     shippingAddress: el('ms-address').value || null,
+    customerId: _msPickedId || null,
+    createCustomer: !_msPickedId && !!el('ms-save-customer')?.checked,
     orderNumber: el('ms-ordernum').value || null,
     vehicleReg: el('ms-reg').value || null,
     vinNumber: el('ms-vin')?.value || null,
