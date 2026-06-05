@@ -7249,10 +7249,12 @@ function qbSelectProduct(id) {
       <div class="card-body">
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
           <span class="pill ${totalQty(p)>0?'green':'red'}">${totalQty(p)>0 ? totalQty(p) + ' in stock' : 'Out of stock'}</span>
+          ${totalQty(p) <= 0 && (p.incomingQty > 0) ? `<span class="pill" style="font-size:11px;background:var(--amber-light);color:var(--amber);font-weight:600">⏳ Pre-order${p.incomingEta ? ' · arriving ~' + new Date(p.incomingEta).toLocaleDateString('en-GB') : ''}</span>` : ''}
           <span style="color:var(--ink-soft);font-size:13px">${escapeHtml(p.sku)}${p.partNumber ? ' · ' + escapeHtml(p.partNumber) : ''}</span>
           ${p.location ? `<span style="color:var(--ink-soft);font-size:13px">${escapeHtml(p.location)}</span>` : ''}
           ${linkedItemId ? `<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink);font-weight:600">📦 eBay${linkedStore ? ' · ' + escapeHtml(abbreviateStoreName(linkedStore.name)) : ''}</span>` : ''}
         </div>
+        ${totalQty(p) <= 0 && (p.incomingQty > 0) ? `<div style="font-size:12px;background:var(--amber-light);color:var(--amber);padding:8px 12px;border-radius:6px;margin-bottom:12px"><strong>Not in stock — pre-order only.</strong> ${p.incomingQty} unit(s) on the way${p.incomingEta ? `, estimated arrival around <strong>${new Date(p.incomingEta).toLocaleDateString('en-GB')}</strong>` : ''}. Let the customer know this item is awaiting a delivery.</div>` : ''}
         ${prices.fromShopify ? (linkedItemId
           ? `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ Product is linked to eBay item <strong>${escapeHtml(linkedItemId)}</strong> but no eBay price is on file. Run "Hydrate eBay prices" from Listing Mirror to pull the price now.</div>`
           : `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ Not linked to an eBay listing yet — using Shopify price as the basis. Link via Listing Mirror → Link Status.</div>`
