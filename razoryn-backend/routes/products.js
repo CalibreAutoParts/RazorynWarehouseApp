@@ -87,6 +87,28 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
     delete r.location_photo_data_url;
     delete r.location_photo_data_url_2;
   }
+  // Attach incoming/pre-order info per product (units on the way + earliest ETA).
+  // Lets the inventory list flag items as pre-order with an arrival date. Done
+  // as a separate, guarded query so a cold-boot before the incoming table exists
+  // never breaks the products list.
+  try {
+    const ids = rows.map(r => r.id);
+    if (ids.length) {
+      const inc = await query(`
+        SELECT product_id,
+               COALESCE(SUM(GREATEST(qty_ordered - qty_received, 0)), 0)::int AS incoming_qty,
+               MIN(expected_date) AS incoming_eta
+        FROM incoming_stock
+        WHERE product_id = ANY($1) AND status NOT IN ('received','cancelled')
+        GROUP BY product_id`, [ids]);
+      const map = new Map(inc.rows.map(x => [x.product_id, x]));
+      for (const r of rows) {
+        const x = map.get(r.id);
+        r.incoming_qty = x ? x.incoming_qty : 0;
+        r.incoming_eta = x ? x.incoming_eta : null;
+      }
+    }
+  } catch (e) { /* incoming table not ready yet — non-critical */ }
   res.json({ products: rows, total: count.rows[0].n, page, pageSize });
 });
 

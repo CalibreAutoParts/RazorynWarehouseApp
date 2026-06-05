@@ -1195,6 +1195,8 @@ function adaptProduct(p) {
     shopifyProductId: p.shopify_product_id,
     shopifyVariantId: p.shopify_variant_id,
     shopifyHandle: p.shopify_handle || '',
+    incomingQty: p.incoming_qty || 0,
+    incomingEta: p.incoming_eta || null,
   };
 }
 function adaptSale(s) {
@@ -3060,7 +3062,7 @@ function openReceiveIncoming(id) {
       </div>
       <div class="field"><label>Quantity received now</label><input id="inc-recv-qty" type="number" min="1" max="${remaining}" value="${remaining}"></div>
       ${it.product_id
-        ? '<label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="inc-recv-push" checked> Push new stock to Shopify + eBay</label>'
+        ? '<label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="inc-recv-push" checked> Push to sales channels — makes it available / in stock on Shopify + eBay</label><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Use this when a pre-order item arrives: the quantity is set live on Shopify and on the (hidden, qty-0) eBay listing so it becomes visible and in stock.</div>'
         : '<div style="font-size:12px;color:var(--amber)">Not linked to a warehouse product — stock won\'t update automatically. Edit this line to link it to a product first if you want it pushed.</div>'}
     `,
     actions: [
@@ -3165,7 +3167,10 @@ function renderInventory() {
         <td><div style="font-weight:500">${p.title}</div><div style="color:var(--ink-soft);font-size:11px">${p.sku}</div></td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${p.partNumber||'—'}</td>
         <td><div style="font-size:12px">${p.location || '—'}</div></td>
-        <td class="num"><strong>${tq}</strong> ${tq<=p.lowThresh ? `<span class="pill ${tq===0?'red':'amber'}" style="margin-left:6px">${tq===0?'Out':'Low'}</span>`:''}</td>
+        <td class="num">
+          <strong>${tq}</strong> ${tq<=p.lowThresh ? `<span class="pill ${tq===0?'red':'amber'}" style="margin-left:6px">${tq===0?'Out':'Low'}</span>`:''}
+          ${p.incomingQty > 0 ? `<div style="font-size:11px;margin-top:3px"><span class="pill" style="background:var(--bg-soft);color:var(--brand-primary);font-size:10px">${tq===0?'Pre-order':'+'+p.incomingQty+' incoming'}</span>${p.incomingEta ? `<div style="color:var(--ink-soft);font-size:10px;margin-top:2px">ETA ~${new Date(p.incomingEta).toLocaleDateString('en-GB')}</div>` : ''}</div>` : ''}
+        </td>
         <td class="num">${gbp(p.priceShopify)}</td>
         <td style="white-space:nowrap"><button class="btn btn-outline btn-sm" data-act="edit" data-pid="${p.id}">Edit</button> <button class="btn btn-ghost btn-sm" data-act="del" data-pid="${p.id}" style="color:var(--red)" title="Delete product">🗑</button></td>
       </tr>
