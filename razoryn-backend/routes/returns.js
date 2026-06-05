@@ -573,7 +573,7 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
         require('../services/push').sendToAll({
           title: `eBay return updated [${store.name}]`,
           body: `${(resolvedTitle || returnId).slice(0, 60)} · now ${state}`,
-          url: '/', tag: 'return-' + returnId,
+          url: '/', tag: 'return-' + returnId, category: 'return_closed',
         }).catch(() => {});
       }
     } else {
@@ -605,7 +605,7 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
       require('../services/push').sendToAll({
         title: `New eBay return [${store.name}]`,
         body: `${(resolvedTitle || returnId).slice(0, 60)} · buyer ${buyerUser || 'unknown'}`,
-        url: '/', tag: 'return-' + returnId,
+        url: '/', tag: 'return-' + returnId, category: 'return',
       }).catch(() => {});
     }
     }  // end per-return for loop

@@ -71,7 +71,7 @@ async function removeSubscription(endpoint) {
 // Send a push to every subscribed device (best-effort). Dead subscriptions
 // (404/410 Gone) are pruned automatically. Never throws — push is auxiliary to
 // the in-app notification, so a failure must not break the caller.
-async function sendToAll({ title, body, url, tag } = {}) {
+async function sendToAll({ title, body, url, tag, category } = {}) {
   try {
     await ensureSetup();
     const { rows } = await query(`SELECT endpoint, p256dh, auth FROM push_subscriptions`);
@@ -81,6 +81,9 @@ async function sendToAll({ title, body, url, tag } = {}) {
       body: body || '',
       url: url || '/',
       tag: tag || undefined,
+      // category lets an OPEN app play its matching custom sound instead of the
+      // OS default (the service worker forwards it to the page).
+      category: category || undefined,
     });
     let sent = 0;
     for (const s of rows) {

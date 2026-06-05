@@ -1584,6 +1584,16 @@ function registerPwa() {
 
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+    // When the app is OPEN and a push arrives, the service worker forwards it
+    // here so we can play the user's CUSTOM notification sound (the OS uses its
+    // own sound on a background push — that can't be overridden). Also surface a
+    // toast so the alert is visible in-app.
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      const m = e.data || {};
+      if (m.type !== 'push-notification') return;
+      try { if (m.category && window.Sounds) Sounds._playDebounced(m.category); } catch (_) {}
+      try { if (m.title) toast(m.body ? `${m.title} — ${m.body}` : m.title, 'info', 6000); } catch (_) {}
+    });
   }
 
   // Install affordance — only if not already installed and not dismissed before.

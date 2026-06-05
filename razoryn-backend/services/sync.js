@@ -91,7 +91,7 @@ async function recordLowStockIfNeeded(productId) {
       ]
     );
     require('./push').sendToAll({
-      title: 'Low stock', body: `${pr.title} — ${pr.qty_on_hand} left`, url: '/', tag: 'lowstock-' + pr.id,
+      title: 'Low stock', body: `${pr.title} — ${pr.qty_on_hand} left`, url: '/', tag: 'lowstock-' + pr.id, category: 'low_stock',
     }).catch(() => {});
   }
 }

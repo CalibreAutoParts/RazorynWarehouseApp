@@ -85,7 +85,19 @@ self.addEventListener('push', (event) => {
     vibrate: [80, 40, 80],
     data: { url: data.url || '/' },
   };
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const visible = wins.find((c) => c.visibilityState === 'visible' || c.focused);
+    if (visible) {
+      // App is open/in front: let the page play its CUSTOM notification sound
+      // (the OS won't let us substitute a custom sound on a push), and show the
+      // notification silently so the device's default sound doesn't also fire.
+      try { visible.postMessage({ type: 'push-notification', category: data.category || null, title, body: data.body || '', url: data.url || '/' }); } catch (_) {}
+      return self.registration.showNotification(title, { ...options, silent: true });
+    }
+    // App closed/backgrounded: standard OS notification (device sound).
+    return self.registration.showNotification(title, options);
+  })());
 });
 
 self.addEventListener('notificationclick', (event) => {
