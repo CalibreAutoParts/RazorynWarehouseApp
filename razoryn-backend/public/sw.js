@@ -78,9 +78,11 @@ self.addEventListener('push', (event) => {
   const title = data.title || 'Warehouse Hub';
   const options = {
     body: data.body || '',
-    icon: '/app-icon.svg',
-    badge: '/app-icon.svg',
+    icon: '/apple-touch-icon.png',
+    badge: '/apple-touch-icon.png',
     tag: data.tag || undefined,
+    renotify: !!data.tag,
+    vibrate: [80, 40, 80],
     data: { url: data.url || '/' },
   };
   event.waitUntil(self.registration.showNotification(title, options));

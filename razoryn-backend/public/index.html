@@ -8047,18 +8047,45 @@ async function disablePushNotifications() {
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
   updatePushButton();
 }
+function isIOS() { return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); }
+function isStandalone() { return window.navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches; }
+async function sendTestPush(btn) {
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const r = await Api.post('/api/notifications/test-push', {});
+    if (r.sent > 0) toast(`Test sent to ${r.sent} device(s) — check your notification tray`, 'success', 5000);
+    else if (r.total === 0) toast('No devices subscribed yet — tap “Enable on this device” first', 'warn', 6000);
+    else toast('Sent, but the push service didn’t deliver — the device may have revoked it. Re-enable on this device.', 'warn', 8000);
+  } catch (e) { toast('Test failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = orig; } }
+}
 async function updatePushButton() {
   const wrap = el('push-toggle-wrap');
   if (!wrap) return;
-  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+  const supported = ('serviceWorker' in navigator) && ('PushManager' in window) && ('Notification' in window);
+  // iOS only allows web push from a Home-Screen-installed PWA (iOS 16.4+). In
+  // Safari (not installed), push is unavailable — guide the user to install.
+  if (isIOS() && !isStandalone()) {
+    wrap.innerHTML = `<div style="font-size:12px;color:var(--amber);max-width:520px;text-align:right">
+      On iPhone/iPad, notifications only work from the installed app. Tap the <strong>Share</strong> icon in Safari → <strong>Add to Home Screen</strong>, then open the app from your Home Screen and enable notifications here.</div>`;
+    return;
+  }
+  if (!supported) {
     wrap.innerHTML = '<span style="font-size:12px;color:var(--ink-soft)">Not supported on this device/browser.</span>';
     return;
   }
+  const perm = (typeof Notification !== 'undefined') ? Notification.permission : 'default';
   let subscribed = false;
   try { const reg = await navigator.serviceWorker.ready; subscribed = !!(await reg.pushManager.getSubscription()); } catch (_) {}
+  const status = `<span style="font-size:11px;color:var(--ink-soft);margin-right:8px">permission: ${perm}${subscribed ? ' · subscribed' : ''}</span>`;
+  if (perm === 'denied') {
+    wrap.innerHTML = status + '<span style="font-size:12px;color:var(--amber)">Notifications are blocked in your browser/OS settings — allow them for this site, then reload.</span>';
+    return;
+  }
   wrap.innerHTML = subscribed
-    ? `<span style="font-size:12px;color:var(--green);font-weight:600;margin-right:8px">✓ Enabled</span><button class="btn btn-outline btn-sm" onclick="disablePushNotifications()">🔕 Disable</button>`
-    : `<button class="btn btn-primary btn-sm" onclick="enablePushNotifications(this)">🔔 Enable on this device</button>`;
+    ? `${status}<button class="btn btn-outline btn-sm" onclick="sendTestPush(this)" style="margin-right:6px">Send test</button><button class="btn btn-ghost btn-sm" onclick="disablePushNotifications()" style="color:var(--ink-soft)">🔕 Disable</button>`
+    : `${status}<button class="btn btn-primary btn-sm" onclick="enablePushNotifications(this)">🔔 Enable on this device</button>`;
 }
 function paintNotifs() {
   const list = el('notif-list');
