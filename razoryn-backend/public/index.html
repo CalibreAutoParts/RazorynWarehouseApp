@@ -6424,7 +6424,9 @@ function qbComputePrices(p) {
   const fromShopify = !(p.priceEbay && p.priceEbay > 0) && (p.priceShopify || 0) > 0;
   return {
     cash: ebayBasis * (1 - cfg.cashDiscountPct / 100),
-    bank: ebayBasis * (1 - cfg.bankTransferPct / 100),
+    // #6: bank transfer price equals the Shopify price (fall back to the eBay
+    // discount only when no Shopify price exists for the product).
+    bank: (p.priceShopify && p.priceShopify > 0) ? p.priceShopify : ebayBasis * (1 - cfg.bankTransferPct / 100),
     ebay: ebayBasis * (1 + cfg.ebayBuyerProtectionMarkup / 100),
     shopify: p.priceShopify || 0,
     fromShopify,
@@ -6555,7 +6557,7 @@ function qbSelectProduct(id) {
                ${bankAddable ? `onclick="qbAddToQuote('${p.id}', 'bank')"` : ''}>
             <div>
               <div class="ch-name">🏦 Bank transfer (trade)</div>
-              <div class="ch-meta">${prices.fromShopify ? 'Shopify' : 'eBay'} price minus ${prices.cfg.bankTransferPct}% — invoiced</div>
+              <div class="ch-meta">${(prices.shopify > 0) ? 'Same as Shopify price' : 'eBay price minus ' + prices.cfg.bankTransferPct + '%'} — invoiced</div>
             </div>
             <div>
               <div class="ch-price">${gbp(prices.bank)}</div>
@@ -10171,6 +10173,48 @@ function renderSettings() {
         </div>
       </div>
 
+      <!-- Pricing sync (#5) — fixed Shopify↔eBay price link -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>🔗 Shopify ↔ eBay price sync</h3>
+          <div class="card-desc">Keep your two channels in a fixed relationship: Shopify is a set % below eBay (eBay is that % above Shopify). Choose which price is the master, preview every change, then push to the live channel.</div>
+        </div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:end">
+            <div class="field">
+              <label>Direction (master → derived)</label>
+              <select id="psync-direction">
+                <option value="ebay_to_shopify">eBay price → set Shopify (Shopify below eBay)</option>
+                <option value="shopify_to_ebay">Shopify price → set eBay (eBay above Shopify)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Price gap (%)</label>
+              <input type="number" id="psync-pct" min="0" max="99" step="0.5" placeholder="e.g. 10">
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--ink-soft);margin:4px 0 12px">eBay→Shopify writes the new price to Shopify; Shopify→eBay revises the price on every linked eBay listing. The gap % is saved as your default.</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-primary" onclick="psyncPreview()">Preview changes</button>
+            <span id="psync-status" style="font-size:12px;color:var(--ink-soft)"></span>
+          </div>
+          <div id="psync-wrap" style="display:none;margin-top:12px">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+              <button class="btn btn-outline btn-sm" onclick="psyncToggleAll(true)">Select all</button>
+              <button class="btn btn-outline btn-sm" onclick="psyncToggleAll(false)">Select none</button>
+              <span style="margin-left:auto"></span>
+              <button class="btn btn-primary btn-sm" onclick="psyncApply()">Apply selected to live channel</button>
+            </div>
+            <div class="table-wrap" style="max-height:460px;overflow:auto">
+              <table class="table" style="font-size:12px">
+                <thead><tr><th style="width:26px"></th><th>Product</th><th>Master</th><th>Current</th><th>New</th><th>Channel</th></tr></thead>
+                <tbody id="psync-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>Company & invoice details</h3><div class="card-desc">Shown on every invoice, estimate, and receipt.</div></div>
         <div class="card-body">
@@ -10750,6 +10794,7 @@ async function loadPricingConfig() {
     setVal('set-ebay-store-cat', r.ebayDefaultStoreCategoryId || '');
     setVal('set-ebay-promote-pct', r.ebayPromotePercent != null ? r.ebayPromotePercent : 10);
     if (el('set-ebay-promote-default')) el('set-ebay-promote-default').checked = !!r.ebayPromoteDefault;
+    setVal('psync-pct', r.priceLinkPct != null ? r.priceLinkPct : '');
     // Named description templates — loaded via their own endpoint (robust).
     ebayLoadTemplates();
     setVal('set-ebay-condition', r.ebayDefaultConditionId || '1000');
@@ -11364,6 +11409,57 @@ async function submitNewTemplate() {
     } else {
       toast('Create failed: ' + (e.data?.message || e.message), 'error');
     }
+  }
+}
+
+// ── Pricing sync (#5): fixed Shopify↔eBay price link ─────────────────────────
+let PsyncPreview = [];
+async function psyncPreview() {
+  const direction = el('psync-direction')?.value || 'ebay_to_shopify';
+  const pct = parseFloat(el('psync-pct')?.value);
+  const status = el('psync-status');
+  if (isNaN(pct) || pct < 0 || pct >= 100) { toast('Enter a valid % gap (0–99)', 'warn'); return; }
+  if (status) status.textContent = 'Calculating…';
+  try {
+    const r = await Api.post('/api/pricing/link/preview', { direction, pct });
+    PsyncPreview = (r.items || []).map(it => ({ ...it, selected: true }));
+    if (status) status.textContent = `${PsyncPreview.length} product${PsyncPreview.length === 1 ? '' : 's'} would change.`;
+    el('psync-wrap').style.display = PsyncPreview.length ? 'block' : 'none';
+    psyncPaint();
+    // Persist the gap % as the saved default (fire-and-forget).
+    Api.post('/api/settings/pricing-config', { priceLinkPct: pct }).then(() => { if (State.pricingConfig) State.pricingConfig.priceLinkPct = pct; }).catch(() => {});
+  } catch (e) {
+    if (status) status.textContent = 'Failed: ' + (e.data?.message || e.message);
+  }
+}
+function psyncPaint() {
+  const tb = el('psync-tbody');
+  if (!tb) return;
+  tb.innerHTML = PsyncPreview.map((it, i) => `<tr>
+    <td><input type="checkbox" ${it.selected ? 'checked' : ''} onchange="PsyncPreview[${i}].selected=this.checked"></td>
+    <td><div style="font-weight:600">${escapeHtml(it.title)}</div><div style="color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')}</div></td>
+    <td>£${(it.masterPrice).toFixed(2)}</td>
+    <td style="color:var(--ink-soft)">${it.currentPrice != null ? '£' + it.currentPrice.toFixed(2) : '—'}</td>
+    <td style="color:var(--green);font-weight:600">£${(it.newPrice).toFixed(2)}</td>
+    <td>${escapeHtml(it.channel)}</td>
+  </tr>`).join('');
+}
+function psyncToggleAll(on) { PsyncPreview.forEach(it => { it.selected = on; }); psyncPaint(); }
+async function psyncApply() {
+  const direction = el('psync-direction')?.value || 'ebay_to_shopify';
+  const chosen = PsyncPreview.filter(it => it.selected);
+  if (!chosen.length) { toast('Nothing selected', 'warn'); return; }
+  if (!confirm(`Push new prices to the live ${chosen[0].channel} listing(s) for ${chosen.length} product(s)?`)) return;
+  const taskId = Task.start(`Updating ${chosen.length} prices…`);
+  try {
+    const r = await Api.post('/api/pricing/link/apply', { direction, items: chosen.map(it => ({ id: it.id, newPrice: it.newPrice })) });
+    Task.done(taskId, `Applied ${r.applied}/${r.total}`);
+    const failed = (r.results || []).filter(x => !x.ok);
+    toast(`Updated ${r.applied}/${r.total} prices` + (failed.length ? ` · ${failed.length} failed` : ''), failed.length ? 'warn' : 'success', 6000);
+    if (failed.length) console.warn('[psync] failures:', failed);
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Apply failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 

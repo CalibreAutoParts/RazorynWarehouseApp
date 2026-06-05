@@ -28,7 +28,9 @@ router.get('/quote', requirePermission('pricing'), async (req, res) => {
   const shopifyUnit = parseFloat(pr.price_shopify || 0);
   const ebayUnit = parseFloat(pr.price_ebay || 0);
   const cashUnit = +(ebayUnit * (1 - cashDiscountPct / 100)).toFixed(2);
-  const bankUnit = +(ebayUnit * (1 - bankTransferPct / 100)).toFixed(2);
+  // #6: the bank-transfer price equals the Shopify price. Fall back to the eBay
+  // discount only when no Shopify price is on file.
+  const bankUnit = shopifyUnit > 0 ? shopifyUnit : +(ebayUnit * (1 - bankTransferPct / 100)).toFixed(2);
   const ebayProtectedUnit = +(ebayUnit * (1 + ebayMarkup / 100)).toFixed(2);
 
   res.json({
@@ -42,6 +44,99 @@ router.get('/quote', requirePermission('pricing'), async (req, res) => {
       bank:    { unit: bankUnit,    total: +(bankUnit * qtyN).toFixed(2) },
     },
   });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Fixed Shopify↔eBay price link (#5)
+// Shopify price = eBay price − pct%  (equivalently eBay = Shopify × (1+pct%)).
+// direction:
+//   'ebay_to_shopify'  master = price_ebay   → derived Shopify = ebay × (1-pct/100)
+//   'shopify_to_ebay'  master = price_shopify → derived eBay   = shopify × (1+pct/100)
+// Preview-then-apply: preview is read-only; apply pushes to the live channel.
+// ──────────────────────────────────────────────────────────────────────────
+function deriveLinked(direction, master, pct) {
+  const m = parseFloat(master);
+  if (!(m > 0)) return null;
+  if (direction === 'shopify_to_ebay') return +(m * (1 + pct / 100)).toFixed(2);
+  return +(m * (1 - pct / 100)).toFixed(2); // ebay_to_shopify (default)
+}
+
+// POST /api/pricing/link/preview { direction, pct }
+router.post('/link/preview', requireAdmin, async (req, res) => {
+  const direction = req.body?.direction === 'shopify_to_ebay' ? 'shopify_to_ebay' : 'ebay_to_shopify';
+  const pct = parseFloat(req.body?.pct);
+  if (isNaN(pct) || pct < 0 || pct >= 100) return res.status(400).json({ error: 'invalid_pct' });
+
+  const { rows } = await query(`
+    SELECT p.id, p.sku, p.title, p.price_ebay, p.price_shopify, p.shopify_product_id
+    FROM products p WHERE p.active = true ORDER BY p.title LIMIT 2000`);
+
+  const items = [];
+  for (const p of rows) {
+    const master = direction === 'shopify_to_ebay' ? p.price_shopify : p.price_ebay;
+    const current = direction === 'shopify_to_ebay' ? p.price_ebay : p.price_shopify;
+    const newPrice = deriveLinked(direction, master, pct);
+    if (newPrice == null) continue;                         // no master price
+    // eBay→Shopify needs a Shopify product to write to.
+    if (direction === 'ebay_to_shopify' && !p.shopify_product_id) continue;
+    const cur = current != null ? parseFloat(current) : null;
+    if (cur != null && Math.abs(cur - newPrice) < 0.005) continue; // unchanged
+    items.push({
+      id: p.id, sku: p.sku, title: p.title,
+      masterPrice: parseFloat(master),
+      currentPrice: cur,
+      newPrice,
+      channel: direction === 'shopify_to_ebay' ? 'eBay' : 'Shopify',
+      shopifyProductId: p.shopify_product_id || null,
+    });
+  }
+  res.json({ direction, pct, count: items.length, items });
+});
+
+// POST /api/pricing/link/apply { direction, pct, items:[{id,newPrice}] }
+router.post('/link/apply', requireAdmin, async (req, res) => {
+  const direction = req.body?.direction === 'shopify_to_ebay' ? 'shopify_to_ebay' : 'ebay_to_shopify';
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) return res.status(400).json({ error: 'no_items' });
+  const shopify = require('../services/shopify');
+  const ebay = require('../services/ebay');
+
+  const results = [];
+  for (const it of items) {
+    const price = parseFloat(it.newPrice);
+    if (!it.id || isNaN(price) || price < 0) { results.push({ id: it.id, ok: false, error: 'invalid' }); continue; }
+    const pr = await query(`SELECT id, sku, shopify_product_id FROM products WHERE id = $1`, [it.id]);
+    const product = pr.rows[0];
+    if (!product) { results.push({ id: it.id, ok: false, error: 'not_found' }); continue; }
+    try {
+      if (direction === 'shopify_to_ebay') {
+        // Push to every linked eBay listing, then store price_ebay.
+        const links = await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [product.shopify_product_id]);
+        if (!links.rows.length) { results.push({ id: it.id, ok: false, error: 'no_ebay_link' }); continue; }
+        const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
+        let pushed = 0;
+        for (const link of links.rows) {
+          const store = stores.find(s => s.code === link.store_code) || (link.store_code ? null : stores.find(s => s.primary) || stores[0]);
+          if (!store) continue;
+          await ebay.reviseItem(link.ebay_item_id, { price }, store.code);
+          pushed++;
+        }
+        await query(`UPDATE products SET price_ebay = $1, updated_at = now() WHERE id = $2`, [price, product.id]);
+        results.push({ id: it.id, ok: pushed > 0, pushed });
+      } else {
+        // eBay→Shopify: set the Shopify variant price, then store price_shopify.
+        if (!product.shopify_product_id) { results.push({ id: it.id, ok: false, error: 'no_shopify_product' }); continue; }
+        await shopify.setVariantPrice(product.shopify_product_id, price);
+        await query(`UPDATE products SET price_shopify = $1, updated_at = now() WHERE id = $2`, [price, product.id]);
+        results.push({ id: it.id, ok: true });
+      }
+    } catch (e) {
+      results.push({ id: it.id, ok: false, error: e.message });
+    }
+  }
+  const okCount = results.filter(r => r.ok).length;
+  await audit(req, 'price_link_apply', null, null, { direction, applied: okCount, total: items.length });
+  res.json({ applied: okCount, total: items.length, results });
 });
 
 module.exports = router;

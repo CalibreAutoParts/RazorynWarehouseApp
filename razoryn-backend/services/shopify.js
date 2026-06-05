@@ -337,6 +337,21 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
   return (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
 }
 
+// Lightweight price-only update — sets just the first variant's price without
+// touching title, images, or inventory. Used by the pricing-sync tool.
+async function setVariantPrice(shopifyProductId, price) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const p = parseFloat(price);
+  if (isNaN(p) || p < 0) throw new Error('valid price required');
+  const ex = await shopifyRequest('get', `/products/${encodeURIComponent(shopifyProductId)}.json`);
+  const variant = ex.data.product?.variants?.[0];
+  if (!variant) throw new Error('no_variant_for_product');
+  await shopifyRequest('put', `/variants/${variant.id}.json`, {
+    data: { variant: { id: variant.id, price: p.toFixed(2) } },
+  });
+  return { ok: true, productId: String(shopifyProductId), price: +p.toFixed(2) };
+}
+
 // List delivery (shipping) profiles. Returns [{id, name}].
 let cachedProfiles = null;
 async function getDeliveryProfiles() {
@@ -897,6 +912,7 @@ module.exports = {
   findProductsBySkus,
   createProduct,
   updateProduct,
+  setVariantPrice,
   publishProductToAllChannels,
   getPublications,
   getMetafieldDefinitions,

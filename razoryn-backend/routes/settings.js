@@ -58,6 +58,9 @@ async function ensureSocialColumns() {
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_promote_default BOOLEAN DEFAULT false`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_promote_percent NUMERIC DEFAULT 10`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_description_templates TEXT`);
+    // Fixed Shopify↔eBay price link: Shopify price is this % BELOW the eBay
+    // price (equivalently eBay is this % above Shopify). Default 0 = no gap.
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS price_link_pct NUMERIC DEFAULT 0`);
     // Logo — uploaded image stored as base64 data URL. Used on invoices + the
     // app's top-bar logo (overrides the static /logo.png fallback). Storing
     // inline avoids needing a file-host; size is capped client-side at ~500KB.
@@ -286,6 +289,7 @@ router.get('/pricing-config', async (req, res) => {
     ebayCountryOfOrigin:    r.ebay_country_of_origin || 'China',
     ebayDefaultStoreCategoryId: r.ebay_default_store_category_id || '',
     ebayVatPercent:         r.ebay_vat_percent != null ? parseFloat(r.ebay_vat_percent) : 20,
+    priceLinkPct:           r.price_link_pct != null ? parseFloat(r.price_link_pct) : 0,
     ebayPromoteDefault:     !!r.ebay_promote_default,
     ebayPromotePercent:     r.ebay_promote_percent != null ? parseFloat(r.ebay_promote_percent) : 10,
     ebayDescriptionTemplates: (() => {
@@ -369,6 +373,7 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       ebayCountryOfOrigin:        'ebay_country_of_origin',
       ebayDefaultStoreCategoryId: 'ebay_default_store_category_id',
       ebayVatPercent:             'ebay_vat_percent',
+      priceLinkPct:               'price_link_pct',
       ebayPromoteDefault:         'ebay_promote_default',
       ebayPromotePercent:         'ebay_promote_percent',
       // Stock-check reminder
@@ -379,7 +384,7 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
       if (b[bodyKey] === undefined) continue;
       let val = b[bodyKey];
-      if (['cash_discount_pct','bank_transfer_pct','free_delivery_threshold','ebay_buyer_protection_markup','vat_rate','ebay_markup_pct','ebay_vat_percent','ebay_promote_percent'].includes(dbCol)) {
+      if (['cash_discount_pct','bank_transfer_pct','free_delivery_threshold','ebay_buyer_protection_markup','vat_rate','ebay_markup_pct','ebay_vat_percent','ebay_promote_percent','price_link_pct'].includes(dbCol)) {
         val = parseFloat(val);
       }
       // Stock-check day → INTEGER (or null if empty). Day stored 1-31.
