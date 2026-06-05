@@ -293,4 +293,9 @@ app.listen(PORT, () => {
   require('./services/push').ensureSetup()
     .then(() => console.log('[boot] web push ready'))
     .catch(e => console.warn('[boot] web push setup failed:', e.message));
+  // Auto-publish built-in How-To guides into Key Information (insert-if-missing).
+  try {
+    const { query } = require('./db');
+    require('./lib/howto-guides').seedHowtoGuides(query);
+  } catch (e) { console.warn('[boot] howto seed failed:', e.message); }
 });
