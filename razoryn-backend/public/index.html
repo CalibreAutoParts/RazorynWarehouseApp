@@ -906,13 +906,16 @@
     </div>
     <div id="login-form">
       <div class="field">
-        <label>Username</label>
-        <input type="text" id="username-input" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="username">
+        <label>Username or email</label>
+        <input type="text" id="username-input" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="username or email">
       </div>
       <div class="field">
         <label>Password</label>
         <input type="password" id="pwd-input" autocomplete="current-password" placeholder="••••••••">
       </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin:8px 0 12px;color:var(--ink-soft)">
+        <input type="checkbox" id="login-remember" checked> Keep me signed in on this device
+      </label>
       <button class="btn btn-primary btn-block" id="login-submit">Sign in</button>
       <div class="pin-error" id="login-error" style="margin-top:10px"></div>
     </div>
@@ -1103,6 +1106,25 @@ const State = {
 const API_BASE = ''; // same-origin
 let API_TOKEN = null;
 
+// Token persistence (#4 "keep me signed in"). localStorage is the most reliable
+// store across reloads/closes (IndexedDB and cookies can be evicted, especially
+// on iOS); window.storage is kept as a secondary. When the user opts out of
+// "keep me signed in" we don't persist it, so it clears when the tab closes.
+function saveAuthToken(token, remember) {
+  API_TOKEN = token;
+  try { if (remember) localStorage.setItem('rzn_token', token); else localStorage.removeItem('rzn_token'); } catch (_) {}
+  try { window.storage.set('rzn_token', token); } catch (_) {}
+}
+function clearAuthToken() {
+  API_TOKEN = null;
+  try { localStorage.removeItem('rzn_token'); } catch (_) {}
+  try { window.storage.delete('rzn_token'); } catch (_) {}
+}
+function loadStoredToken() {
+  try { const t = localStorage.getItem('rzn_token'); if (t) return t; } catch (_) {}
+  return null;
+}
+
 const Api = {
   async _req(method, path, body, isMultipart = false) {
     const headers = {};
@@ -1140,22 +1162,19 @@ const Api = {
 
   // ----- auth -----
   auth: {
-    async loginPin(pin) {
+    async loginPin(pin, remember = true) {
       const r = await Api.post('/api/auth/login-pin', { pin });
-      API_TOKEN = r.token;
-      try { await window.storage.set('rzn_token', r.token); } catch(_) {}
+      saveAuthToken(r.token, remember);
       return r.user;
     },
-    async login(username, password) {
+    async login(username, password, remember = true) {
       const r = await Api.post('/api/auth/login', { username, password });
-      API_TOKEN = r.token;
-      try { await window.storage.set('rzn_token', r.token); } catch(_) {}
+      saveAuthToken(r.token, remember);
       return r.user;
     },
     async logout() {
       try { await Api.post('/api/auth/logout'); } catch(_) {}
-      API_TOKEN = null;
-      try { await window.storage.delete('rzn_token'); } catch(_) {}
+      clearAuthToken();
     },
     async me() {
       const r = await Api.get('/api/auth/me');
@@ -1553,8 +1572,13 @@ async function init() {
   // Try to restore an existing session via the API. If we have a token saved
   // OR the cookie is still valid, /me will return the user and we can skip login.
   try {
-    const saved = await window.storage.get('rzn_token').catch(() => null);
-    if (saved && saved.value) API_TOKEN = saved.value;
+    // Prefer the persistent localStorage token; fall back to window.storage;
+    // either way /me also works via the httpOnly cookie if a token isn't present.
+    API_TOKEN = loadStoredToken();
+    if (!API_TOKEN) {
+      const saved = await window.storage.get('rzn_token').catch(() => null);
+      if (saved && saved.value) API_TOKEN = saved.value;
+    }
     const me = await Api.auth.me();
     State.user = me;
     await Store.refreshAll();
@@ -1794,8 +1818,9 @@ function bindLogin() {
     const pwd = document.getElementById('pwd-input').value;
     if (errEl) errEl.textContent = '';
     if (!username || !pwd) { toast('Username and password required', 'error'); return; }
+    const remember = document.getElementById('login-remember')?.checked !== false;
     try {
-      const user = await Api.auth.login(username, pwd);
+      const user = await Api.auth.login(username, pwd, remember);
       State.user = user;
       await Store.refreshAll();
       try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (e) {}
