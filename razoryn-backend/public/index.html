@@ -5660,6 +5660,73 @@ function printSingleInvoice(id) {
   if (!w) toast('Pop-up blocked. Allow pop-ups to print invoices.', 'error');
 }
 
+// #7 — log a return against an existing sale: pick items, refund amount, restock.
+async function openReturnFromSale(saleId) {
+  let data;
+  try { data = await Api.get('/api/sales/' + saleId); }
+  catch (e) { toast('Failed to load sale: ' + e.message, 'error'); return; }
+  const s = data.sale, items = data.items || [];
+  if (!items.length) { toast('This sale has no line items to return', 'warn'); return; }
+  const rows = items.map((it, i) => `
+    <tr>
+      <td><input type="checkbox" class="rfs-pick" data-i="${i}" checked></td>
+      <td><div style="font-weight:600;font-size:13px">${escapeHtml(it.title)}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')}</div></td>
+      <td><input type="number" class="rfs-qty" data-i="${i}" min="1" max="${it.qty}" value="${it.qty}" style="width:64px"></td>
+      <td><input type="number" class="rfs-refund" data-i="${i}" min="0" step="0.01" value="${parseFloat(it.line_total||0).toFixed(2)}" style="width:90px"></td>
+    </tr>`).join('');
+  // Stash items so submit can read productId per row.
+  State._rfsItems = items.map(it => ({ productId: it.product_id || null }));
+  modal({
+    title: '↩ Log return — #' + (s.invoice_number || s.payment_reference || s.id),
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Tick the items returned, set quantity and the refund amount for each, then choose whether to put them back into stock.</div>
+      <div class="table-wrap" style="max-height:300px;overflow:auto">
+        <table class="table" style="font-size:12px">
+          <thead><tr><th style="width:26px"></th><th>Item</th><th>Qty</th><th>Refund £</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="rfs-restock" checked> Put returned items back into stock</label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="rfs-mark-refunded"> Mark whole order as refunded</label>
+        <div class="field"><label>Reason / notes (optional)</label><input id="rfs-reason" placeholder="e.g. wrong part, faulty, changed mind"></div>
+      </div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Log return', primary: true, onClick: () => submitReturnFromSale(saleId) },
+    ],
+  });
+}
+async function submitReturnFromSale(saleId) {
+  const picks = [...document.querySelectorAll('.rfs-pick:checked')].map(c => parseInt(c.getAttribute('data-i')));
+  if (!picks.length) { toast('Pick at least one item', 'warn'); return; }
+  const items = picks.map(i => ({
+    productId: State._rfsItems?.[i]?.productId || null,
+    qty: parseInt(document.querySelector(`.rfs-qty[data-i="${i}"]`)?.value) || 1,
+    refundAmount: document.querySelector(`.rfs-refund[data-i="${i}"]`)?.value || null,
+  }));
+  const payload = {
+    saleId,
+    items,
+    restock: !!el('rfs-restock')?.checked,
+    markSaleRefunded: !!el('rfs-mark-refunded')?.checked,
+    reason: el('rfs-reason')?.value || null,
+  };
+  const taskId = Task.start('Logging return…');
+  try {
+    const r = await Api.post('/api/returns/from-sale', payload);
+    Task.done(taskId, 'Return logged');
+    toast(`Return logged · ${r.created} item(s)${r.restocked ? ', ' + r.restocked + ' restocked' : ''}${r.totalRefund ? ', £' + r.totalRefund.toFixed(2) + ' refunded' : ''}`, 'success', 6000);
+    closeModal();
+    await Store.refresh('sales'); await Store.refresh('products');
+    renderSales();
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
 async function openSaleDetail(id) {
   let data;
   try {
@@ -5753,6 +5820,7 @@ async function openSaleDetail(id) {
     `,
     actions: [
       { label: 'Close', onClick: closeModal },
+      ...(!s.is_estimate ? [{ label: '↩ Log return', onClick: () => openReturnFromSale(id) }] : []),
       { label: '✉ Email', onClick: () => { closeModal(); emailSingleInvoice(id); } },
       { label: '🖨 Print / PDF', primary: true, onClick: () => { closeModal(); printSingleInvoice(id); } },
     ],

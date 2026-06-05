@@ -96,6 +96,57 @@ router.post('/', requirePermission('returns'), async (req, res) => {
   res.status(201).json({ return: rows[0] });
 });
 
+// POST /api/returns/from-sale — #7. Log a return against an existing sale:
+// pick the returned line items (+ qty + refund amount each), optionally restock,
+// and optionally mark the sale refunded. Handles cash/bank/card direct sales
+// (and any sale). Creates one processed return per item and restocks in a single
+// transaction.
+//   { saleId, items:[{productId, qty, refundAmount}], restock, markSaleRefunded, reason, notes }
+router.post('/from-sale', requirePermission('returns'), async (req, res) => {
+  const b = req.body || {};
+  if (!b.saleId || !Array.isArray(b.items) || !b.items.length) {
+    return res.status(400).json({ error: 'saleId_and_items_required' });
+  }
+  const saleRes = await query('SELECT id, channel, status FROM sales WHERE id = $1', [b.saleId]);
+  const sale = saleRes.rows[0];
+  if (!sale) return res.status(404).json({ error: 'sale_not_found' });
+
+  const restock = b.restock !== false;
+  const result = await withTx(async (c) => {
+    let created = 0, restocked = 0, totalRefund = 0;
+    for (const it of b.items) {
+      const qty = parseInt(it.qty) || 0;
+      if (qty <= 0) continue;
+      const refundAmount = it.refundAmount != null && it.refundAmount !== '' ? parseFloat(it.refundAmount) : null;
+      if (refundAmount) totalRefund += refundAmount;
+      const resolution = restock ? 'restock' : 'refund';
+      const r = await c.query(
+        `INSERT INTO returns (sale_id, product_id, channel, qty, reason, resolution,
+                              refund_amount, status, notes, handled_by, closed_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'processed',$8,$9, now()) RETURNING id`,
+        [sale.id, it.productId || null, sale.channel, qty, b.reason || null, resolution,
+         refundAmount, b.notes || null, req.user.id]
+      );
+      created++;
+      if (restock && it.productId) {
+        await c.query(`UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2`, [qty, it.productId]);
+        await c.query(
+          `INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by)
+           VALUES ($1,$2,'return_restock',$3,$4)`,
+          [it.productId, qty, r.rows[0].id, req.user.id]
+        );
+        restocked += qty;
+      }
+    }
+    if (b.markSaleRefunded) {
+      await c.query(`UPDATE sales SET status = 'refunded' WHERE id = $1`, [sale.id]);
+    }
+    return { created, restocked, totalRefund: +totalRefund.toFixed(2) };
+  });
+  await audit(req, 'return_from_sale', 'sale', b.saleId, result);
+  res.json({ ok: true, ...result });
+});
+
 // POST /api/returns/:id/photos  (multipart)
 router.post('/:id/photos', requirePermission('returns'), upload.single('photo'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'photo_required' });
