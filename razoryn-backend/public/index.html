@@ -7688,12 +7688,72 @@ function renderNotifications() {
         <div><h1>Notifications</h1><div class="desc">Low stock alerts, returns, sync events</div></div>
         <div class="actions"><button class="btn btn-outline" onclick="markAllRead()">Mark all read</button></div>
       </div>
+      <div class="card" style="margin-bottom:14px"><div class="card-body" style="padding:14px 18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="font-size:13px"><strong>📲 Device notifications</strong><div style="font-size:11px;color:var(--ink-soft)">Get alerts (returns, low stock) pushed to this phone/tablet even when the app is closed.</div></div>
+        <span style="margin-left:auto"></span>
+        <div id="push-toggle-wrap"></div>
+      </div></div>
       <div class="card">
         <div id="notif-list"></div>
       </div>
     </div>
   `;
   paintNotifs();
+  updatePushButton();
+}
+
+// ── Web Push opt-in (#2) ─────────────────────────────────────────────────────
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+async function enablePushNotifications(btn) {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) { toast('This device/browser doesn’t support push notifications', 'warn'); return; }
+  const orig = btn ? btn.textContent : '';
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = 'Enabling…'; }
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { toast('Notification permission was not granted', 'warn'); return; }
+    const reg = await navigator.serviceWorker.ready;
+    const { key } = await Api.get('/api/notifications/vapid-public-key');
+    if (!key) { toast('Push isn’t available on the server yet', 'error'); return; }
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key) });
+    await Api.post('/api/notifications/subscribe', { subscription: sub.toJSON ? sub.toJSON() : sub });
+    toast('Notifications enabled on this device ✅', 'success');
+    await Api.post('/api/notifications/test-push', {}).catch(() => {});
+  } catch (e) {
+    toast('Couldn’t enable notifications: ' + (e.message || e), 'error', 6000);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+    updatePushButton();
+  }
+}
+async function disablePushNotifications() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) { await Api.post('/api/notifications/unsubscribe', { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe(); }
+    toast('Notifications disabled on this device', 'success');
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+  updatePushButton();
+}
+async function updatePushButton() {
+  const wrap = el('push-toggle-wrap');
+  if (!wrap) return;
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+    wrap.innerHTML = '<span style="font-size:12px;color:var(--ink-soft)">Not supported on this device/browser.</span>';
+    return;
+  }
+  let subscribed = false;
+  try { const reg = await navigator.serviceWorker.ready; subscribed = !!(await reg.pushManager.getSubscription()); } catch (_) {}
+  wrap.innerHTML = subscribed
+    ? `<span style="font-size:12px;color:var(--green);font-weight:600;margin-right:8px">✓ Enabled</span><button class="btn btn-outline btn-sm" onclick="disablePushNotifications()">🔕 Disable</button>`
+    : `<button class="btn btn-primary btn-sm" onclick="enablePushNotifications(this)">🔔 Enable on this device</button>`;
 }
 function paintNotifs() {
   const list = el('notif-list');

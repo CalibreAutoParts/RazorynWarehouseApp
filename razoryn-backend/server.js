@@ -287,4 +287,9 @@ app.listen(PORT, () => {
   console.log(`[boot] ${brand.appTitle} (${brand.code}) listening on :${PORT}`);
   console.log(`[boot] env=${process.env.NODE_ENV || 'development'} upload_dir=${UPLOAD_DIR}`);
   console.log(`[boot] eBay stores: ${brand.stores.map(s => s.code + (s.token ? '✓' : '✗')).join(', ')}`);
+  // Initialise Web Push (generates/loads VAPID keys + ensures tables) so device
+  // notifications are ready without manual key setup.
+  require('./services/push').ensureSetup()
+    .then(() => console.log('[boot] web push ready'))
+    .catch(e => console.warn('[boot] web push setup failed:', e.message));
 });

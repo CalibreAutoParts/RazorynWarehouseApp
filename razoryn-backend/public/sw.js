@@ -69,3 +69,32 @@ self.addEventListener('fetch', (event) => {
     )
   );
 });
+
+// ── Web Push (#2) ────────────────────────────────────────────────────────────
+// Show the notification the server sent, and focus/open the app when tapped.
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch (_) { data = { body: event.data && event.data.text() }; }
+  const title = data.title || 'Warehouse Hub';
+  const options = {
+    body: data.body || '',
+    icon: '/app-icon.svg',
+    badge: '/app-icon.svg',
+    tag: data.tag || undefined,
+    data: { url: data.url || '/' },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
+      for (const c of clients) {
+        if ('focus' in c) { c.focus(); if (c.navigate && url !== '/') c.navigate(url).catch(() => {}); return; }
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(url);
+    })
+  );
+});

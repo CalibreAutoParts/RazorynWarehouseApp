@@ -44,4 +44,36 @@ router.post('/read-all', async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Web Push (#2) — let devices subscribe to OS notifications ────────────────
+const push = require('../services/push');
+
+// The VAPID public key the browser needs to subscribe.
+router.get('/vapid-public-key', async (req, res) => {
+  const key = await push.getPublicKey();
+  if (!key) return res.status(503).json({ error: 'push_unavailable' });
+  res.json({ key });
+});
+
+// Save this device's push subscription.
+router.post('/subscribe', async (req, res) => {
+  try {
+    await push.saveSubscription(req.user.id, req.body?.subscription, req.headers['user-agent']);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: 'subscribe_failed', message: e.message });
+  }
+});
+
+// Remove a subscription (device opted out).
+router.post('/unsubscribe', async (req, res) => {
+  await push.removeSubscription(req.body?.endpoint);
+  res.json({ ok: true });
+});
+
+// Send a test push to all subscribed devices (so the user can confirm it works).
+router.post('/test-push', async (req, res) => {
+  const r = await push.sendToAll({ title: 'Warehouse Hub', body: 'Push notifications are working on this device ✅', url: '/' });
+  res.json({ ok: true, ...r });
+});
+
 module.exports = router;

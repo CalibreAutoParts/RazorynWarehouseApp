@@ -570,6 +570,11 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
           ]
         );
         notifications++;
+        require('../services/push').sendToAll({
+          title: `eBay return updated [${store.name}]`,
+          body: `${(resolvedTitle || returnId).slice(0, 60)} · now ${state}`,
+          url: '/', tag: 'return-' + returnId,
+        }).catch(() => {});
       }
     } else {
       const inserted = await query(
@@ -596,6 +601,12 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
         ]
       );
       notifications++;
+      // #2 — push the new-return alert to subscribed devices (best-effort).
+      require('../services/push').sendToAll({
+        title: `New eBay return [${store.name}]`,
+        body: `${(resolvedTitle || returnId).slice(0, 60)} · buyer ${buyerUser || 'unknown'}`,
+        url: '/', tag: 'return-' + returnId,
+      }).catch(() => {});
     }
     }  // end per-return for loop
     perStore.push({ code: store.code, fetched: returns.length, created: storeCreated, updated: storeUpdated });
