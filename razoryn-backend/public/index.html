@@ -2727,6 +2727,7 @@ function renderIncoming() {
         <div class="actions"><button class="btn btn-primary" onclick="openAddIncoming()">+ Add incoming</button></div>
       </div>
       <div class="grid-4" id="incoming-stats" style="margin-bottom:16px"></div>
+      <div id="incoming-containers" style="margin-bottom:14px"></div>
       <div class="toolbar" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <input type="search" class="search-input" id="incoming-search" placeholder="Search part, SKU, container, supplier…" oninput="incomingDebouncedSearch(this.value)" style="flex:1;min-width:200px">
         <select id="incoming-status-filter" onchange="loadIncoming()" style="padding:6px 8px;font-size:13px">
@@ -2768,12 +2769,38 @@ async function loadIncoming() {
     State.incoming = items;
     paintIncomingStats(r.summary || {});
     paintIncoming(items);
+    loadIncomingContainers();
     // Nav badge
     const badge = el('nav-incoming-count');
     if (badge) { const n = r.summary?.open_lines || 0; badge.textContent = n; badge.style.display = n ? '' : 'none'; }
   } catch (e) {
     if (el('incoming-tbody')) el('incoming-tbody').innerHTML = `<tr><td colspan="10"><div class="empty"><div class="t">Failed to load: ${escapeHtml(e.data?.message || e.message)}</div></div></td></tr>`;
   }
+}
+async function loadIncomingContainers() {
+  const wrap = el('incoming-containers'); if (!wrap) return;
+  try {
+    const r = await Api.get('/api/incoming/containers');
+    const cs = r.containers || [];
+    if (!cs.length) { wrap.innerHTML = ''; return; }
+    wrap.innerHTML = `<div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Open containers</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">` + cs.map(c => `
+        <div style="border:1px solid var(--line);border-radius:8px;padding:8px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <div><div style="font-weight:600;font-size:13px">${escapeHtml(c.ref)}</div><div style="font-size:11px;color:var(--ink-soft)">${c.lines} line(s) · ${c.units} units${c.expected ? ' · ETA ' + new Date(c.expected).toLocaleDateString('en-GB') : ''}</div></div>
+          <button class="btn btn-primary btn-sm" onclick="receiveContainer('${escapeAttr(c.ref)}')" title="Receive every remaining line on this container and push to Shopify + eBay">📦 Receive all</button>
+        </div>`).join('') + `</div>`;
+  } catch (e) { wrap.innerHTML = ''; }
+}
+async function receiveContainer(ref) {
+  if (!confirm(`Receive ALL remaining stock on container "${ref}"?\n\nThis adds every line's remaining units to warehouse stock and pushes the new quantities to Shopify + eBay.`)) return;
+  const taskId = Task.start('Receiving container…');
+  try {
+    const r = await Api.post('/api/incoming/receive-container', { containerRef: ref, push: true });
+    Task.done(taskId, 'Received');
+    toast(`Received ${r.receivedLines} line(s) · ${r.receivedUnits} units · pushed ${r.pushed}`, 'success', 6000);
+    loadIncoming();
+    Store.refresh('products').catch(() => {});
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 function paintIncomingStats(s) {
   const wrap = el('incoming-stats'); if (!wrap) return;
@@ -2838,8 +2865,119 @@ function incomingModalBody(it) {
     <div class="field"><label>Notes</label><input id="inc-notes" value="${escapeAttr(it.notes || '')}"></div>`;
 }
 function openAddIncoming() {
+  _incLines = [];
+  modal({
+    title: '+ Add incoming stock',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Add a whole container at once. Each line links to a product in your inventory — no need to retype SKUs.</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px">
+        <div class="field"><label>Container / order ref</label><input id="incb-container" placeholder="e.g. CONT-2026-04"></div>
+        <div class="field"><label>Supplier</label><input id="incb-supplier"></div>
+        <div class="field"><label>Rough ETA <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(sea freight, approx.)</span></label><input id="incb-expected" type="date"></div>
+      </div>
+      <div style="border-top:1px solid var(--line);margin:12px 0;padding-top:10px">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">Add products</div>
+        <div style="position:relative">
+          <input id="incb-search" placeholder="Search a product by title / SKU / part, then pick to add a line…" autocomplete="off" oninput="incbSearch(this.value)">
+          <div id="incb-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:240px;overflow:auto"></div>
+        </div>
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer;font-size:12px;color:var(--brand-primary)">📋 Paste from a packing list (SKU/part + quantity per line)</summary>
+          <div style="margin-top:8px">
+            <textarea id="incb-paste" rows="5" placeholder="One per line, e.g.&#10;11192455, 120&#10;10788797 60&#10;EB-277027050399,200" style="width:100%;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+            <button type="button" class="btn btn-outline btn-sm" onclick="incbParsePaste()" style="margin-top:6px">Add pasted lines</button>
+            <div id="incb-paste-result" style="font-size:11px;color:var(--ink-soft);margin-top:6px"></div>
+          </div>
+        </details>
+      </div>
+      <div id="incb-lines-wrap" style="margin-top:8px"></div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Add all', primary: true, onClick: submitBulkIncoming },
+    ],
+  });
+  incbRenderLines();
+}
+let _incLines = [];
+function incbRenderLines() {
+  const wrap = el('incb-lines-wrap'); if (!wrap) return;
+  if (!_incLines.length) { wrap.innerHTML = '<div style="font-size:12px;color:var(--ink-soft);padding:8px 0">No lines yet — search a product above or paste a list.</div>'; return; }
+  const units = _incLines.reduce((a, l) => a + (parseInt(l.qty) || 0), 0);
+  wrap.innerHTML = `<div style="font-size:12px;font-weight:600;margin-bottom:6px">${_incLines.length} line(s) · ${units} units</div>` +
+    _incLines.map((l, i) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+      <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(l.title)}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || '')}</div></div>
+      <input type="number" min="1" value="${escapeAttr(l.qty)}" onchange="_incLines[${i}].qty=parseInt(this.value)||0" style="width:80px">
+      <button class="btn btn-ghost btn-sm" onclick="_incLines.splice(${i},1);incbRenderLines()" style="color:var(--red)">×</button>
+    </div>`).join('');
+}
+function incbAddProduct(p, qty) {
+  if (!p) return;
+  const existing = _incLines.find(l => l.productId === p.id);
+  if (existing) existing.qty = (parseInt(existing.qty) || 0) + (qty || 1);
+  else _incLines.push({ productId: p.id, sku: p.sku, title: p.title, qty: qty || 1 });
+}
+function incbSearch(q) {
+  const box = el('incb-suggest'); if (!box) return;
+  q = (q || '').trim().toLowerCase();
+  if (q.length < 2) { box.style.display = 'none'; return; }
+  const matches = (State.products || []).filter(p =>
+    (p.title || '').toLowerCase().includes(q) || (p.sku || '').toLowerCase().includes(q) || (p.part_number || '').toLowerCase().includes(q)
+  ).slice(0, 12);
+  if (!matches.length) { box.style.display = 'none'; return; }
+  box.innerHTML = matches.map(p => `<div onclick="incbPick(${p.id})" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line);font-size:12px" onmouseover="this.style.background='var(--bg-soft)'" onmouseout="this.style.background=''">
+    <div style="font-weight:600">${escapeHtml(p.title)}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')} · on hand ${p.qty_on_hand ?? 0}</div></div>`).join('');
+  box.style.display = 'block';
+}
+function incbPick(id) {
+  const p = (State.products || []).find(x => x.id === id);
+  incbAddProduct(p, 1);
+  if (el('incb-search')) el('incb-search').value = '';
+  const box = el('incb-suggest'); if (box) box.style.display = 'none';
+  incbRenderLines();
+}
+function incbParsePaste() {
+  const text = el('incb-paste')?.value || '';
+  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  let added = 0; const unmatched = [];
+  for (const line of lines) {
+    const m = line.split(/[,\t;]+|\s{2,}|\s+(?=\d+$)/).map(s => s.trim()).filter(Boolean);
+    // Last token that's a number = qty; the rest = code.
+    let qty = NaN, code = '';
+    if (m.length >= 2) { qty = parseInt(m[m.length - 1]); code = m.slice(0, -1).join(' '); }
+    else { const parts = line.split(/\s+/); qty = parseInt(parts[parts.length - 1]); code = parts.slice(0, -1).join(' '); }
+    if (!code || !Number.isInteger(qty) || qty <= 0) { unmatched.push(line); continue; }
+    const cl = code.toLowerCase();
+    const p = (State.products || []).find(x => (x.sku || '').toLowerCase() === cl || (x.part_number || '').toLowerCase() === cl);
+    if (p) { incbAddProduct(p, qty); added++; } else unmatched.push(code + ' (no match)');
+  }
+  const res = el('incb-paste-result');
+  if (res) res.innerHTML = `Added ${added} line(s).` + (unmatched.length ? ` <span style="color:var(--amber)">Couldn't match ${unmatched.length}:</span> ${unmatched.slice(0, 8).map(escapeHtml).join(', ')}${unmatched.length > 8 ? '…' : ''}` : '');
+  if (el('incb-paste')) el('incb-paste').value = '';
+  incbRenderLines();
+}
+async function submitBulkIncoming() {
+  if (!_incLines.length) { toast('Add at least one line', 'warn'); return; }
+  const payload = {
+    containerRef: el('incb-container')?.value || null,
+    supplier: el('incb-supplier')?.value || null,
+    expectedDate: el('incb-expected')?.value || null,
+    status: 'on_order',
+    lines: _incLines.filter(l => (parseInt(l.qty) || 0) > 0).map(l => ({ productId: l.productId, qty: parseInt(l.qty) })),
+  };
+  const taskId = Task.start('Adding incoming stock…');
+  try {
+    const r = await Api.post('/api/incoming/bulk', payload);
+    Task.done(taskId, 'Added');
+    toast(`Added ${r.created} line(s) · ${r.createdUnits} units` + (r.unmatched?.length ? ` · ${r.unmatched.length} skipped` : ''), 'success', 5000);
+    closeModal();
+    loadIncoming();
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+function openAddIncomingSingle() {
   _incPickedProductId = null;
-  modal({ title: '+ Add incoming stock', body: incomingModalBody(), actions: [
+  modal({ title: '+ Add one incoming line', body: incomingModalBody(), actions: [
     { label: 'Cancel', onClick: closeModal },
     { label: 'Add', primary: true, onClick: () => submitIncoming(null) },
   ]});

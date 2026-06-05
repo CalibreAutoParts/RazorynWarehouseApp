@@ -108,6 +108,86 @@ router.post('/', requirePermission('inventory'), async (req, res) => {
   res.status(201).json({ item: rows[0] });
 });
 
+// POST /api/incoming/bulk
+//   { containerRef, supplier, expectedDate, status, lines: [{ productId?, sku?, partNumber?, qty }] }
+// Add a whole container of stock at once (a 45HQ is 2000+ pcs across many
+// products). Each line links to an existing product — resolved by productId, or
+// by SKU / part number (case-insensitive) — so there's no need to retype item
+// details. Lines that can't be matched are returned so the user can fix them.
+router.post('/bulk', requirePermission('inventory'), async (req, res) => {
+  await ensureTable();
+  const b = req.body || {};
+  const lines = Array.isArray(b.lines) ? b.lines : [];
+  if (!lines.length) return res.status(400).json({ error: 'no_lines' });
+
+  // Resolve all referenced SKUs/parts in one go.
+  const skus = [...new Set(lines.map(l => (l.sku || '').trim()).filter(Boolean))];
+  const parts = [...new Set(lines.map(l => (l.partNumber || '').trim()).filter(Boolean))];
+  const prodRows = (await query(
+    `SELECT id, sku, title, part_number FROM products
+      WHERE active = true AND (sku = ANY($1) OR part_number = ANY($2)
+        OR LOWER(sku) = ANY($3) OR LOWER(part_number) = ANY($4))`,
+    [skus, parts, skus.map(s => s.toLowerCase()), parts.map(s => s.toLowerCase())]
+  )).rows;
+  const bySku = new Map(), byPart = new Map();
+  for (const p of prodRows) {
+    if (p.sku) bySku.set(p.sku.toLowerCase(), p);
+    if (p.part_number) byPart.set(p.part_number.toLowerCase(), p);
+  }
+  const byId = new Map(prodRows.map(p => [p.id, p]));
+  // Also fetch any productId-only lines not already loaded.
+  const extraIds = [...new Set(lines.map(l => l.productId).filter(id => id && !byId.has(id)))];
+  if (extraIds.length) {
+    for (const p of (await query(`SELECT id, sku, title, part_number FROM products WHERE id = ANY($1)`, [extraIds])).rows) byId.set(p.id, p);
+  }
+
+  const created = [], unmatched = [];
+  for (const l of lines) {
+    const qty = parseInt(l.qty);
+    if (!Number.isInteger(qty) || qty <= 0) { unmatched.push({ ...l, reason: 'bad qty' }); continue; }
+    let prod = (l.productId && byId.get(l.productId))
+      || (l.sku && bySku.get(String(l.sku).trim().toLowerCase()))
+      || (l.partNumber && byPart.get(String(l.partNumber).trim().toLowerCase()))
+      || null;
+    if (!prod) { unmatched.push({ ...l, reason: 'no matching product' }); continue; }
+    const ins = await query(
+      `INSERT INTO incoming_stock (product_id, sku, title, part_number, qty_ordered, container_ref, supplier, expected_date, status, notes, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+      [prod.id, prod.sku, prod.title, prod.part_number, qty, b.containerRef || null, b.supplier || null,
+       b.expectedDate || null, b.status || 'on_order', b.notes || null, req.user.id]);
+    created.push({ id: ins.rows[0].id, productId: prod.id, sku: prod.sku, qty });
+  }
+  await audit(req, 'incoming_bulk_add', 'incoming', null, { created: created.length, unmatched: unmatched.length, container: b.containerRef });
+  res.json({ ok: true, created: created.length, createdUnits: created.reduce((a, c) => a + c.qty, 0), unmatched });
+});
+
+// POST /api/incoming/receive-container  { containerRef, push }
+// Receive EVERY remaining line on a container in one action (when it's unloaded)
+// — adds all units to stock and pushes each linked product to Shopify + eBay.
+router.post('/receive-container', requirePermission('inventory'), async (req, res) => {
+  await ensureTable();
+  const ref = (req.body?.containerRef || '').trim();
+  if (!ref) return res.status(400).json({ error: 'containerRef_required' });
+  const push = req.body?.push !== false;
+  const { rows } = await query(
+    `SELECT * FROM incoming_stock WHERE container_ref = $1 AND status NOT IN ('received','cancelled')`, [ref]);
+  let receivedLines = 0, receivedUnits = 0, pushed = 0;
+  const { pushProductStockToChannels } = require('./products');
+  for (const row of rows) {
+    const remaining = Math.max(0, row.qty_ordered - row.qty_received);
+    if (remaining <= 0) continue;
+    await query(`UPDATE incoming_stock SET qty_received = qty_ordered, status = 'received', received_at = COALESCE(received_at, now()), updated_at = now() WHERE id = $1`, [row.id]);
+    receivedLines++; receivedUnits += remaining;
+    if (row.product_id) {
+      await query(`UPDATE products SET qty_on_hand = qty_on_hand + $1, updated_at = now() WHERE id = $2`, [remaining, row.product_id]);
+      await query(`INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by) VALUES ($1,$2,'incoming_received',$3,$4)`, [row.product_id, remaining, row.id, req.user.id]).catch(() => {});
+      if (push) { try { await pushProductStockToChannels(row.product_id); pushed++; } catch (e) {} }
+    }
+  }
+  await audit(req, 'incoming_receive_container', 'incoming', null, { container: ref, receivedLines, receivedUnits });
+  res.json({ ok: true, receivedLines, receivedUnits, pushed });
+});
+
 // PATCH /api/incoming/:id — edit fields (qty, container, supplier, expected, status, notes, product link).
 router.patch('/:id', requirePermission('inventory'), async (req, res) => {
   await ensureTable();
