@@ -856,7 +856,11 @@ router.get('/metafield-definitions', requireAdmin, async (req, res) => {
 router.get('/delivery-profiles', requireAdmin, async (req, res) => {
   try {
     const profiles = await shopify.getDeliveryProfiles();
-    res.json({ profiles });
+    // When empty it's almost always the Shopify custom app missing the shipping
+    // scopes — surface an actionable hint so the UI can explain the empty list.
+    const hint = profiles.length ? null
+      : 'No Shopify delivery profiles returned. Your Shopify custom app token likely needs the read_shipping scope (and write_shipping to assign products). In Shopify admin → Apps → your custom app → Configuration → Admin API access scopes, enable read_shipping + write_shipping, Save, then reinstall the app.';
+    res.json({ profiles, hint });
   } catch (e) {
     res.status(500).json({ error: 'fetch_failed', message: e.message });
   }

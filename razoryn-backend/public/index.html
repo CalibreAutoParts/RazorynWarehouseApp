@@ -9128,6 +9128,7 @@ async function pullEbayListings() {
   }).catch(() => {});
   Api.get('/api/listings/delivery-profiles').then(r => {
     MirrorState.deliveryProfiles = r.profiles || [];
+    MirrorState.deliveryProfilesHint = r.hint || '';
     populateShippingProfileDropdown();
   }).catch(() => {});
   try {
@@ -9794,6 +9795,21 @@ function populateShippingProfileDropdown() {
       const label = escapeHtml(p.name) + (isDefault ? ' (default)' : '');
       return `<option value="${escapeAttr(p.id)}">${label}</option>`;
     }).join('');
+  // If Shopify returned no profiles, show the actionable scope hint next to the
+  // dropdown so the empty list is explained rather than silently broken.
+  const noteId = 'mr-shipping-profile-note';
+  let note = el(noteId);
+  if (!profiles.length && MirrorState.deliveryProfilesHint) {
+    if (!note) {
+      note = document.createElement('div');
+      note.id = noteId;
+      note.style.cssText = 'font-size:11px;color:var(--amber);margin-top:4px';
+      sel.parentElement?.appendChild(note);
+    }
+    note.textContent = '⚠ ' + MirrorState.deliveryProfilesHint;
+  } else if (note) {
+    note.remove();
+  }
 }
 
 function setStatusFilter(v) {

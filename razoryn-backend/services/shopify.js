@@ -340,20 +340,21 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
 // List delivery (shipping) profiles. Returns [{id, name}].
 let cachedProfiles = null;
 async function getDeliveryProfiles() {
-  if (cachedProfiles) return cachedProfiles;
+  // Only the SUCCESSFUL, non-empty result is cached — otherwise an early failure
+  // (e.g. before read_shipping was granted) would stick as "[]" for the whole
+  // process lifetime, so the dropdown would stay empty even after the scope fix.
+  if (cachedProfiles && cachedProfiles.length) return cachedProfiles;
   try {
     const r = await shopifyRequest('post', '/graphql.json', {
       data: { query: `query { deliveryProfiles(first: 25) { edges { node { id name } } } }` },
     });
     if (r.data.errors) {
-      console.warn('[shopify] deliveryProfiles errors:', JSON.stringify(r.data.errors));
       // Common cause: missing read_shipping scope on the custom app.
-      // Surface the issue so the caller (debug endpoint) can show it.
-      cachedProfiles = [];
-      return cachedProfiles;
+      throw new Error(JSON.stringify(r.data.errors));
     }
-    cachedProfiles = (r.data.data?.deliveryProfiles?.edges || []).map(e => e.node);
-    return cachedProfiles;
+    const profiles = (r.data.data?.deliveryProfiles?.edges || []).map(e => e.node);
+    if (profiles.length) cachedProfiles = profiles;
+    return profiles;
   } catch (e) {
     console.warn('[shopify] getDeliveryProfiles failed:', e.response?.data || e.message);
     return [];
