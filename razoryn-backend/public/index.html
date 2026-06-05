@@ -6347,17 +6347,40 @@ async function openSaleDetail(id) {
 async function emailSingleInvoice(id) {
   const sale = State.sales.find(s => s.id == id);
   const defaultEmail = sale?.customerEmail || '';
-  const to = prompt('Send invoice to which email?', defaultEmail);
-  if (!to) return;
+  const isEbay = (sale?.apiChannel || sale?.channel || '').startsWith('ebay');
+  let templates = [];
+  try { templates = (await Api.get('/api/sales/email-templates')).templates || []; } catch (_) {}
+  const defaultKey = isEbay ? 'ebay_convert' : 'standard';
+  const opts = templates.map(t => `<option value="${escapeAttr(t.key)}" ${t.key === defaultKey ? 'selected' : ''}>${escapeHtml(t.name)}</option>`).join('');
+  modal({
+    title: '✉ Email invoice',
+    body: `
+      <div class="field"><label>Send to</label><input id="em-to" type="email" value="${escapeAttr(defaultEmail)}" placeholder="customer@example.com"></div>
+      <div class="field"><label>Message template</label>
+        <select id="em-template">${opts || '<option value="standard">Standard</option>'}</select>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Pick the tone for this customer — e.g. plain note for a private buyer, trade pitch for a business, or DropFleet direct delivery for local orders. Edit templates in Settings.</div>
+      </div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Send', primary: true, onClick: () => submitEmailInvoice(id) },
+    ],
+  });
+}
+async function submitEmailInvoice(id) {
+  const to = (el('em-to')?.value || '').trim();
+  if (!to) { toast('Enter an email address', 'warn'); return; }
+  const templateKey = el('em-template')?.value || 'standard';
+  const taskId = Task.start('Sending email…');
   try {
-    const r = await Api.post('/api/sales/' + id + '/email', { to });
+    await Api.post('/api/sales/' + id + '/email', { to, templateKey });
+    Task.done(taskId, 'Sent');
     toast('Email sent to ' + to, 'success');
+    closeModal();
   } catch (e) {
-    if (e.data?.error === 'email_not_configured') {
-      alert('Email sending not configured.\n\n' + e.data.message);
-    } else {
-      toast('Email failed: ' + (e.data?.message || e.message), 'error');
-    }
+    Task.fail(taskId, 'Failed');
+    if (e.data?.error === 'email_not_configured') alert('Email sending not configured.\n\n' + e.data.message);
+    else toast('Email failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 
@@ -11147,6 +11170,21 @@ function renderSettings() {
         </div>
       </div>
 
+      <!-- Invoice email messages -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>✉ Invoice email messages</h3>
+          <div class="card-desc">The covering messages you can pick from when emailing an invoice (private/retail, trade, local DropFleet delivery, eBay buy-direct…). The brand signature is added automatically. Placeholders: <code>{customer} {brand} {ref} {doc} {website}</code>.</div>
+        </div>
+        <div class="card-body">
+          <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px">
+            <button type="button" class="btn btn-outline btn-sm" onclick="emailTplAdd()">+ Add message</button>
+            <button type="button" class="btn btn-primary btn-sm" onclick="emailTplSave()">Save messages</button>
+          </div>
+          <div id="email-tpl-rows"></div>
+        </div>
+      </div>
+
       <!-- eBay listing defaults -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-head">
@@ -11651,6 +11689,7 @@ async function loadPricingConfig() {
     setVal('psync-pct', r.priceLinkPct != null ? r.priceLinkPct : '');
     // Named description templates — loaded via their own endpoint (robust).
     ebayLoadTemplates();
+    emailTplLoad();
     setVal('set-ebay-condition', r.ebayDefaultConditionId || '1000');
     setVal('set-ebay-country',   r.ebayLocationCountry    || 'GB');
     setVal('set-ebay-city',      r.ebayLocationCity       || '');
@@ -12357,6 +12396,51 @@ function ebayCollectTemplates() {
 }
 // Load saved templates from the dedicated endpoint (robust against the big
 // pricing-config save/load). Called when the Settings page opens.
+// ── Invoice email message templates (Settings) ───────────────────────────────
+function emailTplRow(t) {
+  t = t || {};
+  const row = document.createElement('div');
+  row.className = 'email-tpl-row';
+  row.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px';
+  row.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+      <input class="etpl-name" placeholder="Message name (e.g. Trade / business)" value="${escapeAttr(t.name || '')}" style="flex:1;font-weight:600">
+      <input class="etpl-key" placeholder="key" value="${escapeAttr(t.key || '')}" style="width:120px;font-size:11px;font-family:ui-monospace,monospace" title="Short id used to select this message">
+      <button type="button" class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="this.closest('.email-tpl-row').remove()">×</button>
+    </div>
+    <textarea class="etpl-body" rows="5" placeholder="Message body. Placeholders: {customer} {brand} {ref} {doc} {website}. Leave blank for 'invoice only'.">${escapeHtml(t.body || '')}</textarea>`;
+  return row;
+}
+function emailTplRender(list) {
+  const wrap = el('email-tpl-rows'); if (!wrap) return;
+  wrap.innerHTML = '';
+  (Array.isArray(list) ? list : []).forEach(t => wrap.appendChild(emailTplRow(t)));
+  if (!wrap.children.length) wrap.innerHTML = '<div style="font-size:12px;color:var(--ink-soft)">No messages yet — click "Add message".</div>';
+}
+function emailTplAdd() {
+  const wrap = el('email-tpl-rows'); if (!wrap) return;
+  if (wrap.querySelector('div') && !wrap.querySelector('.email-tpl-row')) wrap.innerHTML = '';
+  const row = emailTplRow({});
+  wrap.appendChild(row);
+  row.querySelector('.etpl-name').focus();
+}
+async function emailTplLoad() {
+  try { const r = await Api.get('/api/sales/email-templates'); emailTplRender(r.templates || []); }
+  catch (e) { emailTplRender([]); }
+}
+async function emailTplSave() {
+  const templates = [...document.querySelectorAll('#email-tpl-rows .email-tpl-row')].map(row => ({
+    key: (row.querySelector('.etpl-key')?.value || '').trim(),
+    name: (row.querySelector('.etpl-name')?.value || '').trim(),
+    body: (row.querySelector('.etpl-body')?.value || '').trim(),
+  })).filter(t => t.name || t.body);
+  try {
+    const r = await Api.put('/api/sales/email-templates', { templates });
+    emailTplRender(r.templates || []);
+    toast(`Saved ${(r.templates || []).length} message template(s)`, 'success');
+  } catch (e) { toast('Couldn’t save: ' + (e.data?.message || e.message), 'error'); }
+}
+
 async function ebayLoadTemplates() {
   try {
     const r = await Api.get('/api/settings/ebay-templates');

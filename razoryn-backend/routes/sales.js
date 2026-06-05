@@ -1178,6 +1178,34 @@ router.get('/:id/invoice.html', requireAdmin, async (req, res) => {
   res.set('Content-Type', 'text/html').send(renderInvoiceHtml({ sale, items, company, mode, baseUrl }));
 });
 
+// GET /api/sales/email-templates — list the covering-message templates for the
+// send dialog's picker.
+router.get('/email-templates', requireAdmin, async (req, res) => {
+  const { getEmailTemplates } = require('../lib/email-templates');
+  res.json({ templates: await getEmailTemplates(query) });
+});
+
+// PUT /api/sales/email-templates { templates:[{key,name,body}] } — save edits.
+router.put('/email-templates', requireAdmin, async (req, res) => {
+  try {
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS invoice_email_templates TEXT`);
+    await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+    const arr = (Array.isArray(req.body?.templates) ? req.body.templates : [])
+      .filter(t => t && (t.name || t.body))
+      .map(t => ({
+        key: String(t.key || t.name || 'tpl').toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 32) || 'tpl',
+        name: String(t.name || 'Untitled').slice(0, 80),
+        body: String(t.body || ''),
+      }))
+      .slice(0, 30);
+    await query(`UPDATE app_settings SET invoice_email_templates = $1, updated_at = now() WHERE id = 1`, [JSON.stringify(arr)]);
+    await audit(req, 'update_email_templates', null, null, { count: arr.length });
+    res.json({ ok: true, templates: arr });
+  } catch (e) {
+    res.status(500).json({ error: 'save_failed', message: e.message });
+  }
+});
+
 // POST /api/sales/:id/email — email the invoice to the customer
 router.post('/:id/email', requireAdmin, async (req, res) => {
   const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
@@ -1202,25 +1230,33 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
                  : 'Invoice';
   const subject = `${docLabel} ${sale.invoice_number || sale.payment_reference || ''} — ${brand.name}`;
 
-  // Covering message + brand signature prepended above the invoice (#6). For
-  // eBay orders we also add a friendly nudge to buy direct from the website with
-  // trade benefits — turning marketplace buyers into website customers. Skipped
-  // when includeMessage is explicitly false.
+  // Covering message + brand signature prepended above the invoice (#6/#email
+  // templates). The admin picks a template at send time (private/retail, trade,
+  // local DropFleet delivery, eBay buy-direct, or none) — defaulting by channel.
   const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const isEbayOrder = (sale.channel || '').startsWith('ebay');
   const site = company.company_website || (brand.domain ? `https://${brand.domain}` : '');
   const siteLabel = (company.company_website || brand.domain || '').replace(/^https?:\/\//, '');
   const sigBits = [company.company_phone, company.company_email, siteLabel].filter(Boolean).join(' · ');
-  const wantMessage = req.body?.includeMessage !== false;
-  const cover = !wantMessage ? '' : `
+
+  const { getEmailTemplates, defaultKeyForSale } = require('../lib/email-templates');
+  const templates = await getEmailTemplates(query);
+  // includeMessage:false (legacy) forces no message; else use the chosen key.
+  const chosenKey = req.body?.includeMessage === false ? 'none'
+                  : (req.body?.templateKey || defaultKeyForSale(sale));
+  const tpl = templates.find(t => t.key === chosenKey) || templates.find(t => t.key === 'standard');
+  const rawBody = tpl ? (tpl.body || '') : '';
+  // Substitute placeholders, escape, and convert newlines/blank-lines to HTML.
+  const subst = rawBody
+    .replace(/\{customer\}/g, sale.customer_name || 'there')
+    .replace(/\{brand\}/g, brand.name || '')
+    .replace(/\{doc\}/g, docLabel.toLowerCase())
+    .replace(/\{ref\}/g, sale.invoice_number ? ` (ref ${sale.invoice_number})` : '')
+    .replace(/\{website\}/g, siteLabel || (brand.name || 'our website'));
+  const bodyHtml = esc(subst).trim()
+    .split(/\n{2,}/).map(p => `<p style="margin:0 0 10px">${p.replace(/\n/g, '<br>')}</p>`).join('');
+  const cover = !bodyHtml ? '' : `
     <div style="font-family:Arial,Helvetica,sans-serif;max-width:660px;margin:0 auto 16px;padding:18px 20px;background:#f6f7f8;border-radius:10px;color:#222;line-height:1.5">
-      <p style="margin:0 0 10px">Hi ${esc(sale.customer_name) || 'there'},</p>
-      <p style="margin:0 0 10px">Please find your ${esc(docLabel.toLowerCase())}${sale.invoice_number ? ` (ref ${esc(sale.invoice_number)})` : ''} from ${esc(brand.name)} below. Any questions, just reply to this email.</p>
-      ${isEbayOrder && site ? `<div style="margin:12px 0;padding:12px 14px;background:#fff;border:1px solid #e4e4e7;border-radius:8px">
-        <strong>Buy direct &amp; save</strong><br>
-        Order straight from <a href="${esc(site)}" style="color:#c8202d;font-weight:600">${esc(siteLabel)}</a> for better prices than the marketplace, faster service, and exclusive <strong>trade benefits</strong> on regular or bulk orders. Reply to this email to set up a trade account.
-      </div>` : ''}
-      <p style="margin:10px 0 0">Thank you for your business.</p>
+      ${bodyHtml}
       <p style="margin:14px 0 0;font-weight:700">${esc(brand.name)}</p>
       ${sigBits ? `<p style="margin:3px 0 0;font-size:12px;color:#666">${esc(sigBits)}</p>` : ''}
     </div>`;
