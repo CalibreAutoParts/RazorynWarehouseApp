@@ -2300,6 +2300,24 @@ function initEditingTracker() {
   }, true);
 }
 
+// #5 — warn before a page refresh/close would throw away in-progress work
+// (e.g. half-done Listing Mirror selections, an open edit dialog, or unsaved
+// field edits). The browser shows its native "Leave site?" prompt.
+function hasUnsavedWork() {
+  if (Editing.dirty) return true;
+  // Listing Mirror holds volatile selection/photo/override state once pulled.
+  if (State.page === 'mirror' && window.MirrorState && (MirrorState.listings || []).length) return true;
+  const m = document.getElementById('modal-overlay');
+  if (m && m.classList.contains('open')) return true;
+  return false;
+}
+if (!window._beforeUnloadBound) {
+  window._beforeUnloadBound = true;
+  window.addEventListener('beforeunload', (e) => {
+    if (hasUnsavedWork()) { e.preventDefault(); e.returnValue = ''; }
+  });
+}
+
 // Mobile stacked-table support: copy each column header onto its body cells as
 // data-label, so the CSS card layout can show "Header: value" with no sidescroll.
 // Runs on every content/table re-render via a debounced MutationObserver.
@@ -8717,6 +8735,8 @@ function renderMirror() {
                   <button data-mstatus="new" onclick="setStatusFilter('new')">Not mirrored</button>
                   <button data-mstatus="mirrored" onclick="setStatusFilter('mirrored')">Already mirrored</button>
                 </div>
+                <button class="btn btn-outline btn-sm" onclick="selectAll(true)" title="Select every listing in the current filter">✓ Select all</button>
+                <button class="btn btn-outline btn-sm" onclick="selectAll(false)" title="Deselect every listing in the current filter">✗ Select none</button>
               </div>
             </div>
           </div>
@@ -10387,16 +10407,7 @@ function pickMetafieldDef(idx, value) {
 function paintMirrorList() {
   const list = el('mirror-list');
   if (!list) return;
-  const filter = MirrorState.filterText;
-  const statusFilter = MirrorState.statusFilter;
-  const filtered = MirrorState.listings.filter(l => {
-    if (filter) {
-      if (!matchesKeywords(filter, l.title, l.sku, String(l.itemId || ''))) return false;
-    }
-    if (statusFilter === 'new' && l.existsOnShopify) return false;
-    if (statusFilter === 'mirrored' && !l.existsOnShopify) return false;
-    return true;
-  });
+  const filtered = mirrorFilteredListings();
 
   // Pagination — render only the current page's slice to keep the DOM small.
   const total = filtered.length;
@@ -10797,10 +10808,27 @@ function toggleImage(itemId, url, on) {
     }
   }
 }
+// Listings matching the current search + status filter (shared by paint + the
+// select-all/none toggle so "select all" only affects what you can see).
+function mirrorFilteredListings() {
+  const filter = MirrorState.filterText;
+  const statusFilter = MirrorState.statusFilter;
+  return MirrorState.listings.filter(l => {
+    if (filter && !matchesKeywords(filter, l.title, l.sku, String(l.itemId || ''))) return false;
+    if (statusFilter === 'new' && l.existsOnShopify) return false;
+    if (statusFilter === 'mirrored' && !l.existsOnShopify) return false;
+    return true;
+  });
+}
 function selectAll(on) {
-  if (on) MirrorState.selected = new Set(MirrorState.listings.map(l => l.itemId));
-  else MirrorState.selected.clear();
+  // Operate on the currently-filtered set so e.g. "Not mirrored" + Select all
+  // selects only those, without disturbing selections on other filters.
+  const items = mirrorFilteredListings();
+  if (on) items.forEach(l => MirrorState.selected.add(l.itemId));
+  else items.forEach(l => MirrorState.selected.delete(l.itemId));
   paintMirrorList();
+  const n = MirrorState.selected.size;
+  toast(on ? `Selected ${items.length} listing(s)` : 'Selection cleared', 'success', 1500);
 }
 function updateMirrorCounter() {
   const n = MirrorState.selected.size;
