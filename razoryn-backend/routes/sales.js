@@ -117,7 +117,28 @@ router.get('/', requireAdmin, async (req, res) => {
   const summary = await query(`
     SELECT channel, COUNT(*)::int AS count, COALESCE(SUM(total),0) AS revenue
     FROM sales s ${w} GROUP BY channel`, params);
-  res.json({ sales: rows, total: tot.rows[0].n, summary: summary.rows });
+
+  // Refunds in the same window (so revenue can be shown net of returns, #1).
+  // Returns carry refund_amount once a return is processed/closed; grouped by
+  // the originating sale's channel (fall back to the return's own channel).
+  let refundsByChannel = {}, refundsTotal = 0;
+  try {
+    const rWhere = [`r.status IN ('processed','closed')`, `r.refund_amount IS NOT NULL`];
+    const rParams = [];
+    if (from) { rParams.push(from); rWhere.push(`r.created_at >= $${rParams.length}`); }
+    if (to)   { rParams.push(to);   rWhere.push(`r.created_at <= $${rParams.length}`); }
+    const rRows = (await query(`
+      SELECT COALESCE(s.channel, r.channel) AS channel, COALESCE(SUM(r.refund_amount),0)::numeric AS refunds
+      FROM returns r LEFT JOIN sales s ON s.id = r.sale_id
+      WHERE ${rWhere.join(' AND ')} GROUP BY COALESCE(s.channel, r.channel)`, rParams)).rows;
+    for (const row of rRows) {
+      const amt = parseFloat(row.refunds) || 0;
+      refundsByChannel[row.channel] = amt;
+      refundsTotal += amt;
+    }
+  } catch (e) { /* returns table not ready — ignore */ }
+
+  res.json({ sales: rows, total: tot.rows[0].n, summary: summary.rows, refundsByChannel, refundsTotal });
 });
 
 // GET /api/sales/export.csv?channel=&from=&to=

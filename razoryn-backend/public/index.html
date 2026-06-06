@@ -1413,7 +1413,7 @@ const Store = {
     // dashboard renderers can call .filter/.length without crashing.
     const calls = [
       ['products',      () => loadAllProducts()],
-      ['sales',         () => Api.get('/api/sales?pageSize=200').then(r => (r.sales || []).map(adaptSale))],
+      ['sales',         () => Api.get('/api/sales?pageSize=200').then(r => { State.salesRefundsByChannel = r.refundsByChannel || {}; State.salesRefundsTotal = r.refundsTotal || 0; return (r.sales || []).map(adaptSale); })],
       ['returns',       () => Api.get('/api/returns').then(r => (r.returns || []).map(adaptReturn))],
       ['schedule',      () => Api.get('/api/schedule').then(r => (r.tasks || []).map(adaptTask))],
       ['videos',        () => Api.get('/api/videos').then(r => (r.videos || []).map(adaptVideo))],
@@ -1447,7 +1447,7 @@ const Store = {
   async refresh(key) {
     const map = {
       products:      () => loadAllProducts(),
-      sales:         () => Api.get('/api/sales?pageSize=200').then(r => (r.sales || []).map(adaptSale)),
+      sales:         () => Api.get('/api/sales?pageSize=200').then(r => { State.salesRefundsByChannel = r.refundsByChannel || {}; State.salesRefundsTotal = r.refundsTotal || 0; return (r.sales || []).map(adaptSale); }),
       returns:       () => Api.get('/api/returns').then(r => (r.returns || []).map(adaptReturn)),
       schedule:      () => Api.get('/api/schedule').then(r => (r.tasks || []).map(adaptTask)),
       videos:        () => Api.get('/api/videos').then(r => (r.videos || []).map(adaptVideo)),
@@ -6022,16 +6022,24 @@ function renderSales() {
   function paintStats(filter='all') {
     const subset = applyFilter(filter);
     const allPaid = State.sales.filter(s => !s.isEstimate);
-    const totalShop = allPaid.filter(s=>s.channel==='shopify').reduce((a,b)=>a+b.amount,0);
-    const totalEby = allPaid.filter(s=>(s.channel||'').startsWith('ebay')).reduce((a,b)=>a+b.amount,0);
+    // #1 — refunds (from completed returns) net off the revenue figures.
+    const rbc = State.salesRefundsByChannel || {};
+    const refShop = rbc.shopify || 0;
+    const refEby = Object.keys(rbc).filter(k => k.startsWith('ebay')).reduce((a,k)=>a+rbc[k],0);
+    const refDirect = (rbc.direct_cash || 0) + (rbc.direct_bank || 0);
+    const refTotal = State.salesRefundsTotal || 0;
+    const totalShop = allPaid.filter(s=>s.channel==='shopify').reduce((a,b)=>a+b.amount,0) - refShop;
+    const totalEby = allPaid.filter(s=>(s.channel||'').startsWith('ebay')).reduce((a,b)=>a+b.amount,0) - refEby;
     const ebyCount = allPaid.filter(s=>(s.channel||'').startsWith('ebay')).length;
-    const totalDirect = allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').reduce((a,b)=>a+b.amount,0);
+    const totalDirect = allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').reduce((a,b)=>a+b.amount,0) - refDirect;
+    const grossTotal = allPaid.reduce((a,b)=>a+b.amount,0);
+    const netTotal = grossTotal - refTotal;
     const estimatesCount = State.sales.filter(s => s.isEstimate).length;
     el('sales-stats').innerHTML = `
-      <div class="stat"><div class="label">Total revenue</div><div class="value">${gbp(allPaid.reduce((a,b)=>a+b.amount,0))}</div><div class="delta">${allPaid.length} sales</div></div>
-      <div class="stat"><div class="label">Store</div><div class="value">${gbp(totalShop)}</div><div class="delta">${allPaid.filter(s=>s.channel==='shopify').length} orders</div></div>
-      <div class="stat"><div class="label">eBay${(State.brand?.stores||[]).length > 1 ? ' (all)' : ''}</div><div class="value">${gbp(totalEby)}</div><div class="delta">${ebyCount} orders</div></div>
-      <div class="stat"><div class="label">${filter === 'estimates' ? 'Estimates' : 'Direct (cash + bank)'}</div><div class="value">${filter === 'estimates' ? estimatesCount : gbp(totalDirect)}</div><div class="delta">${filter === 'estimates' ? 'open quotes' : allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').length + ' orders'}</div></div>
+      <div class="stat"><div class="label">Net revenue</div><div class="value">${gbp(netTotal)}</div><div class="delta">${allPaid.length} sales${refTotal ? ` · −${gbp(refTotal)} refunded` : ''}</div></div>
+      <div class="stat"><div class="label">Store</div><div class="value">${gbp(totalShop)}</div><div class="delta">${allPaid.filter(s=>s.channel==='shopify').length} orders${refShop ? ` · −${gbp(refShop)}` : ''}</div></div>
+      <div class="stat"><div class="label">eBay${(State.brand?.stores||[]).length > 1 ? ' (all)' : ''}</div><div class="value">${gbp(totalEby)}</div><div class="delta">${ebyCount} orders${refEby ? ` · −${gbp(refEby)}` : ''}</div></div>
+      <div class="stat"><div class="label">${filter === 'estimates' ? 'Estimates' : 'Direct (cash + bank)'}</div><div class="value">${filter === 'estimates' ? estimatesCount : gbp(totalDirect)}</div><div class="delta">${filter === 'estimates' ? 'open quotes' : allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').length + ' orders' + (refDirect ? ` · −${gbp(refDirect)}` : '')}</div></div>
     `;
   }
   function paintTable(filter='all') {
@@ -6141,6 +6149,8 @@ async function salesReload() {
   try {
     const r = await Api.get('/api/sales?' + qs.toString());
     State.sales = (r.sales || []).map(adaptSale);
+    State.salesRefundsByChannel = r.refundsByChannel || {};
+    State.salesRefundsTotal = r.refundsTotal || 0;
     renderSales();
   } catch (e) {
     toast('Failed to load sales: ' + (e.data?.message || e.message), 'error');
