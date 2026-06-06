@@ -928,6 +928,13 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
         l.overrideSku = o.override_sku;
         l.overrideTitle = o.override_title;
         l.customPrice = o.custom_price != null ? parseFloat(o.custom_price) : null;
+        // Restore the saved per-listing settings + metafields so the user's work
+        // reappears on re-pull.
+        try { l.overrideMetafields = o.metafields ? (typeof o.metafields === 'string' ? JSON.parse(o.metafields) : o.metafields) : null; } catch (_) { l.overrideMetafields = null; }
+        l.overrideTags = o.tags != null ? o.tags : null;
+        l.overrideTemplateSuffix = o.template_suffix != null ? o.template_suffix : null;
+        l.overrideShippingProfileId = o.shipping_profile_id != null ? o.shipping_profile_id : null;
+        l.overrideCategoryId = o.category_id != null ? o.category_id : null;
       }
       const link = linkMap[l.itemId];
       if (link) {
@@ -1045,20 +1052,37 @@ router.post('/set-stock', requireAdmin, async (req, res) => {
   res.json({ ok: true, productId: product.id, qty, channelPush });
 });
 
-// Persist override (SKU/title/price/metafield edits)
+// Persist override — SKU/title/price PLUS the per-listing settings + metafields
+// (tags, product template, shipping profile, Shopify category) so a user's work
+// in "Per-listing settings & metafields" survives a refresh / re-pull.
+let _ovrColsReady = false;
+async function ensureOverrideColumns() {
+  if (_ovrColsReady) return;
+  try {
+    await query(`ALTER TABLE ebay_listing_overrides ADD COLUMN IF NOT EXISTS tags TEXT`);
+    await query(`ALTER TABLE ebay_listing_overrides ADD COLUMN IF NOT EXISTS template_suffix TEXT`);
+    await query(`ALTER TABLE ebay_listing_overrides ADD COLUMN IF NOT EXISTS category_id TEXT`);
+    await query(`ALTER TABLE ebay_listing_overrides ADD COLUMN IF NOT EXISTS shipping_profile_id TEXT`);
+    _ovrColsReady = true;
+  } catch (e) { console.warn('[listings] ensureOverrideColumns:', e.message); }
+}
 router.post('/save-override', requireAdmin, async (req, res) => {
-  const { itemId, overrideSku, overrideTitle, customPrice, metafields, shippingProfileId } = req.body;
+  const { itemId, overrideSku, overrideTitle, customPrice, metafields, shippingProfileId, tags, templateSuffix, categoryId } = req.body;
   if (!itemId) return res.status(400).json({ error: 'missing_item_id' });
   try {
+    await ensureOverrideColumns();
     await query(`
-      INSERT INTO ebay_listing_overrides (ebay_item_id, override_sku, override_title, custom_price, metafields, shipping_profile_id, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, now())
+      INSERT INTO ebay_listing_overrides (ebay_item_id, override_sku, override_title, custom_price, metafields, shipping_profile_id, tags, template_suffix, category_id, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
       ON CONFLICT (ebay_item_id) DO UPDATE SET
         override_sku = EXCLUDED.override_sku,
         override_title = EXCLUDED.override_title,
         custom_price = EXCLUDED.custom_price,
         metafields = EXCLUDED.metafields,
         shipping_profile_id = EXCLUDED.shipping_profile_id,
+        tags = EXCLUDED.tags,
+        template_suffix = EXCLUDED.template_suffix,
+        category_id = EXCLUDED.category_id,
         updated_at = now()
     `, [
       itemId,
@@ -1067,6 +1091,9 @@ router.post('/save-override', requireAdmin, async (req, res) => {
       customPrice != null ? customPrice : null,
       metafields ? JSON.stringify(metafields) : null,
       shippingProfileId || null,
+      tags != null ? tags : null,
+      templateSuffix != null ? templateSuffix : null,
+      categoryId || null,
     ]);
     res.json({ ok: true });
   } catch (e) {

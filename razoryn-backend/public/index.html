@@ -8785,6 +8785,13 @@ function scheduleSaveOverride(itemId) {
         overrideSku: MirrorState.skuOverrides[itemId] || null,
         overrideTitle: MirrorState.titleOverrides[itemId] || null,
         customPrice: MirrorState.customPrices[itemId] != null ? MirrorState.customPrices[itemId] : null,
+        // Persist the per-listing settings + metafields too, so the work isn't
+        // lost on refresh / re-pull.
+        metafields: MirrorState.perItemMetafields[itemId] || null,
+        tags: MirrorState.itemTags[itemId] != null ? MirrorState.itemTags[itemId] : null,
+        templateSuffix: MirrorState.itemTemplateSuffixes[itemId] != null ? MirrorState.itemTemplateSuffixes[itemId] : null,
+        shippingProfileId: MirrorState.itemShippingProfileIds[itemId] != null ? MirrorState.itemShippingProfileIds[itemId] : null,
+        categoryId: (MirrorState.itemCategoryIds && MirrorState.itemCategoryIds[itemId] != null) ? MirrorState.itemCategoryIds[itemId] : null,
       });
       // small visual indicator: badge on row
       const row = document.querySelector(`[data-row="${itemId}"]`);
@@ -10186,12 +10193,23 @@ async function pullEbayListings() {
     MirrorState.customPrices = {};
     MirrorState.titleOverrides = {};
     MirrorState.skuOverrides = {};
+    MirrorState.perItemMetafields = {};
+    MirrorState.itemTags = {};
+    MirrorState.itemTemplateSuffixes = {};
+    MirrorState.itemShippingProfileIds = {};
+    MirrorState.itemCategoryIds = {};
 
-    // Seed in-memory overrides from server-side persisted data
+    // Seed in-memory overrides from server-side persisted data, including the
+    // per-listing settings + metafields so saved work reappears on re-pull.
     for (const l of MirrorState.listings) {
       if (l.overrideSku != null) MirrorState.skuOverrides[l.itemId] = l.overrideSku;
       if (l.overrideTitle != null) MirrorState.titleOverrides[l.itemId] = l.overrideTitle;
       if (l.customPrice != null) MirrorState.customPrices[l.itemId] = l.customPrice;
+      if (l.overrideMetafields && typeof l.overrideMetafields === 'object') MirrorState.perItemMetafields[l.itemId] = l.overrideMetafields;
+      if (l.overrideTags != null) MirrorState.itemTags[l.itemId] = l.overrideTags;
+      if (l.overrideTemplateSuffix != null) MirrorState.itemTemplateSuffixes[l.itemId] = l.overrideTemplateSuffix;
+      if (l.overrideShippingProfileId != null) MirrorState.itemShippingProfileIds[l.itemId] = l.overrideShippingProfileId;
+      if (l.overrideCategoryId != null) MirrorState.itemCategoryIds[l.itemId] = l.overrideCategoryId;
       // Default to importing ALL of the listing's photos (untick any unwanted).
       MirrorState.selectedImages[l.itemId] = new Set(Array.isArray(l.pictureUrls) ? l.pictureUrls : []);
     }
@@ -11091,8 +11109,13 @@ function mrClearCategory() {
 }
 
 async function mirrorSelected() {
-  const selected = MirrorState.listings.filter(l => MirrorState.selected.has(l.itemId));
-  if (!selected.length) { toast('Nothing selected', 'warn'); return; }
+  // Only push listings that are selected AND visible under the current search /
+  // status filter — so filtering to e.g. "jaecoo" and pushing won't also push
+  // the hidden listings that happen to still be selected.
+  const visibleSet = new Set(mirrorFilteredListings().map(l => l.itemId));
+  const selected = MirrorState.listings.filter(l => MirrorState.selected.has(l.itemId) && visibleSet.has(l.itemId));
+  const filterNote = MirrorState.filterText ? ` matching "${MirrorState.filterText}"` : '';
+  if (!selected.length) { toast('No selected listings are visible in the current filter', 'warn'); return; }
 
   // Check SKU using overrides
   const effectiveSku = (l) => MirrorState.skuOverrides[l.itemId] != null ? MirrorState.skuOverrides[l.itemId] : l.sku;
@@ -11101,6 +11124,9 @@ async function mirrorSelected() {
     if (!confirm(`${missingSku.length} listing(s) have no SKU and will be skipped. Continue with the rest?`)) return;
   }
   const valid = selected.filter(l => effectiveSku(l));
+
+  // Up-front scope confirmation so a filtered push is unambiguous.
+  if (!confirm(`Push ${valid.length} listing(s)${filterNote} to Shopify?`)) return;
 
   // Check Shopify for conflicts
   toast('Checking Shopify for existing products…', 'info');
