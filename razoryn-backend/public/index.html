@@ -2565,7 +2565,7 @@ async function stCount(pid, adjust) {
   if (!p) return;
   let actualQty = totalQty(p);
   if (adjust) {
-    const v = prompt(`Counted quantity for "${p.title}"?\nThe system shows ${actualQty}.`, String(actualQty));
+    const v = await promptInput({ title: 'Stock count', label: `Counted quantity for "${p.title}"`, type: 'number', value: String(actualQty), help: `The system currently shows ${actualQty}.`, okLabel: 'Save count' });
     if (v === null) return;
     const n = parseInt(v, 10);
     if (isNaN(n) || n < 0) { toast('Enter a valid quantity', 'error'); return; }
@@ -3181,11 +3181,11 @@ function incomingLabelItems(it, qty) {
   const n = parseInt(qty) || it.qty_ordered || 1;
   return [{ sku: it.sku || it.product_sku || '', title: it.title || it.product_title || '', partNumber: it.part_number || it.sku || '', barcode: it.sku || '', qty: n }];
 }
-function printIncomingLabels(id) {
+async function printIncomingLabels(id) {
   const it = (State.incoming || []).find(x => x.id === id);
   if (!it) return;
   const remaining = Math.max(0, it.qty_ordered - it.qty_received);
-  const n = prompt('How many labels to print for "' + (it.title || it.sku) + '"?', String(remaining || it.qty_ordered || 1));
+  const n = await promptInput({ title: 'Print labels', label: `How many labels for "${it.title || it.sku}"?`, type: 'number', value: String(remaining || it.qty_ordered || 1), okLabel: 'Print' });
   if (n === null) return;
   const qty = parseInt(n);
   if (!Number.isInteger(qty) || qty <= 0) { toast('Enter a valid number', 'warn'); return; }
@@ -3466,13 +3466,12 @@ function invUpdateBulkBar() {
 async function bulkDeleteSelected() {
   const ids = Array.from(State.invSelected);
   if (!ids.length) return;
-  const choice = prompt(
-    `Delete ${ids.length} product${ids.length>1?'s':''}?\n\n` +
-    `Type one of:\n` +
-    `  1 = remove from warehouse only (keep on Shopify)\n` +
-    `  2 = remove from BOTH warehouse AND Shopify\n` +
-    `  (anything else cancels)`
-  );
+  const choice = await promptInput({
+    title: `Delete ${ids.length} product${ids.length>1?'s':''}`,
+    label: 'Type 1 or 2',
+    help: '1 = remove from warehouse only (keep on Shopify). 2 = remove from BOTH warehouse and Shopify.',
+    okLabel: 'Continue',
+  });
   if (choice !== '1' && choice !== '2') return;
   const removeFromShopify = choice === '2';
   const ok = confirm(
@@ -3499,13 +3498,12 @@ async function bulkDeleteSelected() {
 
 async function deleteProduct(id, title) {
   // Two-step confirm: first ask local-only or also remove from Shopify
-  const choice = prompt(
-    `Delete "${title}"?\n\n` +
-    `Type one of:\n` +
-    `  1 = remove from warehouse only (keep on Shopify)\n` +
-    `  2 = remove from BOTH warehouse AND Shopify\n` +
-    `  (anything else cancels)`
-  );
+  const choice = await promptInput({
+    title: `Delete "${title}"`,
+    label: 'Type 1 or 2',
+    help: '1 = remove from warehouse only (keep on Shopify). 2 = remove from BOTH warehouse and Shopify.',
+    okLabel: 'Continue',
+  });
   if (choice !== '1' && choice !== '2') return;
   const removeFromShopify = choice === '2';
   const confirmed = confirm(
@@ -6638,9 +6636,10 @@ async function convertEstimateToInvoice(id) {
   // Legacy estimates (created before Quote Builder) may not have a payment method.
   // Fall back to prompting in that case only.
   if (!paymentMethod || !['cash','bank','card'].includes(paymentMethod)) {
-    const typed = prompt('Payment received via — type one of:\ncash, bank, card', 'cash');
-    if (!typed || !['cash','bank','card'].includes(typed.toLowerCase())) return;
-    paymentMethod = typed.toLowerCase();
+    const typed = await promptInput({ title: 'Payment method', label: 'Payment received via', value: 'cash', help: 'Type one of: cash, bank, card' });
+    if (typed === null) return;
+    if (!['cash','bank','card'].includes(typed.trim().toLowerCase())) { toast('Type cash, bank or card', 'warn'); return; }
+    paymentMethod = typed.trim().toLowerCase();
   } else {
     // Confirmed sale has locked method → just ask staff to confirm payment was received.
     const labels = { cash: 'Cash on collection', bank: 'Bank transfer', card: 'Card' };
@@ -8565,26 +8564,51 @@ function permRow(u, key, name, desc) {
     <label class="switch"><input type="checkbox" ${u.perms[key]?'checked':''} onchange="togglePerm('${u.id}','${key}',this.checked)"><span></span></label>
   </div>`;
 }
+// PWA-safe replacement for window.prompt() — which is blocked in installed
+// PWAs (standalone mode), making prompt-based buttons appear dead. Returns a
+// Promise of the entered value, or null if cancelled.
+function promptInput({ title, label, value = '', placeholder = '', type = 'text', okLabel = 'Save', help = '' }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (settled) return; settled = true; closeModal(); resolve(v); };
+    modal({
+      title: title || 'Enter value',
+      body: `
+        <div class="field">
+          ${label ? `<label>${escapeHtml(label)}</label>` : ''}
+          <input id="prompt-input" type="${escapeAttr(type)}" value="${escapeAttr(value)}" placeholder="${escapeAttr(placeholder)}" autocapitalize="none" autocorrect="off" spellcheck="false">
+          ${help ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">${escapeHtml(help)}</div>` : ''}
+        </div>`,
+      actions: [
+        { label: 'Cancel', onClick: () => done(null) },
+        { label: okLabel, primary: true, onClick: () => done((el('prompt-input')?.value ?? '')) },
+      ],
+    });
+    setTimeout(() => { const i = el('prompt-input'); if (i) { i.focus(); i.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(i.value); }); } }, 60);
+  });
+}
+
 async function resetPin(uid, uname) {
-  const newPin = prompt('Enter new 4-digit PIN for ' + uname + ':');
-  if (!newPin) return;
+  const newPin = await promptInput({ title: 'Reset PIN', label: `New 4–6 digit PIN for ${uname}`, type: 'tel' });
+  if (newPin === null) return;
   if (!/^\d{4,6}$/.test(newPin)) { toast('PIN must be 4-6 digits', 'error'); return; }
   try {
     await Api.patch('/api/staff/' + uid, { pin: newPin });
     toast('PIN reset for ' + uname, 'success');
-  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function resetPassword(uid, uname) {
-  const newPwd = prompt('Enter new password for ' + uname + ' (min 8 chars):');
-  if (!newPwd) return;
+  const newPwd = await promptInput({ title: 'Reset password', label: `New password for ${uname}`, type: 'password', help: 'Minimum 8 characters.', okLabel: 'Set password' });
+  if (newPwd === null) return;
   if (newPwd.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
   try {
     await Api.patch('/api/staff/' + uid, { password: newPwd });
     toast('Password reset for ' + uname, 'success');
-  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function changeUsername(uid, uname) {
-  const newName = prompt('Enter new username for ' + uname + ':');
+  const cur = (State.staff.find(x => x.id == uid) || {}).username || '';
+  const newName = await promptInput({ title: 'Change username', label: `Login username for ${uname}`, value: cur, placeholder: 'e.g. admin', help: 'They sign in with this (or their email).' });
   if (newName === null) return;
   const trimmed = newName.trim();
   if (!trimmed) { toast('Username cannot be empty', 'error'); return; }
@@ -8594,7 +8618,7 @@ async function changeUsername(uid, uname) {
     paintStaff();
     toast('Username updated for ' + uname, 'success');
   } catch (e) {
-    toast(e.data?.error === 'username_or_email_exists' ? 'That username is already taken' : 'Failed: ' + e.message, 'error');
+    toast(e.data?.error === 'username_or_email_exists' ? 'That username is already taken' : 'Failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 async function togglePerm(uid, key, val) {
