@@ -1110,6 +1110,27 @@ const State = {
 const API_BASE = ''; // same-origin
 let API_TOKEN = null;
 
+// ── Global error surfacer ────────────────────────────────────────────────────
+// On installed PWAs (phones/tablets) there's no dev console, so a runtime error
+// in a click handler makes a button silently "not respond". Surface uncaught
+// errors on-screen (and to console) so they can be seen and reported.
+window.__lastError = null;
+(function () {
+  let last = 0;
+  function show(msg) {
+    window.__lastError = msg;
+    try { console.error('[app error]', msg); } catch (_) {}
+    const now = Date.now();
+    if (now - last < 1500) return; // throttle bursts
+    last = now;
+    try { if (typeof toast === 'function') toast('Error: ' + msg, 'error', 8000); } catch (_) {}
+  }
+  window.addEventListener('error', (e) => { show((e.error && e.error.message) || e.message || 'script error'); });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason; show((r && (r.message || (r.data && r.data.message))) || String(r) || 'promise rejection');
+  });
+})();
+
 // Token persistence (#4 "keep me signed in"). localStorage is the most reliable
 // store across reloads/closes (IndexedDB and cookies can be evicted, especially
 // on iOS); window.storage is kept as a secondary. When the user opts out of
@@ -2259,10 +2280,12 @@ function bindHeader() {
   if (!window._navDelegationBound) {
     window._navDelegationBound = true;
     document.addEventListener('click', (e) => {
-      if (e.target.closest('#menu-toggle')) {
+      const t = e.target;
+      if (!t || typeof t.closest !== 'function') return; // text nodes / non-elements
+      if (t.closest('#menu-toggle')) {
         document.getElementById('sidebar')?.classList.toggle('open');
         document.getElementById('sb-backdrop')?.classList.toggle('open');
-      } else if (e.target.closest('#sb-backdrop')) {
+      } else if (t.closest('#sb-backdrop')) {
         document.getElementById('sidebar')?.classList.remove('open');
         document.getElementById('sb-backdrop')?.classList.remove('open');
       }
@@ -2310,7 +2333,7 @@ function initEditingTracker() {
 function hasUnsavedWork() {
   if (Editing.dirty) return true;
   // Listing Mirror holds volatile selection/photo/override state once pulled.
-  if (State.page === 'mirror' && window.MirrorState && (MirrorState.listings || []).length) return true;
+  if (State.page === 'mirror' && typeof MirrorState !== 'undefined' && (MirrorState.listings || []).length) return true;
   const m = document.getElementById('modal-overlay');
   if (m && m.classList.contains('open')) return true;
   return false;

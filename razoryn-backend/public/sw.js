@@ -9,7 +9,7 @@
 //   • navigations / HTML           → network-first, fall back to cached shell
 //                                     when offline (so deploys show instantly).
 //   • other same-origin GETs       → cache-first (logos, manifest, icon).
-const CACHE = 'wh-static-v1';
+const CACHE = 'wh-static-v2';
 const SHELL = '/index.html';
 const PRECACHE = ['/', SHELL, '/manifest.webmanifest', '/app-icon.svg'];
 
