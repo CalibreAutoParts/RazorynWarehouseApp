@@ -10719,6 +10719,14 @@ function renderMetafieldPanel(l) {
   const tagVal = itemTag != null ? itemTag : MirrorState.commonTags;
   const profileVal = itemProfile != null ? itemProfile : MirrorState.commonShippingProfileId;
   const templateVal = itemTemplate != null ? itemTemplate : MirrorState.commonTemplateSuffix;
+  // Effective Shopify category for this listing: per-listing override, else the
+  // bulk category, else none. Names are remembered when picked (ids restore
+  // without a name, shown as "category set").
+  const itemCat = (MirrorState.itemCategoryIds && MirrorState.itemCategoryIds[l.itemId] != null) ? MirrorState.itemCategoryIds[l.itemId] : null;
+  const catName = (n) => n ? String(n).split('>').pop().trim() : '';
+  const catLabel = itemCat != null
+    ? (catName((MirrorState.itemCategoryNames || {})[l.itemId]) || 'category set')
+    : (MirrorState.commonCategoryId ? (catName(MirrorState.commonCategoryName) || 'bulk category') + ' (bulk)' : 'none — set in toolbar or here');
 
   const settingsBlock = `
     <div style="background:var(--bg-soft);padding:12px;border-radius:6px;margin-top:8px;margin-bottom:8px">
@@ -10741,6 +10749,15 @@ function renderMetafieldPanel(l) {
             <option value="" ${profileVal === '' ? 'selected' : ''}>No override (use bulk setting or Shopify default)</option>
             ${profiles.map(p => `<option value="${escapeAttr(p.id)}" ${profileVal === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
           </select>
+          ${!profiles.length ? `<div style="font-size:10px;color:var(--amber);margin-top:3px">No Shopify delivery profiles loaded — enable <code>read_shipping</code> + <code>write_shipping</code> on the Shopify custom app, then re-pull.</div>` : ''}
+        </div>
+        <div style="grid-column:1 / -1">
+          <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Shopify category ${itemCat != null ? '<span style="color:var(--red)">·override</span>' : ''}</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:12px;font-weight:600">${escapeHtml(catLabel)}</span>
+            <button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="openListingCategory('${l.itemId}')">Set</button>
+            ${itemCat != null ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;color:var(--ink-soft)" onclick="clearListingCategory('${l.itemId}')">Use bulk</button>` : ''}
+          </div>
         </div>
       </div>
       ${overridesCount ? `<button class="btn btn-ghost btn-sm" onclick="clearItemOverrides('${l.itemId}')" style="font-size:11px;margin-top:8px;color:var(--ink-soft)">↺ Clear all per-listing overrides</button>` : ''}
@@ -10801,6 +10818,8 @@ function clearItemOverrides(itemId) {
   delete MirrorState.itemTags[itemId];
   delete MirrorState.itemShippingProfileIds[itemId];
   delete MirrorState.itemTemplateSuffixes[itemId];
+  if (MirrorState.itemCategoryIds) delete MirrorState.itemCategoryIds[itemId];
+  if (MirrorState.itemCategoryNames) delete MirrorState.itemCategoryNames[itemId];
   scheduleSaveOverride(itemId);
   paintMirrorList();
 }
@@ -11106,6 +11125,55 @@ function mrClearCategory() {
   MirrorState.commonCategoryId = null; MirrorState.commonCategoryName = null;
   if (el('mr-category-current')) el('mr-category-current').textContent = '';
   if (el('mr-category-search')) el('mr-category-search').value = '';
+}
+// Per-listing Shopify category override — searchable modal.
+let _lcatList = [], _lcatItemId = null;
+function openListingCategory(itemId) {
+  _lcatItemId = itemId; _lcatList = [];
+  modal({
+    title: 'Shopify category for this listing',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Overrides the bulk category for this listing only.</div>
+      <div style="position:relative">
+        <input id="lcat-search" placeholder="Search Shopify categories (e.g. bumpers, headlights)…" autocomplete="off" oninput="listingCategorySearch(this.value)">
+        <div id="lcat-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:260px;overflow:auto"></div>
+      </div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
+  setTimeout(() => el('lcat-search')?.focus(), 60);
+}
+let _lcatTimer = null;
+function listingCategorySearch(q) {
+  clearTimeout(_lcatTimer);
+  const box = el('lcat-suggest'); if (!box) return;
+  if (!q || q.trim().length < 2) { box.style.display = 'none'; return; }
+  _lcatTimer = setTimeout(async () => {
+    try {
+      const r = await Api.get('/api/listings/shopify-categories?q=' + encodeURIComponent(q.trim()));
+      _lcatList = r.categories || [];
+      box.innerHTML = _lcatList.length
+        ? _lcatList.map((c, i) => `<div onclick="pickListingCategory(${i})" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line);font-size:12px" onmouseover="this.style.background='var(--bg-soft)'" onmouseout="this.style.background=''">${escapeHtml(c.name)}</div>`).join('')
+        : '<div style="padding:8px 10px;font-size:12px;color:var(--ink-soft)">No matches</div>';
+      box.style.display = 'block';
+    } catch (e) { box.style.display = 'none'; }
+  }, 280);
+}
+function pickListingCategory(i) {
+  const c = _lcatList[i]; if (!c || !_lcatItemId) return;
+  MirrorState.itemCategoryIds = MirrorState.itemCategoryIds || {};
+  MirrorState.itemCategoryNames = MirrorState.itemCategoryNames || {};
+  MirrorState.itemCategoryIds[_lcatItemId] = c.id;
+  MirrorState.itemCategoryNames[_lcatItemId] = c.name;
+  scheduleSaveOverride(_lcatItemId);
+  closeModal();
+  paintMirrorList();
+  toast('Category set for this listing', 'success', 1500);
+}
+function clearListingCategory(itemId) {
+  if (MirrorState.itemCategoryIds) delete MirrorState.itemCategoryIds[itemId];
+  if (MirrorState.itemCategoryNames) delete MirrorState.itemCategoryNames[itemId];
+  scheduleSaveOverride(itemId);
+  paintMirrorList();
 }
 
 async function mirrorSelected() {
