@@ -888,17 +888,21 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
     });
   }
   try {
+    // Only stores with a live token are pulled — a store whose token was removed
+    // (e.g. Evanta) is skipped automatically. We report which stores were pulled
+    // and tag each listing with its store so duplicates can be spotted/filtered.
     const stores = ebay.listStores().filter(s => s.hasToken);
     let listings = [];
+    const storesPulled = [];
     for (const s of stores) {
       try {
-        // enrichPhotos: pull the FULL picture set per listing (a GetItem call
-        // each) so the mirror UI can import every eBay photo, not just the
-        // single gallery image GetMyeBaySelling returns.
         const part = await ebay.getActiveListings(s.code, { enrichPhotos: true });
+        part.forEach(l => { l.storeCode = s.code; l.storeName = s.name; });
         listings = listings.concat(part);
+        storesPulled.push({ code: s.code, name: s.name, count: part.length });
       } catch (e) {
         console.warn(`[mirror.pull] store=${s.code} failed: ${e.message}`);
+        storesPulled.push({ code: s.code, name: s.name, count: 0, error: e.message });
       }
     }
 
@@ -1003,7 +1007,7 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
       }
     }
 
-    res.json({ listings, count: listings.length });
+    res.json({ listings, count: listings.length, storesPulled });
   } catch (e) {
     console.error('[listings/ebay-active]', e.message);
     res.status(500).json({ error: 'fetch_failed', message: e.message });

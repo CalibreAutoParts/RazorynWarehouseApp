@@ -8820,6 +8820,7 @@ function renderMirror() {
                 <div id="mr-category-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:260px;overflow:auto"></div>
               </div>
 
+              <div id="mirror-stores-banner" style="display:none;margin-top:12px;font-size:12px;color:var(--ink-soft);background:var(--bg-soft);padding:8px 12px;border-radius:6px"></div>
               <div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
                 <input id="mr-search" placeholder="Filter by title, SKU, or item ID…" oninput="updateFilter(this.value)" style="flex:1;min-width:240px">
                 <div class="seg">
@@ -10132,6 +10133,7 @@ async function pullEbayListings() {
   try {
     const r = await Api.get('/api/listings/ebay-active');
     MirrorState.listings = r.listings || [];
+    MirrorState.storesPulled = r.storesPulled || [];
     MirrorState.selected = new Set(MirrorState.listings.map(l => l.itemId));
     MirrorState.selectedImages = {};
     MirrorState.customPrices = {};
@@ -10153,6 +10155,16 @@ async function pullEbayListings() {
     paintMetafields();
     const noPhotos = MirrorState.listings.filter(l => !l.pictureUrls.length).length;
     const onShopify = MirrorState.listings.filter(l => l.existsOnShopify).length;
+    // Show which stores were pulled — so a removed store (e.g. Evanta) is clearly
+    // absent, and any duplicate-source store is visible.
+    const sp = MirrorState.storesPulled || [];
+    const banner = el('mirror-stores-banner');
+    if (banner) {
+      banner.innerHTML = sp.length
+        ? `Pulled from: ${sp.map(s => `<strong>${escapeHtml(s.name || s.code)}</strong> (${s.count})${s.error ? ' ⚠' : ''}`).join(' · ')}`
+        : '';
+      banner.style.display = sp.length ? 'block' : 'none';
+    }
     let msg = `Loaded ${MirrorState.listings.length} listings`;
     if (onShopify) msg += ` · ${onShopify} already on Shopify`;
     if (noPhotos) msg += ` · ${noPhotos} no photos`;
@@ -10565,6 +10577,7 @@ function paintMirrorList() {
                   <div style="display:flex;gap:14px;font-size:12px;color:var(--ink-soft);margin-top:4px;flex-wrap:wrap;align-items:center">
                     <span>SKU: <input type="text" value="${escapeAttr(skuVal)}" oninput="MirrorState.skuOverrides['${l.itemId}']=this.value;scheduleSaveOverride('${l.itemId}')" style="width:200px;padding:2px 6px;font-family:ui-monospace,monospace;font-size:12px" placeholder="(no SKU)"></span>
                     <span>Item: ${l.itemId}</span>
+                    ${l.storeName ? `<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">${escapeHtml(l.storeName)}</span>` : ''}
                     <span>eBay price: <strong style="color:var(--ink)">${gbp(l.priceEbay)}</strong></span>
                     <span>Qty: <strong style="color:var(--ink)">${l.quantityAvailable != null ? l.quantityAvailable : '—'}</strong></span>
                     <button class="btn btn-ghost btn-sm" onclick="openStockLabelForListing('${escapeAttr(l.itemId)}')" style="font-size:11px" title="Set warehouse stock (pushes to Shopify + eBay) and/or print a stock-check label">🏷 Stock/label</button>
