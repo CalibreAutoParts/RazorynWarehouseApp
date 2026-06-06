@@ -70,6 +70,7 @@ app.use('/api/kb',           require('./routes/knowledge'));
 app.use('/api/videos',       require('./routes/videos'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/staff',        require('./routes/staff'));
+app.use('/api/audit',        require('./routes/audit'));
 app.use('/api/pricing',      require('./routes/pricing'));
 app.use('/api/settings',     require('./routes/settings'));
 app.use('/api/listings',     require('./routes/listings'));

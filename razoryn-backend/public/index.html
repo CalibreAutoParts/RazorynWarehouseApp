@@ -1041,6 +1041,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           Staff &amp; Access
         </button>
+        <button class="nav-item admin-only" data-page="activity">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          Activity
+        </button>
         <button class="nav-item admin-only" data-page="mirror">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
           Listing Mirror
@@ -2377,6 +2381,7 @@ function hasPerm(page) {
     // The "+ Create on eBay" + Listing Mirror + Settings + Staff + Sales etc.
     // are management functions that aren't part of the warehouse workflow.
     sales:        false,
+    activity:     false,
     pricing:      false,
     schedule:     false,
     videos:       false,
@@ -2417,6 +2422,7 @@ function routeTo(page) {
     locations: renderLocations, returns: renderReturns, sales: renderSales,
     pricing: renderQuoteBuilder, schedule: renderSchedule, videos: renderVideos,
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror,
+    activity: renderActivity,
     labels: renderLabels, notes: renderNotes, dispatch: renderDispatch
   };
   try {
@@ -8387,6 +8393,82 @@ async function markAllRead() {
 /* ==========================================================
    STAFF (admin only)
    ========================================================== */
+// ── Activity log (admin) — what each staff member has done ───────────────────
+function renderActivity() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Activity</h1><div class="desc">What each staff member has been doing — summarised, plus a recent feed.</div></div>
+        <div class="actions">
+          <select id="act-days" onchange="loadActivity()" style="padding:6px 10px;font-size:13px">
+            <option value="7">Last 7 days</option>
+            <option value="30" selected>Last 30 days</option>
+            <option value="90">Last 3 months</option>
+            <option value="365">Last year</option>
+          </select>
+          <button class="btn btn-outline" onclick="loadActivity()">↻ Refresh</button>
+        </div>
+      </div>
+      <div id="act-summary" style="margin-bottom:16px"></div>
+      <div class="card">
+        <div class="card-head" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+          <h3 style="margin:0">Recent activity</h3>
+          <select id="act-user" onchange="loadActivityFeed()" style="padding:6px 10px;font-size:13px"><option value="">All staff</option></select>
+        </div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Details</th></tr></thead><tbody id="act-feed"><tr><td colspan="4"><div class="empty"><div class="t">Loading…</div></div></td></tr></tbody></table></div>
+      </div>
+    </div>`;
+  loadActivity();
+}
+async function loadActivity() {
+  const days = el('act-days')?.value || '30';
+  try {
+    const r = await Api.get('/api/audit/summary?days=' + days);
+    const staff = r.staff || [];
+    el('act-summary').innerHTML = staff.length ? `<div class="grid-3" style="gap:12px">` + staff.map(s => `
+      <div class="card"><div class="card-body" style="padding:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <div style="font-weight:700">${escapeHtml(s.name)}</div>
+          ${s.role ? `<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">${escapeHtml(s.role)}</span>` : ''}
+        </div>
+        <div style="font-size:24px;font-weight:800;margin:6px 0">${s.total}</div>
+        <div style="font-size:11px;color:var(--ink-soft)">actions${s.lastAt ? ' · last ' + fmtDate(s.lastAt) : ''}</div>
+        <div style="margin-top:8px;display:flex;flex-direction:column;gap:3px">
+          ${(s.breakdown || []).slice(0, 5).map(b => `<div style="font-size:12px;display:flex;justify-content:space-between"><span>${escapeHtml(b.label)}</span><strong>${b.n}</strong></div>`).join('')}
+        </div>
+      </div></div>`).join('') + `</div>` : '<div class="empty"><div class="t">No activity in this period</div></div>';
+    // Populate the user filter
+    const sel = el('act-user');
+    if (sel) sel.innerHTML = '<option value="">All staff</option>' + staff.filter(s => s.userId).map(s => `<option value="${s.userId}">${escapeHtml(s.name)}</option>`).join('');
+    loadActivityFeed();
+  } catch (e) {
+    el('act-summary').innerHTML = `<div class="empty"><div class="t">Failed: ${escapeHtml(e.data?.message || e.message)}</div></div>`;
+  }
+}
+async function loadActivityFeed() {
+  const days = el('act-days')?.value || '30';
+  const userId = el('act-user')?.value || '';
+  try {
+    const r = await Api.get('/api/audit?days=' + days + (userId ? '&userId=' + userId : ''));
+    const rows = r.entries || [];
+    el('act-feed').innerHTML = rows.length ? rows.map(e => {
+      let detail = e.targetType ? e.targetType + (e.targetId ? ' #' + e.targetId : '') : '';
+      if (e.metadata && typeof e.metadata === 'object') {
+        const m = Object.entries(e.metadata).filter(([k, v]) => v != null && typeof v !== 'object').slice(0, 3).map(([k, v]) => `${k}: ${v}`).join(', ');
+        if (m) detail = m;
+      }
+      return `<tr>
+        <td style="white-space:nowrap">${fmtDate(e.at)}</td>
+        <td>${escapeHtml(e.who)}</td>
+        <td>${escapeHtml(e.label)}</td>
+        <td style="color:var(--ink-soft);font-size:12px">${escapeHtml(detail)}</td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="4"><div class="empty"><div class="t">No activity</div></div></td></tr>';
+  } catch (e) {
+    el('act-feed').innerHTML = `<tr><td colspan="4"><div class="empty"><div class="t">Failed: ${escapeHtml(e.data?.message || e.message)}</div></div></td></tr>`;
+  }
+}
+
 function renderStaff() {
   el('content').innerHTML = `
     <div class="page">
