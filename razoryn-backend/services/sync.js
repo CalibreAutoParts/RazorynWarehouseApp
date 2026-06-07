@@ -514,7 +514,20 @@ async function pushAllStockToBoth(onProgress, opts = {}) {
          FROM products
          WHERE active = true AND (shopify_inventory_id IS NOT NULL OR shopify_product_id IS NOT NULL)`;
   const { rows } = await query(sql);
-  const out = { total: rows.length, done: 0, countedOnly, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null };
+  // ebayFailures: the actual listings that failed (itemId + store + sku + error),
+  // capped so a big run can't bloat the status payload. Lets the UI show exactly
+  // WHICH listings failed (e.g. all on one store) instead of just a sample.
+  const out = { total: rows.length, done: 0, countedOnly, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null, ebayFailures: [], ebayFailuresByStore: {} };
+  const FAIL_CAP = 200;
+  const recordFail = (info) => {
+    out.ebay.errors++;
+    const store = info.store || 'unknown';
+    out.ebayFailuresByStore[store] = (out.ebayFailuresByStore[store] || 0) + 1;
+    if (!out.sampleEbayError) out.sampleEbayError = info.error || 'unknown';
+    if (out.ebayFailures.length < FAIL_CAP) {
+      out.ebayFailures.push({ itemId: info.itemId || null, store, sku: info.sku || null, error: info.error || 'unknown' });
+    }
+  };
   const shopOk = shopify.isConfigured();
   const ebayOk = ebay.isConfigured();
   let i = 0;
@@ -531,13 +544,13 @@ async function pushAllStockToBoth(onProgress, opts = {}) {
         if (r && Array.isArray(r.results)) {
           for (const x of r.results) {
             if (x.ok) out.ebay.pushed++;
-            else { out.ebay.errors++; if (!out.sampleEbayError) out.sampleEbayError = x.error || 'unknown'; }
+            else recordFail({ itemId: x.itemId, store: x.store, sku: p.sku, error: x.error });
           }
         } else if (r && r.ok) out.ebay.pushed++;
         else if (r && r.skipped) { /* no link / no sku — not an error */ }
-        else { out.ebay.errors++; if (!out.sampleEbayError && r && r.error) out.sampleEbayError = r.error; }
+        else recordFail({ sku: p.sku, error: r && r.error });
       } catch (e) {
-        out.ebay.errors++; if (!out.sampleEbayError) out.sampleEbayError = e.message;
+        recordFail({ sku: p.sku, error: e.message });
       }
     }
     out.done = ++i;

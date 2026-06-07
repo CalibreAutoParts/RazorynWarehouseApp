@@ -2635,16 +2635,48 @@ function renderPushAllStatus(s) {
     tone = anyErr ? '#b45309' : '#15803d';
     heading = anyErr ? '⚠ Stock push finished with some errors' : '✓ Stock push complete';
   } else if (s.state === 'error') { tone = '#b91c1c'; heading = '✕ Stock push failed'; }
+  const byStore = res.ebayFailuresByStore && Object.keys(res.ebayFailuresByStore).length
+    ? Object.entries(res.ebayFailuresByStore).map(([st, n]) => `${escapeHtml(st)}: ${n}`).join(', ')
+    : '';
   const detail = s.error
     ? escapeHtml(s.error)
     : `Shopify: ${sh.pushed || 0} updated${sh.errors ? `, ${sh.errors} failed` : ''} · `
       + `eBay: ${eb.pushed || 0} updated${eb.errors ? `, ${eb.errors} failed` : ''}`
+      + (byStore ? `<br><span style="color:#b45309">eBay failures by store — ${byStore}</span>` : '')
       + (res.sampleEbayError ? `<br><span style="color:#b91c1c">eBay error e.g.: ${escapeHtml(String(res.sampleEbayError).slice(0, 160))}</span>` : '');
+  // List of the actual failed listings, collapsed behind a toggle so it doesn't
+  // dominate the page. Each links straight to the eBay item.
+  const fails = Array.isArray(res.ebayFailures) ? res.ebayFailures : [];
+  let failsHtml = '';
+  if (fails.length) {
+    const rowsHtml = fails.map(f => {
+      const id = f.itemId ? String(f.itemId) : '';
+      const link = id ? `<a href="https://www.ebay.co.uk/itm/${encodeURIComponent(id)}" target="_blank" rel="noopener" style="color:#2563eb">${escapeHtml(id)}</a>` : '<span style="color:#94a3b8">—</span>';
+      return `<tr>
+        <td style="padding:3px 8px;white-space:nowrap">${link}</td>
+        <td style="padding:3px 8px">${escapeHtml(f.store || '')}</td>
+        <td style="padding:3px 8px">${escapeHtml(f.sku || '')}</td>
+        <td style="padding:3px 8px;color:#b91c1c">${escapeHtml(String(f.error || '').slice(0, 140))}</td>
+      </tr>`;
+    }).join('');
+    failsHtml = `<details style="margin-top:8px">
+      <summary style="cursor:pointer;font-size:13px;color:#b45309">Show ${fails.length} failed listing${fails.length === 1 ? '' : 's'}${(eb.errors || 0) > fails.length ? ` (of ${eb.errors})` : ''}</summary>
+      <div style="overflow:auto;max-height:280px;margin-top:6px">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="text-align:left;color:#64748b">
+            <th style="padding:3px 8px">eBay item</th><th style="padding:3px 8px">Store</th><th style="padding:3px 8px">SKU</th><th style="padding:3px 8px">Error</th>
+          </tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+    </details>`;
+  }
   box.style.display = 'block';
   box.innerHTML = `<div class="card"><div class="card-body" style="padding:12px 16px;border-left:4px solid ${tone}">
     <div style="font-weight:600;color:${tone}">${escapeHtml(heading)}</div>
     <div style="margin-top:4px;font-size:13px;color:#475569">${detail}</div>
     ${s.state === 'running' ? `<div style="margin-top:8px;height:6px;background:#e2e8f0;border-radius:4px;overflow:hidden"><div style="height:100%;width:${pct}%;background:${tone};transition:width .3s"></div></div>` : ''}
+    ${failsHtml}
   </div></div>`;
 }
 

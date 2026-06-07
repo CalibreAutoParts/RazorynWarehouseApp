@@ -240,9 +240,12 @@ router.post('/push-all-stock', requireAdmin, async (req, res) => {
       pushAllStatus = { state: 'done', startedAt: pushAllStatus.startedAt, finishedAt: Date.now(), countedOnly, result: r, error: null };
       const sev = (r.shopify.errors || r.ebay.errors) ? 'warn' : 'success';
       const scope = countedOnly ? `Counted stock (${r.total} items) · ` : '';
+      const byStore = r.ebayFailuresByStore && Object.keys(r.ebayFailuresByStore).length
+        ? ' (' + Object.entries(r.ebayFailuresByStore).map(([s, n]) => `${s}: ${n}`).join(', ') + ')'
+        : '';
       const body = scope
         + `Shopify: ${r.shopify.pushed} updated${r.shopify.errors ? `, ${r.shopify.errors} failed` : ''} · `
-        + `eBay: ${r.ebay.pushed} updated${r.ebay.errors ? `, ${r.ebay.errors} failed` : ''}`
+        + `eBay: ${r.ebay.pushed} updated${r.ebay.errors ? `, ${r.ebay.errors} failed${byStore}` : ''}`
         + (r.sampleEbayError ? ` · eBay error e.g. "${String(r.sampleEbayError).slice(0, 120)}"` : '');
       await query(
         `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
