@@ -2476,7 +2476,8 @@ function renderStockTake() {
       <div class="page-head">
         <div><h1>Monthly stock-take</h1><div class="desc">Walk the warehouse and tick off each item as you count it — progress is saved.</div></div>
         <div class="actions">
-          <button class="btn btn-primary admin-only" onclick="pushAllStock(this)" title="Force-push every product's current warehouse quantity to Shopify and eBay. Use after counting to reconcile both channels.">⇪ Push all stock to channels</button>
+          <button class="btn btn-primary admin-only" onclick="pushAllStock(this, true)" title="Push the current warehouse quantity of every item COUNTED this month to Shopify and eBay. Uses far fewer API calls than a full reconcile.">⇪ Push counted stock to channels</button>
+          <button class="btn btn-outline admin-only" onclick="pushAllStock(this, false)" title="Force-push EVERY linked product (full reconcile). Heavier on API credits.">⇪ Push all</button>
           <button class="btn btn-outline" onclick="routeTo('scan')">← Stock Check</button>
         </div>
       </div>
@@ -2603,10 +2604,13 @@ async function stCount(pid, adjust) {
 // Force-push every product's warehouse quantity to Shopify + eBay (reconcile
 // after a stock-take). Heavy but manual; confirm first.
 let _pushAllPoll = null;
-async function pushAllStock(btn) {
-  if (!confirm('Push the current warehouse quantity of every linked product to Shopify AND eBay?\n\nThis runs in the background (it can take a few minutes for the whole catalogue). Live progress + the result will show here on the page — you can keep working.')) return;
+async function pushAllStock(btn, countedOnly = true) {
+  const msg = countedOnly
+    ? 'Push the current warehouse quantity of every item COUNTED this month to Shopify AND eBay?\n\nThis only touches counted items, so it uses far fewer API calls. Live progress + the result show here on the page — you can keep working.'
+    : 'Push the current warehouse quantity of EVERY linked product to Shopify AND eBay (full reconcile)?\n\nThis is heavier on API credits. Live progress + the result show here on the page — you can keep working.';
+  if (!confirm(msg)) return;
   try {
-    const r = await Api.post('/api/settings/push-all-stock', {});
+    const r = await Api.post('/api/settings/push-all-stock', { countedOnly });
     if (r && r.alreadyRunning) toast('A stock push is already running — watching its progress.', 'info', 5000);
     else toast('Stock push started — live progress below.', 'success', 5000);
     if (btn) { btn.disabled = true; btn.dataset._label = btn.textContent; btn.textContent = '⇪ Pushing…'; }
@@ -2623,8 +2627,9 @@ function renderPushAllStatus(s) {
   const res = s.result || { total: 0, done: 0, shopify: {}, ebay: {} };
   const sh = res.shopify || {}, eb = res.ebay || {};
   const pct = res.total ? Math.round((res.done / res.total) * 100) : 0;
+  const scope = res.countedOnly ? 'counted stock' : 'all stock';
   let tone = '#2563eb', heading = '';
-  if (s.state === 'running') { heading = `Pushing stock to channels… ${res.done || 0}/${res.total || 0} (${pct}%)`; }
+  if (s.state === 'running') { heading = `Pushing ${scope} to channels… ${res.done || 0}/${res.total || 0} (${pct}%)`; }
   else if (s.state === 'done') {
     const anyErr = (sh.errors || 0) || (eb.errors || 0);
     tone = anyErr ? '#b45309' : '#15803d';

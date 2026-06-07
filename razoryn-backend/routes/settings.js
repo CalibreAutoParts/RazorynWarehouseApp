@@ -231,14 +231,17 @@ router.post('/push-all-stock', requireAdmin, async (req, res) => {
   if (pushAllStatus.state === 'running') {
     return res.json({ ok: true, started: false, alreadyRunning: true });
   }
-  pushAllStatus = { state: 'running', startedAt: Date.now(), finishedAt: null, result: { total: 0, done: 0, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null }, error: null };
-  res.json({ ok: true, started: true });
+  const countedOnly = !!(req.body && req.body.countedOnly);
+  pushAllStatus = { state: 'running', startedAt: Date.now(), finishedAt: null, countedOnly, result: { total: 0, done: 0, countedOnly, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null }, error: null };
+  res.json({ ok: true, started: true, countedOnly });
   setImmediate(async () => {
     try {
-      const r = await sync.pushAllStockToBoth((p) => { pushAllStatus.result = { ...p }; });
-      pushAllStatus = { state: 'done', startedAt: pushAllStatus.startedAt, finishedAt: Date.now(), result: r, error: null };
+      const r = await sync.pushAllStockToBoth((p) => { pushAllStatus.result = { ...p }; }, { countedOnly });
+      pushAllStatus = { state: 'done', startedAt: pushAllStatus.startedAt, finishedAt: Date.now(), countedOnly, result: r, error: null };
       const sev = (r.shopify.errors || r.ebay.errors) ? 'warn' : 'success';
-      const body = `Shopify: ${r.shopify.pushed} updated${r.shopify.errors ? `, ${r.shopify.errors} failed` : ''} · `
+      const scope = countedOnly ? `Counted stock (${r.total} items) · ` : '';
+      const body = scope
+        + `Shopify: ${r.shopify.pushed} updated${r.shopify.errors ? `, ${r.shopify.errors} failed` : ''} · `
         + `eBay: ${r.ebay.pushed} updated${r.ebay.errors ? `, ${r.ebay.errors} failed` : ''}`
         + (r.sampleEbayError ? ` · eBay error e.g. "${String(r.sampleEbayError).slice(0, 120)}"` : '');
       await query(

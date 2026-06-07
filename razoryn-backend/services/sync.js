@@ -496,12 +496,25 @@ async function pushAllStockToEbay() {
 // accurate per-channel counts INCLUDING per-eBay-listing failures + a sample
 // error, so the caller can tell a real failure from a timeout. Meant to run in
 // the background (it can take minutes for a big catalogue).
-async function pushAllStockToBoth(onProgress) {
-  const { rows } = await query(`
-    SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id
-    FROM products
-    WHERE active = true AND (shopify_inventory_id IS NOT NULL OR shopify_product_id IS NOT NULL)`);
-  const out = { total: rows.length, done: 0, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null };
+async function pushAllStockToBoth(onProgress, opts = {}) {
+  // countedOnly → restrict to products counted in THIS calendar month's
+  // stock-take. Far fewer API calls than the whole catalogue (saves eBay/Shopify
+  // credits) while still reconciling everything that was just re-counted.
+  const countedOnly = !!opts.countedOnly;
+  const sql = countedOnly
+    ? `SELECT p.id, p.sku, p.qty_on_hand, p.shopify_inventory_id, p.shopify_product_id
+         FROM products p
+         WHERE p.active = true
+           AND (p.shopify_inventory_id IS NOT NULL OR p.shopify_product_id IS NOT NULL)
+           AND EXISTS (
+             SELECT 1 FROM stock_checks sc
+             WHERE sc.product_id = p.id
+               AND sc.created_at >= date_trunc('month', now()))`
+    : `SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id
+         FROM products
+         WHERE active = true AND (shopify_inventory_id IS NOT NULL OR shopify_product_id IS NOT NULL)`;
+  const { rows } = await query(sql);
+  const out = { total: rows.length, done: 0, countedOnly, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null };
   const shopOk = shopify.isConfigured();
   const ebayOk = ebay.isConfigured();
   let i = 0;
