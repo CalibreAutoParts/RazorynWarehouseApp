@@ -2470,7 +2470,10 @@ function renderStockTake() {
     <div class="page">
       <div class="page-head">
         <div><h1>Monthly stock-take</h1><div class="desc">Walk the warehouse and tick off each item as you count it — progress is saved.</div></div>
-        <div class="actions"><button class="btn btn-outline" onclick="routeTo('scan')">← Stock Check</button></div>
+        <div class="actions">
+          <button class="btn btn-primary admin-only" onclick="pushAllStock(this)" title="Force-push every product's current warehouse quantity to Shopify and eBay. Use after counting to reconcile both channels.">⇪ Push all stock to channels</button>
+          <button class="btn btn-outline" onclick="routeTo('scan')">← Stock Check</button>
+        </div>
       </div>
       <div class="card" style="margin-bottom:14px"><div class="card-body" style="padding:14px 18px">
         <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px">
@@ -2583,6 +2586,28 @@ async function stCount(pid, adjust) {
     toast(adjust && changed ? `Counted — adjusted to ${actualQty}` : 'Counted ✓', 'success', 1500);
   } catch (e) {
     toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// Force-push every product's warehouse quantity to Shopify + eBay (reconcile
+// after a stock-take). Heavy but manual; confirm first.
+async function pushAllStock(btn) {
+  if (!confirm('Push the current warehouse quantity of every linked product to Shopify AND eBay?\n\nUse this to reconcile both channels after counting. It can take a minute or two.')) return;
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Pushing…'; }
+  const taskId = Task.start('Pushing all stock to Shopify & eBay…');
+  try {
+    const r = await Api.post('/api/settings/push-all-stock', {});
+    Task.done(taskId, 'Stock pushed');
+    const sh = r.shopifyStock || {}, eb = r.ebayStock || {};
+    const shMsg = sh.skipped ? 'Shopify not configured' : `Shopify ${sh.pushed}/${sh.total}${sh.errors ? ` (${sh.errors} failed)` : ''}`;
+    const ebMsg = eb.skipped ? 'eBay not configured' : `eBay ${eb.pushed}/${eb.total}${eb.errors ? ` (${eb.errors} failed)` : ''}`;
+    toast(`Stock pushed — ${shMsg} · ${ebMsg}`, (sh.errors || eb.errors) ? 'warn' : 'success', 8000);
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Push failed: ' + (e.data?.message || e.message), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
   }
 }
 

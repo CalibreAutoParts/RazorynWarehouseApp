@@ -218,6 +218,19 @@ router.post('/sync-now', requireAdmin, async (req, res) => {
   }
 });
 
+// POST /api/settings/push-all-stock (admin) — force-push every product's current
+// warehouse quantity to Shopify AND eBay (full reconcile, e.g. after a stock-take).
+router.post('/push-all-stock', requireAdmin, async (req, res) => {
+  try {
+    const shopifyStock = await sync.pushAllStockToShopify();
+    const ebayStock = await sync.pushAllStockToEbay();
+    await audit(req, 'push_all_stock', null, null, { shopifyStock, ebayStock });
+    res.json({ ok: true, shopifyStock, ebayStock });
+  } catch (e) {
+    res.status(500).json({ error: 'push_failed', message: e.message });
+  }
+});
+
 // POST /api/settings/reset-sync-cursor (admin)
 // Rewind the sync cursor so the next sync pulls older orders.
 // Body: { channel: 'shopify' | 'ebay' | 'all', days: number (default 30) }

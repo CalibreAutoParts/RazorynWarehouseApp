@@ -473,12 +473,31 @@ async function markAutoDispatched(saleId, platform, tracking, carrier) {
   `, [saleId, tracking, carrier, `Auto-detected from ${platform}`]);
 }
 
+// Push EVERY linked product's current warehouse qty to eBay (manual full
+// reconcile — e.g. after a monthly stock-take). One ReviseInventoryStatus per
+// linked listing; best-effort per product.
+async function pushAllStockToEbay() {
+  if (!ebay.isConfigured()) return { skipped: 'not_configured' };
+  const { rows } = await query(`
+    SELECT DISTINCT p.id, p.sku, p.qty_on_hand, p.shopify_product_id
+    FROM products p
+    JOIN mirror_links ml ON ml.shopify_product_id::text = p.shopify_product_id
+    WHERE p.active = true`);
+  let pushed = 0, errors = 0;
+  for (const p of rows) {
+    try { await ebay.pushStockForProduct(p); pushed++; }
+    catch (e) { errors++; console.warn('[sync] ebay push-all fail', p.sku, e.message); }
+  }
+  return { channel: 'ebay_stock', pushed, errors, total: rows.length };
+}
+
 module.exports = {
   runFullSync,
   pullShopify,
   pullEbay,
   pushStockForSaleItems,
   pushAllStockToShopify,
+  pushAllStockToEbay,
   recordLowStockIfNeeded,
   resolveProductBySku,
   autoMarkDispatched,
