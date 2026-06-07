@@ -363,20 +363,18 @@ async function runFullSync() {
     await setCursor('ebay', { lastSyncedAt: new Date(), status: 'error', error: e.message });
   }
 
-  // MASTER-STOCK PROPAGATION: incoming eBay/Shopify orders decrement the
-  // warehouse qty_on_hand (done in the pull loops above). The warehouse is the
-  // master, so after ingesting orders we re-push the NEW quantity to every
-  // channel — this keeps Shopify and eBay in sync with each other. Example: an
-  // eBay sale drops stock 3→2 in the app; without this, Shopify would still
-  // show 3. We push the freshest qty for every product touched by a sale in
-  // this run.
+  // MASTER-STOCK PROPAGATION: the warehouse is the master. Re-push the latest
+  // qty to BOTH channels for every product whose stock changed recently — from
+  // ANY source (orders, stock-checks, returns, manual edits, incoming receipts),
+  // not just sales. This is the backstop that keeps eBay in sync (Shopify also
+  // gets a full push below); the window (40 min) comfortably covers the 30-min
+  // sync cron so nothing is missed between runs.
   try {
     const touched = await query(`
       SELECT DISTINCT p.id, p.sku, p.qty_on_hand, p.shopify_inventory_id, p.shopify_product_id
       FROM products p
       JOIN stock_movements sm ON sm.product_id = p.id
-      WHERE sm.reason LIKE 'sale_%'
-        AND sm.created_at > now() - interval '10 minutes'
+      WHERE sm.created_at > now() - interval '40 minutes'
         AND p.active = true
     `);
     let pushed = 0;

@@ -47,7 +47,18 @@ router.post('/', requirePermission('scan'), async (req, res) => {
 
   if (result.error) return res.status(404).json({ error: result.error });
   await audit(req, 'stock_check', 'product', productId, { variance: result.variance });
-  res.status(201).json(result);
+
+  // Push the corrected quantity to Shopify + every linked eBay store immediately
+  // (previously a stock-check only updated locally + Shopify-via-cron, so eBay
+  // never got the new quantity). Best-effort — never fail the stock check.
+  let channelPush = null;
+  if (result.variance !== 0) {
+    try {
+      const { pushProductStockToChannels } = require('./products');
+      channelPush = await pushProductStockToChannels(productId);
+    } catch (e) { channelPush = { error: e.message }; }
+  }
+  res.status(201).json({ ...result, channelPush });
 });
 
 // GET /api/stock-checks?productId=&days=30
