@@ -496,14 +496,15 @@ async function pushAllStockToEbay() {
 // accurate per-channel counts INCLUDING per-eBay-listing failures + a sample
 // error, so the caller can tell a real failure from a timeout. Meant to run in
 // the background (it can take minutes for a big catalogue).
-async function pushAllStockToBoth() {
+async function pushAllStockToBoth(onProgress) {
   const { rows } = await query(`
     SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id
     FROM products
     WHERE active = true AND (shopify_inventory_id IS NOT NULL OR shopify_product_id IS NOT NULL)`);
-  const out = { total: rows.length, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null };
+  const out = { total: rows.length, done: 0, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null };
   const shopOk = shopify.isConfigured();
   const ebayOk = ebay.isConfigured();
+  let i = 0;
   for (const p of rows) {
     if (shopOk && p.shopify_inventory_id) {
       try { await shopify.pushStockForProduct(p); out.shopify.pushed++; }
@@ -525,6 +526,12 @@ async function pushAllStockToBoth() {
       } catch (e) {
         out.ebay.errors++; if (!out.sampleEbayError) out.sampleEbayError = e.message;
       }
+    }
+    out.done = ++i;
+    // Report progress every 25 items (and on the last one) so a polling UI can
+    // show live progress without hammering the callback on every iteration.
+    if (typeof onProgress === 'function' && (i % 25 === 0 || i === rows.length)) {
+      try { onProgress(out); } catch (_) {}
     }
   }
   return out;

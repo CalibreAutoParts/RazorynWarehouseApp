@@ -222,11 +222,21 @@ router.post('/sync-now', requireAdmin, async (req, res) => {
 // warehouse quantity to Shopify AND eBay (full reconcile after a stock-take).
 // Runs in the BACKGROUND (a big catalogue is 1000+ API calls and would time out
 // the request) and posts a notification + push when finished.
+// In-memory status of the most recent push-all run, so the UI can poll for live
+// progress + the final result IN-APP (OS push notifications don't reliably fire
+// on the user's devices, so the page itself must show the outcome).
+let pushAllStatus = { state: 'idle', startedAt: null, finishedAt: null, result: null, error: null };
+
 router.post('/push-all-stock', requireAdmin, async (req, res) => {
+  if (pushAllStatus.state === 'running') {
+    return res.json({ ok: true, started: false, alreadyRunning: true });
+  }
+  pushAllStatus = { state: 'running', startedAt: Date.now(), finishedAt: null, result: { total: 0, done: 0, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null }, error: null };
   res.json({ ok: true, started: true });
   setImmediate(async () => {
     try {
-      const r = await sync.pushAllStockToBoth();
+      const r = await sync.pushAllStockToBoth((p) => { pushAllStatus.result = { ...p }; });
+      pushAllStatus = { state: 'done', startedAt: pushAllStatus.startedAt, finishedAt: Date.now(), result: r, error: null };
       const sev = (r.shopify.errors || r.ebay.errors) ? 'warn' : 'success';
       const body = `Shopify: ${r.shopify.pushed} updated${r.shopify.errors ? `, ${r.shopify.errors} failed` : ''} · `
         + `eBay: ${r.ebay.pushed} updated${r.ebay.errors ? `, ${r.ebay.errors} failed` : ''}`
@@ -239,10 +249,16 @@ router.post('/push-all-stock', requireAdmin, async (req, res) => {
       try { require('../services/push').sendToAll({ title: 'Stock push complete', body, url: '/', category: 'sale' }); } catch (_) {}
       console.log('[push-all-stock]', body);
     } catch (e) {
+      pushAllStatus = { state: 'error', startedAt: pushAllStatus.startedAt, finishedAt: Date.now(), result: pushAllStatus.result, error: e.message };
       await query(`INSERT INTO notifications (type, title, body, severity) VALUES ('sync','Stock push failed',$1,'error')`, [e.message]).catch(() => {});
       console.error('[push-all-stock] failed:', e.message);
     }
   });
+});
+
+// GET /api/settings/push-all-stock/status — poll live progress + final result.
+router.get('/push-all-stock/status', requireAdmin, (req, res) => {
+  res.json(pushAllStatus);
 });
 
 // POST /api/settings/reset-sync-cursor (admin)

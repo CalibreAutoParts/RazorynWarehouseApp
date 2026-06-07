@@ -2480,6 +2480,7 @@ function renderStockTake() {
           <button class="btn btn-outline" onclick="routeTo('scan')">← Stock Check</button>
         </div>
       </div>
+      <div id="push-all-status" style="display:none;margin-bottom:14px"></div>
       <div class="card" style="margin-bottom:14px"><div class="card-body" style="padding:14px 18px">
         <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px">
           <span id="st-progress-text">Loading…</span><span id="st-progress-pct" style="font-weight:700"></span>
@@ -2502,6 +2503,11 @@ function renderStockTake() {
   Api.get('/api/stock-checks/this-month')
     .then(r => { State._stChecked = new Set((r.productIds || []).map(String)); stPaint(); })
     .catch(() => stPaint());
+
+  // If a push-all is in progress (or recently finished), resume showing it.
+  Api.get('/api/settings/push-all-stock/status')
+    .then(s => { if (s && s.state && s.state !== 'idle') { renderPushAllStatus(s); if (s.state === 'running') pollPushAllStatus(null); } })
+    .catch(() => {});
 
   el('st-list').addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-act]');
@@ -2596,14 +2602,61 @@ async function stCount(pid, adjust) {
 
 // Force-push every product's warehouse quantity to Shopify + eBay (reconcile
 // after a stock-take). Heavy but manual; confirm first.
+let _pushAllPoll = null;
 async function pushAllStock(btn) {
-  if (!confirm('Push the current warehouse quantity of every linked product to Shopify AND eBay?\n\nThis runs in the background (it can take a few minutes for the whole catalogue). You\'ll get a notification when it finishes — you can keep working.')) return;
+  if (!confirm('Push the current warehouse quantity of every linked product to Shopify AND eBay?\n\nThis runs in the background (it can take a few minutes for the whole catalogue). Live progress + the result will show here on the page — you can keep working.')) return;
   try {
-    await Api.post('/api/settings/push-all-stock', {});
-    toast('Stock push started in the background — you\'ll get a notification when it\'s done (you can keep working).', 'success', 7000);
+    const r = await Api.post('/api/settings/push-all-stock', {});
+    if (r && r.alreadyRunning) toast('A stock push is already running — watching its progress.', 'info', 5000);
+    else toast('Stock push started — live progress below.', 'success', 5000);
+    if (btn) { btn.disabled = true; btn.dataset._label = btn.textContent; btn.textContent = '⇪ Pushing…'; }
+    pollPushAllStatus(btn);
   } catch (e) {
     toast('Couldn\'t start push: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+function renderPushAllStatus(s) {
+  const box = document.getElementById('push-all-status');
+  if (!box) return;
+  if (!s || s.state === 'idle') { box.style.display = 'none'; return; }
+  const res = s.result || { total: 0, done: 0, shopify: {}, ebay: {} };
+  const sh = res.shopify || {}, eb = res.ebay || {};
+  const pct = res.total ? Math.round((res.done / res.total) * 100) : 0;
+  let tone = '#2563eb', heading = '';
+  if (s.state === 'running') { heading = `Pushing stock to channels… ${res.done || 0}/${res.total || 0} (${pct}%)`; }
+  else if (s.state === 'done') {
+    const anyErr = (sh.errors || 0) || (eb.errors || 0);
+    tone = anyErr ? '#b45309' : '#15803d';
+    heading = anyErr ? '⚠ Stock push finished with some errors' : '✓ Stock push complete';
+  } else if (s.state === 'error') { tone = '#b91c1c'; heading = '✕ Stock push failed'; }
+  const detail = s.error
+    ? escapeHtml(s.error)
+    : `Shopify: ${sh.pushed || 0} updated${sh.errors ? `, ${sh.errors} failed` : ''} · `
+      + `eBay: ${eb.pushed || 0} updated${eb.errors ? `, ${eb.errors} failed` : ''}`
+      + (res.sampleEbayError ? `<br><span style="color:#b91c1c">eBay error e.g.: ${escapeHtml(String(res.sampleEbayError).slice(0, 160))}</span>` : '');
+  box.style.display = 'block';
+  box.innerHTML = `<div class="card"><div class="card-body" style="padding:12px 16px;border-left:4px solid ${tone}">
+    <div style="font-weight:600;color:${tone}">${escapeHtml(heading)}</div>
+    <div style="margin-top:4px;font-size:13px;color:#475569">${detail}</div>
+    ${s.state === 'running' ? `<div style="margin-top:8px;height:6px;background:#e2e8f0;border-radius:4px;overflow:hidden"><div style="height:100%;width:${pct}%;background:${tone};transition:width .3s"></div></div>` : ''}
+  </div></div>`;
+}
+
+async function pollPushAllStatus(btn) {
+  if (_pushAllPoll) clearInterval(_pushAllPoll);
+  const tick = async () => {
+    try {
+      const s = await Api.get('/api/settings/push-all-stock/status');
+      renderPushAllStatus(s);
+      if (s.state === 'done' || s.state === 'error') {
+        clearInterval(_pushAllPoll); _pushAllPoll = null;
+        if (btn) { btn.disabled = false; if (btn.dataset._label) btn.textContent = btn.dataset._label; }
+      }
+    } catch (e) { /* keep polling; transient errors are fine */ }
+  };
+  await tick();
+  _pushAllPoll = setInterval(tick, 2500);
 }
 
 function refreshNavCounts() {
