@@ -279,8 +279,7 @@ async function pushStockForProduct(product) {
   if (!product.sku) return { skipped: 'no_sku' };
   // Route through the warehouse DB → mirror_links to find this product's eBay
   // ItemID(s) + store, then push via ReviseInventoryStatus (Trading API) which
-  // works for legacy listings. Falls back to the Inventory-API SKU update only
-  // if no mirror link exists (e.g. inventory-model listings).
+  // works for legacy listings.
   let links = [];
   try {
     const { query } = require('../db');
@@ -289,7 +288,7 @@ async function pushStockForProduct(product) {
       [product.shopify_product_id]
     );
     links = r.rows;
-  } catch (e) { /* db unavailable — fall through to SKU path */ }
+  } catch (e) { /* db unavailable — treat as no link */ }
 
   if (links.length) {
     const results = [];
@@ -305,13 +304,11 @@ async function pushStockForProduct(product) {
     return { ok: true, via: 'ReviseInventoryStatus', results };
   }
 
-  // No mirror link — try the Inventory API SKU update as a last resort.
-  try {
-    await setInventoryQty(product.sku, product.qty_on_hand);
-    return { ok: true, via: 'inventory_api' };
-  } catch (e) {
-    return { error: e.message };
-  }
+  // No mirror link → this product isn't listed on eBay (or hasn't been mirrored
+  // yet). Skip it silently rather than firing a wasted Inventory-API call: it
+  // would just fail for legacy Trading-API sellers (and burns API credits). Use
+  // Listing Mirror to link a product before its stock can push to eBay.
+  return { skipped: 'no_link' };
 }
 
 // setQuantityTradingAPI — update a listing's available quantity using the
