@@ -2641,7 +2641,7 @@ function renderPushAllStatus(s) {
   const detail = s.error
     ? escapeHtml(s.error)
     : `Shopify: ${sh.pushed || 0} updated${sh.errors ? `, ${sh.errors} failed` : ''} · `
-      + `eBay: ${eb.pushed || 0} updated${eb.errors ? `, ${eb.errors} failed` : ''}`
+      + `eBay: ${eb.pushed || 0} updated${eb.errors ? `, ${eb.errors} failed` : ''}${eb.skipped ? `, ${eb.skipped} skipped` : ''}`
       + (byStore ? `<br><span style="color:#b45309">eBay failures by store — ${byStore}</span>` : '')
       + (res.sampleEbayError ? `<br><span style="color:#b91c1c">eBay error e.g.: ${escapeHtml(String(res.sampleEbayError).slice(0, 160))}</span>` : '');
   // List of the actual failed listings, collapsed behind a toggle so it doesn't
@@ -2671,12 +2671,36 @@ function renderPushAllStatus(s) {
       </div>
     </details>`;
   }
+  // List of products skipped on eBay (not listed / no SKU) so the user can see
+  // WHAT was skipped and why — same style as the failures list.
+  const skips = Array.isArray(res.ebaySkipped) ? res.ebaySkipped : [];
+  const reasonLabel = (r) => r === 'no_sku' ? 'No SKU' : 'Not listed on eBay';
+  let skipsHtml = '';
+  if (skips.length) {
+    const rowsHtml = skips.map(f => `<tr>
+        <td style="padding:3px 8px;white-space:nowrap">${escapeHtml(f.sku || '—')}</td>
+        <td style="padding:3px 8px">${escapeHtml(f.title || '')}</td>
+        <td style="padding:3px 8px;color:#64748b">${escapeHtml(reasonLabel(f.reason))}</td>
+      </tr>`).join('');
+    skipsHtml = `<details style="margin-top:8px">
+      <summary style="cursor:pointer;font-size:13px;color:#64748b">Show ${skips.length} skipped item${skips.length === 1 ? '' : 's'}${(eb.skipped || 0) > skips.length ? ` (of ${eb.skipped})` : ''} — not listed on eBay</summary>
+      <div style="overflow:auto;max-height:280px;margin-top:6px">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="text-align:left;color:#64748b">
+            <th style="padding:3px 8px">SKU</th><th style="padding:3px 8px">Item</th><th style="padding:3px 8px">Reason</th>
+          </tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+    </details>`;
+  }
   box.style.display = 'block';
   box.innerHTML = `<div class="card"><div class="card-body" style="padding:12px 16px;border-left:4px solid ${tone}">
     <div style="font-weight:600;color:${tone}">${escapeHtml(heading)}</div>
     <div style="margin-top:4px;font-size:13px;color:#475569">${detail}</div>
     ${s.state === 'running' ? `<div style="margin-top:8px;height:6px;background:#e2e8f0;border-radius:4px;overflow:hidden"><div style="height:100%;width:${pct}%;background:${tone};transition:width .3s"></div></div>` : ''}
     ${failsHtml}
+    ${skipsHtml}
   </div></div>`;
 }
 

@@ -502,7 +502,7 @@ async function pushAllStockToBoth(onProgress, opts = {}) {
   // credits) while still reconciling everything that was just re-counted.
   const countedOnly = !!opts.countedOnly;
   const sql = countedOnly
-    ? `SELECT p.id, p.sku, p.qty_on_hand, p.shopify_inventory_id, p.shopify_product_id
+    ? `SELECT p.id, p.sku, p.title, p.qty_on_hand, p.shopify_inventory_id, p.shopify_product_id
          FROM products p
          WHERE p.active = true
            AND (p.shopify_inventory_id IS NOT NULL OR p.shopify_product_id IS NOT NULL)
@@ -510,15 +510,18 @@ async function pushAllStockToBoth(onProgress, opts = {}) {
              SELECT 1 FROM stock_checks sc
              WHERE sc.product_id = p.id
                AND sc.created_at >= date_trunc('month', now()))`
-    : `SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id
+    : `SELECT id, sku, title, qty_on_hand, shopify_inventory_id, shopify_product_id
          FROM products
          WHERE active = true AND (shopify_inventory_id IS NOT NULL OR shopify_product_id IS NOT NULL)`;
   const { rows } = await query(sql);
   // ebayFailures: the actual listings that failed (itemId + store + sku + error),
   // capped so a big run can't bloat the status payload. Lets the UI show exactly
   // WHICH listings failed (e.g. all on one store) instead of just a sample.
-  const out = { total: rows.length, done: 0, countedOnly, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null, ebayFailures: [], ebayFailuresByStore: {} };
+  // ebaySkipped: products not pushed to eBay (no listing / no SKU) so the user
+  // can see WHAT was skipped and why, not just a count.
+  const out = { total: rows.length, done: 0, countedOnly, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0, skipped: 0 }, sampleEbayError: null, ebayFailures: [], ebayFailuresByStore: {}, ebaySkipped: [] };
   const FAIL_CAP = 200;
+  const SKIP_CAP = 500;
   const recordFail = (info) => {
     out.ebay.errors++;
     const store = info.store || 'unknown';
@@ -526,6 +529,12 @@ async function pushAllStockToBoth(onProgress, opts = {}) {
     if (!out.sampleEbayError) out.sampleEbayError = info.error || 'unknown';
     if (out.ebayFailures.length < FAIL_CAP) {
       out.ebayFailures.push({ itemId: info.itemId || null, store, sku: info.sku || null, error: info.error || 'unknown' });
+    }
+  };
+  const recordSkip = (p, reason) => {
+    out.ebay.skipped++;
+    if (out.ebaySkipped.length < SKIP_CAP) {
+      out.ebaySkipped.push({ sku: p.sku || null, title: p.title || null, reason });
     }
   };
   const shopOk = shopify.isConfigured();
@@ -547,11 +556,14 @@ async function pushAllStockToBoth(onProgress, opts = {}) {
             else recordFail({ itemId: x.itemId, store: x.store, sku: p.sku, error: x.error });
           }
         } else if (r && r.ok) out.ebay.pushed++;
-        else if (r && r.skipped) { /* no link / no sku — not an error */ }
+        else if (r && r.skipped) recordSkip(p, r.skipped);
         else recordFail({ sku: p.sku, error: r && r.error });
       } catch (e) {
         recordFail({ sku: p.sku, error: e.message });
       }
+    } else if (ebayOk && !p.shopify_product_id) {
+      // No Shopify product id → can't resolve an eBay link for it.
+      recordSkip(p, 'no_link');
     }
     out.done = ++i;
     // Report progress every 25 items (and on the last one) so a polling UI can

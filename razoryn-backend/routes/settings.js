@@ -245,7 +245,7 @@ router.post('/push-all-stock', requireAdmin, async (req, res) => {
         : '';
       const body = scope
         + `Shopify: ${r.shopify.pushed} updated${r.shopify.errors ? `, ${r.shopify.errors} failed` : ''} · `
-        + `eBay: ${r.ebay.pushed} updated${r.ebay.errors ? `, ${r.ebay.errors} failed${byStore}` : ''}`
+        + `eBay: ${r.ebay.pushed} updated${r.ebay.errors ? `, ${r.ebay.errors} failed${byStore}` : ''}${r.ebay.skipped ? `, ${r.ebay.skipped} skipped (not listed)` : ''}`
         + (r.sampleEbayError ? ` · eBay error e.g. "${String(r.sampleEbayError).slice(0, 120)}"` : '');
       await query(
         `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
