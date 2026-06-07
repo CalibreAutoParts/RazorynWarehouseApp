@@ -1045,6 +1045,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
           Activity
         </button>
+        <button class="nav-item admin-only" data-page="pricingrules">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          Pricing
+        </button>
         <button class="nav-item admin-only" data-page="mirror">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
           Listing Mirror
@@ -2405,6 +2409,7 @@ function hasPerm(page) {
     // are management functions that aren't part of the warehouse workflow.
     sales:        false,
     activity:     false,
+    pricingrules: false,
     pricing:      false,
     schedule:     false,
     videos:       false,
@@ -2445,7 +2450,7 @@ function routeTo(page) {
     locations: renderLocations, returns: renderReturns, sales: renderSales,
     pricing: renderQuoteBuilder, schedule: renderSchedule, videos: renderVideos,
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror,
-    activity: renderActivity,
+    activity: renderActivity, pricingrules: renderPricingRules,
     labels: renderLabels, notes: renderNotes, dispatch: renderDispatch
   };
   try {
@@ -8443,6 +8448,119 @@ async function markAllRead() {
 /* ==========================================================
    STAFF (admin only)
    ========================================================== */
+// ── Pricing rules (admin) — the cross-channel pricing model ──────────────────
+// Model: eBay is the highest price. Shopify & Bank-transfer are a fixed % below
+// eBay (equal to each other). Cash is a (default 10%) below eBay. The %s are set
+// here; "Recalculate" rewrites Shopify prices from eBay and pushes them live.
+let PrRecalc = [];
+function renderPricingRules() {
+  const cfg = State.pricingConfig || {};
+  const shopPct = cfg.priceLinkPct != null ? cfg.priceLinkPct : 0;
+  const cashPct = cfg.cashDiscountPct != null ? cfg.cashDiscountPct : 10;
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Pricing</h1><div class="desc">Set how Shopify, bank-transfer and cash prices are derived from the eBay price.</div></div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Pricing model</h3><div class="card-desc">eBay is the highest price. Shopify & bank-transfer are equal — a fixed % below eBay. Cash is a % below eBay too.</div></div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:560px">
+            <div class="field">
+              <label>Shopify &amp; Bank — % below eBay</label>
+              <input id="pr-shop-pct" type="number" min="0" max="90" step="0.5" value="${escapeAttr(shopPct)}">
+              <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Shopify and bank-transfer prices = eBay − this %.</div>
+            </div>
+            <div class="field">
+              <label>Cash — % below eBay</label>
+              <input id="pr-cash-pct" type="number" min="0" max="90" step="0.5" value="${escapeAttr(cashPct)}">
+              <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Cash on collection = eBay − this % (typically 10%).</div>
+            </div>
+          </div>
+          <div id="pr-example" style="font-size:12px;color:var(--ink-soft);margin-top:12px"></div>
+          <div style="margin-top:14px"><button class="btn btn-primary" onclick="savePricingRules()">Save pricing rules</button></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>Recalculate Shopify prices from eBay</h3><div class="card-desc">Rewrites each product's Shopify price to eBay − [Shopify %] and pushes it live. eBay prices are the source and are left unchanged. Preview first.</div></div>
+        <div class="card-body">
+          <button class="btn btn-primary" onclick="prRecalcPreview()">Preview changes</button>
+          <span id="pr-status" style="font-size:12px;color:var(--ink-soft);margin-left:8px"></span>
+          <div id="pr-wrap" style="display:none;margin-top:12px">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+              <button class="btn btn-outline btn-sm" onclick="prToggleAll(true)">Select all</button>
+              <button class="btn btn-outline btn-sm" onclick="prToggleAll(false)">Select none</button>
+              <span style="margin-left:auto"></span>
+              <button class="btn btn-primary btn-sm" onclick="prRecalcApply()">Apply &amp; push to Shopify</button>
+            </div>
+            <div class="table-wrap" style="max-height:460px;overflow:auto">
+              <table class="table" style="font-size:12px"><thead><tr><th style="width:26px"></th><th>Product</th><th>eBay</th><th>Shopify now</th><th>New Shopify</th></tr></thead><tbody id="pr-tbody"></tbody></table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  prUpdateExample();
+  ['pr-shop-pct', 'pr-cash-pct'].forEach(id => el(id)?.addEventListener('input', prUpdateExample));
+}
+function prUpdateExample() {
+  const ex = el('pr-example'); if (!ex) return;
+  const eb = 100;
+  const s = +(eb * (1 - (parseFloat(el('pr-shop-pct')?.value) || 0) / 100)).toFixed(2);
+  const c = +(eb * (1 - (parseFloat(el('pr-cash-pct')?.value) || 0) / 100)).toFixed(2);
+  ex.innerHTML = `Example: an item priced <strong>£100 on eBay</strong> → Shopify &amp; bank <strong>£${s.toFixed(2)}</strong> · cash <strong>£${c.toFixed(2)}</strong>.`;
+}
+async function savePricingRules() {
+  const shopPct = parseFloat(el('pr-shop-pct')?.value);
+  const cashPct = parseFloat(el('pr-cash-pct')?.value);
+  if (isNaN(shopPct) || shopPct < 0 || isNaN(cashPct) || cashPct < 0) { toast('Enter valid percentages', 'warn'); return; }
+  try {
+    // priceLinkPct drives the Shopify recalc; bankTransferPct keeps bank = Shopify;
+    // cashDiscountPct drives the cash price in the Quote Builder.
+    await Api.post('/api/settings/pricing-config', { priceLinkPct: shopPct, bankTransferPct: shopPct, cashDiscountPct: cashPct });
+    if (State.pricingConfig) { State.pricingConfig.priceLinkPct = shopPct; State.pricingConfig.bankTransferPct = shopPct; State.pricingConfig.cashDiscountPct = cashPct; }
+    toast('Pricing rules saved', 'success');
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function prRecalcPreview() {
+  const pct = parseFloat(el('pr-shop-pct')?.value);
+  if (isNaN(pct) || pct < 0 || pct >= 100) { toast('Enter a valid Shopify %', 'warn'); return; }
+  const status = el('pr-status'); if (status) status.textContent = 'Calculating…';
+  try {
+    const r = await Api.post('/api/pricing/link/preview', { direction: 'ebay_to_shopify', pct });
+    PrRecalc = (r.items || []).map(it => ({ ...it, selected: true }));
+    if (status) status.textContent = `${PrRecalc.length} product(s) would change.`;
+    el('pr-wrap').style.display = PrRecalc.length ? 'block' : 'none';
+    prPaint();
+  } catch (e) { if (status) status.textContent = 'Failed: ' + (e.data?.message || e.message); }
+}
+function prPaint() {
+  const tb = el('pr-tbody'); if (!tb) return;
+  tb.innerHTML = PrRecalc.map((it, i) => `<tr>
+    <td><input type="checkbox" ${it.selected ? 'checked' : ''} onchange="PrRecalc[${i}].selected=this.checked"></td>
+    <td><div style="font-weight:600">${escapeHtml(it.title)}</div><div style="color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')}</div></td>
+    <td>£${it.masterPrice.toFixed(2)}</td>
+    <td style="color:var(--ink-soft)">${it.currentPrice != null ? '£' + it.currentPrice.toFixed(2) : '—'}</td>
+    <td style="color:var(--green);font-weight:600">£${it.newPrice.toFixed(2)}</td>
+  </tr>`).join('');
+}
+function prToggleAll(on) { PrRecalc.forEach(it => { it.selected = on; }); prPaint(); }
+async function prRecalcApply() {
+  const chosen = PrRecalc.filter(it => it.selected);
+  if (!chosen.length) { toast('Nothing selected', 'warn'); return; }
+  if (!confirm(`Update ${chosen.length} Shopify price(s) to eBay − ${el('pr-shop-pct')?.value}% and push them live?`)) return;
+  const taskId = Task.start(`Updating ${chosen.length} prices…`);
+  try {
+    const r = await Api.post('/api/pricing/link/apply', { direction: 'ebay_to_shopify', items: chosen.map(it => ({ id: it.id, newPrice: it.newPrice })) });
+    Task.done(taskId, `Applied ${r.applied}/${r.total}`);
+    const failed = (r.results || []).filter(x => !x.ok).length;
+    toast(`Updated ${r.applied}/${r.total} Shopify prices` + (failed ? ` · ${failed} failed` : ''), failed ? 'warn' : 'success', 6000);
+    prRecalcPreview();
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Apply failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
 // ── Activity log (admin) — what each staff member has done ───────────────────
 function renderActivity() {
   el('content').innerHTML = `
