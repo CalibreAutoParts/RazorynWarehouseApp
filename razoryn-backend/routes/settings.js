@@ -219,16 +219,30 @@ router.post('/sync-now', requireAdmin, async (req, res) => {
 });
 
 // POST /api/settings/push-all-stock (admin) — force-push every product's current
-// warehouse quantity to Shopify AND eBay (full reconcile, e.g. after a stock-take).
+// warehouse quantity to Shopify AND eBay (full reconcile after a stock-take).
+// Runs in the BACKGROUND (a big catalogue is 1000+ API calls and would time out
+// the request) and posts a notification + push when finished.
 router.post('/push-all-stock', requireAdmin, async (req, res) => {
-  try {
-    const shopifyStock = await sync.pushAllStockToShopify();
-    const ebayStock = await sync.pushAllStockToEbay();
-    await audit(req, 'push_all_stock', null, null, { shopifyStock, ebayStock });
-    res.json({ ok: true, shopifyStock, ebayStock });
-  } catch (e) {
-    res.status(500).json({ error: 'push_failed', message: e.message });
-  }
+  res.json({ ok: true, started: true });
+  setImmediate(async () => {
+    try {
+      const r = await sync.pushAllStockToBoth();
+      const sev = (r.shopify.errors || r.ebay.errors) ? 'warn' : 'success';
+      const body = `Shopify: ${r.shopify.pushed} updated${r.shopify.errors ? `, ${r.shopify.errors} failed` : ''} · `
+        + `eBay: ${r.ebay.pushed} updated${r.ebay.errors ? `, ${r.ebay.errors} failed` : ''}`
+        + (r.sampleEbayError ? ` · eBay error e.g. "${String(r.sampleEbayError).slice(0, 120)}"` : '');
+      await query(
+        `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+         VALUES ('sync', $1, $2, $3, NULL, NULL)`,
+        ['Stock push complete', body, sev]
+      ).catch(() => {});
+      try { require('../services/push').sendToAll({ title: 'Stock push complete', body, url: '/', category: 'sale' }); } catch (_) {}
+      console.log('[push-all-stock]', body);
+    } catch (e) {
+      await query(`INSERT INTO notifications (type, title, body, severity) VALUES ('sync','Stock push failed',$1,'error')`, [e.message]).catch(() => {});
+      console.error('[push-all-stock] failed:', e.message);
+    }
+  });
 });
 
 // POST /api/settings/reset-sync-cursor (admin)

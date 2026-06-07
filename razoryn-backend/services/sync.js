@@ -491,6 +491,45 @@ async function pushAllStockToEbay() {
   return { channel: 'ebay_stock', pushed, errors, total: rows.length };
 }
 
+// Push EVERY linked product's current warehouse qty to Shopify AND eBay in a
+// single pass (interleaved, so eBay isn't starved if the run is long). Returns
+// accurate per-channel counts INCLUDING per-eBay-listing failures + a sample
+// error, so the caller can tell a real failure from a timeout. Meant to run in
+// the background (it can take minutes for a big catalogue).
+async function pushAllStockToBoth() {
+  const { rows } = await query(`
+    SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id
+    FROM products
+    WHERE active = true AND (shopify_inventory_id IS NOT NULL OR shopify_product_id IS NOT NULL)`);
+  const out = { total: rows.length, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null };
+  const shopOk = shopify.isConfigured();
+  const ebayOk = ebay.isConfigured();
+  for (const p of rows) {
+    if (shopOk && p.shopify_inventory_id) {
+      try { await shopify.pushStockForProduct(p); out.shopify.pushed++; }
+      catch (e) { out.shopify.errors++; }
+    }
+    if (ebayOk && p.shopify_product_id) {
+      try {
+        const r = await ebay.pushStockForProduct(p);
+        // pushStockForProduct catches per-link errors internally and returns
+        // { results:[{ok|error}] } — so inspect them for the true count.
+        if (r && Array.isArray(r.results)) {
+          for (const x of r.results) {
+            if (x.ok) out.ebay.pushed++;
+            else { out.ebay.errors++; if (!out.sampleEbayError) out.sampleEbayError = x.error || 'unknown'; }
+          }
+        } else if (r && r.ok) out.ebay.pushed++;
+        else if (r && r.skipped) { /* no link / no sku — not an error */ }
+        else { out.ebay.errors++; if (!out.sampleEbayError && r && r.error) out.sampleEbayError = r.error; }
+      } catch (e) {
+        out.ebay.errors++; if (!out.sampleEbayError) out.sampleEbayError = e.message;
+      }
+    }
+  }
+  return out;
+}
+
 module.exports = {
   runFullSync,
   pullShopify,
@@ -498,6 +537,7 @@ module.exports = {
   pushStockForSaleItems,
   pushAllStockToShopify,
   pushAllStockToEbay,
+  pushAllStockToBoth,
   recordLowStockIfNeeded,
   resolveProductBySku,
   autoMarkDispatched,

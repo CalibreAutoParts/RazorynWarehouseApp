@@ -2597,22 +2597,12 @@ async function stCount(pid, adjust) {
 // Force-push every product's warehouse quantity to Shopify + eBay (reconcile
 // after a stock-take). Heavy but manual; confirm first.
 async function pushAllStock(btn) {
-  if (!confirm('Push the current warehouse quantity of every linked product to Shopify AND eBay?\n\nUse this to reconcile both channels after counting. It can take a minute or two.')) return;
-  const orig = btn ? btn.textContent : '';
-  if (btn) { btn.disabled = true; btn.textContent = 'Pushing…'; }
-  const taskId = Task.start('Pushing all stock to Shopify & eBay…');
+  if (!confirm('Push the current warehouse quantity of every linked product to Shopify AND eBay?\n\nThis runs in the background (it can take a few minutes for the whole catalogue). You\'ll get a notification when it finishes — you can keep working.')) return;
   try {
-    const r = await Api.post('/api/settings/push-all-stock', {});
-    Task.done(taskId, 'Stock pushed');
-    const sh = r.shopifyStock || {}, eb = r.ebayStock || {};
-    const shMsg = sh.skipped ? 'Shopify not configured' : `Shopify ${sh.pushed}/${sh.total}${sh.errors ? ` (${sh.errors} failed)` : ''}`;
-    const ebMsg = eb.skipped ? 'eBay not configured' : `eBay ${eb.pushed}/${eb.total}${eb.errors ? ` (${eb.errors} failed)` : ''}`;
-    toast(`Stock pushed — ${shMsg} · ${ebMsg}`, (sh.errors || eb.errors) ? 'warn' : 'success', 8000);
+    await Api.post('/api/settings/push-all-stock', {});
+    toast('Stock push started in the background — you\'ll get a notification when it\'s done (you can keep working).', 'success', 7000);
   } catch (e) {
-    Task.fail(taskId, 'Failed');
-    toast('Push failed: ' + (e.data?.message || e.message), 'error');
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = orig; }
+    toast('Couldn\'t start push: ' + (e.data?.message || e.message), 'error');
   }
 }
 
