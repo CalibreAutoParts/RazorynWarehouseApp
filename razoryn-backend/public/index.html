@@ -2602,14 +2602,37 @@ async function stCount(pid, adjust) {
   }
   const changed = actualQty !== totalQty(p);
   try {
-    await Api.post('/api/stock-checks', { productId: pid, actualQty, reason: 'stock_take' });
+    // forcePush: always reconcile this item to Shopify + eBay after counting —
+    // even when the count matched — so channel drift can't leave a sold-out item
+    // listed for sale.
+    const res = await Api.post('/api/stock-checks', { productId: pid, actualQty, reason: 'stock_take', forcePush: true });
     State._stChecked.add(String(pid));
     if (changed) await Store.refresh('products');
     stPaint();
-    toast(adjust && changed ? `Counted — adjusted to ${actualQty}` : 'Counted ✓', 'success', 1500);
+    const base = adjust && changed ? `Counted — adjusted to ${actualQty}` : 'Counted ✓';
+    toast(`${base} · ${summarizeChannelPush(res && res.channelPush)}`, 'success', 2600);
   } catch (e) {
     toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+// Turn a /api/stock-checks channelPush result into a short status string for the
+// per-item toast, e.g. "Shopify ✓ · eBay ✓ (2)" or "eBay ✕".
+function summarizeChannelPush(cp) {
+  if (!cp) return 'channels: no change';
+  const parts = [];
+  if (cp.shopify) {
+    if (cp.shopify.ok) parts.push('Shopify ✓');
+    else if (cp.shopify.error) parts.push('Shopify ✕');
+    // skipped (no inventory id / not configured) → omit silently
+  }
+  const eb = Array.isArray(cp.ebay) ? cp.ebay : [];
+  const ok = eb.filter(x => x.ok).length;
+  const failed = eb.filter(x => x.error).length;
+  if (ok) parts.push(`eBay ✓${ok > 1 ? ` (${ok})` : ''}`);
+  if (failed) parts.push(`eBay ✕ (${failed})`);
+  if (!ok && !failed && eb.some(x => x.skipped === 'no_ebay_links' || x.skipped)) parts.push('eBay: not listed');
+  return parts.length ? parts.join(' · ') : 'channels updated';
 }
 
 // Force-push every product's warehouse quantity to Shopify + eBay (reconcile

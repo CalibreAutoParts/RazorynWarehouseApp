@@ -11,7 +11,7 @@ router.use(requireAuth);
 // Records a stock check. If actualQty != expected, applies the variance and
 // logs a stock movement so the audit trail stays complete.
 router.post('/', requirePermission('scan'), async (req, res) => {
-  const { productId, actualQty, reason, notes, photoPath } = req.body || {};
+  const { productId, actualQty, reason, notes, photoPath, forcePush } = req.body || {};
   if (!productId || actualQty == null) {
     return res.status(400).json({ error: 'productId_and_actualQty_required' });
   }
@@ -48,11 +48,13 @@ router.post('/', requirePermission('scan'), async (req, res) => {
   if (result.error) return res.status(404).json({ error: result.error });
   await audit(req, 'stock_check', 'product', productId, { variance: result.variance });
 
-  // Push the corrected quantity to Shopify + every linked eBay store immediately
-  // (previously a stock-check only updated locally + Shopify-via-cron, so eBay
-  // never got the new quantity). Best-effort — never fail the stock check.
+  // Push the counted quantity to Shopify + every linked eBay store immediately.
+  // We push whenever the count CHANGED the system qty, and also when the caller
+  // asks (forcePush) — the latter reconciles the channels even when the system
+  // already matched, catching channel drift so a sold-out item can't be oversold
+  // during a stock-take. Best-effort — never fail the stock check.
   let channelPush = null;
-  if (result.variance !== 0) {
+  if (result.variance !== 0 || forcePush) {
     try {
       const { pushProductStockToChannels } = require('./products');
       channelPush = await pushProductStockToChannels(productId);
