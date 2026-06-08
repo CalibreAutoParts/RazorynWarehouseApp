@@ -9,7 +9,8 @@
     "dev": "node --watch server.js",
     "migrate": "node scripts/migrate.js",
     "seed": "node scripts/seed.js",
-    "sync:run": "node scripts/sync-cron.js"
+    "sync:run": "node scripts/sync-cron.js",
+    "competitors:run": "node scripts/competitor-cron.js"
   },
   "engines": {
     "node": ">=20"

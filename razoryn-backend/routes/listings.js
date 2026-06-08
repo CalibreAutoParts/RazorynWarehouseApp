@@ -10,33 +10,10 @@ const router = express.Router();
 
 router.use(requireAuth);
 
-// Best-effort parse of vehicle Make / Model / Year(range) from a product title,
-// used to auto-populate eBay item specifics. Conservative — only emits a value
-// when reasonably confident (make matched against a known list, etc.).
-const VEHICLE_MAKES = ['Abarth','Alfa Romeo','Aston Martin','Audi','Bentley','BMW','Citroen','Citroën','Cupra','Dacia','DS','Ferrari','Fiat','Ford','Honda','Hyundai','Jaguar','Jeep','Kia','Lamborghini','Land Rover','Lexus','Maserati','Mazda','McLaren','Mercedes-Benz','Mercedes','MG','Mini','Mitsubishi','Nissan','Peugeot','Polestar','Porsche','Renault','Seat','Skoda','Škoda','Smart','SsangYong','Subaru','Suzuki','Tesla','Toyota','Vauxhall','Volkswagen','VW','Volvo'];
-function parseVehicleFromTitle(title) {
-  const t = ' ' + String(title || '') + ' ';
-  let make = null, makeRe = null;
-  for (const m of VEHICLE_MAKES) {
-    const re = new RegExp('\\b' + m.replace(/-/g, '[- ]?') + '\\b', 'i');
-    if (re.test(t)) { make = (m === 'VW' ? 'Volkswagen' : m); makeRe = re; break; }
-  }
-  // Year range (2019-2024, 2019–2024, 2019 to 2024) else single year.
-  let year = null;
-  const range = t.match(/\b((?:19|20)\d{2})\s*(?:[-–]|to)\s*((?:19|20)\d{2})\b/i);
-  if (range) year = `${range[1]}-${range[2]}`;
-  else { const single = t.match(/\b((?:19|20)\d{2})\b/); if (single) year = single[1]; }
-  // Model — the 1-2 tokens after the make, up to a year or a part-type keyword.
-  let model = null;
-  if (makeRe) {
-    const after = t.split(makeRe)[1] || '';
-    const stopIdx = after.search(/\b(?:19|20)\d{2}\b|\b(?:front|rear|left|right|lh|rh|bumper|bonnet|hood|headlight|headlamp|taillight|wing|fender|door|mirror|grille|grill|tailgate|panel|arch|spoiler|skirt|sill)\b/i);
-    const seg = (stopIdx > 0 ? after.slice(0, stopIdx) : after).trim();
-    const tokens = seg.split(/\s+/).filter(Boolean).slice(0, 2);
-    if (tokens.length) model = tokens.join(' ');
-  }
-  return { make, model, year };
-}
+// Vehicle Make/Model/Year parsing now lives in lib/vehicle.js so the
+// competitor-monitor matcher reuses the exact same logic. Behaviour here is
+// unchanged — it's the same function, just imported.
+const { VEHICLE_MAKES, parseVehicleFromTitle } = require('../lib/vehicle');
 
 // GET /api/listings/category-specifics?categoryId=&storeCode=
 // eBay's recommended/required item specifics for a category, so the UI can show
