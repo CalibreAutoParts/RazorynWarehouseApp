@@ -80,6 +80,7 @@ app.use('/api/dispatch',     require('./routes/dispatch'));
 app.use('/api/messages',     require('./routes/messages'));
 app.use('/api/customers',    require('./routes/customers'));
 app.use('/api/desktop',      require('./routes/desktop'));
+app.use('/api/competitors',  require('./routes/competitors'));
 // Public logo serving — mounted at /public-logo (NOT /api/settings) so it
 // completely bypasses the auth middleware that the settings router applies
 // to its whole namespace. Used by <img src="/public-logo"> in invoice HTML
@@ -243,6 +244,42 @@ if (cron.validate(dispatchCronExpr)) {
     }
   });
   console.log(`[boot] eBay dispatch auto-sync scheduled: ${dispatchCronExpr}`);
+}
+
+// Competitor monitoring — scan configured competitors (eBay sellers, and later
+// their websites), record price history, match against our catalogue and raise
+// undercut / price-drop / new-item alerts. Deliberately infrequent (every 6h by
+// default) to respect eBay Browse API limits and scraping etiquette.
+const competitorCronExpr = (process.env.COMPETITOR_SYNC_CRON || '0 */6 * * *').trim();
+if (cron.validate(competitorCronExpr)) {
+  cron.schedule(competitorCronExpr, async () => {
+    console.log(`[cron competitors] tick @ ${new Date().toISOString()} (${competitorCronExpr})`);
+    try {
+      const result = await require('./services/competitor-monitor').scanAll();
+      if (result.competitors) console.log('[cron competitors] complete', JSON.stringify(result));
+    } catch (e) {
+      console.error('[cron competitors] failed:', e.message);
+    }
+  });
+  console.log(`[boot] competitor monitor scheduled: ${competitorCronExpr}`);
+} else {
+  console.error(`[boot] ⚠️  invalid COMPETITOR_SYNC_CRON "${competitorCronExpr}" — competitor monitoring disabled.`);
+}
+
+// Market analysis — periodically snapshot whole-eBay saturation + our ranking for
+// products that have competitor matches. Daily by default (heavier API use).
+const marketCronExpr = (process.env.COMPETITOR_MARKET_CRON || '30 4 * * *').trim();
+if (cron.validate(marketCronExpr)) {
+  cron.schedule(marketCronExpr, async () => {
+    try {
+      const r = await require('./services/market-analysis').refreshMarkets(
+        parseInt(process.env.COMPETITOR_MARKET_BATCH || '25', 10) || 25);
+      if (r.products) console.log('[cron market] snapshots', JSON.stringify(r));
+    } catch (e) {
+      console.error('[cron market] failed:', e.message);
+    }
+  });
+  console.log(`[boot] market analysis scheduled: ${marketCronExpr}`);
 }
 
 // Nightly cleanup: permanently delete staff_notes older than 31 days.

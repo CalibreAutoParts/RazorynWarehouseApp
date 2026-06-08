@@ -82,6 +82,169 @@ async function taxonomyGet(path) {
   return axios.get(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, timeout: 20000 });
 }
 
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Normalize one Browse item_summary into our internal listing shape, including
+// shipping (so prices compare delivered), condition and the actual seller.
+function normalizeBrowseItem(it) {
+  const ship = (it.shippingOptions && it.shippingOptions[0]) || null;
+  const buyOpts = it.buyingOptions || [];
+  let shippingCost = null, shippingType = 'unknown', shippingFree = false;
+  if (ship) {
+    const sc = ship.shippingCost && ship.shippingCost.value != null ? Number(ship.shippingCost.value) : null;
+    shippingCost = sc;
+    if (sc === 0) { shippingFree = true; shippingType = 'free'; }
+    else if (ship.shippingCostType === 'CALCULATED') shippingType = 'calculated';
+    else if (sc != null) shippingType = 'flat';
+  } else if (buyOpts.includes('LOCAL_PICKUP') || it.pickupOptions) {
+    shippingType = 'collection';
+  }
+  return {
+    external_id: it.itemId,
+    title: it.title || '',
+    price: it.price && it.price.value != null ? Number(it.price.value) : null,
+    currency: (it.price && it.price.currency) || 'GBP',
+    url: it.itemWebUrl || null,
+    image_url: (it.image && it.image.imageUrl) || (it.thumbnailImages && it.thumbnailImages[0]?.imageUrl) || null,
+    condition: it.condition || null,
+    condition_id: it.conditionId || null,
+    seller_username: (it.seller && it.seller.username) || null,
+    shipping_cost: shippingCost,
+    shipping_type: shippingType,
+    shipping_free: shippingFree,
+  };
+}
+
+// One Browse search request with the canonical 429/503 backoff. Returns the raw
+// axios response so callers can read both itemSummaries and the total count.
+async function browseSearch(url, marketplaceId) {
+  const token = await getAppToken();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+          'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+        },
+        timeout: 30000,
+      });
+    } catch (e) {
+      const status = e.response?.status;
+      if ((status === 429 || status === 503) && attempt < 5) {
+        const ra = parseInt(e.response?.headers?.['retry-after'], 10);
+        const waitMs = (!isNaN(ra) && ra > 0) ? ra * 1000 : Math.min(500 * 2 ** attempt, 8000);
+        await sleep(waitMs);
+        continue;
+      }
+      const msg = e.response?.data?.errors?.[0]?.message || e.message;
+      throw new Error(`eBay Browse search failed [${status || '?'}]: ${msg}`);
+    }
+  }
+}
+
+// Public Buy Browse API — list a competitor seller's active listings using the
+// app (client_credentials) token, NOT a per-store user token. This is the legal,
+// supported way to monitor competitors who sell on eBay.
+//
+// Notes / constraints:
+//  - The `sellers:{username}` filter cannot stand alone; eBay requires an
+//    accompanying q or category, so we pass a broad q=* .
+//  - Browse paginates via offset (max 200 per page); total results are capped at
+//    ~10k by eBay, so very large sellers are necessarily sampled.
+//  - Requires the application to have Buy API (Browse) access granted.
+// Condition is captured AND can be filtered: pass conditionIds (e.g. '1000' for
+// New only) to restrict results — competitor tracking uses New so we compare
+// like-for-like and don't treat salvage/used listings as price competitors.
+// Returns a normalized array of:
+//   { external_id, title, price, currency, url, image_url,
+//     condition, condition_id, seller_username,
+//     shipping_cost, shipping_type, shipping_free }
+async function getSellerActiveListings(sellerUsername, { limit = 1000, marketplaceId, conditionIds } = {}) {
+  if (!sellerUsername) throw new Error('seller username required');
+  const token = await getAppToken();
+  const mkt = marketplaceId || process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
+  const pageSize = 200;
+  const out = [];
+  let offset = 0;
+  let total = Infinity;
+  let pages = 0;
+  const maxPages = Math.ceil(limit / pageSize) + 1;
+
+  // Build the filter: seller is required; optionally restrict by condition.
+  let filterStr = 'sellers:{' + sellerUsername + '}';
+  if (conditionIds) {
+    const ids = Array.isArray(conditionIds) ? conditionIds.join('|') : String(conditionIds).replace(/,/g, '|');
+    filterStr += `,conditionIds:{${ids}}`;
+  }
+
+  while (offset < Math.min(limit, total) && pages < maxPages) {
+    const url = `${BASE}/buy/browse/v1/item_summary/search`
+      + `?q=${encodeURIComponent('*')}`
+      + `&filter=${encodeURIComponent(filterStr)}`
+      + `&limit=${pageSize}&offset=${offset}`;
+
+    const resp = await browseSearch(url, mkt);
+    const data = resp.data || {};
+    total = typeof data.total === 'number' ? data.total : 0;
+    const items = data.itemSummaries || [];
+    for (const it of items) out.push(normalizeBrowseItem(it));
+    pages++;
+    if (!items.length) break;
+    offset += pageSize;
+    if (offset < Math.min(limit, total)) await sleep(300); // gentle pacing between pages
+  }
+  return out;
+}
+
+// Market-wide search (no seller filter) — used to rank ALL sellers competing on
+// a part and to read the saturation (total active listing count). Returns
+// { items, total }. Pass conditionIds to scope to NEW (1000) etc.
+async function searchActiveListings({ q, conditionIds, marketplaceId, limit = 100 } = {}) {
+  const mkt = marketplaceId || process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
+  const pageSize = Math.min(100, limit);
+  const out = [];
+  let offset = 0, total = Infinity, pages = 0;
+  const maxPages = Math.ceil(limit / pageSize) + 1;
+  const filters = [];
+  if (conditionIds) {
+    const ids = Array.isArray(conditionIds) ? conditionIds.join('|') : String(conditionIds).replace(/,/g, '|');
+    filters.push(`conditionIds:{${ids}}`);
+  }
+  while (offset < Math.min(limit, total) && pages < maxPages) {
+    const url = `${BASE}/buy/browse/v1/item_summary/search`
+      + `?q=${encodeURIComponent(q || '*')}`
+      + (filters.length ? `&filter=${encodeURIComponent(filters.join(','))}` : '')
+      + `&limit=${pageSize}&offset=${offset}`;
+    const resp = await browseSearch(url, mkt);
+    const data = resp.data || {};
+    total = typeof data.total === 'number' ? data.total : 0;
+    const items = data.itemSummaries || [];
+    for (const it of items) out.push(normalizeBrowseItem(it));
+    pages++;
+    if (!items.length) break;
+    offset += pageSize;
+    if (offset < Math.min(limit, total)) await sleep(300);
+  }
+  return { items: out, total: total === Infinity ? out.length : total };
+}
+
+// Cheap saturation count for a query+condition (reads total without fetching all).
+async function countActiveListings({ q, conditionIds, marketplaceId } = {}) {
+  const mkt = marketplaceId || process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
+  const filters = [];
+  if (conditionIds) {
+    const ids = Array.isArray(conditionIds) ? conditionIds.join('|') : String(conditionIds).replace(/,/g, '|');
+    filters.push(`conditionIds:{${ids}}`);
+  }
+  const url = `${BASE}/buy/browse/v1/item_summary/search`
+    + `?q=${encodeURIComponent(q || '*')}`
+    + (filters.length ? `&filter=${encodeURIComponent(filters.join(','))}` : '')
+    + `&limit=1&offset=0`;
+  const resp = await browseSearch(url, mkt);
+  return typeof resp.data?.total === 'number' ? resp.data.total : 0;
+}
+
 async function getAccessToken() {
   if (!isConfigured()) {
     const have = {
@@ -1498,6 +1661,9 @@ module.exports = {
   getItemDescription,
   getCategorySpecifics,
   getSuggestedCategories,
+  getSellerActiveListings,
+  searchActiveListings,
+  countActiveListings,
   getBusinessPolicies,
   debugBusinessPolicies,
   getFulfilledOrderIds,

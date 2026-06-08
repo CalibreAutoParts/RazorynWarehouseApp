@@ -808,6 +808,9 @@
   .admin-only { display: none; }
   body.is-admin .admin-only { display: initial; }
   body.is-admin .nav-item.admin-only { display: flex; }
+  /* Competitors page — visible to admins and warehouse staff with the perm. */
+  .nav-item.competitors-only { display: none; }
+  body.can-competitors .nav-item.competitors-only { display: flex; }
 
   /* ==================== PROGRESS BAR ====================
      Top-of-screen task indicator. A thin brand-coloured stripe shows long-running
@@ -1048,6 +1051,10 @@
         <button class="nav-item admin-only" data-page="pricingrules">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           Pricing
+        </button>
+        <button class="nav-item competitors-only" data-page="competitors">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          Competitors
         </button>
         <button class="nav-item admin-only" data-page="mirror">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
@@ -1873,6 +1880,8 @@ function enterApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').classList.add('active');
   document.body.classList.toggle('is-admin', State.user.role === 'admin');
+  document.body.classList.toggle('can-competitors',
+    State.user.role === 'admin' || !!(State.user.permissions && State.user.permissions.competitors));
 
   document.getElementById('user-avatar').textContent = State.user.name.charAt(0).toUpperCase();
   document.getElementById('user-name').textContent = State.user.name;
@@ -2403,6 +2412,7 @@ function hasPerm(page) {
     locations:    'locations',
     returns:     'returns',
     dispatch:    'dispatch',
+    competitors: 'competitors',
     notifications: true,
     // Admin-only pages — no granular permission, hard "false" for warehouse role.
     // The "+ Create on eBay" + Listing Mirror + Settings + Staff + Sales etc.
@@ -2451,7 +2461,8 @@ function routeTo(page) {
     pricing: renderQuoteBuilder, schedule: renderSchedule, videos: renderVideos,
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror,
     activity: renderActivity, pricingrules: renderPricingRules,
-    labels: renderLabels, notes: renderNotes, dispatch: renderDispatch
+    labels: renderLabels, notes: renderNotes, dispatch: renderDispatch,
+    competitors: renderCompetitors
   };
   try {
     (pages[page] || renderDashboard)();
@@ -8787,6 +8798,7 @@ function paintStaff() {
           ${permRow(u, 'locations', 'Locations', 'View and edit storage locations')}
           ${permRow(u, 'returns', 'Returns', 'Process returns')}
           ${permRow(u, 'dispatch', 'Dispatch', 'Mark orders shipped or collected, add tracking')}
+          ${permRow(u, 'competitors', 'Competitors', 'View competitor pricing, alerts and opportunities')}
           <div style="margin:14px 0 10px;font-size:12px;font-weight:600;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">Optional resources <span style="font-weight:400;text-transform:none;color:var(--ink-soft);font-size:11px">(off by default for warehouse staff)</span></div>
           ${permRow(u, 'schedule', 'Schedule', 'View and complete tasks')}
           ${permRow(u, 'videos', 'How-to videos', 'View training videos')}
@@ -13546,6 +13558,411 @@ async function resetData() {
   // In production mode this is disabled — wiping a real DB requires using
   // psql or running `npm run seed -- --force` from the server.
   toast('Reset disabled in production. Use server-side scripts.', 'warn');
+}
+
+/* ==========================================================
+   COMPETITOR MONITORING
+   ========================================================== */
+const compGbp = (v, cur) => v == null ? '—' : ((cur && cur !== 'GBP') ? `${Number(v).toFixed(2)} ${cur}` : `£${Number(v).toFixed(2)}`);
+
+function renderCompetitors() {
+  if (!State.comp) State.comp = { tab: 'manager', competitorId: null, competitorName: '' };
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div>
+          <h1>Competitors</h1>
+          <div class="desc">Track competitor pricing on eBay, see when they change prices, and spot parts they sell that you don't.</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          ${State.user.role === 'admin' ? `<button class="btn btn-outline btn-sm" onclick="scanAllCompetitors(this)" title="Fetch the latest listings and prices for every active competitor now. Also runs automatically every few hours.">⟳ Scan all now</button>` : ''}
+          <button class="btn btn-outline btn-sm" onclick="renderCompetitors()">↻ Refresh</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
+        ${compTabBtn('manager', 'Competitors')}
+        ${compTabBtn('listings', 'Listings')}
+        ${compTabBtn('market', 'Market & Ranking')}
+        ${compTabBtn('opportunities', 'Opportunities')}
+        ${compTabBtn('alerts', 'Alerts')}
+      </div>
+      <div id="comp-body"><div class="empty"><div class="t">Loading…</div></div></div>
+    </div>`;
+  loadCompTab();
+}
+
+function compTabBtn(tab, label) {
+  const active = (State.comp && State.comp.tab === tab);
+  return `<button class="btn btn-sm ${active ? 'btn-primary' : 'btn-outline'}" onclick="compSetTab('${tab}')">${label}</button>`;
+}
+function compSetTab(tab) { State.comp.tab = tab; renderCompetitors(); }
+
+async function loadCompTab() {
+  const tab = State.comp.tab;
+  try {
+    if (tab === 'manager') return loadCompManager();
+    if (tab === 'listings') return loadCompListings();
+    if (tab === 'market') return loadCompMarket();
+    if (tab === 'opportunities') return loadCompOpportunities();
+    if (tab === 'alerts') return loadCompAlerts();
+  } catch (e) {
+    el('comp-body').innerHTML = `<div class="card"><div class="card-body" style="padding:20px;color:var(--red)">Failed to load: ${escapeHtml(e.data?.error || e.message)}</div></div>`;
+  }
+}
+
+// ---- Manager tab ----
+async function loadCompManager() {
+  const { competitors } = await Api.get('/api/competitors');
+  State.comp.list = competitors;
+  const isAdmin = State.user.role === 'admin';
+  const rows = competitors.map(c => {
+    const src = c.source_type === 'ebay' ? `eBay: ${escapeHtml(c.ebay_username || '—')}` : `Web: ${escapeHtml(c.website_url || '—')}`;
+    const status = c.last_status === 'error'
+      ? `<span style="color:var(--red)" title="${escapeHtml(c.last_error || '')}">error</span>`
+      : (c.last_status || '—');
+    return `<tr>
+      <td><strong>${escapeHtml(c.name)}</strong>${c.active ? '' : ' <span style="color:var(--ink-soft);font-size:11px">(paused)</span>'}<br><span style="font-size:11px;color:var(--ink-soft)">${src}</span></td>
+      <td style="text-align:center">${c.active_listings || 0}</td>
+      <td style="text-align:center">${c.opportunities || 0}</td>
+      <td style="font-size:12px">${c.last_scanned_at ? fmtDate(c.last_scanned_at) : 'never'}<br><span style="color:var(--ink-soft)">${status}</span></td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn btn-outline btn-sm" onclick="viewCompListings(${c.id}, '${escapeHtml(c.name).replace(/'/g, '')}')">Listings</button>
+        ${isAdmin ? `<button class="btn btn-outline btn-sm" onclick="scanCompetitorNow(${c.id}, this)">Scan</button>
+        <button class="btn btn-outline btn-sm" onclick="editCompetitor(${c.id})">Edit</button>
+        <button class="btn btn-outline btn-sm" onclick="deleteCompetitor(${c.id})" title="Remove">✕</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+
+  el('comp-body').innerHTML = `
+    <div class="card"><div class="card-body" style="padding:0;overflow-x:auto">
+      <table class="table" style="width:100%">
+        <thead><tr><th>Competitor</th><th style="text-align:center">Live items</th><th style="text-align:center">Gaps</th><th>Last scan</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--ink-soft)">No competitors yet.${isAdmin ? ' Add one below.' : ''}</td></tr>`}</tbody>
+      </table>
+    </div></div>
+    ${isAdmin ? compAddFormHtml() : ''}`;
+}
+
+function compAddFormHtml() {
+  return `
+    <div class="card" style="margin-top:14px"><div class="card-body" style="padding:18px">
+      <h3 style="margin:0 0 12px">Add competitor</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px">
+        <div class="field"><label>Name</label><input id="comp-name" placeholder="BCP Automotive"></div>
+        <div class="field"><label>Code (slug)</label><input id="comp-code" placeholder="bcp"></div>
+        <div class="field"><label>Source</label>
+          <select id="comp-source" onchange="document.getElementById('comp-ebay-wrap').style.display=this.value==='ebay'?'block':'none';document.getElementById('comp-web-wrap').style.display=this.value==='website'?'block':'none'">
+            <option value="ebay">eBay seller</option>
+            <option value="website">Website (Phase 2)</option>
+          </select>
+        </div>
+        <div class="field" id="comp-ebay-wrap"><label>eBay username</label><input id="comp-ebay" placeholder="dial4panel"></div>
+        <div class="field" id="comp-web-wrap" style="display:none"><label>Website URL</label><input id="comp-web" placeholder="https://…"></div>
+      </div>
+      <div style="margin-top:12px"><button class="btn btn-primary btn-sm" onclick="saveCompetitor(this)">Add competitor</button></div>
+    </div></div>`;
+}
+
+async function saveCompetitor(btn) {
+  const body = {
+    name: el('comp-name').value.trim(),
+    code: el('comp-code').value.trim().toLowerCase(),
+    source_type: el('comp-source').value,
+    ebay_username: el('comp-ebay') ? el('comp-ebay').value.trim() : '',
+    website_url: el('comp-web') ? el('comp-web').value.trim() : '',
+  };
+  if (!body.name || !body.code) { toast('Name and code are required', 'error'); return; }
+  if (body.source_type === 'ebay' && !body.ebay_username) { toast('eBay username is required', 'error'); return; }
+  btn.disabled = true;
+  try {
+    await Api.post('/api/competitors', body);
+    toast('Competitor added', 'success');
+    loadCompManager();
+  } catch (e) {
+    toast(e.data?.error || e.message, 'error');
+  } finally { btn.disabled = false; }
+}
+
+async function editCompetitor(id) {
+  const c = (State.comp.list || []).find(x => x.id === id);
+  if (!c) return;
+  const name = prompt('Name', c.name); if (name === null) return;
+  const username = c.source_type === 'ebay' ? prompt('eBay username', c.ebay_username || '') : c.ebay_username;
+  const activeStr = prompt('Active? (yes/no)', c.active ? 'yes' : 'no');
+  try {
+    await Api.put('/api/competitors/' + id, {
+      name: name.trim(),
+      ebay_username: username != null ? username.trim() : c.ebay_username,
+      active: /^y/i.test(activeStr || ''),
+    });
+    toast('Saved', 'success');
+    loadCompManager();
+  } catch (e) { toast(e.data?.error || e.message, 'error'); }
+}
+
+async function deleteCompetitor(id) {
+  if (!confirm('Remove this competitor and all its tracked listings/history?')) return;
+  try { await Api.delete('/api/competitors/' + id); toast('Removed', 'success'); loadCompManager(); }
+  catch (e) { toast(e.data?.error || e.message, 'error'); }
+}
+
+async function scanCompetitorNow(id, btn) {
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const r = await Api.post('/api/competitors/' + id + '/scan', {});
+    const s = r.summary || {};
+    toast(`Scanned: ${s.listings || 0} items, ${s.priceChanges || 0} price changes, ${s.alerts || 0} alerts`, 'success', 5000);
+    loadCompManager();
+  } catch (e) { toast('Scan failed: ' + (e.data?.error || e.message), 'error', 6000); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = orig; } }
+}
+
+async function scanAllCompetitors(btn) {
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
+  try {
+    const r = await Api.post('/api/competitors/scan', {});
+    const x = r.result || {};
+    toast(`Scanned ${x.competitors || 0} competitor(s): ${x.listings || 0} items, ${x.alerts || 0} alerts`, 'success', 6000);
+    renderCompetitors();
+  } catch (e) { toast('Scan failed: ' + (e.data?.error || e.message), 'error', 6000); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = orig; } }
+}
+
+// ---- Listings tab ----
+function viewCompListings(id, name) { State.comp.competitorId = id; State.comp.competitorName = name; State.comp.tab = 'listings'; renderCompetitors(); }
+
+async function loadCompListings() {
+  const list = State.comp.list || (await Api.get('/api/competitors')).competitors;
+  State.comp.list = list;
+  if (!State.comp.competitorId && list.length) State.comp.competitorId = list[0].id;
+  if (!State.comp.competitorId) { el('comp-body').innerHTML = `<div class="card"><div class="card-body" style="padding:20px;color:var(--ink-soft)">Add a competitor first.</div></div>`; return; }
+  const picker = `<select onchange="State.comp.competitorId=parseInt(this.value);loadCompListings()" style="padding:6px 10px;margin-bottom:12px">
+    ${list.map(c => `<option value="${c.id}" ${c.id === State.comp.competitorId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select>`;
+  el('comp-body').innerHTML = picker + `<div id="comp-listings-tbl"><div class="empty"><div class="t">Loading…</div></div></div>`;
+
+  const { listings } = await Api.get(`/api/competitors/${State.comp.competitorId}/listings?available=1`);
+  const rows = listings.map(l => {
+    const our = l.our_price_ebay != null ? Number(l.our_price_ebay) : (l.our_price_shopify != null ? Number(l.our_price_shopify) : null);
+    const delivered = l.price != null ? Number(l.price) + (l.shipping_free ? 0 : Number(l.shipping_cost || 0)) : null;
+    let delta = '';
+    if (our != null && delivered != null && l.currency === 'GBP') {
+      const d = ((delivered - our) / our) * 100;
+      const col = d < 0 ? 'var(--red)' : 'var(--green)';
+      delta = `<span style="color:${col};font-weight:600">${d > 0 ? '+' : ''}${d.toFixed(0)}%</span>`;
+    }
+    return `<tr>
+      <td style="width:46px">${l.image_url ? `<img src="${escapeHtml(l.image_url)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px">` : ''}</td>
+      <td>${l.url ? `<a href="${escapeHtml(l.url)}" target="_blank" rel="noopener">${escapeHtml(l.title)}</a>` : escapeHtml(l.title)}
+          <br><span style="font-size:11px;color:var(--ink-soft)">${escapeHtml([l.parsed_make, l.parsed_model, l.parsed_part_type].filter(Boolean).join(' · ') || '')}${l.condition && l.condition !== 'New' ? ` · <span style="color:var(--amber,#d97706)">${escapeHtml(l.condition)}</span>` : ''}</span></td>
+      <td>${compMatchBadge(l)}${l.our_sku ? `<br><span style="font-size:11px;color:var(--ink-soft)">${escapeHtml(l.our_sku)}</span>` : ''}</td>
+      <td style="text-align:right;white-space:nowrap">${compGbp(l.price, l.currency)}<br><span style="font-size:11px;color:var(--ink-soft)">${compShipLabel(l)}</span></td>
+      <td style="text-align:right;white-space:nowrap"><strong>${delivered != null ? compGbp(delivered, l.currency) : '—'}</strong></td>
+      <td style="text-align:right;white-space:nowrap">${our != null ? compGbp(our, 'GBP') : '—'}</td>
+      <td style="text-align:right">${delta}</td>
+      <td style="text-align:right"><button class="btn btn-outline btn-sm" onclick="showCompHistory(${l.id}, '${escapeHtml(l.title).replace(/'/g, '')}')">History</button></td>
+    </tr>`;
+  }).join('');
+  el('comp-listings-tbl').innerHTML = `<div class="card"><div class="card-body" style="padding:0;overflow-x:auto">
+    <table class="table" style="width:100%">
+      <thead><tr><th></th><th>Item</th><th>Match</th><th style="text-align:right">Their price</th><th style="text-align:right">Delivered</th><th style="text-align:right">Our price</th><th style="text-align:right">Δ</th><th></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--ink-soft)">No live listings. Run a scan.</td></tr>`}</tbody>
+    </table></div></div>`;
+}
+
+function compShipLabel(l) {
+  if (l.shipping_free) return 'free P&P';
+  if (l.shipping_type === 'collection') return 'collection only';
+  if (l.shipping_type === 'calculated') return 'P&P calculated';
+  if (l.shipping_cost != null) return `+£${Number(l.shipping_cost).toFixed(2)} P&P`;
+  return 'P&P n/a';
+}
+function compMatchBadge(l) {
+  if (l.is_opportunity) return `<span style="display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;background:#fde68a;color:#92400e">Opportunity</span>`;
+  const map = { exact_part_number: ['Exact', '#bbf7d0', '#166534'], make_model_parttype: ['Make/Model', '#bfdbfe', '#1e40af'], fuzzy: ['Fuzzy', '#e9d5ff', '#6b21a8'] };
+  const m = map[l.match_type];
+  if (!m) return '';
+  return `<span style="display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;background:${m[1]};color:${m[2]}">${m[0]}</span>`;
+}
+
+// ---- Market & Ranking tab ----
+async function loadCompMarket() {
+  const sel = State.comp.marketProduct;
+  el('comp-body').innerHTML = `
+    <div class="card"><div class="card-body" style="padding:16px">
+      <div class="desc" style="margin-bottom:8px">Pick one of your products to see every NEW eBay seller competing on it, ranked by delivered price, plus market saturation and a suggested ad rate.</div>
+      <div class="field"><label>Search your products</label>
+        <input id="comp-mkt-q" placeholder="SKU, title or part number…" oninput="compMarketSearch()" autocomplete="off" value="${sel ? escapeHtml(sel.title) : ''}">
+      </div>
+      <div id="comp-mkt-results"></div>
+    </div></div>
+    <div id="comp-mkt-detail" style="margin-top:14px">${sel ? '<div class="empty"><div class="t">Analysing eBay market…</div></div>' : ''}</div>`;
+  if (sel) loadCompMarketDetail(sel.id);
+}
+
+let _compMktTimer = null;
+function compMarketSearch() {
+  clearTimeout(_compMktTimer);
+  const q = el('comp-mkt-q').value.trim();
+  if (q.length < 2) { el('comp-mkt-results').innerHTML = ''; return; }
+  _compMktTimer = setTimeout(async () => {
+    try {
+      const { products } = await Api.get('/api/competitors/products?q=' + encodeURIComponent(q));
+      el('comp-mkt-results').innerHTML = products.length
+        ? products.map(p => `<div style="padding:8px 10px;border-bottom:1px solid var(--line);cursor:pointer" onclick="compPickMarketProduct(${p.id}, '${escapeHtml(p.title).replace(/'/g, '')}')">
+            <strong>${escapeHtml(p.title)}</strong> <span style="color:var(--ink-soft);font-size:12px">${escapeHtml(p.sku)}${p.price_ebay != null ? ` · £${Number(p.price_ebay).toFixed(2)}` : ''}</span></div>`).join('')
+        : '<div style="padding:8px;color:var(--ink-soft)">No products found.</div>';
+    } catch (e) { el('comp-mkt-results').innerHTML = `<div style="padding:8px;color:var(--red)">${escapeHtml(e.message)}</div>`; }
+  }, 250);
+}
+
+function compPickMarketProduct(id, title) {
+  State.comp.marketProduct = { id, title };
+  el('comp-mkt-q').value = title;
+  el('comp-mkt-results').innerHTML = '';
+  el('comp-mkt-detail').innerHTML = '<div class="empty"><div class="t">Analysing eBay market…</div></div>';
+  loadCompMarketDetail(id);
+}
+
+async function loadCompMarketDetail(id) {
+  let d;
+  try { d = await Api.get('/api/competitors/market?productId=' + id); }
+  catch (e) { el('comp-mkt-detail').innerHTML = `<div class="card"><div class="card-body" style="padding:18px;color:var(--red)">Market lookup failed: ${escapeHtml(e.data?.error || e.message)}</div></div>`; return; }
+
+  const stat = (label, val) => `<div style="flex:1;min-width:120px"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">${label}</div><div style="font-size:20px;font-weight:700">${val}</div></div>`;
+  const rankTxt = d.ourRank != null ? `#${d.ourRank} of ${d.saturationNew || '?'}` : '—';
+  const isAdmin = State.user.role === 'admin';
+
+  const sellerRows = (d.sellers || []).map(s => `<tr style="${s.is_us ? 'background:rgba(34,197,94,.12)' : ''}">
+    <td style="text-align:center">${s.rank}</td>
+    <td>${s.is_us ? '<strong>You</strong> · ' : ''}${s.url ? `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.seller_username || '—')}</a>` : escapeHtml(s.seller_username || '—')}
+        <br><span style="font-size:11px;color:var(--ink-soft)">${escapeHtml(s.title || '')}</span></td>
+    <td style="text-align:right;white-space:nowrap">${compGbp(s.price, s.currency)}<br><span style="font-size:11px;color:var(--ink-soft)">${compShipLabel(s)}</span></td>
+    <td style="text-align:right;white-space:nowrap"><strong>${s.delivered != null ? compGbp(s.delivered, s.currency) : '—'}</strong></td>
+  </tr>`).join('');
+
+  const adBreakdown = d.adRate.breakdown.map(b => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0">
+    <span style="color:var(--ink-soft)">${escapeHtml(b.label)}</span><span>${b.pct >= 0 ? '+' : ''}${Number(b.pct).toFixed(1)}%</span></div>`).join('');
+
+  el('comp-mkt-detail').innerHTML = `
+    <div class="card"><div class="card-body" style="padding:18px">
+      <div style="display:flex;flex-wrap:wrap;gap:18px">
+        ${stat('NEW listings', d.saturationNew ?? '—')}
+        ${stat('Used / salvage', d.saturationUsed ?? '—')}
+        ${stat('Our rank', rankTxt)}
+        ${stat('Cheapest delivered', d.minDelivered != null ? compGbp(d.minDelivered, 'GBP') : '—')}
+        ${stat('Median delivered', d.medianDelivered != null ? compGbp(d.medianDelivered, 'GBP') : '—')}
+        ${stat('Our delivered', d.ourDelivered != null ? compGbp(d.ourDelivered, 'GBP') : '—')}
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Search used: <code>${escapeHtml(d.query)}</code>. Used/salvage listings are shown for awareness only — not ranked as competitors.</div>
+    </div></div>
+
+    <div class="card" style="margin-top:14px"><div class="card-body" style="padding:18px">
+      <h3 style="margin:0 0 4px">Suggested eBay ad rate</h3>
+      <div class="desc" style="margin-bottom:10px">Our own calculation from saturation and your price position — not eBay's (inflated) suggestion.</div>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center">
+        <div style="font-size:34px;font-weight:800;color:var(--brand-primary)">${Number(d.adRate.suggested).toFixed(1)}%</div>
+        <div style="min-width:220px">${adBreakdown}<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Bounded ${d.adRate.bounds.min}–${d.adRate.bounds.max}%</div></div>
+        ${isAdmin ? `<div style="display:flex;gap:8px;align-items:center">
+          <input id="comp-adrate" type="number" step="0.1" min="0" value="${Number(d.adRate.suggested).toFixed(1)}" style="width:80px;padding:6px 8px">
+          <button class="btn btn-primary btn-sm" onclick="applyAdRate(${d.product.id}, this)" ${d.product.ebay_item_id ? '' : 'disabled title="No linked eBay listing"'}>Apply to eBay</button>
+        </div>` : ''}
+      </div>
+      ${d.product.ebay_item_id ? '' : '<div style="font-size:11px;color:var(--ink-soft);margin-top:8px">This product isn\'t linked to an eBay listing, so the rate can\'t be applied automatically.</div>'}
+    </div></div>
+
+    <div class="card" style="margin-top:14px"><div class="card-body" style="padding:0;overflow-x:auto">
+      <table class="table" style="width:100%">
+        <thead><tr><th style="text-align:center">#</th><th>Seller</th><th style="text-align:right">Price</th><th style="text-align:right">Delivered</th></tr></thead>
+        <tbody>${sellerRows || `<tr><td colspan="4" style="padding:20px;text-align:center;color:var(--ink-soft)">No NEW listings found for this search.</td></tr>`}</tbody>
+      </table></div></div>`;
+}
+
+async function applyAdRate(productId, btn) {
+  const v = parseFloat(el('comp-adrate').value);
+  if (!(v > 0)) { toast('Enter a valid ad rate', 'error'); return; }
+  if (!confirm(`Set a ${v.toFixed(1)}% Promoted Listings ad rate on this item's eBay listing?`)) return;
+  btn.disabled = true;
+  try {
+    await Api.post('/api/competitors/market/' + productId + '/promote', { bidPercent: v });
+    toast(`Ad rate set to ${v.toFixed(1)}%`, 'success');
+  } catch (e) { toast('Apply failed: ' + (e.data?.error || e.message), 'error', 6000); }
+  finally { btn.disabled = false; }
+}
+
+// ---- Opportunities tab ----
+async function loadCompOpportunities() {
+  const { opportunities } = await Api.get('/api/competitors/opportunities');
+  const isAdmin = State.user.role === 'admin';
+  const rows = opportunities.map(o => `<tr>
+    <td style="width:46px">${o.image_url ? `<img src="${escapeHtml(o.image_url)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px">` : ''}</td>
+    <td>${o.url ? `<a href="${escapeHtml(o.url)}" target="_blank" rel="noopener">${escapeHtml(o.title)}</a>` : escapeHtml(o.title)}
+        <br><span style="font-size:11px;color:var(--ink-soft)">${escapeHtml([o.parsed_make, o.parsed_model, o.parsed_part_type].filter(Boolean).join(' · '))} — ${escapeHtml(o.competitor_name)}</span></td>
+    <td style="text-align:right;white-space:nowrap">${compGbp(o.price, o.currency)}</td>
+    ${isAdmin ? `<td style="text-align:right"><button class="btn btn-outline btn-sm" onclick="dismissOpportunity(${o.match_id})">Dismiss</button></td>` : ''}
+  </tr>`).join('');
+  el('comp-body').innerHTML = `
+    <div class="desc" style="margin-bottom:10px">Parts and models competitors list that you don't stock — potential range additions.</div>
+    <div class="card"><div class="card-body" style="padding:0;overflow-x:auto">
+      <table class="table" style="width:100%">
+        <thead><tr><th></th><th>Item</th><th style="text-align:right">Their price</th>${isAdmin ? '<th></th>' : ''}</tr></thead>
+        <tbody>${rows || `<tr><td colspan="4" style="padding:20px;text-align:center;color:var(--ink-soft)">No open opportunities.</td></tr>`}</tbody>
+      </table></div></div>`;
+}
+
+async function dismissOpportunity(matchId) {
+  try { await Api.post('/api/competitors/matches/' + matchId + '/review', { dismissed: true }); toast('Dismissed', 'success'); loadCompOpportunities(); }
+  catch (e) { toast(e.data?.error || e.message, 'error'); }
+}
+
+// ---- Alerts tab ----
+async function loadCompAlerts() {
+  const { alerts } = await Api.get('/api/competitors/alerts');
+  const sevCol = { warn: 'var(--amber, #d97706)', error: 'var(--red)', success: 'var(--green)', info: 'var(--ink-soft)' };
+  const rows = alerts.map(a => `<div style="padding:12px 14px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:flex-start">
+    <span style="width:8px;height:8px;border-radius:50%;background:${sevCol[a.severity] || 'var(--ink-soft)'};margin-top:6px;flex:none"></span>
+    <div style="flex:1">
+      <div style="font-weight:600;font-size:13px">${escapeHtml(a.title)}</div>
+      <div style="font-size:12px;color:var(--ink-soft)">${escapeHtml(a.body || '')}</div>
+    </div>
+    <div style="font-size:11px;color:var(--ink-soft);white-space:nowrap">${fmtDate(a.created_at)}</div>
+  </div>`).join('');
+  el('comp-body').innerHTML = `<div class="card"><div class="card-body" style="padding:0">
+    ${rows || `<div style="padding:20px;text-align:center;color:var(--ink-soft)">No competitor alerts yet.</div>`}
+  </div></div>`;
+}
+
+// ---- Price history (drill-down) ----
+async function showCompHistory(listingId, title) {
+  const { history } = await Api.get(`/api/competitors/listings/${listingId}/history`);
+  const body = el('comp-body');
+  const back = `<button class="btn btn-outline btn-sm" onclick="loadCompListings()" style="margin-bottom:12px">← Back to listings</button>`;
+  if (!history.length) { body.innerHTML = back + `<div class="card"><div class="card-body" style="padding:20px;color:var(--ink-soft)">No price history recorded yet.</div></div>`; return; }
+  const list = history.map(h => `<tr><td style="font-size:12px">${fmtDate(h.observed_at)}</td><td style="text-align:right">${compGbp(h.price, h.currency)}</td></tr>`).reverse().join('');
+  body.innerHTML = back + `<div class="card"><div class="card-body" style="padding:18px">
+    <h3 style="margin:0 0 4px">${escapeHtml(title)}</h3>
+    <div class="desc" style="margin-bottom:12px">Price changes over time — each point is a recorded change.</div>
+    ${compSparkline(history)}
+    <table class="table" style="width:100%;margin-top:14px"><thead><tr><th>When</th><th style="text-align:right">Price</th></tr></thead><tbody>${list}</tbody></table>
+  </div></div>`;
+}
+
+function compSparkline(history) {
+  const pts = history.map(h => Number(h.price)).filter(v => !isNaN(v));
+  if (pts.length < 2) return `<div style="color:var(--ink-soft);font-size:12px">Single price point — no trend yet.</div>`;
+  const w = 480, h = 90, pad = 6;
+  const min = Math.min(...pts), max = Math.max(...pts), range = (max - min) || 1;
+  const step = (w - pad * 2) / (pts.length - 1);
+  const coords = pts.map((v, i) => [pad + i * step, h - pad - ((v - min) / range) * (h - pad * 2)]);
+  const poly = coords.map(c => `${c[0].toFixed(1)},${c[1].toFixed(1)}`).join(' ');
+  const dots = coords.map(c => `<circle cx="${c[0].toFixed(1)}" cy="${c[1].toFixed(1)}" r="2.5" fill="var(--brand-primary)"/>`).join('');
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;max-width:${w}px;height:auto;border:1px solid var(--line);border-radius:6px;background:var(--bg-soft)">
+    <polyline points="${poly}" fill="none" stroke="var(--brand-primary)" stroke-width="2"/>${dots}
+    <text x="${pad}" y="12" font-size="10" fill="var(--ink-soft)">£${max.toFixed(2)}</text>
+    <text x="${pad}" y="${h - 2}" font-size="10" fill="var(--ink-soft)">£${min.toFixed(2)}</text>
+  </svg>`;
 }
 
 /* ==========================================================
