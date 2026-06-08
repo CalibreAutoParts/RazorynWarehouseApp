@@ -533,6 +533,25 @@ CREATE TABLE IF NOT EXISTS competitor_match (
 CREATE INDEX IF NOT EXISTS comp_match_product_idx ON competitor_match (product_id) WHERE product_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS comp_match_opportunity_idx ON competitor_match (is_opportunity) WHERE is_opportunity = true;
 
+-- Per-product market snapshot — saturation + our ranking over time, captured when
+-- a product's whole-eBay market is analysed (on demand and periodically). The
+-- ranked seller list itself is computed live (not stored) to keep growth bounded.
+CREATE TABLE IF NOT EXISTS product_market_snapshot (
+  id              SERIAL PRIMARY KEY,
+  product_id      INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  query           TEXT,                       -- the search used (part no. or make/model/part)
+  saturation_new  INTEGER,                    -- active NEW listings competing
+  saturation_used INTEGER,                    -- used/salvage listings (awareness only)
+  seller_count    INTEGER,                    -- distinct NEW sellers in the ranked sample
+  min_delivered   NUMERIC(10,2),              -- cheapest NEW delivered price seen
+  median_delivered NUMERIC(10,2),
+  our_delivered   NUMERIC(10,2),              -- our delivered price at capture
+  our_rank        INTEGER,                    -- 1 = cheapest; NULL if we don't appear
+  suggested_ad_rate NUMERIC(5,2),             -- our own computed rate (not eBay's)
+  captured_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS product_market_snapshot_idx ON product_market_snapshot (product_id, captured_at DESC);
+
 -- Triggers — auto-update updated_at
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
 BEGIN NEW.updated_at = now(); RETURN NEW; END;

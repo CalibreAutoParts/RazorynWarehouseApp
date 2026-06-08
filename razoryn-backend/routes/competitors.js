@@ -8,6 +8,8 @@ const { query } = require('../db');
 const { requireAuth, requireAdmin, requirePermission } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 const monitor = require('../services/competitor-monitor');
+const market = require('../services/market-analysis');
+const ebay = require('../services/ebay');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -178,6 +180,64 @@ router.post('/matches/:id/review', requireAdmin, async (req, res) => {
   if (!rows[0]) return res.status(404).json({ error: 'not found' });
   await audit(req, 'competitor.reviewMatch', 'competitor_match', req.params.id, { dismissed });
   res.json({ match: rows[0] });
+});
+
+// ---------- whole-market analysis & ranking ----------
+
+// GET /api/competitors/products?q= — search our catalogue for the market picker.
+router.get('/products', canRead, async (req, res) => {
+  const q = `%${(req.query.q || '').trim()}%`;
+  const { rows } = await query(
+    `SELECT id, sku, title, brand, model, part_number, price_ebay
+       FROM products
+      WHERE active = true AND (title ILIKE $1 OR sku ILIKE $1 OR part_number ILIKE $1)
+      ORDER BY title LIMIT 25`, [q]
+  );
+  res.json({ products: rows });
+});
+
+// GET /api/competitors/market?productId= — live whole-eBay ranking for a part.
+router.get('/market', canRead, async (req, res) => {
+  const productId = Number(req.query.productId);
+  if (!productId) return res.status(400).json({ error: 'productId required' });
+  try {
+    const data = await market.analyzeProductMarket(productId, { persist: true });
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// GET /api/competitors/market/:productId/history — saturation/rank over time.
+router.get('/market/:productId/history', canRead, async (req, res) => {
+  const { rows } = await query(
+    `SELECT saturation_new, saturation_used, seller_count, min_delivered, median_delivered,
+            our_delivered, our_rank, suggested_ad_rate, captured_at
+       FROM product_market_snapshot
+      WHERE product_id = $1
+      ORDER BY captured_at ASC LIMIT 200`, [req.params.productId]
+  );
+  res.json({ history: rows });
+});
+
+// POST /api/competitors/market/:productId/promote { bidPercent } — apply OUR
+// suggested fixed ad rate to the product's eBay listing via Promoted Listings.
+router.post('/market/:productId/promote', requireAdmin, async (req, res) => {
+  const bidPercent = parseFloat(req.body && req.body.bidPercent);
+  if (!(bidPercent > 0)) return res.status(400).json({ error: 'bidPercent must be a positive number' });
+  const p = (await query(
+    `SELECT ebay_listing_id_em, ebay_listing_id_cl FROM products WHERE id = $1`, [req.params.productId]
+  )).rows[0];
+  if (!p) return res.status(404).json({ error: 'product not found' });
+  const itemId = p.ebay_listing_id_em || p.ebay_listing_id_cl;
+  if (!itemId) return res.status(400).json({ error: 'this product has no linked eBay listing to promote' });
+  try {
+    const r = await ebay.promoteListing(undefined, { itemId, bidPercent });
+    await audit(req, 'competitor.promote', 'product', req.params.productId, { itemId, bidPercent });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
 });
 
 module.exports = router;

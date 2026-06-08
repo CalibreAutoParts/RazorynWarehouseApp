@@ -13582,6 +13582,7 @@ function renderCompetitors() {
       <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
         ${compTabBtn('manager', 'Competitors')}
         ${compTabBtn('listings', 'Listings')}
+        ${compTabBtn('market', 'Market & Ranking')}
         ${compTabBtn('opportunities', 'Opportunities')}
         ${compTabBtn('alerts', 'Alerts')}
       </div>
@@ -13601,6 +13602,7 @@ async function loadCompTab() {
   try {
     if (tab === 'manager') return loadCompManager();
     if (tab === 'listings') return loadCompListings();
+    if (tab === 'market') return loadCompMarket();
     if (tab === 'opportunities') return loadCompOpportunities();
     if (tab === 'alerts') return loadCompAlerts();
   } catch (e) {
@@ -13783,6 +13785,111 @@ function compMatchBadge(l) {
   const m = map[l.match_type];
   if (!m) return '';
   return `<span style="display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;background:${m[1]};color:${m[2]}">${m[0]}</span>`;
+}
+
+// ---- Market & Ranking tab ----
+async function loadCompMarket() {
+  const sel = State.comp.marketProduct;
+  el('comp-body').innerHTML = `
+    <div class="card"><div class="card-body" style="padding:16px">
+      <div class="desc" style="margin-bottom:8px">Pick one of your products to see every NEW eBay seller competing on it, ranked by delivered price, plus market saturation and a suggested ad rate.</div>
+      <div class="field"><label>Search your products</label>
+        <input id="comp-mkt-q" placeholder="SKU, title or part number…" oninput="compMarketSearch()" autocomplete="off" value="${sel ? escapeHtml(sel.title) : ''}">
+      </div>
+      <div id="comp-mkt-results"></div>
+    </div></div>
+    <div id="comp-mkt-detail" style="margin-top:14px">${sel ? '<div class="empty"><div class="t">Analysing eBay market…</div></div>' : ''}</div>`;
+  if (sel) loadCompMarketDetail(sel.id);
+}
+
+let _compMktTimer = null;
+function compMarketSearch() {
+  clearTimeout(_compMktTimer);
+  const q = el('comp-mkt-q').value.trim();
+  if (q.length < 2) { el('comp-mkt-results').innerHTML = ''; return; }
+  _compMktTimer = setTimeout(async () => {
+    try {
+      const { products } = await Api.get('/api/competitors/products?q=' + encodeURIComponent(q));
+      el('comp-mkt-results').innerHTML = products.length
+        ? products.map(p => `<div style="padding:8px 10px;border-bottom:1px solid var(--line);cursor:pointer" onclick="compPickMarketProduct(${p.id}, '${escapeHtml(p.title).replace(/'/g, '')}')">
+            <strong>${escapeHtml(p.title)}</strong> <span style="color:var(--ink-soft);font-size:12px">${escapeHtml(p.sku)}${p.price_ebay != null ? ` · £${Number(p.price_ebay).toFixed(2)}` : ''}</span></div>`).join('')
+        : '<div style="padding:8px;color:var(--ink-soft)">No products found.</div>';
+    } catch (e) { el('comp-mkt-results').innerHTML = `<div style="padding:8px;color:var(--red)">${escapeHtml(e.message)}</div>`; }
+  }, 250);
+}
+
+function compPickMarketProduct(id, title) {
+  State.comp.marketProduct = { id, title };
+  el('comp-mkt-q').value = title;
+  el('comp-mkt-results').innerHTML = '';
+  el('comp-mkt-detail').innerHTML = '<div class="empty"><div class="t">Analysing eBay market…</div></div>';
+  loadCompMarketDetail(id);
+}
+
+async function loadCompMarketDetail(id) {
+  let d;
+  try { d = await Api.get('/api/competitors/market?productId=' + id); }
+  catch (e) { el('comp-mkt-detail').innerHTML = `<div class="card"><div class="card-body" style="padding:18px;color:var(--red)">Market lookup failed: ${escapeHtml(e.data?.error || e.message)}</div></div>`; return; }
+
+  const stat = (label, val) => `<div style="flex:1;min-width:120px"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">${label}</div><div style="font-size:20px;font-weight:700">${val}</div></div>`;
+  const rankTxt = d.ourRank != null ? `#${d.ourRank} of ${d.saturationNew || '?'}` : '—';
+  const isAdmin = State.user.role === 'admin';
+
+  const sellerRows = (d.sellers || []).map(s => `<tr style="${s.is_us ? 'background:rgba(34,197,94,.12)' : ''}">
+    <td style="text-align:center">${s.rank}</td>
+    <td>${s.is_us ? '<strong>You</strong> · ' : ''}${s.url ? `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.seller_username || '—')}</a>` : escapeHtml(s.seller_username || '—')}
+        <br><span style="font-size:11px;color:var(--ink-soft)">${escapeHtml(s.title || '')}</span></td>
+    <td style="text-align:right;white-space:nowrap">${compGbp(s.price, s.currency)}<br><span style="font-size:11px;color:var(--ink-soft)">${compShipLabel(s)}</span></td>
+    <td style="text-align:right;white-space:nowrap"><strong>${s.delivered != null ? compGbp(s.delivered, s.currency) : '—'}</strong></td>
+  </tr>`).join('');
+
+  const adBreakdown = d.adRate.breakdown.map(b => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0">
+    <span style="color:var(--ink-soft)">${escapeHtml(b.label)}</span><span>${b.pct >= 0 ? '+' : ''}${Number(b.pct).toFixed(1)}%</span></div>`).join('');
+
+  el('comp-mkt-detail').innerHTML = `
+    <div class="card"><div class="card-body" style="padding:18px">
+      <div style="display:flex;flex-wrap:wrap;gap:18px">
+        ${stat('NEW listings', d.saturationNew ?? '—')}
+        ${stat('Used / salvage', d.saturationUsed ?? '—')}
+        ${stat('Our rank', rankTxt)}
+        ${stat('Cheapest delivered', d.minDelivered != null ? compGbp(d.minDelivered, 'GBP') : '—')}
+        ${stat('Median delivered', d.medianDelivered != null ? compGbp(d.medianDelivered, 'GBP') : '—')}
+        ${stat('Our delivered', d.ourDelivered != null ? compGbp(d.ourDelivered, 'GBP') : '—')}
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Search used: <code>${escapeHtml(d.query)}</code>. Used/salvage listings are shown for awareness only — not ranked as competitors.</div>
+    </div></div>
+
+    <div class="card" style="margin-top:14px"><div class="card-body" style="padding:18px">
+      <h3 style="margin:0 0 4px">Suggested eBay ad rate</h3>
+      <div class="desc" style="margin-bottom:10px">Our own calculation from saturation and your price position — not eBay's (inflated) suggestion.</div>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center">
+        <div style="font-size:34px;font-weight:800;color:var(--brand-primary)">${Number(d.adRate.suggested).toFixed(1)}%</div>
+        <div style="min-width:220px">${adBreakdown}<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Bounded ${d.adRate.bounds.min}–${d.adRate.bounds.max}%</div></div>
+        ${isAdmin ? `<div style="display:flex;gap:8px;align-items:center">
+          <input id="comp-adrate" type="number" step="0.1" min="0" value="${Number(d.adRate.suggested).toFixed(1)}" style="width:80px;padding:6px 8px">
+          <button class="btn btn-primary btn-sm" onclick="applyAdRate(${d.product.id}, this)" ${d.product.ebay_item_id ? '' : 'disabled title="No linked eBay listing"'}>Apply to eBay</button>
+        </div>` : ''}
+      </div>
+      ${d.product.ebay_item_id ? '' : '<div style="font-size:11px;color:var(--ink-soft);margin-top:8px">This product isn\'t linked to an eBay listing, so the rate can\'t be applied automatically.</div>'}
+    </div></div>
+
+    <div class="card" style="margin-top:14px"><div class="card-body" style="padding:0;overflow-x:auto">
+      <table class="table" style="width:100%">
+        <thead><tr><th style="text-align:center">#</th><th>Seller</th><th style="text-align:right">Price</th><th style="text-align:right">Delivered</th></tr></thead>
+        <tbody>${sellerRows || `<tr><td colspan="4" style="padding:20px;text-align:center;color:var(--ink-soft)">No NEW listings found for this search.</td></tr>`}</tbody>
+      </table></div></div>`;
+}
+
+async function applyAdRate(productId, btn) {
+  const v = parseFloat(el('comp-adrate').value);
+  if (!(v > 0)) { toast('Enter a valid ad rate', 'error'); return; }
+  if (!confirm(`Set a ${v.toFixed(1)}% Promoted Listings ad rate on this item's eBay listing?`)) return;
+  btn.disabled = true;
+  try {
+    await Api.post('/api/competitors/market/' + productId + '/promote', { bidPercent: v });
+    toast(`Ad rate set to ${v.toFixed(1)}%`, 'success');
+  } catch (e) { toast('Apply failed: ' + (e.data?.error || e.message), 'error', 6000); }
+  finally { btn.disabled = false; }
 }
 
 // ---- Opportunities tab ----

@@ -266,6 +266,22 @@ if (cron.validate(competitorCronExpr)) {
   console.error(`[boot] ⚠️  invalid COMPETITOR_SYNC_CRON "${competitorCronExpr}" — competitor monitoring disabled.`);
 }
 
+// Market analysis — periodically snapshot whole-eBay saturation + our ranking for
+// products that have competitor matches. Daily by default (heavier API use).
+const marketCronExpr = (process.env.COMPETITOR_MARKET_CRON || '30 4 * * *').trim();
+if (cron.validate(marketCronExpr)) {
+  cron.schedule(marketCronExpr, async () => {
+    try {
+      const r = await require('./services/market-analysis').refreshMarkets(
+        parseInt(process.env.COMPETITOR_MARKET_BATCH || '25', 10) || 25);
+      if (r.products) console.log('[cron market] snapshots', JSON.stringify(r));
+    } catch (e) {
+      console.error('[cron market] failed:', e.message);
+    }
+  });
+  console.log(`[boot] market analysis scheduled: ${marketCronExpr}`);
+}
+
 // Nightly cleanup: permanently delete staff_notes older than 31 days.
 // Notes are already filtered out of the GET response after 31 days, but this
 // keeps the table from growing unbounded.
