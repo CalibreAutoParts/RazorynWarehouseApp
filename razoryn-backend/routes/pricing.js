@@ -3,6 +3,7 @@ const express = require('express');
 const { query } = require('../db');
 const { requireAuth, requireAdmin, requirePermission } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
+const { roundCashTotal, cheapestCap } = require('../lib/cash-round');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -33,15 +34,23 @@ router.get('/quote', requirePermission('pricing'), async (req, res) => {
   const bankUnit = shopifyUnit > 0 ? shopifyUnit : +(ebayUnit * (1 - bankTransferPct / 100)).toFixed(2);
   const ebayProtectedUnit = +(ebayUnit * (1 + ebayMarkup / 100)).toFixed(2);
 
+  const shopifyTotal = +(shopifyUnit * qtyN).toFixed(2);
+  const ebayTotal = +(ebayProtectedUnit * qtyN).toFixed(2);
+  const bankTotal = +(bankUnit * qtyN).toFixed(2);
+  // Cash total is rounded (nearest £5, or £1 under £25) and never allowed to
+  // exceed the cheapest of bank/eBay/Shopify. Derive the unit back from it.
+  const cashTotal = roundCashTotal(cashUnit * qtyN, cheapestCap(bankTotal, ebayTotal, shopifyTotal));
+  const cashUnitRounded = qtyN ? +(cashTotal / qtyN).toFixed(2) : cashTotal;
+
   res.json({
     product: { id: pr.id, sku: pr.sku, title: pr.title, qtyOnHand: pr.qty_on_hand },
     qty: qtyN,
     config: { cashDiscountPct, bankTransferPct, ebayBuyerProtectionMarkup: ebayMarkup, shopifyFreeDeliveryOver: freeDeliveryThreshold },
     quotes: {
-      shopify: { unit: shopifyUnit, total: +(shopifyUnit * qtyN).toFixed(2) },
-      ebay:    { unit: ebayProtectedUnit, total: +(ebayProtectedUnit * qtyN).toFixed(2) },
-      cash:    { unit: cashUnit,    total: +(cashUnit * qtyN).toFixed(2) },
-      bank:    { unit: bankUnit,    total: +(bankUnit * qtyN).toFixed(2) },
+      shopify: { unit: shopifyUnit, total: shopifyTotal },
+      ebay:    { unit: ebayProtectedUnit, total: ebayTotal },
+      cash:    { unit: cashUnitRounded, total: cashTotal },
+      bank:    { unit: bankUnit, total: bankTotal },
     },
   });
 });

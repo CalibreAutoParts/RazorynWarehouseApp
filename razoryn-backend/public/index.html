@@ -2501,6 +2501,7 @@ function renderStockTake() {
       </div></div>
       <div class="toolbar">
         <input type="search" class="search-input" id="st-search" placeholder="Search by name, SKU, part #...">
+        <button class="btn btn-outline" onclick="stStartScan()" title="Scan an item barcode with the camera to jump straight to counting it">📷 Scan</button>
         <select class="filter-select" id="st-filter">
           <option value="remaining">Remaining to count</option>
           <option value="all">All items</option>
@@ -2633,6 +2634,79 @@ function summarizeChannelPush(cp) {
   if (failed) parts.push(`eBay ✕ (${failed})`);
   if (!ok && !failed && eb.some(x => x.skipped === 'no_ebay_links' || x.skipped)) parts.push('eBay: not listed');
   return parts.length ? parts.join(' · ') : 'channels updated';
+}
+
+// ── Stock-take barcode scanning ──────────────────────────────────────────────
+// Reuses the html5-qrcode library already loaded for the Stock Check page. Opens
+// a camera modal; on a successful scan it finds the matching product (by barcode,
+// SKU or part number) and jumps straight into counting it.
+let stScanner = null;
+let _stScanBusy = false;
+
+function stStartScan() {
+  if (typeof Html5Qrcode === 'undefined') { toast('Scanner library not loaded — refresh and try again', 'error'); return; }
+  modal({
+    title: '📷 Scan to count',
+    body: `
+      <div id="st-scan-region" style="width:100%;min-height:240px;background:#000;border-radius:10px;overflow:hidden"></div>
+      <div id="st-scan-status" style="margin-top:10px;font-size:13px;color:var(--ink-soft);text-align:center">Point the camera at the item's barcode…</div>
+    `,
+    actions: [{ label: 'Done', primary: true, onClick: () => stStopScan() }],
+  });
+  _stScanBusy = false;
+  // Defer until the modal's DOM is mounted.
+  setTimeout(() => {
+    try {
+      stScanner = new Html5Qrcode('st-scan-region');
+      stScanner.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: { width: 250, height: 150 } },
+        (decoded) => handleStScan(decoded),
+        () => {}
+      ).catch(() => {
+        const st = el('st-scan-status'); if (st) st.innerHTML = '<span style="color:var(--red)">Camera access denied. Allow camera access and try again.</span>';
+      });
+    } catch (e) {
+      const st = el('st-scan-status'); if (st) st.textContent = 'Could not start the camera.';
+    }
+  }, 150);
+}
+
+// Stop + release the camera only (no modal change). Called by stStopScan AND by
+// closeModal, so dismissing the modal any way (Done / X / backdrop) frees the camera.
+function stStopScanCamera() {
+  if (!stScanner) return;
+  const s = stScanner; stScanner = null;
+  try { if (s.isScanning) s.stop().then(() => { try { s.clear(); } catch (_) {} }).catch(() => {}); else s.clear(); } catch (_) {}
+}
+
+function stStopScan() {
+  stStopScanCamera();
+  closeModal();
+}
+
+let _stLastScan = { code: null, at: 0 };
+async function handleStScan(code) {
+  if (_stScanBusy) return;
+  const now = Date.now();
+  if (code === _stLastScan.code && now - _stLastScan.at < 2500) return;
+  _stLastScan = { code, at: now };
+
+  const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const nc = norm(code);
+  const p = (State.products || []).find(x =>
+    x.barcode === code || x.sku === code ||
+    (nc && (norm(x.barcode) === nc || norm(x.sku) === nc || norm(x.partNumber) === nc)));
+  const st = el('st-scan-status');
+  if (!p) {
+    if (st) st.innerHTML = `Not recognised: <strong>${escapeHtml(code)}</strong> — keep scanning.`;
+    return;
+  }
+  // Found it — stop the camera, close the scan modal, and open the count entry.
+  _stScanBusy = true;
+  if (st) st.innerHTML = `Found <strong>${escapeHtml(p.title)}</strong> — opening count…`;
+  await stStopScan();
+  stCount(p.id, true);
 }
 
 // Force-push every product's warehouse quantity to Shopify + eBay (reconcile
@@ -4567,7 +4641,9 @@ async function openLocationModal(id) {
         }
         payload.primaryPhoto = window._lmPrimary || 'item';
         try {
-          await Api.patch('/api/products/' + p.id, payload);
+          // Use the location-scoped endpoint so warehouse staff (locations perm,
+          // not admin) can save location + photos too.
+          await Api.patch('/api/products/' + p.id + '/location', payload);
           window._lmPhotos = { item: undefined, location: undefined, location2: undefined };  // reset
           toast('Location saved', 'success');
           closeModal();
@@ -7406,8 +7482,23 @@ function qbComputePrices(p) {
   };
 }
 
-// Compute the total for a quote at a given payment method.
-function qbTotalAt(items, paymentMethod) {
+// Cash rounding (mirrors backend lib/cash-round.js): nobody pays cash with
+// coins, so round the cash total UP to the nearest £5 (£1 under £25) — but never
+// above the bank/eBay/Shopify total, so cash stays the cheapest option.
+function roundCashTotal(rawCash, cap) {
+  const raw = Math.max(0, Number(rawCash) || 0);
+  if (raw <= 0) return 0;
+  const step = raw < 25 ? 1 : 5;
+  let value = Math.ceil(raw / step) * step;
+  if (cap != null && cap > 0 && value > cap) {
+    const down = Math.floor(raw / step) * step;
+    value = Math.min(down > 0 ? down : raw, cap);
+  }
+  return +value.toFixed(2);
+}
+
+// Raw (unrounded) total for a quote at a given payment method.
+function qbRawTotalAt(items, paymentMethod) {
   let total = 0;
   for (const item of items) {
     const p = State.products.find(x => x.id == item.productId);
@@ -7416,6 +7507,16 @@ function qbTotalAt(items, paymentMethod) {
     total += (prices[paymentMethod] || 0) * item.qty;
   }
   return total;
+}
+
+// Compute the total for a quote at a given payment method. The cash total is
+// rounded per the cash rule, capped at the cheapest of bank/eBay/Shopify.
+function qbTotalAt(items, paymentMethod) {
+  const raw = qbRawTotalAt(items, paymentMethod);
+  if (paymentMethod !== 'cash') return raw;
+  const cap = [qbRawTotalAt(items, 'bank'), qbRawTotalAt(items, 'ebay'), qbRawTotalAt(items, 'shopify')]
+    .filter(v => v > 0);
+  return roundCashTotal(raw, cap.length ? Math.min(...cap) : null);
 }
 
 function renderQuoteBuilder() {
@@ -7767,8 +7868,9 @@ function qbOpenProformaModal() {
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
-      { label: 'Generate & open', primary: true, onClick: () => qbSubmitProforma(false) },
-      { label: 'Generate & email', primary: false, onClick: () => qbSubmitProforma(true) },
+      { label: 'Pro-forma (quote only)', onClick: () => qbSubmitProforma(false) },
+      { label: 'Pro-forma & email', onClick: () => qbSubmitProforma(true) },
+      { label: '✓ Confirmed order', primary: true, onClick: () => qbSubmitProforma(false, true) },
     ],
   });
 }
@@ -7835,7 +7937,7 @@ function qbSetModalPm(method) {
 
 // Submit the pro-forma as an estimate. Uses the method selected in the modal
 // (may differ from the original "current method" if staff toggled).
-async function qbSubmitProforma(sendEmail) {
+async function qbSubmitProforma(sendEmail, confirmed = false) {
   const name = el('pf-name').value.trim();
   const email = el('pf-email').value.trim();
   if (!name) { toast('Customer name is required', 'warn'); return; }
@@ -7849,16 +7951,37 @@ async function qbSubmitProforma(sendEmail) {
   const channel = pm === 'cash' ? 'direct_cash' : 'direct_bank';
 
   // Compute per-item prices using the chosen method.
-  const lineItems = items.map(i => {
+  let lineItems = items.map(i => {
     const p = State.products.find(x => x.id == i.productId);
     const prices = p ? qbComputePrices(p) : { cash: 0, bank: 0 };
-    return { productId: i.productId, qty: i.qty, unitPrice: prices[pm] || 0 };
+    return { productId: i.productId, qty: i.qty, unitPrice: +(prices[pm] || 0).toFixed(2) };
   });
+
+  // For cash, scale the line prices so the recorded total equals the rounded
+  // cash total (nearest £5 / £1) — keeps the invoice/receipt internally exact.
+  if (pm === 'cash') {
+    const rounded = qbTotalAt(items, 'cash');
+    const rawSum = lineItems.reduce((s, li) => s + li.unitPrice * li.qty, 0);
+    if (rawSum > 0 && rounded > 0 && Math.abs(rounded - rawSum) >= 0.01) {
+      const factor = rounded / rawSum;
+      lineItems = lineItems.map(li => ({ ...li, unitPrice: +(li.unitPrice * factor).toFixed(2) }));
+      const newSum = lineItems.reduce((s, li) => s + li.unitPrice * li.qty, 0);
+      const drift = +(rounded - newSum).toFixed(2);
+      if (drift !== 0 && lineItems.length) {
+        const last = lineItems[lineItems.length - 1];
+        last.unitPrice = +(last.unitPrice + drift / last.qty).toFixed(2);
+      }
+    }
+  }
 
   const payload = {
     channel,
     paymentMethod: pm,
-    isEstimate: true,
+    // confirmed=true → a real order (shows in Sales + Dispatch, decrements stock),
+    // recorded as unpaid so it lands in the dispatch worklist + unpaid list until
+    // payment/collection. confirmed=false → a pro-forma estimate (quote only).
+    isEstimate: !confirmed,
+    paid: confirmed ? false : undefined,
     customerName: name,
     customerEmail: email || null,
     customerPhone: el('pf-phone').value.trim() || null,
@@ -7870,7 +7993,9 @@ async function qbSubmitProforma(sendEmail) {
     notes: el('pf-notes').value.trim() || null,
   };
 
-  const taskId = Task.start(sendEmail ? 'Generating pro-forma & emailing' : 'Generating pro-forma');
+  const noun = confirmed ? 'order' : 'pro-forma';
+  const invoiceUrl = (id) => '/api/sales/' + id + '/invoice.html' + (confirmed ? '' : '?proforma=1');
+  const taskId = Task.start(sendEmail ? `Creating ${noun} & emailing` : `Creating ${noun}`);
   try {
     const r = await Api.post('/api/sales', payload);
     if (sendEmail) {
@@ -7878,23 +8003,32 @@ async function qbSubmitProforma(sendEmail) {
         await Api.post('/api/sales/' + r.sale.id + '/send-invoice', { to: email });
       } catch (e) {
         Task.fail(taskId, 'Created but email failed');
-        toast('Pro-forma saved but email failed: ' + (e.data?.message || e.message), 'warn', 8000);
+        toast(`${confirmed ? 'Order' : 'Pro-forma'} saved but email failed: ` + (e.data?.message || e.message), 'warn', 8000);
         closeModal();
         await Store.refresh('sales');
-        setTimeout(() => window.open('/api/sales/' + r.sale.id + '/invoice.html?proforma=1', '_blank'), 200);
+        if (confirmed) { await Store.refresh('products'); State.dispatch = null; }
+        setTimeout(() => window.open(invoiceUrl(r.sale.id), '_blank'), 200);
         clearQuote();
         return;
       }
     }
-    Task.done(taskId, sendEmail ? 'Pro-forma emailed' : 'Pro-forma ready');
-    toast(sendEmail ? 'Pro-forma emailed to ' + email : 'Pro-forma saved — opening…', 'success');
+    Task.done(taskId, sendEmail ? `${confirmed ? 'Order' : 'Pro-forma'} emailed` : `${confirmed ? 'Order' : 'Pro-forma'} ready`);
+    toast(sendEmail ? `${confirmed ? 'Order' : 'Pro-forma'} emailed to ` + email
+      : (confirmed ? 'Order confirmed — added to Sales & Dispatch' : 'Pro-forma saved — opening…'), 'success');
     closeModal();
     await Store.refresh('sales');
-    setTimeout(() => window.open('/api/sales/' + r.sale.id + '/invoice.html?proforma=1', '_blank'), 200);
+    // A confirmed order decrements stock and appears in Dispatch — refresh those.
+    if (confirmed) { await Store.refresh('products'); State.dispatch = null; refreshNavCounts(); }
+    setTimeout(() => window.open(invoiceUrl(r.sale.id), '_blank'), 200);
     clearQuote();
   } catch (e) {
-    Task.fail(taskId, 'Failed to generate');
-    toast('Failed: ' + (e.data?.message || e.message), 'error');
+    Task.fail(taskId, 'Failed to create');
+    // Confirmed orders validate stock — surface that clearly.
+    if (confirmed && e.data?.error === 'insufficient_stock') {
+      toast(`Not enough stock for ${e.data.sku || 'an item'} (only ${e.data.available} available). Adjust the quantity or use a pro-forma.`, 'error', 8000);
+    } else {
+      toast('Failed: ' + (e.data?.message || e.message), 'error');
+    }
   }
 }
 
@@ -14149,7 +14283,11 @@ function modal({ title, body, actions=[] }) {
   // Label any tables in the modal so they stack cleanly on mobile.
   try { if (typeof labelizeTables === 'function') labelizeTables(el('modal-body')); } catch (_) {}
 }
-function closeModal() { el('modal-overlay').classList.remove('open'); }
+function closeModal() {
+  // Free the stock-take camera if the scan modal is being dismissed any way.
+  try { if (typeof stStopScanCamera === 'function') stStopScanCamera(); } catch (_) {}
+  el('modal-overlay').classList.remove('open');
+}
 el('modal-close').addEventListener('click', closeModal);
 el('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
 

@@ -326,6 +326,45 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   res.json({ product: rows[0] });
 });
 
+// PATCH /api/products/:id/location — warehouse-staff-safe subset of the product
+// PATCH. Lets anyone with the 'locations' permission set a product's storage
+// area, note and photos (the full PATCH above is admin-only because it can also
+// change prices/title/etc). This is what the Locations page actually saves, so
+// warehouse staff can now add location photos without being an admin.
+router.patch('/:id/location', requirePermission('locations'), async (req, res) => {
+  await ensureProductLocationColumns();
+  const allowed = ['location_id', 'location_note', 'location_photo_data_url',
+                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo'];
+  const map = { locationId: 'location_id', locationNote: 'location_note',
+                locationPhotoDataUrl: 'location_photo_data_url',
+                itemPhotoDataUrl: 'item_photo_data_url',
+                locationPhotoDataUrl2: 'location_photo_data_url_2',
+                primaryPhoto: 'primary_photo' };
+  for (const f of ['itemPhotoDataUrl', 'locationPhotoDataUrl', 'locationPhotoDataUrl2']) {
+    if (typeof req.body?.[f] === 'string' && req.body[f].length > 7_000_000) {
+      return res.status(413).json({ error: 'photo_too_large', message: 'Photo is too large — please use an image under 5 MB.' });
+    }
+  }
+  const sets = [], params = [];
+  for (const [k, v] of Object.entries(req.body || {})) {
+    const col = map[k] || k;
+    if (allowed.includes(col)) { params.push(v); sets.push(`${col} = $${params.length}`); }
+  }
+  if (!sets.length) return res.status(400).json({ error: 'no_updatable_fields' });
+  params.push(req.params.id);
+  const { rows } = await query(
+    `UPDATE products SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length} RETURNING *`,
+    params
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+  const auditBody = { ...req.body };
+  for (const f of ['itemPhotoDataUrl', 'locationPhotoDataUrl', 'locationPhotoDataUrl2']) {
+    if (auditBody[f]) auditBody[f] = '[photo]';
+  }
+  await audit(req, 'update_product_location', 'product', rows[0].id, auditBody);
+  res.json({ product: rows[0] });
+});
+
 // Shared helper: push a product's current qty_on_hand to Shopify AND every
 // eBay store it's linked to (via mirror_links). Used by adjust-stock + the
 // product PATCH so manual quantity edits actually propagate to the channels.
