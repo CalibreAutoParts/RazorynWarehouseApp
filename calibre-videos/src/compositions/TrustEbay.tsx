@@ -32,11 +32,11 @@ export const TrustEbay: React.FC<TrustEbayProps> = ({ feedback, reviewsLine, hoo
         <NavyBg>
           <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', gap: 36 }}>
             <Logo width={360} variant="badge" />
-            <EbayBadge delay={4} rating={feedback} />
+            <EbayBadge delay={4} />
             <Stars count={5} size={76} delay={12} />
             <PopCaption text={reviewsLine} delay={18} bg={COLORS.navy} fontSize={52} />
             <div style={{ fontFamily: FONT_FAMILY.body, fontWeight: 700, fontSize: 34, color: COLORS.silver }}>
-              eBay store: evbodyparts · trading as Calibre Auto Parts
+              eBay store: EVBODYPARTS · trading as Calibre Auto Parts
             </div>
           </AbsoluteFill>
         </NavyBg>
@@ -45,7 +45,7 @@ export const TrustEbay: React.FC<TrustEbayProps> = ({ feedback, reviewsLine, hoo
       <Sequence from={s(5.2)} durationInFrames={s(2.4)}>
         <NavyBg>
           <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', gap: 30 }}>
-            <Stamp top="100%" bottom="FEEDBACK" bg={COLORS.green} size={360} delay={2} />
+            <Stamp top={feedback.toUpperCase()} bottom="SELLER" bg={COLORS.green} size={360} delay={2} />
             <PopCaption text="Buy with confidence — same trusted team on our website" delay={10} bg={COLORS.red} fontSize={46} />
             <SocialBar delay={18} />
           </AbsoluteFill>
@@ -53,7 +53,7 @@ export const TrustEbay: React.FC<TrustEbayProps> = ({ feedback, reviewsLine, hoo
       </Sequence>
 
       <Sequence from={s(7.6)} durationInFrames={s(3)}>
-        <EndCard cta="Trusted on eBay · cheaper on our site" />
+        <EndCard cta="Trusted on eBay · shop our full range" />
       </Sequence>
     </AbsoluteFill>
   );

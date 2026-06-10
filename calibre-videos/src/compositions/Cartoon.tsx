@@ -97,7 +97,7 @@ const SceneStage: React.FC<{ kind: CartoonProps['scenes'][number]['kind']; parts
   }
 
   // parts grid
-  const list = parts ?? ['bumper', 'headlight', 'wing', 'taillight', 'mirror', 'bonnet'];
+  const list = parts ?? ['bumper', 'headlight', 'wing', 'taillight', 'grille', 'bonnet'];
   return (
     <NavyBg>
       <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center' }}>

@@ -1,7 +1,7 @@
 import React from 'react';
-import { AbsoluteFill, Img, staticFile } from 'remotion';
+import { AbsoluteFill } from 'remotion';
 import { NavyBg, LightBg, RedRule } from '../components/Backgrounds';
-import { PartArt } from '../components/PartArt';
+import { ProductImage } from '../components/ProductImage';
 import { Pill, Stars, EbayBadge, SocialBar } from '../components/ui';
 import { Logo } from '../components/Logo';
 import { COLORS } from '../brand/theme';
@@ -13,17 +13,14 @@ export type PhotoAdProps = {
   product: Product;
   headline: string;
   theme?: 'navy' | 'light';
-  /** Optional real product photo under /public (e.g. 'photos/tesla-m3-bumper.jpg').
-   *  When provided the real image is shown; otherwise we fall back to the
-   *  branded vector illustration. */
-  photoSrc?: string;
 };
 
 /**
  * Single-image feed ad (1080x1350, IG portrait). Designed to read instantly
- * as a still — composition is settled, no reliance on motion.
+ * as a still — composition is settled, no reliance on motion. Uses the real
+ * product photo (product.image) when it loads, else the branded illustration.
  */
-export const PhotoAd: React.FC<PhotoAdProps> = ({ product, headline, theme = 'navy', photoSrc }) => {
+export const PhotoAd: React.FC<PhotoAdProps> = ({ product, headline, theme = 'navy' }) => {
   const Wrap = theme === 'navy' ? NavyBg : LightBg;
   const text = theme === 'navy' ? COLORS.white : COLORS.navyInk;
   const sub = theme === 'navy' ? COLORS.silver : COLORS.steel;
@@ -37,13 +34,7 @@ export const PhotoAd: React.FC<PhotoAdProps> = ({ product, headline, theme = 'na
         </div>
 
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
-          {photoSrc ? (
-            <div style={{ width: 560, height: 420, borderRadius: 28, overflow: 'hidden', border: `4px solid ${theme === 'navy' ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.08)'}`, boxShadow: '0 24px 48px rgba(0,0,0,0.35)' }}>
-              <Img src={staticFile(photoSrc)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-            </div>
-          ) : (
-            <PartArt part={product.part} size={460} float={false} delay={-1} />
-          )}
+          <ProductImage product={product} size={560} float={false} delay={-1} />
           <div style={{ fontFamily: FONT_FAMILY.body, fontWeight: 800, fontSize: 34, letterSpacing: 3, color: theme === 'navy' ? COLORS.gold : COLORS.red }}>
             {headline.toUpperCase()}
           </div>

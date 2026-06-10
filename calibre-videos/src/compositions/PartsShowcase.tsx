@@ -2,6 +2,7 @@ import React from 'react';
 import { AbsoluteFill, Sequence, useVideoConfig } from 'remotion';
 import { NavyBg } from '../components/Backgrounds';
 import { PartArt, PART_LABELS, type PartKey } from '../components/PartArt';
+import { ProductImage } from '../components/ProductImage';
 import { KineticHeadline, Pill, SocialBar, PopCaption } from '../components/ui';
 import { Logo } from '../components/Logo';
 import { EndCard } from '../components/EndCard';
@@ -39,7 +40,7 @@ export const PartsShowcase: React.FC<PartsShowcaseProps> = ({ category, headline
         <Sequence key={p.sku} from={s(intro + i * per)} durationInFrames={s(per)}>
           <NavyBg>
             <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', gap: 22 }}>
-              <PartArt part={p.part} size={380} delay={2} />
+              <ProductImage product={p} size={380} delay={2} />
               <div style={{ fontFamily: FONT_FAMILY.display, fontSize: 72, color: COLORS.white, textAlign: 'center', padding: '0 40px' }}>
                 {p.make.toUpperCase()}
               </div>
@@ -62,7 +63,7 @@ export const PartsShowcase: React.FC<PartsShowcaseProps> = ({ category, headline
       <Sequence from={s(intro + items.length * per)} durationInFrames={s(2)}>
         <NavyBg>
           <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', gap: 28 }}>
-            <PopCaption text={`Exact-fit ${PART_LABELS[category]} — Tesla, MG, BYD, Honda & Toyota`} delay={2} bg={COLORS.red} fontSize={46} />
+            <PopCaption text={`Exact-fit ${PART_LABELS[category]} — Hyundai, Kia, Toyota, Nissan & more`} delay={2} bg={COLORS.red} fontSize={46} />
             <SocialBar delay={12} />
           </AbsoluteFill>
         </NavyBg>
