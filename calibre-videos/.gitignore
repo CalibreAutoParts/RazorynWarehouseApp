@@ -1,8 +1,13 @@
 node_modules/
-# Rendered media is large & regenerable — keep it out of git.
+# Rendered media is large & regenerable — keep it out of git (any out/ subdir).
 out/videos/
 out/stills/
 out/frames/
+out/**/*.mp4
+out/**/*.png
+out/**/*.jpg
+out/**/*.jpeg
+out/**/*.log
 out/*.mp4
 out/*.png
 out/*.jpg
