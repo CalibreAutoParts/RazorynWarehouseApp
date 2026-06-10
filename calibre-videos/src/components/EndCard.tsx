@@ -40,7 +40,7 @@ export const EndCard: React.FC<{ cta?: string; showEbay?: boolean }> = ({
           <Pill text="Same-day dispatch" bg={COLORS.red} delay={26} fontSize={30} />
         </div>
         <div style={{ fontFamily: FONT_FAMILY.body, fontWeight: 800, fontSize: 32, color: COLORS.silver }}>
-          Hyundai · Kia · Toyota · Nissan · BMW — Family-run, Watford
+          Tesla · MG · BYD · Honda · Toyota — Family-run, Watford
         </div>
         {showEbay && (
           <div style={{ display: 'flex', justifyContent: 'center', marginTop: 6 }}>

@@ -2,8 +2,7 @@ import React from 'react';
 import { AbsoluteFill, Sequence, useVideoConfig } from 'remotion';
 import { NavyBg } from '../components/Backgrounds';
 import { KineticHeadline, PopCaption, PriceTag, Pill, SocialBar } from '../components/ui';
-import { PART_LABELS } from '../components/PartArt';
-import { ProductImage } from '../components/ProductImage';
+import { PartArt, PART_LABELS } from '../components/PartArt';
 import { Logo } from '../components/Logo';
 import { EndCard } from '../components/EndCard';
 import { COLORS } from '../brand/theme';
@@ -40,7 +39,7 @@ export const AdSpot: React.FC<AdSpotProps> = ({ product, hook, audienceLine }) =
             <div style={{ position: 'absolute', top: 80 }}>
               <Logo width={300} variant="badge" />
             </div>
-            <ProductImage product={product} size={520} />
+            <PartArt part={product.part} size={520} />
             <div style={{ fontFamily: FONT_FAMILY.display, fontSize: 76, color: COLORS.white, textAlign: 'center', padding: '0 40px', lineHeight: 1.0 }}>
               {product.name.toUpperCase()}
             </div>

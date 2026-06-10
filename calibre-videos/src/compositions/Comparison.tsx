@@ -2,7 +2,7 @@ import React from 'react';
 import { AbsoluteFill, Sequence, useVideoConfig, useCurrentFrame, spring } from 'remotion';
 import { NavyBg } from '../components/Backgrounds';
 import { KineticHeadline, PopCaption, SocialBar } from '../components/ui';
-import { ProductImage } from '../components/ProductImage';
+import { PartArt } from '../components/PartArt';
 import { Logo } from '../components/Logo';
 import { EndCard } from '../components/EndCard';
 import { COLORS } from '../brand/theme';
@@ -46,7 +46,7 @@ export const Comparison: React.FC<ComparisonProps> = ({ product, hook, rows }) =
         <NavyBg>
           <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'flex-start', paddingTop: 110, gap: 20 }}>
             <Logo width={300} variant="badge" />
-            <ProductImage product={product} size={240} float={false} />
+            <PartArt part={product.part} size={220} />
             <div style={{ fontFamily: FONT_FAMILY.body, fontWeight: 800, fontSize: 40, color: COLORS.white, textAlign: 'center', padding: '0 40px' }}>
               {product.name}
             </div>

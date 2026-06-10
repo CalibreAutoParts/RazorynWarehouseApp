@@ -4,6 +4,7 @@ import { HOOKS, AUDIENCES, REVIEWS, STORIES, type AudienceKey } from './brandFac
 import { PART_LABELS, type PartKey } from './parts';
 import { VOICEOVER_DIR } from './config';
 import { VOICEOVER_IDS } from './voiceovers';
+import { PHOTOS } from './photos';
 import {
   AD_SPOT_SECONDS,
   UGC_SECONDS,
@@ -57,7 +58,7 @@ const f = (sec: number) => Math.max(1, Math.round(sec * fps));
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40);
 
 const TAGS = {
-  base: '#carparts #bodyparts #hyundai #kia #toyota #nissan #bmw #ukcars #watford #calibreautoparts #evparts',
+  base: '#evparts #carparts #tesla #mgmotor #byd #ukcars #watford #calibreautoparts #electriccar #hybrid',
   flippers: '#carflipping #carflip #flippingcars #catscars #salvagecar #evflip',
   garages: '#mechanic #garage #evrepair #bodyshop #cartrade #evgarage',
   public: '#carmaintenance #carinsurance #cartips #evlife #cardamage',
@@ -191,7 +192,7 @@ const cartoons: { title: string; scenes: { caption: string; kind: 'mechanic' | '
     scenes: [
       { caption: 'We’re a family-run team in Watford', kind: 'mechanic' },
       { caption: 'Exact-fit parts for EVs & modern cars', kind: 'parts' },
-      { caption: 'Hyundai · Kia · Toyota · Nissan · BMW', kind: 'parts', parts: ['bumper', 'headlight', 'wing', 'grille', 'bonnet', 'taillight'] },
+      { caption: 'Tesla · MG · BYD · Honda · Toyota', kind: 'parts', parts: ['bumper', 'headlight', 'wing', 'mirror', 'bonnet', 'taillight'] },
       { caption: 'Free delivery over £25, dispatched same day', kind: 'drive' },
       { caption: 'Getting your car back on the road', kind: 'map' },
     ],
@@ -234,9 +235,9 @@ const cartoons: { title: string; scenes: { caption: string; kind: 'mechanic' | '
   {
     title: 'Trusted on eBay, better on our site',
     scenes: [
-      { caption: 'Trusted eBay seller — EVBODYPARTS', kind: 'mechanic' },
+      { caption: '100% feedback as evbodyparts', kind: 'mechanic' },
       { caption: 'Same trusted team, exact-fit quality', kind: 'parts' },
-      { caption: 'The full range direct on our website', kind: 'parts', parts: ['headlight', 'bumper', 'wing', 'grille', 'bonnet', 'taillight'] },
+      { caption: 'Even better prices direct on our website', kind: 'parts', parts: ['headlight', 'bumper', 'wing', 'mirror', 'bonnet', 'taillight'] },
       { caption: 'Order direct & save', kind: 'drive' },
     ],
   },
@@ -277,7 +278,7 @@ categories.forEach((cat) => {
     meta: {
       type: 'Parts showcase',
       audience: 'all',
-      caption: `Exact-fit ${PART_LABELS[cat]} for Hyundai, Kia, Toyota, Nissan, BMW & more. calibreautoparts.co.uk`,
+      caption: `Exact-fit ${PART_LABELS[cat]} for Tesla, MG, BYD, Honda & Toyota. calibreautoparts.co.uk`,
       hashtags: tagsFor('all'),
     },
   });
@@ -320,7 +321,7 @@ promos.forEach((p, i) => {
 /* ============================ 8. TRUST / EBAY =========================== */
 const trustHooks = [
   'Is Calibre Auto Parts legit? Here’s the proof',
-  'Why so many trust us with their car',
+  'Why thousands trust us with their car',
   'Trusted on eBay. Even cheaper on our site',
 ];
 trustHooks.forEach((hook, i) => {
@@ -332,11 +333,11 @@ trustHooks.forEach((hook, i) => {
     height,
     fps,
     durationInFrames: f(TRUST_SECONDS),
-    props: { feedback: 'Trusted', reviewsLine: 'A trusted UK seller on eBay', hook },
+    props: { feedback: '100%', reviewsLine: 'Thousands of happy UK buyers', hook },
     meta: {
       type: 'Trust / eBay proof',
       audience: 'all',
-      caption: `${hook} ✅ Trusted on eBay as EVBODYPARTS, trading as Calibre Auto Parts. calibreautoparts.co.uk`,
+      caption: `${hook} ✅ 100% eBay feedback as evbodyparts, trading as Calibre Auto Parts. calibreautoparts.co.uk`,
       hashtags: `${tagsFor('all')} #trustedseller #ebay`,
     },
   });
@@ -368,8 +369,8 @@ const tips: { hook: string; tipTitle: string; steps: string[]; part: PartKey }[]
   { hook: 'Save money on body damage', tipTitle: 'Buy the panel, not the labour', steps: ['Get your part from Calibre Auto Parts', 'Use a local fitter or DIY', 'Pay a fraction of a dealer repair'], part: 'bumper' },
   { hook: 'Headlight gone foggy?', tipTitle: 'When to replace not restore', steps: ['Cracked or cloudy inside = replace', 'OEM-spec units from Calibre Auto Parts', 'Fitted in under an hour'], part: 'headlight' },
   { hook: 'Buying salvage to flip?', tipTitle: 'Check these 3 panels first', steps: ['Bumper & grille alignment', 'Wing & arch gaps', 'Source replacements at Calibre Auto Parts'], part: 'wing' },
-  { hook: 'Know your part fits', tipTitle: 'Match by reg & VIN', steps: ['Send us your reg', 'We confirm exact fitment', 'No guesswork, no returns'], part: 'headlight' },
-  { hook: 'Fog light smashed?', tipTitle: 'A cheap 10-minute fix', steps: ['Order the exact unit', 'Unclip the old one', 'Plug, fit, done'], part: 'headlight' },
+  { hook: 'Know your part fits', tipTitle: 'Match by reg & VIN', steps: ['Send us your reg', 'We confirm exact fitment', 'No guesswork, no returns'], part: 'mirror' },
+  { hook: 'Wing mirror smashed?', tipTitle: 'A cheap 10-minute fix', steps: ['Order the exact unit', 'Clip the old one off', 'Plug, fit, done'], part: 'mirror' },
   { hook: 'Cut your repair bill', tipTitle: 'Dealer vs independent', steps: ['Dealers mark up parts hugely', 'Calibre Auto Parts sells the same panels', 'You keep the difference'], part: 'grille' },
   { hook: 'Bumper scuffed not cracked?', tipTitle: 'Repair vs replace', steps: ['Light scuffs can be repaired', 'Cracks or tears = replace it', 'Exact-fit bumpers ready to ship'], part: 'bumper' },
   { hook: 'Damaged door?', tipTitle: 'The only aftermarket doors', steps: ['No other aftermarket supplier does doors', 'We do exact-fit aftermarket doors', 'No need to buy brand-new from the dealer'], part: 'door' },
@@ -403,6 +404,9 @@ const photoHeadlines = ['Exact-fit quality', 'Quality you can trust', 'Back on t
 PRODUCTS.forEach((p, pi) => {
   const theme = pi % 2 === 0 ? 'navy' : 'light';
   const headline = photoHeadlines[pi % photoHeadlines.length];
+  // Use a real product photo if one has been supplied for this SKU; otherwise
+  // the template falls back to the branded illustration (see data/photos.ts).
+  const photoSrc = PHOTOS[p.sku];
   entries.push({
     id: `photo-${slug(p.make)}-${slug(p.part)}-${pi}`,
     template: 'PhotoAd',
@@ -410,7 +414,7 @@ PRODUCTS.forEach((p, pi) => {
     ...STILL_PORTRAIT,
     fps,
     durationInFrames: 31, // short clip so stills can be captured at a settled frame
-    props: { product: p, headline, theme },
+    props: { product: p, headline, theme, photoSrc },
     meta: {
       type: 'Photo ad (still)',
       audience: 'all',
@@ -430,11 +434,11 @@ const carousels: CarouselDef[] = [
     caption: 'Why choose Calibre Auto Parts 👇 Family-run, Watford. calibreautoparts.co.uk',
     slides: [
       { kind: 'cover', title: 'Why Calibre Auto Parts?', subtitle: 'The UK’s smart choice for EV & modern car parts' },
-      { kind: 'point', index: 1, title: 'Exact fit', body: 'Sourced for your exact make & model — Hyundai, Kia, Toyota, Nissan, BMW & more.', part: 'bumper' },
+      { kind: 'point', index: 1, title: 'Exact fit', body: 'Sourced for your exact make & model — Tesla, MG, BYD, Honda, Toyota.', part: 'bumper' },
       { kind: 'point', index: 2, title: 'Aftermarket doors', body: 'The only aftermarket supplier that does doors — no one else makes them.', part: 'door' },
       { kind: 'point', index: 3, title: 'Family-run', body: 'A proper Watford family business that picks up the phone.' },
       { kind: 'point', index: 4, title: 'Same-day dispatch', body: 'Order before 12pm. Free UK delivery over £25.' },
-      { kind: 'point', index: 5, title: 'Trusted on eBay', body: 'A trusted seller on eBay — EVBODYPARTS. Buy with confidence.' },
+      { kind: 'point', index: 5, title: 'Trusted on eBay', body: '100% feedback as evbodyparts. Buy with confidence.' },
       { kind: 'cta', line: 'Get yours today' },
     ],
   },
@@ -446,7 +450,7 @@ const carousels: CarouselDef[] = [
     slides: [
       { kind: 'cover', title: 'Flip smarter', subtitle: 'How EV & hybrid flippers cut repair costs' },
       { kind: 'point', index: 1, title: 'Buy the damage', body: 'Salvage EVs are cheap because of the panels. That’s your opportunity.', part: 'wing' },
-      { kind: 'point', index: 2, title: 'Source exact-fit', body: 'Bumpers, wings & lights for Hyundai, Kia, Nissan & more.', part: 'headlight' },
+      { kind: 'point', index: 2, title: 'Source exact-fit', body: 'Bumpers, wings & LED lights for Tesla, MG, BYD & more.', part: 'headlight' },
       { kind: 'point', index: 3, title: 'Keep the margin', body: 'Lower parts cost = bigger profit on every flip.' },
       { kind: 'cta', line: 'Start your next flip' },
     ],
@@ -458,7 +462,7 @@ const carousels: CarouselDef[] = [
     caption: 'Garages — open a trade account with Calibre Auto Parts 🔧 EV & hybrid specialists. calibreautoparts.co.uk',
     slides: [
       { kind: 'cover', title: 'Trade accounts', subtitle: 'Exact-fit EV parts, faster panels, real service' },
-      { kind: 'point', index: 1, title: 'Exact-fit range', body: 'Exact-fit EV & modern panels — Hyundai, Kia, Nissan, BMW & more.', part: 'bumper' },
+      { kind: 'point', index: 1, title: 'Exact-fit pricing', body: 'Competitive prices on EV & modern panels — Tesla, MG, BYD & more.', part: 'bumper' },
       { kind: 'point', index: 2, title: 'Same-day dispatch', body: 'Order before 12pm so your jobs go out faster.' },
       { kind: 'point', index: 3, title: 'We answer', body: 'A team that actually picks up and sorts it.' },
       { kind: 'cta', line: 'DM us to set up' },
@@ -485,7 +489,7 @@ const carousels: CarouselDef[] = [
     caption: 'You found us on eBay? Here’s why our website is even better 👇 calibreautoparts.co.uk',
     slides: [
       { kind: 'cover', title: 'eBay ✓ Website ✓✓', subtitle: 'Trusted on eBay. Even better direct.' },
-      { kind: 'point', index: 1, title: 'Trusted on eBay', body: 'We’re EVBODYPARTS on eBay — trading as Calibre Auto Parts.' },
+      { kind: 'point', index: 1, title: '100% feedback', body: 'We’re evbodyparts on eBay — trading as Calibre Auto Parts.' },
       { kind: 'point', index: 2, title: 'Bigger range', body: 'The full catalogue lives on our website.', part: 'tailgate' },
       { kind: 'point', index: 3, title: 'Better prices', body: 'Buy direct and skip the marketplace fees.' },
       { kind: 'cta', line: 'Shop direct & save' },
@@ -495,14 +499,14 @@ const carousels: CarouselDef[] = [
     id: 'parts-we-stock',
     theme: 'light',
     audience: 'all',
-    caption: 'Just some of what we stock 👇 Exact-fit for Hyundai, Kia, Toyota, Nissan, BMW & more. calibreautoparts.co.uk',
+    caption: 'Just some of what we stock 👇 Exact-fit for Tesla, MG, BYD, Honda & Toyota. calibreautoparts.co.uk',
     slides: [
       { kind: 'cover', title: 'What we stock', subtitle: 'Exact-fit parts for EVs & modern cars' },
       { kind: 'point', index: 1, title: 'Bumpers & wings', body: 'Fronts, rears & wings, exact-fit for your model.', part: 'bumper' },
       { kind: 'point', index: 2, title: 'LED lights', body: 'Headlights & tail lights, exact-fit.', part: 'headlight' },
       { kind: 'point', index: 3, title: 'Aftermarket doors', body: 'Doors no other aftermarket supplier does — only us.', part: 'door' },
-      { kind: 'point', index: 4, title: 'Bonnets & panels', body: 'Bonnets, wings & arch trims for your model.', part: 'bonnet' },
-      { kind: 'point', index: 5, title: 'Hyundai · Kia · Toyota', body: 'Nissan, BMW & more — pick your make & model.', part: 'grille' },
+      { kind: 'point', index: 4, title: 'Bonnets & mirrors', body: 'Bonnets, wings & wing mirrors for your model.', part: 'bonnet' },
+      { kind: 'point', index: 5, title: 'Tesla · MG · BYD', body: 'Honda & Toyota too — pick your make & model.', part: 'mirror' },
       { kind: 'cta', line: 'Find your part' },
     ],
   },

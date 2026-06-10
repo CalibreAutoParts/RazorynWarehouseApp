@@ -4,7 +4,7 @@ export const BENEFITS = [
   'Exact-fit for your make & model',
   'EV, hybrid & modern-car specialists',
   'The only aftermarket supplier that does doors',
-  'Hyundai · Kia · Toyota · Nissan · BMW & more',
+  'Tesla · MG · BYD · Honda · Toyota',
   'Family-run from Watford',
   'Free UK delivery over £25',
   'Same-day dispatch before 12pm',
@@ -34,9 +34,9 @@ export type AudienceKey = keyof typeof AUDIENCES;
 /** Short hooks that stop the scroll (first 1.5s). Brand-broad, no price figures. */
 export const HOOKS = [
   'Stop overpaying your main dealer.',
-  'Hyundai, Kia or Nissan? We’ve got your panels.',
-  'Hyundai owners — exact-fit parts, sorted.',
-  'BMW & Mercedes panels without the dealer wait.',
+  'MG, BYD or Tesla? We’ve got your panels.',
+  'BYD owners — exact-fit parts at last.',
+  'MG drivers, this one’s for you.',
   'Need a door? We’re the only aftermarket supplier that does them.',
   'Exact-fit EV & hybrid parts, sorted.',
   'POV: you found exact-fit parts.',
@@ -67,14 +67,14 @@ export type Story = {
 
 export const STORIES: Story[] = [
   {
-    id: 'flip-bmw',
-    title: 'I flipped a crashed BMW',
+    id: 'flip-tesla',
+    title: 'I flipped a crashed Tesla',
     audience: 'flippers',
     parts: [
       {
         partLabel: 'Part 1',
         beats: [
-          { text: 'I bought a Cat S BMW X5 for £14,500.' },
+          { text: 'I bought a Cat S Model 3 for £14,500.' },
           { text: 'Front end was wrecked.', emphasis: 'wrecked' },
           { text: 'Everyone said I was mad.' },
           { text: 'Then I found Calibre Auto Parts…' },
@@ -83,8 +83,8 @@ export const STORIES: Story[] = [
       {
         partLabel: 'Part 2',
         beats: [
-          { text: 'Front wing and a primed bonnet.' },
-          { text: 'BMW main-dealer quote? Eye-watering.' },
+          { text: 'Front bumper and both LED headlights.' },
+          { text: 'Tesla main-dealer quote? Eye-watering.' },
           { text: 'Calibre Auto Parts had the lot — exact fit, far less.', emphasis: 'exact fit' },
           { text: 'Dispatched same day to my unit.' },
         ],
@@ -149,7 +149,7 @@ export const STORIES: Story[] = [
       {
         partLabel: 'Part 2',
         beats: [
-          { text: 'Exact-fit parts for Hyundai, Kia & Nissan.' },
+          { text: 'Exact-fit parts for Tesla, MG & BYD.' },
           { text: 'The only aftermarket lot that does doors.', emphasis: 'doors' },
           { text: 'Dispatched same day — jobs out faster.', emphasis: 'same day' },
           { text: 'And they actually answer the phone.' },
@@ -158,22 +158,22 @@ export const STORIES: Story[] = [
     ],
   },
   {
-    id: 'flip-qashqai',
-    title: 'The Nissan Qashqai flip',
+    id: 'flip-mg4',
+    title: 'The MG4 flip',
     audience: 'flippers',
     parts: [
       {
         partLabel: 'Part 1',
         beats: [
-          { text: 'Picked up a damaged Qashqai dirt cheap.' },
-          { text: 'Front wing creased, grille smashed.' },
+          { text: 'Picked up a damaged MG4 dirt cheap.' },
+          { text: 'Front wing creased, headlight smashed.' },
           { text: 'Most people would’ve walked away.' },
         ],
       },
       {
         partLabel: 'Part 2',
         beats: [
-          { text: 'Calibre Auto Parts: exact-fit wing and grille.' },
+          { text: 'Calibre Auto Parts: exact-fit wing and LED headlight.' },
           { text: 'Exact fit, dispatched same day.', emphasis: 'same day' },
           { text: 'A weekend of graft and it was mint.' },
         ],
@@ -197,15 +197,15 @@ export const STORIES: Story[] = [
         partLabel: 'Part 1',
         beats: [
           { text: 'Clipped a bollard dropping the kids off.' },
-          { text: 'Smashed the front fog light.' },
+          { text: 'Wing mirror hanging by the wires.' },
           { text: 'Main dealer wanted a fortune fitted.', emphasis: 'fortune' },
         ],
       },
       {
         partLabel: 'Part 2',
         beats: [
-          { text: 'Found Calibre Auto Parts — exact-fit fog light, sorted.' },
-          { text: 'Watched a 10-minute video, clipped it in.' },
+          { text: 'Found Calibre Auto Parts — exact-fit mirror, sorted.' },
+          { text: 'Watched a 10-minute video, clipped it on.' },
           { text: 'Saved a packet. Buzzing.', emphasis: 'packet' },
         ],
       },

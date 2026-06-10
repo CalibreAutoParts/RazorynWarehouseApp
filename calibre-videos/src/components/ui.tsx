@@ -349,7 +349,7 @@ export const SocialBar: React.FC<{ delay?: number; handle?: string }> = ({
 /* ----------------------------------------------------------------------------
  * eBay trust badge — shows the trusted-seller status the brief asks for.
  * -------------------------------------------------------------------------- */
-export const EbayBadge: React.FC<{ delay?: number }> = ({ delay = 0 }) => {
+export const EbayBadge: React.FC<{ delay?: number; rating?: string }> = ({ delay = 0, rating = '100%' }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const s = spring({ frame: frame - delay, fps, config: { damping: 16 } });
@@ -374,10 +374,10 @@ export const EbayBadge: React.FC<{ delay?: number }> = ({ delay = 0 }) => {
       </span>
       <div style={{ display: 'flex', flexDirection: 'column' }}>
         <span style={{ fontFamily: FONT_FAMILY.body, fontWeight: 800, fontSize: 30, color: COLORS.navy }}>
-          Trusted UK seller
+          {rating} positive
         </span>
         <span style={{ fontFamily: FONT_FAMILY.body, fontWeight: 700, fontSize: 24, color: COLORS.steel }}>
-          eBay · EVBODYPARTS
+          Trusted UK seller
         </span>
       </div>
     </div>
