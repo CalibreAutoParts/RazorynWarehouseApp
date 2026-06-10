@@ -1,7 +1,10 @@
 import { VIDEO } from '../brand/theme';
 import { PRODUCTS, type Product } from './products';
-import { HOOKS, AUDIENCES, TESTIMONIALS, STORIES, type AudienceKey } from './brandFacts';
+import { HOOKS, AUDIENCES, REVIEWS, STORIES, type AudienceKey } from './brandFacts';
 import { PART_LABELS, type PartKey } from './parts';
+import { VOICEOVER_DIR } from './config';
+import { VOICEOVER_IDS } from './voiceovers';
+import { PHOTOS } from './photos';
 import {
   AD_SPOT_SECONDS,
   UGC_SECONDS,
@@ -85,7 +88,7 @@ PRODUCTS.forEach((p, pi) => {
       meta: {
         type: 'Product ad',
         audience: aud,
-        caption: `${hook} ${p.name} from ${p.price} (was ${p.was}) at Calibre Auto Parts. ${AUDIENCES[aud].line} 🔧 Shop calibreautoparts.co.uk`,
+        caption: `${hook} Exact-fit ${p.name} at Calibre Auto Parts. ${AUDIENCES[aud].line} 🔧 Shop calibreautoparts.co.uk`,
         hashtags: tagsFor(aud),
       },
     });
@@ -93,7 +96,7 @@ PRODUCTS.forEach((p, pi) => {
 });
 
 /* ============================ 2. COMPARISONS ============================= */
-const compHooks = ['Dealer price vs Calibre', 'Stop paying dealer prices', 'Same part, half the price'];
+const compHooks = ['Main dealer vs Calibre', 'Why we beat the main dealer', 'Dealer vs Calibre — who wins?'];
 PRODUCTS.forEach((p, pi) => {
   compHooks.forEach((hook, hi) => {
     const aud = audienceCycle[(pi + hi) % 3];
@@ -107,9 +110,9 @@ PRODUCTS.forEach((p, pi) => {
       durationInFrames: f(COMPARISON_SECONDS),
       props: { product: p, hook },
       meta: {
-        type: 'Price comparison',
+        type: 'Dealer comparison',
         audience: aud,
-        caption: `${p.name}: main dealer ${p.was} vs Calibre ${p.price}. Why pay more? 👀 calibreautoparts.co.uk`,
+        caption: `${p.name}: main dealer vs Calibre — exact fit, same-day dispatch and aftermarket doors no one else stocks. 👀 calibreautoparts.co.uk`,
         hashtags: tagsFor(aud),
       },
     });
@@ -117,37 +120,32 @@ PRODUCTS.forEach((p, pi) => {
 });
 
 /* ============================ 3. UGC REVIEWS ============================= */
-const personas = [
-  { name: 'Danny', role: 'Car flipper, Essex', aud: 'flippers' as const },
-  { name: 'Sarah', role: 'Watford', aud: 'public' as const },
-  { name: 'Mike', role: 'Garage owner', aud: 'garages' as const },
-  { name: 'Jay', role: 'Project builder', aud: 'flippers' as const },
-  { name: 'Leah', role: 'St Albans', aud: 'public' as const },
-];
+// Driven ENTIRELY by real, approved reviews (brandFacts → REVIEWS). That list
+// is empty until genuine reviews are signed off, so no fabricated UGC ships.
 const ugcHooks = [
-  'I order ALL my parts from here now',
-  'Honest review after 6 months',
-  'Cheapest quality parts in the UK?',
+  'I order all my parts from here now',
+  'Honest review',
   'Why I stopped using main dealers',
+  'Exact-fit, every time',
 ];
-PRODUCTS.forEach((p, pi) => {
-  const persona = personas[pi % personas.length];
-  const hook = ugcHooks[pi % ugcHooks.length];
-  const quote = TESTIMONIALS[pi % TESTIMONIALS.length].text;
+REVIEWS.forEach((r, ri) => {
+  const p = PRODUCTS[ri % PRODUCTS.length];
+  const hook = ugcHooks[ri % ugcHooks.length];
+  const aud = audienceCycle[ri % 3];
   entries.push({
-    id: `ugc-${slug(persona.name)}-${slug(p.part)}-${pi}`,
+    id: `ugc-${slug(r.name)}-${ri}`,
     template: 'UgcReview',
     kind: 'video',
     width,
     height,
     fps,
     durationInFrames: f(UGC_SECONDS),
-    props: { reviewerName: persona.name, reviewerRole: persona.role, product: p, quote, hook },
+    props: { reviewerName: r.name, reviewerRole: r.role, product: p, quote: r.text, hook },
     meta: {
       type: 'UGC review',
-      audience: persona.aud,
-      caption: `${hook} — got my ${p.name} for ${p.price} 😮 @calibreautoparts #review`,
-      hashtags: tagsFor(persona.aud),
+      audience: aud,
+      caption: `${hook} — ${r.name} on Calibre Auto Parts. @calibreautoparts #review`,
+      hashtags: tagsFor(aud),
     },
   });
 });
@@ -156,8 +154,12 @@ PRODUCTS.forEach((p, pi) => {
 STORIES.forEach((story) => {
   story.parts.forEach((part, idx) => {
     const isLast = idx === story.parts.length - 1;
+    const id = `story-${slug(story.id)}-p${idx + 1}`;
+    // Narration plays only when the audio file has actually been generated
+    // (see scripts/gen-voiceover.ts → src/data/voiceovers.ts). No file → silent.
+    const voiceover = VOICEOVER_IDS.includes(id) ? `${VOICEOVER_DIR}/${id}.mp3` : undefined;
     entries.push({
-      id: `story-${slug(story.id)}-p${idx + 1}`,
+      id,
       template: 'StoryTime',
       kind: 'video',
       width,
@@ -170,6 +172,7 @@ STORIES.forEach((story) => {
         partIndex: idx,
         totalParts: story.parts.length,
         beats: part.beats,
+        voiceover,
       },
       meta: {
         type: `Story time (${idx + 1}/${story.parts.length})`,
@@ -275,24 +278,26 @@ categories.forEach((cat) => {
     meta: {
       type: 'Parts showcase',
       audience: 'all',
-      caption: `Exact-fit ${PART_LABELS[cat]} for Tesla, MG, BYD, Honda & Toyota, from ${items[0].price}. calibreautoparts.co.uk`,
+      caption: `Exact-fit ${PART_LABELS[cat]} for Tesla, MG, BYD, Honda & Toyota. calibreautoparts.co.uk`,
       hashtags: tagsFor('all'),
     },
   });
 });
 
 /* ============================ 7. PROMOS ================================= */
+// NOTE: percentage codes & policy offers only — no £ price figures, so these
+// stay valid through the pending listing price update.
 const promos = [
   { hook: 'Exclusive TikTok offer', offerTop: '10%', offerBottom: 'OFF', code: 'TIKTOK10', detail: 'Follow + use code at checkout' },
-  { hook: 'Trade accounts welcome', offerTop: 'TRADE', offerBottom: 'PRICES', detail: 'Garages — DM us to set up an account' },
+  { hook: 'Trade accounts welcome', offerTop: 'TRADE', offerBottom: 'ACCOUNTS', detail: 'Garages — DM us to set up an account' },
   { hook: 'Free UK delivery weekend', offerTop: 'FREE', offerBottom: 'DELIVERY', detail: 'This weekend only — follow for more' },
-  { hook: 'New followers get a deal', offerTop: '£10', offerBottom: 'OFF £100', code: 'NEW10', detail: 'Follow @calibreautoparts for the code' },
+  { hook: 'New followers get a deal', offerTop: '10%', offerBottom: 'OFF', code: 'NEW10', detail: 'First order — follow @calibreautoparts for the code' },
   { hook: 'Flash sale on bumpers', offerTop: 'FLASH', offerBottom: 'SALE', detail: 'Bumpers reduced — while stocks last' },
-  { hook: 'Bundle & save', offerTop: 'SAVE', offerBottom: 'ON BUNDLES', detail: 'Front-end bundles cheaper than one dealer part' },
+  { hook: 'Doors no one else does', offerTop: 'AFTERMARKET', offerBottom: 'DOORS', detail: 'Dealers only sell brand-new — we don’t' },
   { hook: 'Instagram followers only', offerTop: '15%', offerBottom: 'OFF', code: 'INSTA15', detail: 'Follow @calibreautoparts & DM for the code' },
-  { hook: 'Headlight sale this week', offerTop: 'LIGHTS', offerBottom: 'FROM £44', detail: 'Headlights & tail lights reduced — follow to shop' },
-  { hook: 'Refer a mate', offerTop: '£15', offerBottom: 'EACH', detail: 'You both get £15 off — tag a mate below' },
-  { hook: 'Bank holiday blowout', offerTop: 'BANK HOL', offerBottom: 'DEALS', detail: 'Limited-time prices all weekend' },
+  { hook: 'Headlight sale this week', offerTop: 'LIGHTS', offerBottom: 'SALE', detail: 'Headlights & tail lights reduced — follow to shop' },
+  { hook: 'Refer a mate', offerTop: 'REFER', offerBottom: 'A MATE', detail: 'You both get a deal — tag a mate below' },
+  { hook: 'Bank holiday blowout', offerTop: 'BANK HOL', offerBottom: 'DEALS', detail: 'Limited-time offers all weekend' },
 ];
 promos.forEach((p, i) => {
   entries.push({
@@ -339,7 +344,8 @@ trustHooks.forEach((hook, i) => {
 });
 
 /* ============================ 9. TESTIMONIALS ========================== */
-TESTIMONIALS.forEach((t, i) => {
+// Real, approved reviews only (brandFacts → REVIEWS). Empty list → no cards.
+REVIEWS.forEach((t, i) => {
   entries.push({
     id: `testi-${slug(t.name)}-${i}`,
     template: 'Testimonial',
@@ -366,7 +372,8 @@ const tips: { hook: string; tipTitle: string; steps: string[]; part: PartKey }[]
   { hook: 'Know your part fits', tipTitle: 'Match by reg & VIN', steps: ['Send us your reg', 'We confirm exact fitment', 'No guesswork, no returns'], part: 'mirror' },
   { hook: 'Wing mirror smashed?', tipTitle: 'A cheap 10-minute fix', steps: ['Order the exact unit', 'Clip the old one off', 'Plug, fit, done'], part: 'mirror' },
   { hook: 'Cut your repair bill', tipTitle: 'Dealer vs independent', steps: ['Dealers mark up parts hugely', 'Calibre sells the same panels', 'You keep the difference'], part: 'grille' },
-  { hook: 'Bumper scuffed not cracked?', tipTitle: 'Repair vs replace', steps: ['Light scuffs can be repaired', 'Cracks or tears = replace it', 'New bumpers from £54 at Calibre'], part: 'bumper' },
+  { hook: 'Bumper scuffed not cracked?', tipTitle: 'Repair vs replace', steps: ['Light scuffs can be repaired', 'Cracks or tears = replace it', 'Exact-fit bumpers ready to ship'], part: 'bumper' },
+  { hook: 'Damaged door?', tipTitle: 'You don’t need a dealer', steps: ['Dealers only sell brand-new doors', 'We do aftermarket exact-fit doors', 'A fraction of the dealer route'], part: 'door' },
   { hook: 'New here? Start with this', tipTitle: 'How to buy from Calibre', steps: ['Browse calibreautoparts.co.uk', 'Or our trusted eBay store', 'Send your reg if unsure — we’ll confirm'], part: 'grille' },
   { hook: 'Stop binning good EVs', tipTitle: 'Cat S / Cat N explained', steps: ['Often just cosmetic body damage', 'Source exact-fit panels from Calibre', 'Repair, sell, profit'], part: 'wing' },
   { hook: 'Buying an EV part?', tipTitle: 'Always check exact fit', steps: ['EV trims change year to year', 'Send your make, model & year', 'We confirm the exact part — no guesswork'], part: 'bumper' },
@@ -393,10 +400,13 @@ tips.forEach((t, i) => {
 });
 
 /* ============================ 11. PHOTO ADS (stills) =================== */
-const photoHeadlines = ['Trade prices', 'Quality you can trust', 'Back on the road for less'];
+const photoHeadlines = ['Exact-fit quality', 'Quality you can trust', 'Back on the road'];
 PRODUCTS.forEach((p, pi) => {
   const theme = pi % 2 === 0 ? 'navy' : 'light';
   const headline = photoHeadlines[pi % photoHeadlines.length];
+  // Use a real product photo if one has been supplied for this SKU; otherwise
+  // the template falls back to the branded illustration (see data/photos.ts).
+  const photoSrc = PHOTOS[p.sku];
   entries.push({
     id: `photo-${slug(p.make)}-${slug(p.part)}-${pi}`,
     template: 'PhotoAd',
@@ -404,11 +414,11 @@ PRODUCTS.forEach((p, pi) => {
     ...STILL_PORTRAIT,
     fps,
     durationInFrames: 31, // short clip so stills can be captured at a settled frame
-    props: { product: p, headline, theme },
+    props: { product: p, headline, theme, photoSrc },
     meta: {
       type: 'Photo ad (still)',
       audience: 'all',
-      caption: `${p.name} — ${p.price} (was ${p.was}). ${headline}. calibreautoparts.co.uk`,
+      caption: `${p.name} — ${p.fitment}. ${headline}. calibreautoparts.co.uk`,
       hashtags: tagsFor('all'),
     },
   });
@@ -421,13 +431,14 @@ const carousels: CarouselDef[] = [
     id: 'why-calibre',
     theme: 'navy',
     audience: 'all',
-    caption: '5 reasons to choose Calibre Auto Parts 👇 Family-run, Watford. calibreautoparts.co.uk',
+    caption: 'Why choose Calibre Auto Parts 👇 Family-run, Watford. calibreautoparts.co.uk',
     slides: [
       { kind: 'cover', title: 'Why Calibre?', subtitle: 'The UK’s smart choice for EV & modern car parts' },
       { kind: 'point', index: 1, title: 'Exact fit', body: 'Sourced for your exact make & model — Tesla, MG, BYD, Honda, Toyota.', part: 'bumper' },
-      { kind: 'point', index: 2, title: 'Family-run', body: 'A proper Watford family business that picks up the phone.' },
-      { kind: 'point', index: 3, title: 'Same-day dispatch', body: 'Order before 12pm. Free UK delivery over £25.' },
-      { kind: 'point', index: 4, title: 'Trusted on eBay', body: '100% feedback as evbodyparts. Buy with confidence.' },
+      { kind: 'point', index: 2, title: 'Aftermarket doors', body: 'Exact-fit doors no one else offers — dealers only sell brand-new.', part: 'door' },
+      { kind: 'point', index: 3, title: 'Family-run', body: 'A proper Watford family business that picks up the phone.' },
+      { kind: 'point', index: 4, title: 'Same-day dispatch', body: 'Order before 12pm. Free UK delivery over £25.' },
+      { kind: 'point', index: 5, title: 'Trusted on eBay', body: '100% feedback as evbodyparts. Buy with confidence.' },
       { kind: 'cta', line: 'Get yours today' },
     ],
   },
@@ -491,10 +502,11 @@ const carousels: CarouselDef[] = [
     caption: 'Just some of what we stock 👇 Exact-fit for Tesla, MG, BYD, Honda & Toyota. calibreautoparts.co.uk',
     slides: [
       { kind: 'cover', title: 'What we stock', subtitle: 'Exact-fit parts for EVs & modern cars' },
-      { kind: 'point', index: 1, title: 'Bumpers & wings', body: 'Fronts, rears & wings — from £89.', part: 'bumper' },
+      { kind: 'point', index: 1, title: 'Bumpers & wings', body: 'Fronts, rears & wings, exact-fit for your model.', part: 'bumper' },
       { kind: 'point', index: 2, title: 'LED lights', body: 'Headlights & tail lights, exact-fit.', part: 'headlight' },
-      { kind: 'point', index: 3, title: 'Bonnets & mirrors', body: 'Bonnets, wings & wing mirrors for your model.', part: 'bonnet' },
-      { kind: 'point', index: 4, title: 'Tesla · MG · BYD', body: 'Honda & Toyota too — pick your make & model.', part: 'mirror' },
+      { kind: 'point', index: 3, title: 'Aftermarket doors', body: 'Doors no one else does — dealers only sell brand-new.', part: 'door' },
+      { kind: 'point', index: 4, title: 'Bonnets & mirrors', body: 'Bonnets, wings & wing mirrors for your model.', part: 'bonnet' },
+      { kind: 'point', index: 5, title: 'Tesla · MG · BYD', body: 'Honda & Toyota too — pick your make & model.', part: 'mirror' },
       { kind: 'cta', line: 'Find your part' },
     ],
   },

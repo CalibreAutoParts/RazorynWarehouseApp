@@ -1,5 +1,5 @@
 import React from 'react';
-import { AbsoluteFill, Sequence, useVideoConfig, useCurrentFrame, interpolate } from 'remotion';
+import { AbsoluteFill, Audio, Sequence, staticFile, useVideoConfig, useCurrentFrame, interpolate } from 'remotion';
 import { NavyBg } from '../components/Backgrounds';
 import { RoadScene, CartoonCar } from '../components/CarScene';
 import { KineticHeadline, PopCaption, Pill, SocialBar } from '../components/ui';
@@ -7,6 +7,7 @@ import { Logo } from '../components/Logo';
 import { EndCard } from '../components/EndCard';
 import { COLORS } from '../brand/theme';
 import { FONT_FAMILY } from '../brand/fonts';
+import { STORY_BEAT_SECONDS } from '../data/durations';
 import type { StoryBeat } from '../data/brandFacts';
 
 export type StoryTimeProps = {
@@ -15,20 +16,27 @@ export type StoryTimeProps = {
   partIndex: number; // 0-based
   totalParts: number;
   beats: StoryBeat[];
+  /** Optional narration file under /public (e.g. 'vo/story-flip-tesla-p1.mp3').
+   *  Only set by the catalog when the file actually exists, so renders never
+   *  break before a voiceover has been generated/supplied. */
+  voiceover?: string;
 };
 
 /** Story-time format: kinetic captions over an animated drive. Built to run as
- *  a 2–3 part series — each part hooks the next. */
-export const StoryTime: React.FC<StoryTimeProps> = ({ title, partLabel, partIndex, totalParts, beats }) => {
+ *  a 2–3 part series — each part hooks the next. Optional voiceover narrates
+ *  the beats; pacing is timed so each line is readable with or without audio. */
+export const StoryTime: React.FC<StoryTimeProps> = ({ title, partLabel, partIndex, totalParts, beats, voiceover }) => {
   const { fps } = useVideoConfig();
   const s = (sec: number) => Math.round(sec * fps);
-  const beatDur = 2.0;
+  const beatDur = STORY_BEAT_SECONDS;
+  const intro = 2.6;
   const isLast = partIndex === totalParts - 1;
 
   return (
     <AbsoluteFill>
+      {voiceover && <Audio src={staticFile(voiceover)} />}
       {/* TITLE CARD */}
-      <Sequence durationInFrames={s(2.2)}>
+      <Sequence durationInFrames={s(intro)}>
         <RoadScene>
           <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'flex-start', paddingTop: 230, gap: 28 }}>
             <Pill text={`${partLabel} of ${totalParts}`} bg={COLORS.red} delay={2} fontSize={40} />
@@ -40,7 +48,7 @@ export const StoryTime: React.FC<StoryTimeProps> = ({ title, partLabel, partInde
 
       {/* BEATS */}
       {beats.map((b, i) => (
-        <Sequence key={i} from={s(2.2 + i * beatDur)} durationInFrames={s(beatDur)}>
+        <Sequence key={i} from={s(intro + i * beatDur)} durationInFrames={s(beatDur)}>
           <RoadScene>
             <DriveBy y={1480} />
             <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', paddingBottom: 360 }}>
@@ -61,7 +69,7 @@ export const StoryTime: React.FC<StoryTimeProps> = ({ title, partLabel, partInde
       {/* HOOK NEXT PART or END */}
       {/* HOOK NEXT PART (skipped entirely on the final part) */}
       {!isLast && (
-        <Sequence from={s(2.2 + beats.length * beatDur)} durationInFrames={s(2.6)}>
+        <Sequence from={s(intro + beats.length * beatDur)} durationInFrames={s(2.8)}>
           <NavyBg>
             <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', gap: 30 }}>
               <KineticHeadline text={`Part ${partIndex + 2} drops next`} fontSize={96} highlight="next" />
@@ -73,7 +81,7 @@ export const StoryTime: React.FC<StoryTimeProps> = ({ title, partLabel, partInde
       )}
 
       {/* END CARD — held longer on the final part so the full CTA reads */}
-      <Sequence from={s(2.2 + beats.length * beatDur + (isLast ? 0 : 2.6))} durationInFrames={s(isLast ? 3 : 1.6)}>
+      <Sequence from={s(intro + beats.length * beatDur + (isLast ? 0 : 2.8))} durationInFrames={s(isLast ? 3 : 1.6)}>
         <EndCard cta={isLast ? 'This could be your next flip — shop Calibre' : 'Part of the story · calibreautoparts.co.uk'} />
       </Sequence>
     </AbsoluteFill>

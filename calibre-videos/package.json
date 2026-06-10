@@ -9,6 +9,7 @@
     "plan": "tsx scripts/gen-plan.ts",
     "render": "remotion render",
     "render-all": "tsx scripts/render-all.ts",
+    "voiceover": "tsx scripts/gen-voiceover.ts",
     "render-sample": "tsx scripts/render-all.ts --sample",
     "render-stills": "tsx scripts/render-all.ts --kind=still"
   },

@@ -18,12 +18,13 @@ export type CartoonProps = {
 export const Cartoon: React.FC<CartoonProps> = ({ title, scenes }) => {
   const { fps } = useVideoConfig();
   const s = (sec: number) => Math.round(sec * fps);
-  const dur = 2.6;
+  const dur = 3.1;
+  const intro = 2.4;
 
   return (
     <AbsoluteFill>
       {/* TITLE */}
-      <Sequence durationInFrames={s(2.2)}>
+      <Sequence durationInFrames={s(intro)}>
         <NavyBg>
           <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', gap: 30 }}>
             <Logo width={560} variant="badge" />
@@ -34,7 +35,7 @@ export const Cartoon: React.FC<CartoonProps> = ({ title, scenes }) => {
       </Sequence>
 
       {scenes.map((sc, i) => (
-        <Sequence key={i} from={s(2.2 + i * dur)} durationInFrames={s(dur)}>
+        <Sequence key={i} from={s(intro + i * dur)} durationInFrames={s(dur)}>
           <SceneStage kind={sc.kind} parts={sc.parts} />
           <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 300 }}>
             <PopCaption text={sc.caption} delay={6} bg={i % 2 ? COLORS.red : COLORS.navy} fontSize={62} />
@@ -42,7 +43,7 @@ export const Cartoon: React.FC<CartoonProps> = ({ title, scenes }) => {
         </Sequence>
       ))}
 
-      <Sequence from={s(2.2 + scenes.length * dur)} durationInFrames={s(3.2)}>
+      <Sequence from={s(intro + scenes.length * dur)} durationInFrames={s(3.2)}>
         <EndCard cta="That’s Calibre. Family-run, Watford" />
       </Sequence>
     </AbsoluteFill>

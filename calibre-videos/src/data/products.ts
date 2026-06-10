@@ -14,8 +14,14 @@ export type Product = {
 /**
  * Calibre Auto Parts real range: EXACT-FIT body parts for EVs, hybrids and
  * modern vehicles — Tesla, MG, BYD, Honda and Toyota (see calibreautoparts.co.uk).
- * Parts are headlights, tail lights, bumpers, bonnets, wings and mirrors.
- * Prices reflect their typical £80–£350 range. Extend this list to scale output.
+ * Parts span headlights, tail lights, bumpers, bonnets, wings, mirrors AND
+ * aftermarket-quality DOORS — which main dealers only sell brand-new, so the
+ * doors range is a genuine point of difference no one else offers.
+ *
+ * NOTE ON PRICING: the `price`/`was` figures below are PLACEHOLDERS, not live
+ * data — they are not synced to eBay/website and must not be shown until the
+ * pending price update lands. Every template honours SHOW_PRICING (data/config.ts),
+ * which is currently false, so no price renders regardless of these values.
  */
 export const PRODUCTS: Product[] = [
   // ---- Tesla ----
@@ -74,6 +80,15 @@ export const PRODUCTS: Product[] = [
   { sku: 'CAP-TOY-YAR-BMP', name: 'Toyota Yaris Front Bumper', make: 'Toyota', part: 'bumper', price: '£119', was: '£300', condition: 'Brand New', fitment: '2020+ Hybrid' },
   { sku: 'CAP-TOY-COR-TL', name: 'Toyota Corolla Tail Light', make: 'Toyota', part: 'taillight', price: '£109', was: '£280', condition: 'Brand New', fitment: '2019+ O/S' },
   { sku: 'CAP-TOY-RAV-BMP', name: 'Toyota RAV4 Front Bumper', make: 'Toyota', part: 'bumper', price: '£169', was: '£430', condition: 'OEM Spec', fitment: '2019+ Hybrid' },
+
+  // ---- Aftermarket DOORS (our USP — dealers only sell brand-new) ----
+  { sku: 'CAP-TES-M3-DOOR', name: 'Tesla Model 3 Front Door', make: 'Tesla', part: 'door', price: '£345', was: '£1100', condition: 'OEM Spec', fitment: '2021+ O/S driver' },
+  { sku: 'CAP-TES-MY-DOOR', name: 'Tesla Model Y Front Door', make: 'Tesla', part: 'door', price: '£365', was: '£1180', condition: 'OEM Spec', fitment: '2020–2024 O/S' },
+  { sku: 'CAP-MG4-DOOR', name: 'MG4 Front Door', make: 'MG', part: 'door', price: '£239', was: '£760', condition: 'OEM Spec', fitment: '2022–2026 O/S' },
+  { sku: 'CAP-MGZS-DOOR', name: 'MG ZS Front Door', make: 'MG', part: 'door', price: '£219', was: '£690', condition: 'OEM Spec', fitment: '2020–2024 N/S' },
+  { sku: 'CAP-BYD-ATTO-DOOR', name: 'BYD Atto 3 Front Door', make: 'BYD', part: 'door', price: '£259', was: '£820', condition: 'OEM Spec', fitment: '2022+ O/S' },
+  { sku: 'CAP-HON-CIV-DOOR', name: 'Honda Civic Front Door', make: 'Honda', part: 'door', price: '£209', was: '£680', condition: 'OEM Spec', fitment: '2022+ e:HEV O/S' },
+  { sku: 'CAP-TOY-COR-DOOR', name: 'Toyota Corolla Front Door', make: 'Toyota', part: 'door', price: '£199', was: '£640', condition: 'OEM Spec', fitment: '2019+ Hybrid O/S' },
 ];
 
 export const MAKES = Array.from(new Set(PRODUCTS.map((p) => p.make)));

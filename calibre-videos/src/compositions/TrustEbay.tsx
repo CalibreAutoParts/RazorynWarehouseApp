@@ -46,7 +46,7 @@ export const TrustEbay: React.FC<TrustEbayProps> = ({ feedback, reviewsLine, hoo
         <NavyBg>
           <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', gap: 30 }}>
             <Stamp top="100%" bottom="FEEDBACK" bg={COLORS.green} size={360} delay={2} />
-            <PopCaption text="Buy with confidence — same parts, even better prices on our site" delay={10} bg={COLORS.red} fontSize={46} />
+            <PopCaption text="Buy with confidence — same trusted team on our website" delay={10} bg={COLORS.red} fontSize={46} />
             <SocialBar delay={18} />
           </AbsoluteFill>
         </NavyBg>

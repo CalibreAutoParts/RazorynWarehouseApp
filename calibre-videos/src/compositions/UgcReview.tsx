@@ -8,6 +8,7 @@ import { Logo } from '../components/Logo';
 import { EndCard } from '../components/EndCard';
 import { COLORS } from '../brand/theme';
 import { FONT_FAMILY } from '../brand/fonts';
+import { SHOW_PRICING } from '../data/config';
 import type { Product } from '../data/products';
 
 export type UgcReviewProps = {
@@ -48,8 +49,8 @@ export const UgcReview: React.FC<UgcReviewProps> = ({ reviewerName, reviewerRole
                 <div style={{ fontFamily: FONT_FAMILY.body, fontWeight: 800, fontSize: 38, color: COLORS.white, textAlign: 'center', padding: '0 20px' }}>
                   {product.name}
                 </div>
-                <div style={{ fontFamily: FONT_FAMILY.display, fontSize: 80, color: COLORS.gold }}>{product.price}</div>
-                <Pill text={product.condition} bg={COLORS.green} delay={10} />
+                {SHOW_PRICING && <div style={{ fontFamily: FONT_FAMILY.display, fontSize: 80, color: COLORS.gold }}>{product.price}</div>}
+                <Pill text={`${product.condition} · Exact fit`} bg={COLORS.green} delay={10} />
               </AbsoluteFill>
             </PhoneFrame>
           </AbsoluteFill>

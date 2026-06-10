@@ -19,7 +19,7 @@ export type TipCardProps = {
 export const TipCard: React.FC<TipCardProps> = ({ hook, tipTitle, steps, part = 'bumper' }) => {
   const { fps } = useVideoConfig();
   const s = (sec: number) => Math.round(sec * fps);
-  const per = 1.6;
+  const per = 2.3;
 
   return (
     <AbsoluteFill>
@@ -60,7 +60,7 @@ export const TipCard: React.FC<TipCardProps> = ({ hook, tipTitle, steps, part = 
       <Sequence from={s(3.4 + steps.length * per)} durationInFrames={s(1.6)}>
         <NavyBg>
           <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', gap: 26 }}>
-            <PopCaption text="Need the part? We’ve got it — trade prices" delay={2} bg={COLORS.red} fontSize={52} />
+            <PopCaption text="Need the exact-fit part? We’ve got it" delay={2} bg={COLORS.red} fontSize={52} />
             <SocialBar delay={10} />
           </AbsoluteFill>
         </NavyBg>

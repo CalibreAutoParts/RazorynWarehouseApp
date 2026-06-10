@@ -7,6 +7,7 @@ import { Logo } from '../components/Logo';
 import { EndCard } from '../components/EndCard';
 import { COLORS } from '../brand/theme';
 import { FONT_FAMILY } from '../brand/fonts';
+import { SHOW_PRICING } from '../data/config';
 import type { Product } from '../data/products';
 
 export type AdSpotProps = {
@@ -50,13 +51,23 @@ export const AdSpot: React.FC<AdSpotProps> = ({ product, hook, audienceLine }) =
         </NavyBg>
       </Sequence>
 
-      {/* PRICE / VALUE */}
+      {/* VALUE / MESSAGE */}
       <Sequence from={s(4.8)} durationInFrames={s(2.4)}>
         <NavyBg>
           <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', gap: 40 }}>
             <PopCaption text={audienceLine} delay={2} bg={COLORS.red} />
-            <PriceTag price={product.price} was={product.was} label={`${PART_LABELS[product.part]} from`} delay={10} />
-            <Pill text="vs main dealer price" bg={COLORS.navy} delay={20} fontSize={32} />
+            {SHOW_PRICING ? (
+              <>
+                <PriceTag price={product.price} was={product.was} label={`${PART_LABELS[product.part]} from`} delay={10} />
+                <Pill text="vs main dealer price" bg={COLORS.navy} delay={20} fontSize={32} />
+              </>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+                <Pill text="EXACT-FIT GUARANTEED" bg={COLORS.green} delay={10} fontSize={40} />
+                <Pill text="Same-day dispatch before 12pm" bg={COLORS.navy} delay={16} fontSize={30} />
+                <Pill text="Free UK delivery over £25" bg={COLORS.navy} delay={20} fontSize={30} />
+              </div>
+            )}
             <div style={{ marginTop: 10 }}>
               <SocialBar delay={26} />
             </div>
