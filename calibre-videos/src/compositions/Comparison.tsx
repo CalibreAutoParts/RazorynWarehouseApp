@@ -17,16 +17,17 @@ export type ComparisonProps = {
   rows?: ComparisonRow[];
 };
 
-/** Main dealer vs Calibre — a service & quality comparison (no pricing). Leads
- *  on the things that actually set Calibre apart, including aftermarket doors
- *  that dealers only sell brand-new. */
+/** Main dealer vs Calibre Auto Parts — a service & quality comparison (no
+ *  pricing). The dealer sells every part brand-new; this leads on the things
+ *  that set Calibre Auto Parts apart: an aftermarket alternative, same-day
+ *  dispatch and real service. */
 export const Comparison: React.FC<ComparisonProps> = ({ product, hook, rows }) => {
   const { fps } = useVideoConfig();
   const s = (sec: number) => Math.round(sec * fps);
 
   const data: ComparisonRow[] = rows ?? [
     { label: 'Exact-fit for your model', dealer: true, calibre: true },
-    { label: 'Aftermarket doors available', dealer: false, calibre: true },
+    { label: 'Aftermarket — not just brand-new', dealer: false, calibre: true },
     { label: 'Same-day dispatch before 12pm', dealer: false, calibre: true },
     { label: 'Talk to a real person', dealer: false, calibre: true },
   ];
@@ -75,7 +76,7 @@ export const Comparison: React.FC<ComparisonProps> = ({ product, hook, rows }) =
       </Sequence>
 
       <Sequence from={s(8.6)} durationInFrames={s(3)}>
-        <EndCard cta={`Order your ${product.make} part at Calibre`} />
+        <EndCard cta={`Order your ${product.make} part at Calibre Auto Parts`} />
       </Sequence>
     </AbsoluteFill>
   );

@@ -70,7 +70,7 @@ export const Testimonial: React.FC<TestimonialProps> = ({ name, role, stars, tex
       </Sequence>
 
       <Sequence from={s(8)} durationInFrames={s(3)}>
-        <EndCard cta="See why they choose Calibre" />
+        <EndCard cta="See why they choose Calibre Auto Parts" />
       </Sequence>
     </AbsoluteFill>
   );

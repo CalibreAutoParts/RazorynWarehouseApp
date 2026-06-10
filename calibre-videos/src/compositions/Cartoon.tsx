@@ -44,7 +44,7 @@ export const Cartoon: React.FC<CartoonProps> = ({ title, scenes }) => {
       ))}
 
       <Sequence from={s(intro + scenes.length * dur)} durationInFrames={s(3.2)}>
-        <EndCard cta="That’s Calibre. Family-run, Watford" />
+        <EndCard cta="That’s Calibre Auto Parts. Family-run, Watford" />
       </Sequence>
     </AbsoluteFill>
   );

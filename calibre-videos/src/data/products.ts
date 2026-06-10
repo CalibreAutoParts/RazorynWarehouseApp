@@ -15,8 +15,9 @@ export type Product = {
  * Calibre Auto Parts real range: EXACT-FIT body parts for EVs, hybrids and
  * modern vehicles — Tesla, MG, BYD, Honda and Toyota (see calibreautoparts.co.uk).
  * Parts span headlights, tail lights, bumpers, bonnets, wings, mirrors AND
- * aftermarket-quality DOORS — which main dealers only sell brand-new, so the
- * doors range is a genuine point of difference no one else offers.
+ * aftermarket-quality DOORS. Doors are the standout USP: Calibre Auto Parts is
+ * the ONLY aftermarket supplier that sells them — every other aftermarket seller
+ * stops at panels, leaving the brand-new main dealer as the only alternative.
  *
  * NOTE ON PRICING: the `price`/`was` figures below are PLACEHOLDERS, not live
  * data — they are not synced to eBay/website and must not be shown until the
@@ -81,7 +82,7 @@ export const PRODUCTS: Product[] = [
   { sku: 'CAP-TOY-COR-TL', name: 'Toyota Corolla Tail Light', make: 'Toyota', part: 'taillight', price: '£109', was: '£280', condition: 'Brand New', fitment: '2019+ O/S' },
   { sku: 'CAP-TOY-RAV-BMP', name: 'Toyota RAV4 Front Bumper', make: 'Toyota', part: 'bumper', price: '£169', was: '£430', condition: 'OEM Spec', fitment: '2019+ Hybrid' },
 
-  // ---- Aftermarket DOORS (our USP — dealers only sell brand-new) ----
+  // ---- Aftermarket DOORS (our USP — the only aftermarket supplier that does doors) ----
   { sku: 'CAP-TES-M3-DOOR', name: 'Tesla Model 3 Front Door', make: 'Tesla', part: 'door', price: '£345', was: '£1100', condition: 'OEM Spec', fitment: '2021+ O/S driver' },
   { sku: 'CAP-TES-MY-DOOR', name: 'Tesla Model Y Front Door', make: 'Tesla', part: 'door', price: '£365', was: '£1180', condition: 'OEM Spec', fitment: '2020–2024 O/S' },
   { sku: 'CAP-MG4-DOOR', name: 'MG4 Front Door', make: 'MG', part: 'door', price: '£239', was: '£760', condition: 'OEM Spec', fitment: '2022–2026 O/S' },

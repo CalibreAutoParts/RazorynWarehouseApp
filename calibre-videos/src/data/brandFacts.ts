@@ -3,7 +3,7 @@
 export const BENEFITS = [
   'Exact-fit for your make & model',
   'EV, hybrid & modern-car specialists',
-  'Aftermarket doors no one else offers',
+  'The only aftermarket supplier that does doors',
   'Tesla · MG · BYD · Honda · Toyota',
   'Family-run from Watford',
   'Free UK delivery over £25',
@@ -15,7 +15,7 @@ export const AUDIENCES = {
   flippers: {
     key: 'flippers',
     label: 'Car flippers',
-    line: 'Flipping an EV or hybrid? Exact-fit panels — and doors no one else stocks.',
+    line: 'Flipping an EV or hybrid? Exact-fit panels — and the only aftermarket doors.',
   },
   garages: {
     key: 'garages',
@@ -37,11 +37,11 @@ export const HOOKS = [
   'MG, BYD or Tesla? We’ve got your panels.',
   'BYD owners — exact-fit parts at last.',
   'MG drivers, this one’s for you.',
-  'Need a door? Dealers only sell brand-new. We don’t.',
+  'Need a door? We’re the only aftermarket supplier that does them.',
   'Exact-fit EV & hybrid parts, sorted.',
   'POV: you found exact-fit parts.',
   'Pranged it? Don’t panic.',
-  'Aftermarket doors no one else offers.',
+  'Aftermarket doors no other supplier does.',
   'Exact-fit panels for modern cars.',
   'Watford’s best-kept car-parts secret.',
   'Before you pay that dealer quote… watch this.',
@@ -56,7 +56,7 @@ export const HOOKS = [
 export type Review = { name: string; role: string; stars: number; text: string };
 export const REVIEWS: Review[] = [];
 
-/** Multi-part "story time" scripts (EV/modern car flipping / stumble-across-Calibre). */
+/** Multi-part "story time" scripts (EV/modern car flipping / stumble-across-Calibre Auto Parts). */
 export type StoryBeat = { text: string; emphasis?: string };
 export type Story = {
   id: string;
@@ -85,7 +85,7 @@ export const STORIES: Story[] = [
         beats: [
           { text: 'Front bumper and both LED headlights.' },
           { text: 'Tesla main-dealer quote? Eye-watering.' },
-          { text: 'Calibre had the lot — exact fit, far less.', emphasis: 'exact fit' },
+          { text: 'Calibre Auto Parts had the lot — exact fit, far less.', emphasis: 'exact fit' },
           { text: 'Dispatched same day to my unit.' },
         ],
       },
@@ -95,14 +95,14 @@ export const STORIES: Story[] = [
           { text: 'Fitted it over a weekend.' },
           { text: 'Sold the car for £21,000.' },
           { text: 'That’s the flip. That’s the margin.', emphasis: 'margin' },
-          { text: 'Calibre is now my first call. Every time.' },
+          { text: 'Calibre Auto Parts is now my first call. Every time.' },
         ],
       },
     ],
   },
   {
     id: 'stumble-watford',
-    title: 'How I stumbled across Calibre',
+    title: 'How I stumbled across Calibre Auto Parts',
     audience: 'public',
     parts: [
       {
@@ -116,7 +116,7 @@ export const STORIES: Story[] = [
       {
         partLabel: 'Part 2',
         beats: [
-          { text: 'My mate said "try Calibre, they’re Watford lads".' },
+          { text: 'My mate said "try Calibre Auto Parts, they’re Watford lads".' },
           { text: 'Family-run. Picked up first ring.' },
           { text: 'Exact-fit bumper for my model.', emphasis: 'exact-fit' },
           { text: 'Sorted me out, dispatched same day.' },
@@ -143,14 +143,14 @@ export const STORIES: Story[] = [
         beats: [
           { text: 'We took on more EV and hybrid work.' },
           { text: 'Our old supplier kept sending wrong panels.' },
-          { text: 'Then we opened an account with Calibre.' },
+          { text: 'Then we opened an account with Calibre Auto Parts.' },
         ],
       },
       {
         partLabel: 'Part 2',
         beats: [
           { text: 'Exact-fit parts for Tesla, MG & BYD.' },
-          { text: 'They even do aftermarket doors.', emphasis: 'doors' },
+          { text: 'The only aftermarket lot that does doors.', emphasis: 'doors' },
           { text: 'Dispatched same day — jobs out faster.', emphasis: 'same day' },
           { text: 'And they actually answer the phone.' },
         ],
@@ -173,7 +173,7 @@ export const STORIES: Story[] = [
       {
         partLabel: 'Part 2',
         beats: [
-          { text: 'Calibre: exact-fit wing and LED headlight.' },
+          { text: 'Calibre Auto Parts: exact-fit wing and LED headlight.' },
           { text: 'Exact fit, dispatched same day.', emphasis: 'same day' },
           { text: 'A weekend of graft and it was mint.' },
         ],
@@ -183,7 +183,7 @@ export const STORIES: Story[] = [
         beats: [
           { text: 'In cheap, out the door for a tidy profit.' },
           { text: 'Clear profit after parts.', emphasis: 'profit' },
-          { text: 'Calibre makes the maths work.' },
+          { text: 'Calibre Auto Parts makes the maths work.' },
         ],
       },
     ],
@@ -204,7 +204,7 @@ export const STORIES: Story[] = [
       {
         partLabel: 'Part 2',
         beats: [
-          { text: 'Found Calibre — exact-fit mirror, sorted.' },
+          { text: 'Found Calibre Auto Parts — exact-fit mirror, sorted.' },
           { text: 'Watched a 10-minute video, clipped it on.' },
           { text: 'Saved a packet. Buzzing.', emphasis: 'packet' },
         ],
