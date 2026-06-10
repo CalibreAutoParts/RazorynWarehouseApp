@@ -55,7 +55,7 @@ export const PartsShowcase: React.FC<PartsShowcaseProps> = ({ category, headline
       <Sequence from={s(2.2 + items.length * per)} durationInFrames={s(2)}>
         <NavyBg>
           <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', gap: 28 }}>
-            <PopCaption text={`${PART_LABELS[category]} for every make & budget`} delay={2} bg={COLORS.red} />
+            <PopCaption text={`Exact-fit ${PART_LABELS[category]} — Tesla, MG, BYD, Honda & Toyota`} delay={2} bg={COLORS.red} fontSize={46} />
             <PriceTag price={items[0]?.price ?? '£49'} label="from" delay={8} />
             <SocialBar delay={16} />
           </AbsoluteFill>

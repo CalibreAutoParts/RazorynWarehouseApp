@@ -96,7 +96,7 @@ const SceneStage: React.FC<{ kind: CartoonProps['scenes'][number]['kind']; parts
   }
 
   // parts grid
-  const list = parts ?? ['bumper', 'headlight', 'wing', 'grille', 'mirror', 'bonnet'];
+  const list = parts ?? ['bumper', 'headlight', 'wing', 'taillight', 'mirror', 'bonnet'];
   return (
     <NavyBg>
       <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center' }}>
@@ -107,8 +107,8 @@ const SceneStage: React.FC<{ kind: CartoonProps['scenes'][number]['kind']; parts
             </div>
           ))}
         </div>
-        <div style={{ position: 'absolute', top: 120, fontFamily: FONT_FAMILY.display, fontSize: 64, color: COLORS.white }}>
-          EVERY PANEL, EVERY MAKE
+        <div style={{ position: 'absolute', top: 120, fontFamily: FONT_FAMILY.display, fontSize: 56, color: COLORS.white, textAlign: 'center', padding: '0 40px' }}>
+          EXACT-FIT FOR YOUR MODEL
         </div>
       </AbsoluteFill>
     </NavyBg>

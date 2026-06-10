@@ -46,8 +46,12 @@ export const BRAND = {
   tiktok: '@calibreautoparts',
   instagram: '@calibreautoparts',
   location: 'Watford',
-  tagline: 'Quality Car Parts. Trade Prices.',
+  tagline: 'Exact-Fit Parts for EVs & Modern Cars',
   family: 'Family-run, Watford',
+  // Real USPs from calibreautoparts.co.uk
+  usps: ['Exact-fit, guaranteed fitment', 'Free UK delivery over £25', 'Same-day dispatch before 12pm'],
+  specialism: 'EVs, hybrids & modern vehicles',
+  makes: 'Tesla · MG · BYD · Honda · Toyota',
 } as const;
 
 // Vertical social video canvas (TikTok / Reels)

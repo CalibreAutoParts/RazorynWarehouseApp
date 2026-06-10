@@ -26,17 +26,21 @@ export const EndCard: React.FC<{ cta?: string; showEbay?: boolean }> = ({
         <div
           style={{
             fontFamily: FONT_FAMILY.display,
-            fontSize: 70,
+            fontSize: 64,
             color: COLORS.white,
             textAlign: 'center',
             lineHeight: 1.05,
           }}
         >
-          QUALITY PARTS · TRADE PRICES
+          EXACT-FIT EV &amp; MODERN CAR PARTS
         </div>
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', justifyContent: 'center' }}>
-          <Pill text="Family-run · Watford" bg={COLORS.navy} delay={20} />
-          <Pill text="Fast UK delivery" bg={COLORS.green} delay={24} />
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', justifyContent: 'center' }}>
+          <Pill text="Exact-fit guaranteed" bg={COLORS.green} delay={20} fontSize={30} />
+          <Pill text="Free delivery over £25" bg={COLORS.navy} delay={23} fontSize={30} />
+          <Pill text="Same-day dispatch" bg={COLORS.red} delay={26} fontSize={30} />
+        </div>
+        <div style={{ fontFamily: FONT_FAMILY.body, fontWeight: 800, fontSize: 32, color: COLORS.silver }}>
+          Tesla · MG · BYD · Honda · Toyota — Family-run, Watford
         </div>
         {showEbay && (
           <div style={{ display: 'flex', justifyContent: 'center', marginTop: 6 }}>
