@@ -59,8 +59,9 @@ export const StoryTime: React.FC<StoryTimeProps> = ({ title, partLabel, partInde
       ))}
 
       {/* HOOK NEXT PART or END */}
-      <Sequence from={s(2.2 + beats.length * beatDur)} durationInFrames={s(isLast ? 0.01 : 2.6)}>
-        {!isLast && (
+      {/* HOOK NEXT PART (skipped entirely on the final part) */}
+      {!isLast && (
+        <Sequence from={s(2.2 + beats.length * beatDur)} durationInFrames={s(2.6)}>
           <NavyBg>
             <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', gap: 30 }}>
               <KineticHeadline text={`Part ${partIndex + 2} drops next`} fontSize={96} highlight="next" />
@@ -68,10 +69,10 @@ export const StoryTime: React.FC<StoryTimeProps> = ({ title, partLabel, partInde
               <SocialBar delay={18} />
             </AbsoluteFill>
           </NavyBg>
-        )}
-      </Sequence>
+        </Sequence>
+      )}
 
-      {/* END CARD (only on last part it’s longer; earlier parts still close on brand) */}
+      {/* END CARD — held longer on the final part so the full CTA reads */}
       <Sequence from={s(2.2 + beats.length * beatDur + (isLast ? 0 : 2.6))} durationInFrames={s(isLast ? 3 : 1.6)}>
         <EndCard cta={isLast ? 'This could be your next flip — shop Calibre' : 'Part of the story · calibreautoparts.co.uk'} />
       </Sequence>
