@@ -1,0 +1,35 @@
+{
+  "name": "calibre-videos",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Calibre Auto Parts — Remotion video & ad factory for TikTok and Instagram",
+  "scripts": {
+    "dev": "remotion studio",
+    "studio": "remotion studio",
+    "plan": "tsx scripts/gen-plan.ts",
+    "render": "remotion render",
+    "render-all": "tsx scripts/render-all.ts",
+    "render-sample": "tsx scripts/render-all.ts --sample",
+    "render-stills": "tsx scripts/render-all.ts --kind=still"
+  },
+  "dependencies": {
+    "@fontsource/anton": "^5.2.7",
+    "@fontsource/montserrat": "^5.2.8",
+    "@remotion/cli": "4.0.290",
+    "@remotion/fonts": "^4.0.290",
+    "@remotion/google-fonts": "4.0.290",
+    "@remotion/shapes": "4.0.290",
+    "@remotion/transitions": "4.0.290",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "remotion": "4.0.290",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@remotion/bundler": "^4.0.290",
+    "@remotion/renderer": "^4.0.290",
+    "@types/react": "19.0.0",
+    "tsx": "^4.22.4",
+    "typescript": "5.5.4"
+  }
+}

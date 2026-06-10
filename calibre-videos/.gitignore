@@ -1,0 +1,12 @@
+node_modules/
+# Rendered media is large & regenerable — keep it out of git.
+out/videos/
+out/stills/
+out/frames/
+out/*.mp4
+out/*.png
+out/*.jpg
+out/*.log
+# Keep the plan files (out/catalog.json, out/posting-plan.csv, out/schedule.csv)
+.remotion/
+*.tsbuildinfo
