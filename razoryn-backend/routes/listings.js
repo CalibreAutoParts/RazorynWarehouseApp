@@ -912,6 +912,7 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
         l.overrideTemplateSuffix = o.template_suffix != null ? o.template_suffix : null;
         l.overrideShippingProfileId = o.shipping_profile_id != null ? o.shipping_profile_id : null;
         l.overrideCategoryId = o.category_id != null ? o.category_id : null;
+        try { l.overrideSelectedImages = o.selected_images ? (typeof o.selected_images === 'string' ? JSON.parse(o.selected_images) : o.selected_images) : null; } catch (_) { l.overrideSelectedImages = null; }
       }
       const link = linkMap[l.itemId];
       if (link) {
@@ -1040,17 +1041,18 @@ async function ensureOverrideColumns() {
     await query(`ALTER TABLE ebay_listing_overrides ADD COLUMN IF NOT EXISTS template_suffix TEXT`);
     await query(`ALTER TABLE ebay_listing_overrides ADD COLUMN IF NOT EXISTS category_id TEXT`);
     await query(`ALTER TABLE ebay_listing_overrides ADD COLUMN IF NOT EXISTS shipping_profile_id TEXT`);
+    await query(`ALTER TABLE ebay_listing_overrides ADD COLUMN IF NOT EXISTS selected_images TEXT`);
     _ovrColsReady = true;
   } catch (e) { console.warn('[listings] ensureOverrideColumns:', e.message); }
 }
 router.post('/save-override', requireAdmin, async (req, res) => {
-  const { itemId, overrideSku, overrideTitle, customPrice, metafields, shippingProfileId, tags, templateSuffix, categoryId } = req.body;
+  const { itemId, overrideSku, overrideTitle, customPrice, metafields, shippingProfileId, tags, templateSuffix, categoryId, selectedImages } = req.body;
   if (!itemId) return res.status(400).json({ error: 'missing_item_id' });
   try {
     await ensureOverrideColumns();
     await query(`
-      INSERT INTO ebay_listing_overrides (ebay_item_id, override_sku, override_title, custom_price, metafields, shipping_profile_id, tags, template_suffix, category_id, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+      INSERT INTO ebay_listing_overrides (ebay_item_id, override_sku, override_title, custom_price, metafields, shipping_profile_id, tags, template_suffix, category_id, selected_images, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
       ON CONFLICT (ebay_item_id) DO UPDATE SET
         override_sku = EXCLUDED.override_sku,
         override_title = EXCLUDED.override_title,
@@ -1060,6 +1062,7 @@ router.post('/save-override', requireAdmin, async (req, res) => {
         tags = EXCLUDED.tags,
         template_suffix = EXCLUDED.template_suffix,
         category_id = EXCLUDED.category_id,
+        selected_images = EXCLUDED.selected_images,
         updated_at = now()
     `, [
       itemId,
@@ -1071,6 +1074,7 @@ router.post('/save-override', requireAdmin, async (req, res) => {
       tags != null ? tags : null,
       templateSuffix != null ? templateSuffix : null,
       categoryId || null,
+      (selectedImages && Array.isArray(selectedImages)) ? JSON.stringify(selectedImages) : null,
     ]);
     res.json({ ok: true });
   } catch (e) {
@@ -1191,6 +1195,42 @@ router.post('/mirror', requireAdmin, async (req, res) => {
   }
 
   await audit(req, 'mirror_listings', null, null, results);
+  res.json({ ok: true, ...results });
+});
+
+// POST /api/listings/resync-images — one-click re-push of the SELECTED images only.
+// Deliberately separate from /mirror: it touches images and nothing else (no
+// title/price/metafields), so refreshing photos to full resolution can't disturb
+// the rest of the product. Body: { items: [{ itemId, sku, imageUrls }] }.
+router.post('/resync-images', requireAdmin, async (req, res) => {
+  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+  const items = req.body.items || [];
+  const results = { updated: 0, skipped: 0, errors: [] };
+
+  const itemIds = items.map(i => i.itemId).filter(Boolean);
+  const linkRows = itemIds.length
+    ? await query(`SELECT * FROM mirror_links WHERE ebay_item_id = ANY($1)`, [itemIds])
+    : { rows: [] };
+  const linkByItemId = {};
+  for (const r of linkRows.rows) linkByItemId[r.ebay_item_id] = r;
+
+  for (const item of items) {
+    try {
+      if (!item.imageUrls || !item.imageUrls.length) { results.skipped++; continue; }
+      // Resolve the Shopify product: stable mirror link first, then SKU.
+      let pid = linkByItemId[item.itemId]?.shopify_product_id;
+      if (!pid && item.sku) {
+        const found = await shopify.findProductsBySkus([item.sku]);
+        if (found[item.sku]) pid = found[item.sku].product_id;
+      }
+      if (!pid) { results.skipped++; results.errors.push({ sku: item.sku, error: 'not linked to a Shopify product' }); continue; }
+      const r = await shopify.setProductImages(pid, item.imageUrls);
+      if (r.ok) results.updated++; else { results.skipped++; results.errors.push({ sku: item.sku, error: r.skipped || 'no images uploaded' }); }
+    } catch (e) {
+      results.errors.push({ sku: item.sku, error: e.message });
+    }
+  }
+  await audit(req, 'resync_images', null, null, results);
   res.json({ ok: true, ...results });
 });
 

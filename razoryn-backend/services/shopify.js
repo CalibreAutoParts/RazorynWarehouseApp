@@ -359,6 +359,29 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
   return out;
 }
 
+// Images-only update — replaces a product's images with the given (full-res,
+// de-duped) set WITHOUT touching title, price, metafields or inventory. Used by
+// the one-click "re-push selected images" tool so an image refresh can't disturb
+// anything else. Returns { ok, count }.
+async function setProductImages(productId, imageUrls) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const imgs = normaliseImageUrls(imageUrls);
+  if (!imgs.length) return { ok: false, count: 0, skipped: 'no_images' };
+  const ex = await shopifyRequest('get', `/products/${productId}.json`);
+  const existing = ex.data.product;
+  for (const img of existing.images || []) {
+    try { await shopifyRequest('delete', `/products/${productId}/images/${img.id}.json`); } catch (e) {}
+  }
+  let count = 0;
+  for (const src of imgs) {
+    try {
+      await shopifyRequest('post', `/products/${productId}/images.json`, { data: { image: { src } } });
+      count++;
+    } catch (e) { console.warn('[shopify] image upload failed:', src, e.message); }
+  }
+  return { ok: count > 0, count };
+}
+
 // Lightweight price-only update — sets just the first variant's price without
 // touching title, images, or inventory. Used by the pricing-sync tool.
 async function setVariantPrice(shopifyProductId, price) {
@@ -987,6 +1010,7 @@ module.exports = {
   createProduct,
   updateProduct,
   setVariantPrice,
+  setProductImages,
   publishProductToAllChannels,
   getPublications,
   getMetafieldDefinitions,

@@ -9231,6 +9231,7 @@ function scheduleSaveOverride(itemId) {
         templateSuffix: MirrorState.itemTemplateSuffixes[itemId] != null ? MirrorState.itemTemplateSuffixes[itemId] : null,
         shippingProfileId: MirrorState.itemShippingProfileIds[itemId] != null ? MirrorState.itemShippingProfileIds[itemId] : null,
         categoryId: (MirrorState.itemCategoryIds && MirrorState.itemCategoryIds[itemId] != null) ? MirrorState.itemCategoryIds[itemId] : null,
+        selectedImages: MirrorState.selectedImages[itemId] ? Array.from(MirrorState.selectedImages[itemId]) : null,
       });
       // small visual indicator: badge on row
       const row = document.querySelector(`[data-row="${itemId}"]`);
@@ -9299,7 +9300,10 @@ function renderMirror() {
                 </div>
                 <div>
                   <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Push to Shopify</div>
-                  <button class="btn btn-primary" onclick="mirrorSelected()" id="mr-push-btn">Push selected →</button>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap">
+                    <button class="btn btn-primary" onclick="mirrorSelected()" id="mr-push-btn">Push selected →</button>
+                    <button class="btn btn-outline" onclick="resyncSelectedImages()" id="mr-resync-img-btn" title="Re-upload just the selected photos (full resolution) to the matching Shopify products. Images only — nothing else is changed.">📷 Re-push images</button>
+                  </div>
                 </div>
               </div>
 
@@ -10649,8 +10653,10 @@ async function pullEbayListings() {
       if (l.overrideTemplateSuffix != null) MirrorState.itemTemplateSuffixes[l.itemId] = l.overrideTemplateSuffix;
       if (l.overrideShippingProfileId != null) MirrorState.itemShippingProfileIds[l.itemId] = l.overrideShippingProfileId;
       if (l.overrideCategoryId != null) MirrorState.itemCategoryIds[l.itemId] = l.overrideCategoryId;
-      // Default to importing ALL of the listing's photos (untick any unwanted).
-      MirrorState.selectedImages[l.itemId] = new Set(Array.isArray(l.pictureUrls) ? l.pictureUrls : []);
+      // Restore the saved photo selection if one exists (so a one-click image
+      // re-sync uses exactly the photos the user chose); else default to ALL.
+      const savedImgs = Array.isArray(l.overrideSelectedImages) ? l.overrideSelectedImages.filter(u => (l.pictureUrls || []).includes(u)) : null;
+      MirrorState.selectedImages[l.itemId] = new Set(savedImgs && savedImgs.length ? savedImgs : (Array.isArray(l.pictureUrls) ? l.pictureUrls : []));
     }
     el('mirror-empty').style.display = 'none';
     el('mirror-toolbar').style.display = 'block';
@@ -11426,6 +11432,8 @@ function toggleImage(itemId, url, on) {
   const set = MirrorState.selectedImages[itemId] || new Set();
   if (on) set.add(url); else set.delete(url);
   MirrorState.selectedImages[itemId] = set;
+  // Persist the chosen photos so a one-click image re-sync uses exactly these.
+  scheduleSaveOverride(itemId);
   // Update count label without full repaint
   const row = document.querySelector(`[data-row="${itemId}"]`);
   if (row) {
@@ -11695,6 +11703,42 @@ async function mirrorSelected() {
   } catch (e) {
     Task.fail(taskId, 'Mirror failed');
     toast('Mirror failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// One-click: re-push ONLY the selected photos (full resolution) for the selected,
+// already-mirrored listings. Separate from the full mirror so refreshing images
+// can't disturb titles/prices/metafields.
+async function resyncSelectedImages() {
+  const visibleSet = new Set(mirrorFilteredListings().map(l => l.itemId));
+  const selected = MirrorState.listings.filter(l =>
+    MirrorState.selected.has(l.itemId) && visibleSet.has(l.itemId) && l.existsOnShopify);
+  if (!selected.length) {
+    toast('Select one or more already-mirrored listings first (only linked products can have images re-pushed).', 'warn', 6000);
+    return;
+  }
+  const items = selected.map(l => ({
+    itemId: l.itemId,
+    sku: effectiveSku(l),
+    imageUrls: Array.from(MirrorState.selectedImages[l.itemId] || []),
+  })).filter(i => i.imageUrls.length);
+  if (!items.length) {
+    toast('None of the selected listings have any photos ticked.', 'warn', 6000);
+    return;
+  }
+  if (!confirm(`Re-push the selected photos (full resolution) for ${items.length} listing(s) to Shopify?\n\nThis replaces those products' images only — titles, prices and metafields are untouched.`)) return;
+
+  const taskId = Task.start(`Re-pushing images for ${items.length} listing(s)`);
+  try {
+    const r = await Api.post('/api/listings/resync-images', { items });
+    Task.done(taskId, `Updated ${r.updated} product(s)`);
+    let msg = `Images updated: ${r.updated}`;
+    if (r.skipped) msg += `, Skipped: ${r.skipped}`;
+    if (r.errors?.length) { msg += `, Errors: ${r.errors.length}`; console.warn('Image re-sync errors:', r.errors); }
+    toast(msg, r.errors?.length ? 'warn' : 'success');
+  } catch (e) {
+    Task.fail(taskId, 'Image re-sync failed');
+    toast('Image re-sync failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 
