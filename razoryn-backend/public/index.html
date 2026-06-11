@@ -9320,6 +9320,20 @@ function renderMirror() {
                 <div id="mr-category-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:260px;overflow:auto"></div>
               </div>
 
+              <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+                  <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">
+                    Common metafields <span style="font-weight:400;text-transform:none">— applied to every mirrored listing (e.g. Position, Finish, Part Number). Use {{sku}} / {{title}} tokens. Per-listing values override these.</span>
+                  </div>
+                  <span id="mr-mf-saved" style="font-size:11px;color:var(--green);font-weight:600;opacity:0;transition:opacity .2s">✓ Saved</span>
+                </div>
+                <div id="mr-metafields"></div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+                  <button class="btn btn-outline btn-sm" onclick="addMetafield()">+ Add metafield</button>
+                  <button class="btn btn-outline btn-sm" onclick="addSeoDescriptionTemplate()">+ SEO description</button>
+                </div>
+              </div>
+
               <div id="mirror-stores-banner" style="display:none;margin-top:12px;font-size:12px;color:var(--ink-soft);background:var(--bg-soft);padding:8px 12px;border-radius:6px"></div>
               <div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
                 <input id="mr-search" placeholder="Filter by title, SKU, or item ID…" oninput="updateFilter(this.value)" style="flex:1;min-width:240px">
@@ -9345,6 +9359,8 @@ function renderMirror() {
       </div>
     </div>
   `;
+  // Load the saved common metafields (shared across the team) so they're ready.
+  loadCommonMetafields();
   // If listings were previously pulled, restore the toolbar + list straight away
   if (MirrorState.listings && MirrorState.listings.length) {
     el('mirror-empty').style.display = 'none';
@@ -10774,9 +10790,30 @@ function updateFilter(text) {
   paintMirrorList();
 }
 
+// Load/persist the common (bulk) metafields so they survive refresh + are shared.
+async function loadCommonMetafields() {
+  try {
+    const r = await Api.get('/api/listings/common-metafields');
+    if (Array.isArray(r.metafields)) MirrorState.metafields = r.metafields;
+  } catch (e) { /* non-fatal — start empty */ }
+  paintMetafields();
+}
+let _mfSaveTimer = null;
+function saveCommonMetafields() {
+  clearTimeout(_mfSaveTimer);
+  _mfSaveTimer = setTimeout(async () => {
+    try {
+      await Api.post('/api/listings/common-metafields', { metafields: MirrorState.metafields });
+      const ind = el('mr-mf-saved');
+      if (ind) { ind.style.opacity = '1'; setTimeout(() => { ind.style.opacity = '0'; }, 1200); }
+    } catch (e) { /* keep local copy; will retry on next change */ }
+  }, 700);
+}
+
 function addMetafield() {
   MirrorState.metafields.push({ namespace: 'custom', key: '', value: '', type: 'single_line_text_field' });
   paintMetafields();
+  saveCommonMetafields();
 }
 
 // Convenience: add a multi-line "SEO description" metafield with a sensible token template.
@@ -10792,6 +10829,7 @@ function addSeoDescriptionTemplate() {
   const value = '{{title}} · Part Number: {{sku}} · Quality aftermarket replacement, primed and ready for paint. Direct fit OEM-equivalent body panel.';
   MirrorState.metafields.push({ namespace, key, value, type });
   paintMetafields();
+  saveCommonMetafields();
   if (!def) toast('Tip: define an "seo_description" metafield in Shopify admin first, or change namespace/key above', 'info');
 }
 
@@ -10974,9 +11012,11 @@ async function seoApplySelected() {
 function removeMetafield(idx) {
   MirrorState.metafields.splice(idx, 1);
   paintMetafields();
+  saveCommonMetafields();
 }
 function updateMetafield(idx, field, value) {
   if (MirrorState.metafields[idx]) MirrorState.metafields[idx][field] = value;
+  saveCommonMetafields();
 }
 function paintMetafields() {
   const wrap = el('mr-metafields');
@@ -11019,6 +11059,7 @@ function pickMetafieldDef(idx, value) {
     MirrorState.metafields[idx] = { namespace, key, value: MirrorState.metafields[idx]?.value || '', type };
   }
   paintMetafields();
+  saveCommonMetafields();
 }
 
 function paintMirrorList() {

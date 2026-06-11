@@ -1083,6 +1083,45 @@ router.post('/save-override', requireAdmin, async (req, res) => {
   }
 });
 
+// Common (bulk) metafields applied to every mirrored listing — persisted globally
+// so the set of Position/Finish/Part Number/etc. fields survives a refresh and is
+// shared across the team, rather than living only in one browser tab.
+let _mfDefaultsReady = false;
+async function ensureMirrorDefaults() {
+  if (_mfDefaultsReady) return;
+  await query(`CREATE TABLE IF NOT EXISTS mirror_defaults (
+    id INT PRIMARY KEY DEFAULT 1,
+    common_metafields JSONB,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  _mfDefaultsReady = true;
+}
+router.get('/common-metafields', requireAdmin, async (req, res) => {
+  try {
+    await ensureMirrorDefaults();
+    const { rows } = await query(`SELECT common_metafields FROM mirror_defaults WHERE id = 1`);
+    const mf = rows[0]?.common_metafields;
+    res.json({ metafields: Array.isArray(mf) ? mf : (mf ? (typeof mf === 'string' ? JSON.parse(mf) : mf) : []) });
+  } catch (e) {
+    console.error('[listings/common-metafields GET]', e.message);
+    res.json({ metafields: [] });
+  }
+});
+router.post('/common-metafields', requireAdmin, async (req, res) => {
+  try {
+    await ensureMirrorDefaults();
+    const metafields = Array.isArray(req.body?.metafields) ? req.body.metafields : [];
+    await query(`
+      INSERT INTO mirror_defaults (id, common_metafields, updated_at) VALUES (1, $1, now())
+      ON CONFLICT (id) DO UPDATE SET common_metafields = EXCLUDED.common_metafields, updated_at = now()
+    `, [JSON.stringify(metafields)]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[listings/common-metafields POST]', e.message);
+    res.status(500).json({ error: 'save_failed', message: e.message });
+  }
+});
+
 // Check existing Shopify products by SKU
 router.post('/check-conflicts', requireAdmin, async (req, res) => {
   if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
