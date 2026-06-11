@@ -8570,6 +8570,90 @@ const BUILTIN_GUIDES = [
         </div>` },
     ],
   },
+  {
+    id: 'record-order',
+    title: 'Recording a confirmed order',
+    desc: 'Turn a quote into a real order in the Quote Builder — pricing, payment method, and customer details.',
+    steps: [
+      { title: 'Open the Quote Builder',
+        body: 'In the sidebar go to <strong>Quote Builder</strong>. Use <strong>Search for a part</strong> to find the item by name or part number, then click the row to see pricing.',
+        visual: () => `<div style="display:flex;gap:14px">
+          <div style="width:150px">${G.nav('Quote Builder', true)}${G.nav('Dispatch')}${G.nav('Stock Check & Scan')}</div>
+          <div style="flex:1">${G.card('<div style="font-size:12px;color:var(--ink-soft)">🔍 Search for a part…</div>')}</div>
+        </div>` },
+      { title: 'Choose the payment method',
+        body: 'Tap the price tile for either <strong>💰 Cash on collection</strong> or <strong>🏦 Bank transfer (trade)</strong>. Adjust quantity with the +/− buttons in the footer.',
+        visual: () => `<div style="display:flex;gap:10px;justify-content:center">
+          ${G.card('<div style="font-size:12px;font-weight:600">💰 Cash on collection</div><div style="font-size:18px;font-weight:800;margin-top:4px">£42.00</div>')}
+          ${G.card('<div style="font-size:12px;font-weight:600">🏦 Bank transfer (trade)</div><div style="font-size:18px;font-weight:800;margin-top:4px">£35.00</div>')}
+        </div>` },
+      { title: 'Generate the pro-forma',
+        body: 'Click <strong>Generate pro-forma →</strong>. The <strong>Review &amp; send pro-forma</strong> window opens so you can add the customer details.',
+        visual: () => `<div style="display:flex;justify-content:center">${G.btn('Generate pro-forma →', true)}</div>` },
+      { title: 'Fill in the customer details',
+        body: 'Enter <strong>Customer name</strong> (required), plus phone, email, address, vehicle reg and any notes. Re-select the payment method to confirm it.',
+        visual: () => G.card(`<div style="display:grid;gap:6px;font-size:12px">
+          <div style="padding:6px 8px;border:1px solid var(--line);border-radius:6px">Customer name *</div>
+          <div style="padding:6px 8px;border:1px solid var(--line);border-radius:6px">Phone</div>
+          <div style="padding:6px 8px;border:1px solid var(--line);border-radius:6px">Vehicle reg</div>
+        </div>`) },
+      { title: 'Confirm the order',
+        body: 'Click <strong>✓ Confirmed order</strong>. This records it as a <em>real</em> order (not just an estimate) — it\'s saved to Sales and appears in <strong>Dispatch → Awaiting dispatch</strong>.',
+        visual: () => `<div style="display:flex;flex-direction:column;align-items:center;gap:8px">
+          ${G.btn('✓ Confirmed order', true)}
+          <div style="font-size:11px;color:var(--ink-soft)">→ “Order confirmed — added to Sales &amp; Dispatch”</div>
+        </div>` },
+    ],
+  },
+  {
+    id: 'stock-scan',
+    title: 'Using the stock-take scanner',
+    desc: 'Scan barcodes by camera or USB to check stock, adjust counts, mark damaged, or record a cash sale.',
+    steps: [
+      { title: 'Open Stock Check & Scan',
+        body: 'Go to <strong>Stock Check &amp; Scan</strong> in the sidebar. Pick your input: the <strong>📷 Camera</strong> tab or the <strong>⌨️ USB scanner</strong> tab.',
+        visual: () => `<div style="display:flex;gap:8px;justify-content:center">${G.btn('📷 Camera', true)} ${G.btn('⌨️ USB scanner')}</div>` },
+      { title: 'Start scanning',
+        body: 'Camera: click <strong>Start camera</strong> and point at the barcode. USB: click the input and scan — it types the code and submits automatically. You can also type a SKU or part number and press Enter.',
+        visual: () => G.card(`<div style="display:flex;align-items:center;gap:10px">${G.btn('Start camera', true)}<div style="flex:1;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:12px;color:var(--ink-soft)">Type SKU or part number…</div></div>`) },
+      { title: 'Read the scanned product',
+        body: 'The <strong>Last scanned</strong> card shows the product with its current stock count and bin location, so you can check it against what\'s on the shelf.',
+        visual: () => G.card(`<div style="font-size:11px;font-weight:700;color:var(--ink-soft);margin-bottom:6px">Last scanned</div>
+          <div style="font-size:13px;font-weight:700">Brake disc — FR</div>
+          <div style="font-size:12px;color:var(--ink-soft)">SKU BRK-0192 · Stock: 6 · Bin A12</div>`) },
+      { title: 'Take an action',
+        body: 'Pick the right button: <strong>✓ Stock matches</strong>, <strong>Adjust qty</strong> (enter a new count + reason), <strong>Mark damaged</strong>, or <strong>Mark sold (cash)</strong> to record an on-the-spot cash sale.',
+        visual: () => `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center">${G.btn('✓ Stock matches', true)} ${G.btn('Adjust qty')} ${G.btn('Mark damaged')} ${G.btn('Mark sold (cash)')}</div>` },
+      { title: 'Save the adjustment',
+        body: 'In the modal (e.g. <strong>Adjust stock — BRK-0192</strong>) enter the <strong>New stock count</strong>, choose a <strong>Reason</strong>, add notes, then <strong>Save</strong>. The change is logged so there\'s a full audit trail.',
+        visual: () => G.card(`<div style="font-size:13px;font-weight:700;margin-bottom:8px">Adjust stock — BRK-0192</div>
+          <div style="display:grid;gap:6px;font-size:12px"><div style="padding:6px 8px;border:1px solid var(--line);border-radius:6px">New stock count: 5</div><div style="padding:6px 8px;border:1px solid var(--line);border-radius:6px">Reason: Miscount</div></div>
+          <div style="display:flex;justify-content:flex-end;margin-top:8px">${G.btn('Save', true)}</div>`) },
+    ],
+  },
+  {
+    id: 'ebay-autodispatch',
+    title: 'How auto-dispatch from eBay works',
+    desc: 'When an eBay order is shipped (tracking uploaded), it clears itself from your dispatch worklist automatically.',
+    steps: [
+      { title: 'Orders land in the worklist',
+        body: 'Confirmed eBay orders appear under <strong>Dispatch → 📦 Awaiting dispatch</strong>. This is your live worklist of what still needs sending.',
+        visual: () => G.card(`<div style="font-size:11px;font-weight:700;color:var(--ink-soft);margin-bottom:6px">📦 Awaiting dispatch</div>
+          <div style="font-size:12px">#27-11843 · Brake disc — FR</div>
+          <div style="font-size:12px">#27-11844 · Wing mirror — R</div>`) },
+      { title: 'The app checks eBay every 30 minutes',
+        body: 'A background sync runs automatically every <strong>30 minutes</strong>. It asks eBay which of your orders have been marked <strong>shipped</strong> (tracking + carrier uploaded). No action needed from you.',
+        visual: () => `<div style="display:flex;justify-content:center">${G.card('<div style="font-size:12px;text-align:center">⏱ Auto-sync · every 30 min<br><span style="color:var(--ink-soft)">checking eBay for shipped orders…</span></div>')}</div>` },
+      { title: 'Shipped orders clear themselves',
+        body: 'Any order that\'s been fulfilled on eBay is automatically marked dispatched here and <strong>drops off the worklist</strong> — so the list only ever shows what genuinely still needs packing.',
+        visual: () => G.card(`<div style="font-size:12px;color:var(--ink-soft);text-decoration:line-through">#27-11843 · Brake disc — FR</div>
+          <div style="font-size:11px;color:var(--green);font-weight:600">✓ auto-marked dispatched from eBay tracking</div>`) },
+      { title: 'Need it now? Sync manually',
+        body: 'Don\'t want to wait for the 30-minute cycle? Click <strong>⟳ Sync from eBay</strong> on the Dispatch page to force a check immediately. It does the same thing, on demand.',
+        visual: () => `<div style="display:flex;flex-direction:column;align-items:center;gap:8px">${G.btn('⟳ Sync from eBay', true)}
+          <div style="font-size:11px;color:var(--ink-soft)">“2 order(s) auto-marked dispatched from eBay tracking”</div></div>` },
+    ],
+  },
 ];
 
 let _guideTimer = null, _guideIdx = 0, _guideRef = null;
