@@ -11678,8 +11678,20 @@ async function mirrorSelected() {
     let msg = `Created: ${r.created}, Updated: ${r.updated}, Skipped: ${r.skipped}`;
     if (r.errors && r.errors.length) msg += `, Errors: ${r.errors.length}`;
     Task.done(taskId, `Mirrored ${r.created + r.updated}`);
-    toast(msg, r.errors?.length ? 'warn' : 'success');
+    const hadIssues = r.errors?.length || r.metafieldIssues?.length;
+    toast(msg, hadIssues ? 'warn' : 'success');
     if (r.errors?.length) console.warn('Mirror errors:', r.errors);
+    // Metafields that Shopify rejected used to vanish silently — show them now so
+    // the user can fix the definition/type and re-push.
+    if (r.metafieldIssues?.length) {
+      console.warn('Metafield issues:', r.metafieldIssues);
+      const byField = {};
+      for (const mi of r.metafieldIssues) (byField[mi.key] = byField[mi.key] || []).push(mi.sku);
+      const lines = Object.entries(byField).map(([key, skus]) =>
+        `• ${key} — rejected on ${skus.length} item(s) (e.g. ${skus[0]})`);
+      const sample = r.metafieldIssues[0]?.error || '';
+      alert(`${r.metafieldIssues.length} metafield value(s) were rejected by Shopify and did NOT save:\n\n${lines.join('\n')}\n\nShopify said: ${sample}\n\nUsually the metafield's type in Shopify admin doesn't match — open Settings → Custom data → Products and check the definition, then re-push.`);
+    }
   } catch (e) {
     Task.fail(taskId, 'Mirror failed');
     toast('Mirror failed: ' + (e.data?.message || e.message), 'error');

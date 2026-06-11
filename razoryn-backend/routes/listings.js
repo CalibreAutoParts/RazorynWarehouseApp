@@ -1093,7 +1093,7 @@ router.post('/mirror', requireAdmin, async (req, res) => {
   if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
   const items = req.body.items || [];
   const overwrite = !!req.body.overwriteConflicts;
-  const results = { created: 0, updated: 0, skipped: 0, errors: [] };
+  const results = { created: 0, updated: 0, skipped: 0, errors: [], metafieldIssues: [] };
 
   // Build lookup of existing products. Use mirror_links first (stable), then SKU as fallback.
   const itemIds = items.map(i => i.itemId).filter(Boolean);
@@ -1141,6 +1141,11 @@ router.post('/mirror', requireAdmin, async (req, res) => {
       } else {
         product = await shopify.createProduct(args);
         results.created++;
+      }
+
+      // Surface any metafields Shopify rejected so they're not silently dropped.
+      for (const mf of (product?.__metafieldResults || [])) {
+        if (!mf.ok) results.metafieldIssues.push({ sku: item.sku, key: `${mf.namespace}.${mf.key}`, error: mf.error });
       }
 
       // Assign the Shopify product category (standard taxonomy) when one was

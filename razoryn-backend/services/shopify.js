@@ -264,8 +264,26 @@ async function findProductBySku(sku) {
 
 // Create a new Shopify product with SKU, barcode (= sku), price, and image URLs.
 // imageUrls is an array of public image URLs Shopify will fetch and host.
+
+// Upgrade an eBay-hosted image URL to its largest standard rendition. eBay's
+// gallery/thumbnail URLs (s-l64 … s-l500) otherwise mirror to Shopify at low
+// quality — forcing s-l1600 fetches the full-size image (eBay scales down to the
+// original if it's smaller, so this is always safe).
+function maxResImageUrl(url) {
+  if (!url || typeof url !== 'string') return url;
+  if (/\.ebayimg\.com/i.test(url)) return url.replace(/\/s-l\d+(?=\.|\?|$)/i, '/s-l1600');
+  return url;
+}
+// Normalise + de-dupe a list of image URLs before sending to Shopify. After the
+// resolution upgrade the gallery thumbnail and full image often collapse to the
+// same URL, so de-duping avoids importing the same photo twice.
+function normaliseImageUrls(imageUrls = []) {
+  return [...new Set((imageUrls || []).map(maxResImageUrl).filter(Boolean))];
+}
+
 async function createProduct({ title, sku, price, imageUrls = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
+  const imgs = normaliseImageUrls(imageUrls);
   const productPayload = {
     title,
     status,
@@ -275,7 +293,7 @@ async function createProduct({ title, sku, price, imageUrls = [], status = 'draf
       price: price != null ? String(price) : undefined,
       inventory_management: 'shopify',
     }],
-    images: imageUrls.map(src => ({ src })),
+    images: imgs.map(src => ({ src })),
   };
   if (tags) productPayload.tags = tags; // comma-separated string
   if (templateSuffix) productPayload.template_suffix = templateSuffix; // e.g. "large-parts"
@@ -284,7 +302,7 @@ async function createProduct({ title, sku, price, imageUrls = [], status = 'draf
   const product = r.data.product;
   await publishProductToAllChannels(product.id);
   if (qty != null) await setInitialInventory(product, qty);
-  if (metafields.length) await applyMetafields(product.id, metafields);
+  if (metafields.length) product.__metafieldResults = await applyMetafields(product.id, metafields);
   return product;
 }
 
@@ -315,11 +333,12 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
     });
   }
 
-  if (imageUrls && imageUrls.length) {
+  const imgs = normaliseImageUrls(imageUrls);
+  if (imgs.length) {
     for (const img of existing.images || []) {
       try { await shopifyRequest('delete', `/products/${productId}/images/${img.id}.json`); } catch (e) {}
     }
-    for (const src of imageUrls) {
+    for (const src of imgs) {
       try {
         await shopifyRequest('post', `/products/${productId}/images.json`, {
           data: { image: { src } },
@@ -330,11 +349,14 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
     }
   }
 
-  if (metafields.length) await applyMetafields(productId, metafields);
+  let metafieldResults = [];
+  if (metafields.length) metafieldResults = await applyMetafields(productId, metafields);
   await publishProductToAllChannels(productId);
   if (qty != null) await setInitialInventory(existing, qty);
 
-  return (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
+  const out = (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
+  out.__metafieldResults = metafieldResults;
+  return out;
 }
 
 // Lightweight price-only update — sets just the first variant's price without
@@ -408,24 +430,52 @@ async function assignProductToDeliveryProfile(productId, profileId) {
 }
 
 // Apply a list of metafields to a product. Each metafield: { namespace, key, value, type }.
+// Returns a per-metafield result list [{ namespace, key, ok, error? }] so callers
+// can surface failures — previously these were swallowed, so a rejected metafield
+// (the usual cause of "my metafields didn't come through") was invisible.
+//
+// Two robustness measures that fix the common silent-rejection cases:
+//   • The TYPE is taken from the Shopify metafield DEFINITION when one exists —
+//     a mismatched client type (e.g. sending single_line to a list.* field) is
+//     the #1 reason Shopify returns 422 and the value never lands.
+//   • list.* definitions require a JSON-array value, so scalar / comma-separated
+//     input is coerced into a JSON array (this is what storefront filter fields
+//     like Position / Finish are usually defined as).
 async function applyMetafields(productId, metafields) {
+  const results = [];
+  let defByKey = {};
+  try {
+    const defs = await getMetafieldDefinitions();
+    for (const d of defs) defByKey[`${d.namespace}.${d.key}`] = d;
+  } catch (_) { /* fall back to client-provided types */ }
+
   for (const mf of metafields) {
-    if (!mf.key || !mf.value) continue;
+    if (!mf.key || mf.value == null || mf.value === '') continue;
+    const namespace = mf.namespace || 'custom';
+    const def = defByKey[`${namespace}.${mf.key}`];
+    const type = def?.type || mf.type || 'single_line_text_field';
+    let value = String(mf.value);
+    // list.* metafields must be a JSON array string. Accept an already-JSON array,
+    // otherwise split comma-separated values so multi-value filters work.
+    if (/^list\./.test(type)) {
+      let arr = null;
+      try { const p = JSON.parse(value); if (Array.isArray(p)) arr = p; } catch (_) {}
+      if (!arr) arr = value.split(',').map(s => s.trim()).filter(Boolean);
+      value = JSON.stringify(arr);
+    }
     try {
       await shopifyRequest('post', `/products/${productId}/metafields.json`, {
-        data: {
-          metafield: {
-            namespace: mf.namespace || 'custom',
-            key: mf.key,
-            value: String(mf.value),
-            type: mf.type || 'single_line_text_field',
-          },
-        },
+        data: { metafield: { namespace, key: mf.key, value, type } },
       });
+      results.push({ namespace, key: mf.key, ok: true });
     } catch (e) {
-      console.warn(`[shopify] metafield ${mf.namespace}.${mf.key} failed:`, e.message);
+      const detail = e.response?.data?.errors || e.response?.data || e.message;
+      const error = typeof detail === 'string' ? detail : JSON.stringify(detail);
+      console.warn(`[shopify] metafield ${namespace}.${mf.key} failed:`, error);
+      results.push({ namespace, key: mf.key, ok: false, error });
     }
   }
+  return results;
 }
 
 // List all sales channels (publications) on this Shopify store
