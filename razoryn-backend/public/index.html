@@ -8479,10 +8479,19 @@ function renderKB() {
         <div><h1>Key Information</h1><div class="desc">Couriers, contacts, procedures, logins</div></div>
         <div class="actions admin-only"><button class="btn btn-primary" onclick="openKBModal()">+ Add entry</button></div>
       </div>
-      <div class="toolbar"><input type="search" class="search-input" id="kb-search" placeholder="Search..."></div>
+      <h3 style="font-size:14px;margin:6px 0 10px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">📘 Guides</h3>
+      <div class="grid-2" id="kb-guides"></div>
+      <div class="toolbar" style="margin-top:18px"><input type="search" class="search-input" id="kb-search" placeholder="Search..."></div>
       <div id="kb-list"></div>
     </div>
   `;
+  el('kb-guides').innerHTML = BUILTIN_GUIDES.map(g => `
+    <div class="kb-card" onclick="openGuide('${g.id}')" style="border-left:3px solid var(--brand-primary)">
+      <div class="kb-cat">▶ Walkthrough · ${g.steps.length} steps</div>
+      <div class="kb-title">${g.title}</div>
+      <div class="kb-desc">${g.desc}</div>
+    </div>
+  `).join('');
   function paint() {
     const q = el('kb-search').value.toLowerCase();
     const items = State.knowledge.filter(k => {
@@ -8508,6 +8517,122 @@ function renderKB() {
   paint();
   el('kb-search').addEventListener('input', paint);
 }
+
+/* ==========================================================
+   BUILT-IN GUIDES — animated step-by-step walkthroughs (no external video).
+   Rendered on the Key Information page; each opens an auto-playing player with
+   mock screens, narration, and prev/play/next controls.
+   ========================================================== */
+const G = {
+  // small reusable mock-UI helpers, styled with the app's own tokens
+  btn: (t, on) => `<span style="display:inline-block;padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;${on?'background:var(--brand-primary);color:#fff;box-shadow:0 0 0 3px rgba(200,32,45,.25)':'background:var(--line-2);color:var(--ink)'}">${t}</span>`,
+  nav: (t, on) => `<div style="padding:7px 10px;border-radius:7px;font-size:12px;margin-bottom:3px;${on?'background:var(--brand-primary);color:#fff':'color:var(--ink-soft)'}">${t}</div>`,
+  card: (inner) => `<div style="background:var(--bg-soft);border:1px solid var(--line);border-radius:10px;padding:14px">${inner}</div>`,
+};
+const BUILTIN_GUIDES = [
+  {
+    id: 'resync-shopify',
+    title: 'Re-sync Shopify listings — full-res photos + metafields',
+    desc: 'How to refresh existing Shopify products so photos are full quality and Position/Finish/Part-Number metafields land correctly.',
+    steps: [
+      { title: 'Open the Listing Mirror',
+        body: 'In the left sidebar, go to <strong>Listing Mirror</strong>, then click <strong>⟳ Pull eBay listings</strong> to load your live listings.',
+        visual: () => `<div style="display:flex;gap:14px">
+          <div style="width:150px">${G.nav('Dispatch')}${G.nav('Quote Builder')}${G.nav('Listing Mirror', true)}${G.nav('Settings')}</div>
+          <div style="flex:1;display:flex;align-items:center;justify-content:center">${G.btn('⟳ Pull eBay listings', true)}</div>
+        </div>` },
+      { title: 'Set your Common metafields (once)',
+        body: 'In the toolbar, under <strong>Common metafields</strong>, add the fields that power your storefront filters — e.g. <strong>Position</strong>, <strong>Finish</strong>, <strong>Part Number</strong>. These apply to every listing and are now saved for the whole team. You can use <code>{{sku}}</code> as a token.',
+        visual: () => G.card(`<div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;margin-bottom:8px">Common metafields</div>
+          <div style="display:grid;grid-template-columns:140px 1fr;gap:6px;font-size:12px">
+            <div style="padding:6px 8px;background:var(--line-2);border-radius:6px">Position</div><div style="padding:6px 8px;border:1px solid var(--line);border-radius:6px">Rear</div>
+            <div style="padding:6px 8px;background:var(--line-2);border-radius:6px">Finish</div><div style="padding:6px 8px;border:1px solid var(--line);border-radius:6px">Primed</div>
+            <div style="padding:6px 8px;background:var(--line-2);border-radius:6px">Part Number</div><div style="padding:6px 8px;border:1px solid var(--line);border-radius:6px">{{sku}}</div>
+          </div>`) },
+      { title: 'Pick the photos to keep',
+        body: 'On each listing, tick the photos you want on Shopify. Your selection is <strong>saved automatically</strong>, so the one-click image re-sync will use exactly these. Photos are always pushed at full resolution.',
+        visual: () => G.card(`<div style="font-size:11px;font-weight:700;color:var(--ink-soft);margin-bottom:8px">Photos to import (2 of 3 selected)</div>
+          <div style="display:flex;gap:8px">
+            ${[1,1,0].map(on=>`<div style="width:64px;height:64px;border-radius:8px;background:var(--line-2);position:relative;border:2px solid ${on?'var(--green)':'transparent'}"><span style="position:absolute;top:3px;right:3px;font-size:13px">${on?'✅':'⬜'}</span></div>`).join('')}
+          </div>`) },
+      { title: 'Option A — refresh photos only',
+        body: 'To fix just the image quality without touching anything else: select the listings, then click <strong>📷 Re-push images</strong>. This replaces only the photos (full resolution) on the matching Shopify products — titles, prices and metafields are untouched.',
+        visual: () => `<div style="display:flex;gap:10px;align-items:center;justify-content:center">${G.btn('Push selected →')} ${G.btn('📷 Re-push images', true)}</div>` },
+      { title: 'Option B — re-sync everything (overwrite)',
+        body: 'To re-apply <strong>photos + metafields + price</strong>, select the listings and click <strong>Push selected →</strong>. When it warns that the SKUs already exist on Shopify, click <strong>OK to OVERWRITE</strong> — that\'s what refreshes the existing products.',
+        visual: () => G.card(`<div style="font-size:12px;margin-bottom:10px">⚠ 8 of these SKUs already exist on Shopify.</div>
+          <div style="display:flex;gap:8px;justify-content:flex-end">${G.btn('Cancel (skip)')} ${G.btn('OK — overwrite', true)}</div>`) },
+      { title: 'Check the result',
+        body: 'A summary shows <strong>Created / Updated</strong>. If Shopify rejected any metafield, a popup now lists exactly <strong>which field and why</strong> (usually a type mismatch in Shopify → Settings → Custom data → Products). Fix the definition and push again.',
+        visual: () => `<div style="display:flex;flex-direction:column;gap:8px;align-items:center">
+          <div style="padding:8px 14px;border-radius:8px;background:var(--green);color:#fff;font-size:12px;font-weight:600">Created: 5, Updated: 3</div>
+          <div style="font-size:11px;color:var(--ink-soft)">…and any rejected metafields are listed so nothing fails silently.</div>
+        </div>` },
+    ],
+  },
+];
+
+let _guideTimer = null, _guideIdx = 0, _guideRef = null;
+function openGuide(id) {
+  const g = BUILTIN_GUIDES.find(x => x.id === id);
+  if (!g) return;
+  _guideRef = g; _guideIdx = 0;
+  modal({
+    title: g.title,
+    body: `
+      <div id="guide-stage" style="min-height:200px;border:1px solid var(--line);border-radius:12px;padding:18px;background:var(--white);margin-bottom:12px"></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <button class="btn btn-ghost btn-sm" onclick="guideStep(-1)">‹ Back</button>
+        <button class="btn btn-outline btn-sm" id="guide-playbtn" onclick="guideTogglePlay()">⏸ Pause</button>
+        <button class="btn btn-ghost btn-sm" onclick="guideStep(1)">Next ›</button>
+        <div style="flex:1;height:6px;background:var(--line-2);border-radius:4px;overflow:hidden"><div id="guide-bar" style="height:100%;width:0;background:var(--brand-primary);transition:width .3s"></div></div>
+        <span id="guide-count" style="font-size:12px;color:var(--ink-soft);min-width:38px;text-align:right"></span>
+      </div>
+      <ol style="font-size:12px;color:var(--ink-soft);line-height:1.7;padding-left:18px;margin:0">
+        ${g.steps.map(s => `<li>${s.title}</li>`).join('')}
+      </ol>`,
+    actions: [{ label: 'Close', onClick: () => { stopGuide(); closeModal(); } }],
+  });
+  setTimeout(() => { paintGuideStep(); startGuide(); }, 60);
+}
+function paintGuideStep() {
+  const g = _guideRef; if (!g) return;
+  const s = g.steps[_guideIdx];
+  const stage = el('guide-stage');
+  if (stage) stage.innerHTML = `
+    <div style="font-size:11px;font-weight:700;color:var(--brand-primary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Step ${_guideIdx + 1}</div>
+    <div style="font-size:16px;font-weight:700;margin-bottom:8px">${s.title}</div>
+    <div style="font-size:13px;color:var(--ink-soft);line-height:1.6;margin-bottom:14px">${s.body}</div>
+    <div>${s.visual()}</div>`;
+  const bar = el('guide-bar'); if (bar) bar.style.width = `${((_guideIdx + 1) / g.steps.length) * 100}%`;
+  const cnt = el('guide-count'); if (cnt) cnt.textContent = `${_guideIdx + 1}/${g.steps.length}`;
+}
+function startGuide() {
+  stopGuide();
+  const btn = el('guide-playbtn'); if (btn) btn.textContent = '⏸ Pause';
+  _guideTimer = setInterval(() => {
+    if (!_guideRef) return stopGuide();
+    _guideIdx = (_guideIdx + 1) % _guideRef.steps.length;
+    paintGuideStep();
+  }, 4500);
+}
+function stopGuide() {
+  if (_guideTimer) { clearInterval(_guideTimer); _guideTimer = null; }
+}
+function guideTogglePlay() {
+  const btn = el('guide-playbtn');
+  if (_guideTimer) { stopGuide(); if (btn) btn.textContent = '▶ Play'; }
+  else { startGuide(); }
+}
+function guideStep(dir) {
+  if (!_guideRef) return;
+  stopGuide();
+  const btn = el('guide-playbtn'); if (btn) btn.textContent = '▶ Play';
+  const n = _guideRef.steps.length;
+  _guideIdx = (_guideIdx + dir + n) % n;
+  paintGuideStep();
+}
+
 function openKBView(id) {
   const k = State.knowledge.find(x => x.id == id);
   if (!k) return;
@@ -14406,6 +14531,8 @@ function modal({ title, body, actions=[] }) {
 function closeModal() {
   // Free the stock-take camera if the scan modal is being dismissed any way.
   try { if (typeof stStopScanCamera === 'function') stStopScanCamera(); } catch (_) {}
+  // Stop any running guide auto-play so it doesn't tick in the background.
+  try { if (typeof stopGuide === 'function') stopGuide(); } catch (_) {}
   el('modal-overlay').classList.remove('open');
 }
 el('modal-close').addEventListener('click', closeModal);
