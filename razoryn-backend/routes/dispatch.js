@@ -477,10 +477,27 @@ async function syncEbayDispatchCore({ days = 14 } = {}) {
   if (!ebay.isConfigured()) return { checked: 0, dispatched: 0, skipped: 'ebay_not_configured' };
   const sinceISO = new Date(Date.now() - days * 86400000).toISOString();
 
-  let fulfilledIds;
-  try { fulfilledIds = await ebay.getFulfilledOrderIds(sinceISO); }
-  catch (e) { return { checked: 0, dispatched: 0, error: e.message }; }
-  if (!fulfilledIds || !fulfilledIds.size) return { checked: 0, dispatched: 0 };
+  // Build the set of orders shipped on eBay, plus any tracking/carrier we can
+  // read up-front. Two sources so it works regardless of how the order was
+  // ingested and which eBay API is set up:
+  //   • OAuth Sell Fulfillment API (shared refresh token), when configured.
+  //   • Trading API GetOrders per store (per-store Auth'n'Auth token) — the path
+  //     order ingestion itself falls back to, so the OrderIDs match. Without this
+  //     the sync silently did nothing for token-only stores like Razoryn.
+  const fulfilledIds = new Set();
+  const trackingByOrder = {}; // orderId -> { tracking, carrier }
+  try {
+    const ids = await ebay.getFulfilledOrderIds(sinceISO);
+    for (const id of (ids || [])) fulfilledIds.add(id);
+  } catch (e) { console.warn('[dispatch] getFulfilledOrderIds failed:', e.message); }
+  try {
+    for (const o of await ebay.getShippedOrdersAllStores(sinceISO)) {
+      fulfilledIds.add(o.orderId);
+      if (o.tracking || o.carrier) trackingByOrder[o.orderId] = { tracking: o.tracking, carrier: o.carrier };
+    }
+  } catch (e) { console.warn('[dispatch] getShippedOrdersAllStores failed:', e.message); }
+
+  if (!fulfilledIds.size) return { checked: 0, dispatched: 0 };
 
   // Undispatched eBay sales whose order is now fulfilled on eBay.
   const { rows } = await query(
@@ -493,8 +510,12 @@ async function syncEbayDispatchCore({ days = 14 } = {}) {
 
   let dispatched = 0;
   for (const sale of rows) {
-    let tracking = null, carrier = null;
-    try { const t = await ebay.getOrderTracking(sale.external_order_id); tracking = t.tracking; carrier = t.carrier; } catch (e) { /* best-effort */ }
+    let tracking = trackingByOrder[sale.external_order_id]?.tracking || null;
+    let carrier = trackingByOrder[sale.external_order_id]?.carrier || null;
+    // Fall back to the per-order OAuth lookup only if we didn't already have it.
+    if (!tracking && !carrier) {
+      try { const t = await ebay.getOrderTracking(sale.external_order_id); tracking = t.tracking; carrier = t.carrier; } catch (e) { /* best-effort */ }
+    }
     await query(
       `UPDATE sales SET dispatched_at = now(), status = 'dispatched', channel_push_state = 'na',
          carrier = COALESCE($2, carrier),

@@ -1431,6 +1431,59 @@ async function getOrderTracking(orderId) {
   }
 }
 
+// Trading-API fulfilment detection (#11). The OAuth-only getFulfilledOrderIds()
+// above returns nothing when the Sell Fulfillment API isn't configured — which is
+// the case for stores that only have the legacy Auth'n'Auth token (e.g. Razoryn).
+// That made auto-dispatch silently do nothing. This reads shipped status +
+// tracking from the Trading API GetOrders using the per-store token — the SAME
+// path order ingestion falls back to, so the OrderIDs line up with the stored
+// external_order_id. Returns [{ orderId, tracking, carrier }] for shipped orders.
+async function getShippedOrdersTrading(sinceISO, storeArg) {
+  const fromDate = new Date(sinceISO).toISOString();
+  const toDate = new Date().toISOString();
+  const bodyInner = `
+    <CreateTimeFrom>${fromDate}</CreateTimeFrom>
+    <CreateTimeTo>${toDate}</CreateTimeTo>
+    <OrderStatus>All</OrderStatus>
+    <Pagination><EntriesPerPage>100</EntriesPerPage><PageNumber>1</PageNumber></Pagination>
+    <DetailLevel>ReturnAll</DetailLevel>`;
+  const xml = await tradingCall('GetOrders', bodyInner, storeArg);
+  if (xml.includes('<Ack>Failure</Ack>')) {
+    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+    throw new Error('eBay GetOrders error: ' + decodeEntities(err));
+  }
+  const orderBlocks = extractAll(extractOne(xml, 'OrderArray') || '', 'Order');
+  const out = [];
+  for (const oXml of orderBlocks) {
+    const orderId = extractOne(oXml, 'OrderID');
+    if (!orderId) continue;
+    const shippedTime = extractOne(oXml, 'ShippedTime');
+    // Tracking (when the seller added it) lives under ShipmentTrackingDetails.
+    const trackBlock = extractOne(oXml, 'ShipmentTrackingDetails') || '';
+    const tracking = decodeEntities(extractOne(trackBlock, 'ShipmentTrackingNumber') || '') || null;
+    const carrier = decodeEntities(extractOne(trackBlock, 'ShippingCarrierUsed') || '') || null;
+    // "Shipped" on eBay = a ShippedTime is set (or tracking was uploaded).
+    if (shippedTime || tracking) out.push({ orderId, tracking, carrier });
+  }
+  return out;
+}
+
+// Aggregate shipped orders across every configured store (per-store Trading token),
+// so multi-store brands are covered without the OAuth Sell Fulfillment API.
+async function getShippedOrdersAllStores(sinceISO) {
+  const stores = (brand.stores || []).filter(s => s.token && !s.disabled);
+  const list = stores.length ? stores : [undefined];
+  const out = [];
+  for (const store of list) {
+    try {
+      out.push(...await getShippedOrdersTrading(sinceISO, store));
+    } catch (e) {
+      console.warn('[ebay] getShippedOrdersTrading failed for', store?.code || 'primary', e.message);
+    }
+  }
+  return out;
+}
+
 // Search eBay categories by NAME (not numeric ID) using the Trading API
 // GetSuggestedCategories — this works with the per-store Auth'n'Auth token (the
 // same one used to list items), so it doesn't depend on an OAuth setup. Returns
@@ -1667,6 +1720,8 @@ module.exports = {
   getBusinessPolicies,
   debugBusinessPolicies,
   getFulfilledOrderIds,
+  getShippedOrdersTrading,
+  getShippedOrdersAllStores,
   getOrderTracking,
   getRateLimits,
   itemBelongsToStore,
