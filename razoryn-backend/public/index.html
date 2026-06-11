@@ -5563,7 +5563,10 @@ async function syncDispatchFromEbay(btn) {
     const r = await Api.post('/api/dispatch/sync-ebay', {});
     if (r.skipped === 'ebay_not_configured') toast('eBay isn’t configured', 'warn');
     else if (r.error) toast('eBay sync issue: ' + r.error, 'warn', 6000);
-    else toast(r.dispatched ? `${r.dispatched} order(s) marked dispatched from eBay` : 'No new eBay dispatches found', r.dispatched ? 'success' : 'info', 4000);
+    else if (r.dispatched) toast(`${r.dispatched} order(s) auto-marked dispatched from eBay tracking`, 'success', 5000);
+    // Be explicit when nothing changed, so it's clear WHY (vs the old silent "none found").
+    else if (r.shippedReported) toast(`eBay reported ${r.shippedReported} shipped order(s) in this window, but none are still awaiting dispatch here (already cleared, or not yet imported).`, 'info', 7000);
+    else toast('eBay reports no orders shipped yet in this window — upload tracking on eBay and they’ll clear here automatically.', 'info', 7000);
     await loadDispatch();
   } catch (e) {
     toast('Sync failed: ' + (e.data?.message || e.message), 'error');

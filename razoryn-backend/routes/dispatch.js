@@ -497,7 +497,7 @@ async function syncEbayDispatchCore({ days = 14 } = {}) {
     }
   } catch (e) { console.warn('[dispatch] getShippedOrdersAllStores failed:', e.message); }
 
-  if (!fulfilledIds.size) return { checked: 0, dispatched: 0 };
+  if (!fulfilledIds.size) return { checked: 0, dispatched: 0, shippedReported: 0 };
 
   // Undispatched eBay sales whose order is now fulfilled on eBay.
   const { rows } = await query(
@@ -526,7 +526,10 @@ async function syncEbayDispatchCore({ days = 14 } = {}) {
     );
     dispatched++;
   }
-  return { checked: rows.length, dispatched };
+  // shippedReported = how many shipped orders eBay returned for the window;
+  // matched = how many of those line up with an open (undispatched) sale here.
+  // These let the UI explain "nothing happened" instead of failing silently.
+  return { checked: rows.length, dispatched, shippedReported: fulfilledIds.size, matched: rows.length };
 }
 
 // POST /api/dispatch/sync-ebay — manual trigger for the auto-dispatch sync.
