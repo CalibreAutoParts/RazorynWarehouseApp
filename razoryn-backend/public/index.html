@@ -7305,7 +7305,23 @@ async function submitManualSale() {
       if (!w) toast('Pop-up blocked — find document in Sales tab', 'warn');
     }, 200);
   } catch (e) {
-    toast('Failed: ' + (e.data?.message || e.message), 'error');
+    if (e.data?.error === 'insufficient_stock') {
+      // Name every offending line so staff don't have to scroll the modal hunting for it.
+      const list = e.data.shortages && e.data.shortages.length
+        ? e.data.shortages
+        : [{ title: null, sku: e.data.sku, requested: null, available: e.data.available, productId: e.data.productId }];
+      const lines = list.map(s => {
+        const prod = (State.products || []).find(p => p.id == s.productId);
+        const label = s.title || prod?.title || s.sku || 'item';
+        const sku = s.sku || prod?.sku || '';
+        const need = s.requested != null ? `, need ${s.requested}` : '';
+        return `• ${label}${sku ? ` (${sku})` : ''} — ${s.available} in stock${need}`;
+      }).join('\n');
+      const head = list.length > 1 ? `${list.length} items are short on stock:` : 'Not enough stock:';
+      toast(`${head}\n${lines}\nReduce the quantity or make them custom (no-stock) lines.`, 'error', 12000);
+    } else {
+      toast('Failed: ' + (e.data?.message || e.message), 'error');
+    }
   }
 }
 
@@ -8023,9 +8039,13 @@ async function qbSubmitProforma(sendEmail, confirmed = false) {
     clearQuote();
   } catch (e) {
     Task.fail(taskId, 'Failed to create');
-    // Confirmed orders validate stock — surface that clearly.
+    // Confirmed orders validate stock — surface every short item clearly.
     if (confirmed && e.data?.error === 'insufficient_stock') {
-      toast(`Not enough stock for ${e.data.sku || 'an item'} (only ${e.data.available} available). Adjust the quantity or use a pro-forma.`, 'error', 8000);
+      const list = e.data.shortages?.length ? e.data.shortages
+        : [{ title: null, sku: e.data.sku, requested: null, available: e.data.available }];
+      const lines = list.map(s => `• ${s.title || s.sku || 'item'}${s.sku ? ` (${s.sku})` : ''} — ${s.available} in stock${s.requested != null ? `, need ${s.requested}` : ''}`).join('\n');
+      const head = list.length > 1 ? `${list.length} items are short on stock:` : 'Not enough stock:';
+      toast(`${head}\n${lines}\nAdjust the quantity or use a pro-forma instead.`, 'error', 12000);
     } else {
       toast('Failed: ' + (e.data?.message || e.message), 'error');
     }

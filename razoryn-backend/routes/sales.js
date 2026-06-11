@@ -371,6 +371,9 @@ router.post('/', requireAdmin, async (req, res) => {
   const result = await withTx(async (c) => {
     let subtotal = 0;
     const itemsResolved = [];
+    // Collect ALL stock shortfalls in one pass so the UI can list every offending
+    // line at once, instead of the user fixing one and re-submitting to find the next.
+    const shortages = [];
     for (const it of b.items) {
       if (it.productId) {
         // Inventory-backed item
@@ -381,7 +384,9 @@ router.post('/', requireAdmin, async (req, res) => {
         if (!p.rows[0]) return { error: 'product_not_found', productId: it.productId };
         // For non-estimate paid sales, validate stock. Estimates don't touch stock at all.
         if (!isEstimate && p.rows[0].qty_on_hand < it.qty) {
-          return { error: 'insufficient_stock', productId: it.productId, sku: p.rows[0].sku, available: p.rows[0].qty_on_hand };
+          shortages.push({ productId: p.rows[0].id, sku: p.rows[0].sku, title: p.rows[0].title,
+                           requested: parseInt(it.qty), available: p.rows[0].qty_on_hand });
+          continue;
         }
         const lineTotal = +(parseFloat(it.unitPrice) * parseInt(it.qty)).toFixed(2);
         subtotal += lineTotal;
@@ -398,6 +403,13 @@ router.post('/', requireAdmin, async (req, res) => {
           qty: parseInt(it.qty), unitPrice: parseFloat(it.unitPrice), lineTotal,
         });
       }
+    }
+
+    // Any inventory-backed line short on stock → abort with the full list. Keep
+    // sku/available at the top level for older clients that read just the first.
+    if (shortages.length) {
+      return { error: 'insufficient_stock', shortages,
+               productId: shortages[0].productId, sku: shortages[0].sku, available: shortages[0].available };
     }
 
     // VAT model: prices in the system match Shopify/eBay listing prices, which
