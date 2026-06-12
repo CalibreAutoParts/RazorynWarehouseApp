@@ -11972,7 +11972,7 @@ async function resyncSelectedImages() {
   }
   const items = selected.map(l => ({
     itemId: l.itemId,
-    sku: effectiveSku(l),
+    sku: (MirrorState.skuOverrides[l.itemId] != null ? MirrorState.skuOverrides[l.itemId] : l.sku),
     imageUrls: Array.from(MirrorState.selectedImages[l.itemId] || []),
   })).filter(i => i.imageUrls.length);
   if (!items.length) {
