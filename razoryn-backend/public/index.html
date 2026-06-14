@@ -12760,10 +12760,12 @@ async function syncEbayReviewsNow(btn) {
   if (out) out.textContent = 'Syncing…';
   try {
     const r = await Api.post('/api/reviews/sync', {});
-    const msg = r.skipped ? 'eBay/Shopify not configured'
-      : `${r.updated || 0} product rating(s) updated from ${r.feedback || 0} feedback rows`;
+    let msg;
+    if (r.skipped) msg = 'eBay/Shopify not configured';
+    else if (!r.updated && r.feedback) msg = `0 updated · ${r.feedback} feedback rows matched none of ${r.links || 0} mirrored eBay→Shopify links. Mirror those listings first (Listing Mirror).`;
+    else msg = `${r.updated || 0} product rating(s) updated from ${r.feedback || 0} feedback rows`;
     if (out) out.textContent = msg;
-    toast(msg, r.skipped ? 'warn' : 'success', 6000);
+    toast(msg, (r.skipped || (!r.updated && r.feedback)) ? 'warn' : 'success', 8000);
   } catch (e) {
     if (out) out.textContent = '';
     toast('Failed: ' + (e.data?.message || e.message), 'error');

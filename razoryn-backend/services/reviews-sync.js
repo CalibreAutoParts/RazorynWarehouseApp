@@ -10,19 +10,29 @@ const ebay = require('./ebay');
 const shopify = require('./shopify');
 const brand = require('../lib/brand');
 
-// Map eBay ItemID -> { shopifyProductId } using the products table's per-store
-// eBay listing id columns. Returns a Map(itemId -> shopify_product_id).
+// Map eBay ItemID -> Shopify product id. The canonical link is the mirror_links
+// table (ebay_item_id -> shopify_product_id), written by the Listing Mirror when
+// an eBay listing is mirrored to Shopify by SKU. We also fall back to the
+// products.ebay_listing_id_* columns if they happen to be populated.
 async function buildItemIdMap() {
-  const r = await query(`
-    SELECT shopify_product_id, ebay_listing_id_em, ebay_listing_id_cl
-      FROM products
-     WHERE shopify_product_id IS NOT NULL
-       AND (ebay_listing_id_em IS NOT NULL OR ebay_listing_id_cl IS NOT NULL)`);
   const map = new Map();
-  for (const row of r.rows) {
-    if (row.ebay_listing_id_em) map.set(String(row.ebay_listing_id_em), row.shopify_product_id);
-    if (row.ebay_listing_id_cl) map.set(String(row.ebay_listing_id_cl), row.shopify_product_id);
-  }
+  // Primary: mirror_links (this is how eBay items are linked to Shopify here).
+  try {
+    const ml = await query(`SELECT ebay_item_id, shopify_product_id FROM mirror_links WHERE shopify_product_id IS NOT NULL`);
+    for (const row of ml.rows) map.set(String(row.ebay_item_id), String(row.shopify_product_id));
+  } catch (e) { console.warn('[reviews-sync] mirror_links read:', e.message); }
+  // Fallback: per-product eBay listing id columns.
+  try {
+    const r = await query(`
+      SELECT shopify_product_id, ebay_listing_id_em, ebay_listing_id_cl
+        FROM products
+       WHERE shopify_product_id IS NOT NULL
+         AND (ebay_listing_id_em IS NOT NULL OR ebay_listing_id_cl IS NOT NULL)`);
+    for (const row of r.rows) {
+      if (row.ebay_listing_id_em && !map.has(String(row.ebay_listing_id_em))) map.set(String(row.ebay_listing_id_em), String(row.shopify_product_id));
+      if (row.ebay_listing_id_cl && !map.has(String(row.ebay_listing_id_cl))) map.set(String(row.ebay_listing_id_cl), String(row.shopify_product_id));
+    }
+  } catch (_) {}
   return map;
 }
 
@@ -46,12 +56,17 @@ async function syncEbayReviews() {
   // Aggregate per eBay ItemID → then collapse onto the Shopify product.
   const itemMap = await buildItemIdMap();
   const byProduct = {}; // shopifyProductId -> { sum, count }
+  const unmatchedItemIds = new Set();
   for (const { itemId, score } of rows) {
     const pid = itemMap.get(String(itemId));
-    if (!pid) continue;
+    if (!pid) { unmatchedItemIds.add(String(itemId)); continue; }
     byProduct[pid] = byProduct[pid] || { sum: 0, count: 0 };
     byProduct[pid].sum += score;
     byProduct[pid].count += 1;
+  }
+  if (!Object.keys(byProduct).length) {
+    console.log(`[reviews-sync] ${rows.length} feedback rows but 0 matched (${itemMap.size} eBay→Shopify links known, ${unmatchedItemIds.size} unmatched eBay items). Mirror the listings (Listing Mirror) so feedback can map to products.`);
+    return { feedback: rows.length, links: itemMap.size, matched: 0, updated: 0, unmatchedItems: unmatchedItemIds.size };
   }
 
   let updated = 0, errors = 0;
@@ -62,7 +77,7 @@ async function syncEbayReviews() {
     catch (e) { errors++; console.warn('[reviews-sync] write', pid, e.message); }
   }
   console.log(`[reviews-sync] ${rows.length} feedback rows → ${updated} product(s) updated (${errors} errors)`);
-  return { feedback: rows.length, matched: Object.keys(byProduct).length, updated, errors };
+  return { feedback: rows.length, links: itemMap.size, matched: Object.keys(byProduct).length, updated, errors, unmatchedItems: unmatchedItemIds.size };
 }
 
 module.exports = { syncEbayReviews };
