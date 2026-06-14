@@ -7,8 +7,9 @@
 // the server. No auth (it's called from the storefront), CORS open.
 const express = require('express');
 const { query } = require('../db');
-const { sendGA4 } = require('../services/ga4');
-const { sendMeta } = require('../services/meta');
+const { sendGA4, validateGA4 } = require('../services/ga4');
+const { sendMeta, validateMeta } = require('../services/meta');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -104,6 +105,16 @@ router.post('/', async (req, res) => {
 
 // Health/ping for the pixel setup screen.
 router.get('/', (req, res) => res.json({ ok: true }));
+
+// ── ADMIN: live setup check ─────────────────────────────────────────────────
+// Tests the saved GA4 + Meta credentials against the providers (no data
+// pollution) so the Settings page can show "configured & valid" per provider.
+router.post('/test', requireAuth, requireAdmin, async (req, res) => {
+  invalidateConfig();
+  const cfg = await loadConfig();
+  const [ga4, meta] = await Promise.all([validateGA4(cfg.ga4), validateMeta(cfg.meta)]);
+  res.json({ enabled: cfg.enabled, ga4, meta });
+});
 
 module.exports = router;
 module.exports.invalidateConfig = invalidateConfig;

@@ -12148,9 +12148,14 @@ function renderSettings() {
             <div class="field"><label>GA4 API secret</label><input id="trk-ga4-secret" placeholder="••••••" type="password"></div>
             <div class="field"><label>Meta Pixel ID</label><input id="trk-meta-pixel" placeholder="1234567890"></div>
             <div class="field"><label>Meta CAPI token</label><input id="trk-meta-token" placeholder="••••••" type="password"></div>
+            <div class="field"><label>Meta test event code (optional)</label><input id="trk-meta-test" placeholder="TEST12345 — shows events in Meta's Test Events tab"></div>
           </div>
           <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="trk-enabled" checked><span></span></label> Tracking enabled</label></div>
-          <button class="btn btn-primary" onclick="saveTrackingSettings()">Save tracking config</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-primary" onclick="saveTrackingSettings()">Save tracking config</button>
+            <button class="btn btn-outline" onclick="checkTrackingSetup(this)">🔍 Check setup</button>
+          </div>
+          <div id="trk-status" style="font-size:13px;margin-top:10px"></div>
 
           <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px">
             <div style="font-weight:600;font-size:14px;margin-bottom:4px">eBay reviews → Shopify stars</div>
@@ -12737,6 +12742,7 @@ async function loadTrackingSettings() {
     if (el('trk-ga4-secret')) el('trk-ga4-secret').value = d.ga4_api_secret || '';
     if (el('trk-meta-pixel')) el('trk-meta-pixel').value = d.meta_pixel_id || '';
     if (el('trk-meta-token')) el('trk-meta-token').value = d.meta_capi_token || '';
+    if (el('trk-meta-test')) el('trk-meta-test').value = d.meta_test_code || '';
     if (el('trk-enabled')) el('trk-enabled').checked = d.tracking_enabled !== false;
   } catch (_) {}
 }
@@ -12747,12 +12753,34 @@ async function saveTrackingSettings() {
       ga4_api_secret: el('trk-ga4-secret').value.trim(),
       meta_pixel_id: el('trk-meta-pixel').value.trim(),
       meta_capi_token: el('trk-meta-token').value.trim(),
+      meta_test_code: el('trk-meta-test').value.trim(),
       tracking_enabled: el('trk-enabled').checked,
     });
     toast('Tracking config saved', 'success');
   } catch (e) {
     toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
+}
+// Live test of the saved GA4 + Meta credentials against the providers.
+async function checkTrackingSetup(btn) {
+  const out = el('trk-status');
+  if (btn) btn.disabled = true;
+  if (out) out.innerHTML = '<span style="color:var(--ink-soft)">Checking…</span>';
+  const line = (label, r) => {
+    if (!r || r.configured === false) return `<div>⚪ <strong>${label}</strong> — not configured (left blank)</div>`;
+    if (r.ok) return `<div>✅ <strong>${label}</strong> — connected${r.name ? ' (' + escapeHtml(r.name) + ')' : ''}${r.measurementId ? ' (' + escapeHtml(r.measurementId) + ')' : ''}</div>`;
+    const msg = r.error || (r.messages || []).join('; ') || 'invalid';
+    return `<div>❌ <strong>${label}</strong> — ${escapeHtml(msg)}</div>`;
+  };
+  try {
+    const r = await Api.post('/api/track/test', {});
+    out.innerHTML =
+      (r.enabled ? '' : '<div style="color:var(--amber)">⚠ Tracking is turned OFF — events won\'t be forwarded even if credentials are valid.</div>') +
+      line('GA4', r.ga4) + line('Meta', r.meta) +
+      '<div style="color:var(--ink-soft);margin-top:6px;font-size:12px">Note: this verifies credentials. Live events also need the Web Pixel deployed (storefront-pixel/) and pointed at /api/track.</div>';
+  } catch (e) {
+    out.innerHTML = '<span style="color:var(--red)">Check failed: ' + escapeHtml(e.data?.message || e.message) + '</span>';
+  } finally { if (btn) btn.disabled = false; }
 }
 async function syncEbayReviewsNow(btn) {
   const out = el('reviews-sync-result');

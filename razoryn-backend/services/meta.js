@@ -44,4 +44,20 @@ async function sendMeta(eventName, opts = {}, cfg = {}) {
   }
 }
 
-module.exports = { sendMeta, isConfigured };
+module.exports = { sendMeta, isConfigured, validateMeta };
+
+// Validate Pixel ID + token WITHOUT sending an event: fetch the pixel/dataset
+// object. A valid pair returns { id, name }; a bad token/pixel returns an error.
+async function validateMeta(cfg = {}) {
+  const pixel = cfg.pixelId || process.env.META_PIXEL_ID;
+  const token = cfg.capiToken || process.env.META_CAPI_TOKEN;
+  if (!pixel || !token) return { configured: false };
+  try {
+    const r = await axios.get(`https://graph.facebook.com/${API_VERSION}/${pixel}`, {
+      params: { fields: 'id,name', access_token: token }, timeout: 8000,
+    });
+    return { configured: true, ok: !!r.data?.id, name: r.data?.name, pixelId: r.data?.id };
+  } catch (e) {
+    return { configured: true, ok: false, error: e.response?.data?.error?.message || e.message };
+  }
+}

@@ -30,4 +30,22 @@ async function sendGA4(events, clientId, cfg = {}) {
   }
 }
 
-module.exports = { sendGA4, isConfigured };
+module.exports = { sendGA4, isConfigured, validateGA4 };
+
+// Validate credentials WITHOUT polluting reports: GA4's /debug endpoint checks an
+// event and returns validationMessages (empty = valid) but doesn't record it.
+async function validateGA4(cfg = {}) {
+  const id = cfg.measurementId || process.env.GA4_MEASUREMENT_ID;
+  const secret = cfg.apiSecret || process.env.GA4_API_SECRET;
+  if (!id || !secret) return { configured: false };
+  try {
+    const r = await axios.post(
+      `https://www.google-analytics.com/debug/mp/collect?measurement_id=${id}&api_secret=${secret}`,
+      { client_id: `test.${Date.now()}`, events: [{ name: 'page_view', params: {} }] },
+      { headers: { 'Content-Type': 'application/json' }, timeout: 8000 });
+    const msgs = (r.data?.validationMessages || []).map(m => m.description || m.validationCode);
+    return { configured: true, ok: msgs.length === 0, messages: msgs, measurementId: id };
+  } catch (e) {
+    return { configured: true, ok: false, messages: [e.response?.status ? `HTTP ${e.response.status}` : e.message] };
+  }
+}
