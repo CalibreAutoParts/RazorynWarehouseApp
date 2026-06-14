@@ -103,7 +103,8 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
       FROM sales s
       WHERE s.is_estimate = false
         AND s.dispatched_at IS NULL
-        AND (s.payment_method IS NULL OR s.payment_method != 'cash')
+        AND COALESCE(s.fulfillment_method,
+              CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
         AND s.status NOT IN ('refunded', 'cancelled', 'dispatched')
         AND s.occurred_at >= now() - ($1 || ' days')::interval
       ORDER BY s.occurred_at ASC
@@ -118,7 +119,8 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
         EXTRACT(EPOCH FROM (now() - s.occurred_at)) / 3600 AS age_hours
       FROM sales s
       WHERE s.is_estimate = false
-        AND s.payment_method = 'cash'
+        AND COALESCE(s.fulfillment_method,
+              CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'collect'
         AND s.collected_at IS NULL
         AND s.status NOT IN ('refunded', 'cancelled', 'dispatched')
         AND s.occurred_at >= now() - ($1 || ' days')::interval

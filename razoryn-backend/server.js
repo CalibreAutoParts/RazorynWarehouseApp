@@ -282,6 +282,27 @@ if (cron.validate(marketCronExpr)) {
   console.log(`[boot] market analysis scheduled: ${marketCronExpr}`);
 }
 
+// Daily payment follow-up — chase UNPAID direct cash/bank/card invoices (#15).
+// eBay/Shopify settle on-platform; direct sales are the easy-to-forget ones.
+// Default 9am daily; override with PAYMENT_FOLLOWUP_CRON. Self-throttles to one
+// digest per day inside runPaymentFollowups().
+const followupCronExpr = (process.env.PAYMENT_FOLLOWUP_CRON || '0 9 * * *').trim();
+if (cron.validate(followupCronExpr)) {
+  cron.schedule(followupCronExpr, async () => {
+    try {
+      const { runPaymentFollowups } = require('./routes/sales');
+      if (typeof runPaymentFollowups !== 'function') return;
+      const r = await runPaymentFollowups();
+      if (r && r.count) console.log(`[cron followups] ${r.count} unpaid order(s) flagged (£${(r.total || 0).toFixed(2)})`);
+    } catch (e) {
+      console.error('[cron followups] failed:', e.message);
+    }
+  });
+  console.log(`[boot] payment follow-up scheduled: ${followupCronExpr}`);
+} else {
+  console.error(`[boot] ⚠️  invalid PAYMENT_FOLLOWUP_CRON "${followupCronExpr}" — daily payment reminders disabled.`);
+}
+
 // Nightly cleanup: permanently delete staff_notes older than 31 days.
 // Notes are already filtered out of the GET response after 31 days, but this
 // keeps the table from growing unbounded.
