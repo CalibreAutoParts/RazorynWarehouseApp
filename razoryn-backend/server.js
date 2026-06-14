@@ -81,6 +81,11 @@ app.use('/api/messages',     require('./routes/messages'));
 app.use('/api/customers',    require('./routes/customers'));
 app.use('/api/desktop',      require('./routes/desktop'));
 app.use('/api/competitors',  require('./routes/competitors'));
+app.use('/api/reviews',      require('./routes/reviews'));
+// PUBLIC storefront endpoints (no login, CORS open) — server-side tracking relay
+// + back-in-stock signups. Their routers set their own CORS headers per request.
+app.use('/api/track',        require('./routes/track'));
+app.use('/api/notify',       require('./routes/notify'));
 // Public logo serving — mounted at /public-logo (NOT /api/settings) so it
 // completely bypasses the auth middleware that the settings router applies
 // to its whole namespace. Used by <img src="/public-logo"> in invoice HTML
@@ -301,6 +306,34 @@ if (cron.validate(followupCronExpr)) {
   console.log(`[boot] payment follow-up scheduled: ${followupCronExpr}`);
 } else {
   console.error(`[boot] ⚠️  invalid PAYMENT_FOLLOWUP_CRON "${followupCronExpr}" — daily payment reminders disabled.`);
+}
+
+// Back-in-stock sweep — email customers waiting on a product once its stock
+// returns (qty_on_hand > 0). Every 20 min by default (BACK_IN_STOCK_CRON).
+const bisCronExpr = (process.env.BACK_IN_STOCK_CRON || '*/20 * * * *').trim();
+if (cron.validate(bisCronExpr)) {
+  cron.schedule(bisCronExpr, async () => {
+    try {
+      const { runBackInStockSweep } = require('./routes/notify');
+      if (typeof runBackInStockSweep === 'function') await runBackInStockSweep();
+    } catch (e) { console.error('[cron back-in-stock] failed:', e.message); }
+  });
+  console.log(`[boot] back-in-stock sweep scheduled: ${bisCronExpr}`);
+}
+
+// eBay feedback → Shopify review metafields. Nightly by default (REVIEWS_SYNC_CRON).
+const reviewsCronExpr = (process.env.REVIEWS_SYNC_CRON || '0 4 * * *').trim();
+if (cron.validate(reviewsCronExpr)) {
+  cron.schedule(reviewsCronExpr, async () => {
+    try {
+      const { syncEbayReviews } = require('./services/reviews-sync');
+      const r = await syncEbayReviews();
+      if (r && r.updated) console.log(`[cron reviews] updated ${r.updated} product rating(s)`);
+    } catch (e) {
+      if (!/ebay_not_configured|shopify_not_configured/.test(e.message)) console.error('[cron reviews] failed:', e.message);
+    }
+  });
+  console.log(`[boot] eBay reviews sync scheduled: ${reviewsCronExpr}`);
 }
 
 // Nightly cleanup: permanently delete staff_notes older than 31 days.

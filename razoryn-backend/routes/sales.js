@@ -22,6 +22,11 @@ async function ensurePaidColumn() {
     // Explicit ship-vs-collect choice per order. NULL = legacy rows; the worklist
     // falls back to "cash = collect, everything else = ship" for those.
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS fulfillment_method TEXT`);
+    // Fitment workflow: needs_fitment = no vehicle reg captured (auto-parts must
+    // be confirmed against the customer's car); large_panel = order contains an
+    // LP item needing the special courier.
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS needs_fitment BOOLEAN NOT NULL DEFAULT false`);
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS large_panel BOOLEAN NOT NULL DEFAULT false`);
     // Allow card/Stripe as a manual-entry channel alongside cash + bank. The
     // channel CHECK is inline (auto-named sales_channel_check); widen it so
     // 'direct_card' is accepted without losing the guard on bad values.
@@ -482,20 +487,29 @@ router.post('/', requireAdmin, async (req, res) => {
     // (stock decrements like any invoice) but is flagged for payment follow-up.
     const isPaid = isEstimate ? true : (b.paid !== false);
     await ensurePaidColumn();
+    // Fitment + large-panel flags for the dispatch/fitment queue. needs_fitment
+    // when no vehicle reg was captured; large_panel if any line is a flagged part.
+    const needsFitment = !((b.vehicleReg || '').trim());
+    let largePanel = false;
+    const pids = itemsResolved.map(i => i.productId).filter(Boolean);
+    if (pids.length) {
+      const lp = await c.query(`SELECT bool_or(COALESCE(large_panel,false)) AS lp FROM products WHERE id = ANY($1)`, [pids]);
+      largePanel = !!lp.rows[0]?.lp;
+    }
     const sale = await c.query(
       `INSERT INTO sales (channel, customer_name, customer_phone, customer_email,
                           subtotal, vat, shipping, total, status, invoice_number,
                           notes, recorded_by, payment_method, payment_reference,
                           is_estimate, order_number, vehicle_reg, vin_number, shipping_address,
-                          customer_id, is_paid, paid_at, fulfillment_method)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING *`,
+                          customer_id, is_paid, paid_at, fulfillment_method, needs_fitment, large_panel)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING *`,
       [b.channel, b.customerName || null, b.customerPhone || null, b.customerEmail || null,
        subtotal, vat, shipping, total,
        isEstimate ? 'pending' : (isPaid ? 'paid' : 'pending'),
        invoiceNumber, b.notes || null, req.user.id,
        paymentMethod, paymentReference,
        isEstimate, b.orderNumber || null, b.vehicleReg || null, b.vinNumber || null, b.shippingAddress || null,
-       customerId, isPaid, (!isEstimate && isPaid) ? new Date() : null, fulfillmentMethod]
+       customerId, isPaid, (!isEstimate && isPaid) ? new Date() : null, fulfillmentMethod, needsFitment, largePanel]
     );
 
     for (const it of itemsResolved) {

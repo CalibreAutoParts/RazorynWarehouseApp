@@ -27,6 +27,9 @@ async function ensureProductLocationColumns() {
     // updated_at lets the frontend cache-bust photo URLs (?v=updated_at) when an
     // image changes — without it, edited photos could serve stale from cache.
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()`);
+    // Large-panel flag: marks bulky parts (bumpers, bonnets, doors) that need the
+    // dedicated courier. Orders containing one are flagged for routing at ingest.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS large_panel BOOLEAN NOT NULL DEFAULT false`);
     _prodLocMigrated = true;
   } catch (e) { console.warn('[products] location-columns migration warning:', e.message); }
 }

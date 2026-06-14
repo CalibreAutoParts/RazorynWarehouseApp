@@ -178,6 +178,20 @@ async function pullShopify() {
         }
       }
 
+      // Fitment + large-panel flags. The theme saves the customer's reg as a
+      // cart attribute → order note attribute; no reg means we must confirm
+      // fitment before dispatch. large_panel = any line item is flagged LP.
+      const regAttr = (order.note_attributes || []).find(a => /vehicle\s*reg|reg(istration)?/i.test(a.name || ''));
+      const reg = (regAttr?.value || '').trim() || null;
+      const lp = await c.query(
+        `SELECT bool_or(COALESCE(p.large_panel,false)) AS lp
+           FROM sale_items si JOIN products p ON p.id = si.product_id
+          WHERE si.sale_id = $1`, [sale.rows[0].id]);
+      await c.query(
+        `UPDATE sales SET vehicle_reg = COALESCE($2, vehicle_reg),
+                          needs_fitment = $3, large_panel = $4 WHERE id = $1`,
+        [sale.rows[0].id, reg, !reg, !!lp.rows[0]?.lp]);
+
       // Fire low-stock notifs after the sale
       for (const li of order.line_items || []) {
         const matched = await resolveProductBySku(c, li.sku);

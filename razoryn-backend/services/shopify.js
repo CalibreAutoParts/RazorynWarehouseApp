@@ -987,8 +987,30 @@ async function applyProductSeo(productGid, { seoTitle, seoDescription, handle, c
   return { ok: ue.length === 0, userErrors: ue, product: r.data.data?.productUpdate?.product || null };
 }
 
+// Write a product's review rating + count metafields (reviews.rating /
+// reviews.rating_count). Storefront themes read exactly these for star displays
+// and aggregateRating JSON-LD. productId may be numeric or a GID.
+async function setProductRating(productId, rating, count) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const gid = String(productId).startsWith('gid://') ? productId : `gid://shopify/Product/${productId}`;
+  const mutation = `mutation SetReviews($metafields: [MetafieldsSetInput!]!) {
+    metafieldsSet(metafields: $metafields) { userErrors { field message } }
+  }`;
+  const variables = { metafields: [
+    { ownerId: gid, namespace: 'reviews', key: 'rating', type: 'rating',
+      value: JSON.stringify({ value: String(rating), scale_min: '1.0', scale_max: '5.0' }) },
+    { ownerId: gid, namespace: 'reviews', key: 'rating_count', type: 'number_integer',
+      value: String(count) },
+  ] };
+  const r = await shopifyRequest('post', '/graphql.json', { data: { query: mutation, variables } });
+  const errs = r.data?.data?.metafieldsSet?.userErrors || [];
+  if (errs.length) throw new Error(errs.map(e => `${(e.field || []).join('.')}: ${e.message}`).join('; '));
+  return true;
+}
+
 module.exports = {
   isConfigured,
+  setProductRating,
   getAccessToken,
   getProductSeo,
   findTaxonomyCategory,

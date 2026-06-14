@@ -1693,8 +1693,45 @@ async function itemBelongsToStore(itemId, storeArg) {
   }
 }
 
+// Pull the seller's received feedback via the Trading API GetFeedback call and
+// normalise it to per-eBay-ItemID sentiment rows. eBay feedback is seller-level
+// and per-transaction (Positive/Neutral/Negative) — we map sentiment to a 1–5
+// score so it can be aggregated into star ratings per product.
+//   Positive → 5, Neutral → 3, Negative → 1
+// Only feedback where the subject role is "Seller" (i.e. left FOR us) counts.
+const FEEDBACK_SCORE = { Positive: 5, Neutral: 3, Negative: 1 };
+async function getSellerFeedback(storeArg) {
+  if (!isConfigured(storeArg)) return [];
+  const rows = [];
+  const perPage = 200;
+  for (let page = 1; page <= 25; page++) {
+    let xml;
+    try {
+      xml = await tradingCall('GetFeedback', `
+        <DetailLevel>ReturnAll</DetailLevel>
+        <Pagination><EntriesPerPage>${perPage}</EntriesPerPage><PageNumber>${page}</PageNumber></Pagination>`, storeArg);
+    } catch (e) {
+      console.warn('[ebay] GetFeedback failed:', e.message);
+      break;
+    }
+    const details = extractAll(xml, 'FeedbackDetail');
+    for (const d of details) {
+      const role = extractOne(d, 'Role');           // role of the feedback SUBJECT
+      if (role && role !== 'Seller') continue;       // keep feedback left for us as seller
+      const itemId = extractOne(d, 'ItemID');
+      const commentType = extractOne(d, 'CommentType');
+      const score = FEEDBACK_SCORE[commentType];
+      if (itemId && score) rows.push({ itemId, score });
+    }
+    const totalPages = parseInt(extractOne(xml, 'TotalNumberOfPages') || '1', 10) || 1;
+    if (page >= totalPages || details.length < perPage) break;
+  }
+  return rows;
+}
+
 module.exports = {
   isConfigured,
+  getSellerFeedback,
   getAccessToken,
   setInventoryQty,
   getRecentOrders,
