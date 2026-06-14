@@ -1291,6 +1291,7 @@ function adaptSale(s) {
     apiChannel: s.channel,
     isEstimate: !!s.is_estimate,
     paymentMethod: s.payment_method,
+    fulfillmentMethod: s.fulfillment_method || (s.payment_method === 'cash' ? 'collect' : 'ship'),
     paymentReference: s.payment_reference,
     status: s.status,
     // #13 — payment state. unpaid = issued invoice (parts given) not yet paid.
@@ -5895,10 +5896,12 @@ async function bulkMarkAlreadyShipped() {
 function openBulkDispatchModal() {
   const ids = Array.from(State.dispatchSelected);
   if (!ids.length) { toast('Nothing selected', 'warn'); return; }
-  // Filter to non-cash since cash goes through mark-collected
+  // Split by fulfilment bucket: collection orders go through mark-collected,
+  // the rest through mark-dispatched.
   const allSales = [...(State.dispatch?.toShip || []), ...(State.dispatch?.toCollect || [])];
   const selectedSales = allSales.filter(s => ids.includes(String(s.id)));
-  const cashCount = selectedSales.filter(s => s.payment_method === 'cash').length;
+  const toCollectIds = new Set((State.dispatch?.toCollect || []).map(s => String(s.id)));
+  const cashCount = selectedSales.filter(s => toCollectIds.has(String(s.id))).length;
   const dispatchCount = selectedSales.length - cashCount;
   const carriers = State.dispatch?.carriers || [];
 
@@ -6225,6 +6228,7 @@ function renderSales() {
         <div><h1>Sales</h1><div class="desc">Unified sales across all channels · click a row for details</div></div>
         <div class="actions">
           <button class="btn btn-primary admin-only" onclick="openManualSale()">+ New sale / estimate</button>
+          <button class="btn btn-outline admin-only" onclick="openVatReport()" title="VAT due per quarter — bank + card sales, with a download for your VAT return">📊 VAT returns</button>
           <button class="btn btn-outline admin-only" onclick="relinkUnmatchedSales()" title="Try to match unlinked orders to products by SKU again">🔗 Re-link unmatched</button>
           <button class="btn btn-outline" onclick="exportSalesXlsx()" title="Excel workbook with one sheet per channel">⬇ Excel (per-channel)</button>
           <button class="btn btn-outline" onclick="exportSalesCsv()" title="Single CSV — current filter only">CSV</button>
@@ -6242,6 +6246,7 @@ function renderSales() {
           : `<button data-sf="ebay">eBay</button>`}
         <button data-sf="cash">Cash</button>
         <button data-sf="bank">Bank</button>
+        <button data-sf="card">Card</button>
         <button data-sf="unpaid">⏳ Unpaid${(State.sales||[]).filter(s=>s.unpaid).length ? ' (' + (State.sales||[]).filter(s=>s.unpaid).length + ')' : ''}</button>
         <button data-sf="estimates">Estimates</button>
       </div>
@@ -6290,6 +6295,8 @@ function renderSales() {
     else if (filter === 'all') list = State.sales.filter(s => !s.isEstimate);
     // 'ebay' is the legacy single-store bucket — matches any ebay_* channel.
     else if (filter === 'ebay') list = State.sales.filter(s => (s.channel || '').startsWith('ebay') && !s.isEstimate);
+    // Cash / Bank / Card buckets are by payment method (channels are direct_cash/bank/card).
+    else if (filter === 'cash' || filter === 'bank' || filter === 'card') list = State.sales.filter(s => s.paymentMethod === filter && !s.isEstimate);
     else list = State.sales.filter(s => s.channel === filter && !s.isEstimate);
     const q = (State.salesSearch || '').trim();
     if (q) list = list.filter(s => matchesKeywords(q, s.invoice, s.paymentReference, s.customer, s.customerEmail, s.title, s.orderNumber, s.externalOrderId));
@@ -6347,10 +6354,10 @@ function renderSales() {
       const canDispatch = !s.isEstimate && !s.dispatchedAt && !s.collectedAt
                        && s.status !== 'dispatched' && s.status !== 'refunded' && s.status !== 'cancelled'
                        && isFresh;
-      const isCashOrder = s.paymentMethod === 'cash';
+      const isCollectOrder = s.fulfillmentMethod === 'collect';
       const dispatchBtn = canDispatch
-        ? (isCashOrder
-            ? `<button class="btn btn-ghost btn-sm" onclick="openCollectModalShortcut('${s.id}')" title="Mark collected (cash on collection)" style="color:var(--green)">📦</button>`
+        ? (isCollectOrder
+            ? `<button class="btn btn-ghost btn-sm" onclick="openCollectModalShortcut('${s.id}')" title="Mark collected (customer pickup)" style="color:var(--green)">📦</button>`
             : `<button class="btn btn-ghost btn-sm" onclick="openDispatchModalShortcut('${s.id}')" title="Mark dispatched — record carrier + tracking" style="color:var(--green)">📦</button>`)
         : '';
       return `
@@ -6435,16 +6442,96 @@ async function salesReload() {
 }
 
 // #13 — record payment for an issued-but-unpaid invoice (stock already given).
+// Lets you set the date payment was actually received so it lands in the right
+// VAT period (defaults to today if left blank).
 async function markSalePaid(id) {
-  if (!confirm('Mark this invoice as PAID? (Stock was already given when it was issued — this only records the payment.)')) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const input = prompt('Mark invoice as PAID.\n\nDate payment was received (YYYY-MM-DD) — leave as-is for today.\nThis only records payment; stock was already given.', today);
+  if (input === null) return;
+  const paidAt = input.trim() && /^\d{4}-\d{2}-\d{2}$/.test(input.trim()) ? input.trim() : null;
   try {
-    await Api.post('/api/sales/' + id + '/mark-paid', {});
+    await Api.post('/api/sales/' + id + '/mark-paid', paidAt ? { paidAt } : {});
     toast('Marked as paid', 'success');
     const sale = (State.sales || []).find(s => String(s.id) === String(id));
     if (sale) { sale.unpaid = false; sale.isPaid = true; sale.status = sale.status === 'pending' ? 'paid' : sale.status; }
     renderSales();
   } catch (e) {
     toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// ── VAT returns ────────────────────────────────────────────────────────────
+// Quarter selector + summary + download for the VAT return. Bank + card are
+// VATable (prices are VAT-inclusive, so VAT is the portion within the gross);
+// cash is shown separately as non-VAT. Quarters follow HMRC stagger 3.
+let _vatState = { year: null, quarter: null, basis: 'accrual' };
+function openVatReport() {
+  if (!_vatState.year) {
+    const now = new Date(), m = now.getUTCMonth() + 1, y = now.getUTCFullYear();
+    _vatState.year = m === 12 ? y + 1 : y;
+    _vatState.quarter = m === 12 || m <= 2 ? 1 : m <= 5 ? 2 : m <= 8 ? 3 : 4;
+  }
+  modal({
+    title: '📊 VAT returns',
+    body: `<div id="vat-modal-body"><div class="empty"><div class="t">Loading…</div></div></div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+    wide: true,
+  });
+  loadVatReport();
+}
+async function loadVatReport() {
+  const { year, quarter, basis } = _vatState;
+  const yearOpts = [];
+  const ny = new Date().getUTCFullYear() + 1;
+  for (let yy = ny; yy >= ny - 5; yy--) yearOpts.push(yy);
+  const qLabels = { 1: 'Q1 (Dec–Feb)', 2: 'Q2 (Mar–May)', 3: 'Q3 (Jun–Aug)', 4: 'Q4 (Sep–Nov)' };
+  try {
+    const r = await Api.get(`/api/sales/vat-report?year=${year}&quarter=${quarter}&basis=${basis}`);
+    const body = el('vat-modal-body');
+    if (!body) return;
+    const q = `year=${year}&quarter=${quarter}&basis=${basis}`;
+    body.innerHTML = `
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
+        <select onchange="_vatState.year=+this.value;loadVatReport()" style="padding:6px 8px">
+          ${yearOpts.map(yy => `<option value="${yy}" ${yy === year ? 'selected' : ''}>${yy}</option>`).join('')}
+        </select>
+        <select onchange="_vatState.quarter=+this.value;loadVatReport()" style="padding:6px 8px">
+          ${[1, 2, 3, 4].map(qq => `<option value="${qq}" ${qq === quarter ? 'selected' : ''}>${qLabels[qq]}</option>`).join('')}
+        </select>
+        <select onchange="_vatState.basis=this.value;loadVatReport()" style="padding:6px 8px" title="Accrual = by invoice date. Paid = only invoices marked paid, by payment date (cash accounting).">
+          <option value="accrual" ${basis === 'accrual' ? 'selected' : ''}>By invoice date</option>
+          <option value="paid" ${basis === 'paid' ? 'selected' : ''}>Paid only (by payment date)</option>
+        </select>
+        <span style="margin-left:auto"></span>
+        <a class="btn btn-primary btn-sm" href="/api/sales/vat-report.csv?${q}" target="_blank">⬇ Download CSV</a>
+      </div>
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">${r.window.label} · ${r.window.basis === 'paid' ? 'paid invoices only' : 'all issued invoices'}</div>
+      <div class="grid-4" style="margin-bottom:14px">
+        <div class="stat"><div class="label">VAT due</div><div class="value" style="color:var(--brand-primary)">${gbp(r.vatable.vat)}</div></div>
+        <div class="stat"><div class="label">VATable sales (gross)</div><div class="value">${gbp(r.vatable.gross)}</div></div>
+        <div class="stat"><div class="label">Net (ex-VAT)</div><div class="value">${gbp(r.vatable.net)}</div></div>
+        <div class="stat"><div class="label">Cash (non-VAT)</div><div class="value">${gbp(r.cash.total)}</div></div>
+      </div>
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">${r.vatable.count} VATable invoice(s) — bank ${gbp(r.vatable.byMethod.bank)} · card ${gbp(r.vatable.byMethod.card)}. Cash: ${r.cash.count} sale(s), excluded from VAT.</div>
+      <div style="max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:8px">
+        <table class="table" style="width:100%;font-size:12px">
+          <thead><tr><th>Date</th><th>Invoice</th><th>Customer</th><th>Pay</th><th style="text-align:right">Gross</th><th style="text-align:right">VAT</th><th>Paid</th></tr></thead>
+          <tbody>
+            ${r.rows.map(row => `<tr>
+              <td>${new Date(row.date).toLocaleDateString('en-GB')}</td>
+              <td>${escapeHtml(row.invoice_number || row.payment_reference || '')}</td>
+              <td>${escapeHtml(row.customer_name || '')}</td>
+              <td>${(row.payment_method || '').toUpperCase()}</td>
+              <td style="text-align:right">${gbp(parseFloat(row.total || 0))}</td>
+              <td style="text-align:right">${gbp(parseFloat(row.vat || 0))}</td>
+              <td>${row.is_paid ? '✓' : '⏳'}</td>
+            </tr>`).join('') || '<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--ink-soft)">No VATable sales in this period</td></tr>'}
+          </tbody>
+        </table>
+      </div>`;
+  } catch (e) {
+    const body = el('vat-modal-body');
+    if (body) body.innerHTML = `<div class="empty"><div class="t">Failed to load</div><div class="s">${escapeHtml(e.data?.message || e.message)}</div></div>`;
   }
 }
 
@@ -7877,6 +7964,8 @@ function qbOpenProformaModal() {
   if (!items.length) { toast('Quote is empty', 'warn'); return; }
   const currentPm = State.quote.paymentMethod || 'cash';
   State.quote._modalPm = currentPm;  // working copy of method inside modal
+  State.quote._modalFulfil = currentPm === 'cash' ? 'collect' : 'ship';  // default fulfilment
+  State.quote._modalFulfilTouched = false;
 
   modal({
     title: 'Review & send pro-forma',
@@ -7901,28 +7990,41 @@ function qbRenderProformaModalBody() {
   const pm = State.quote._modalPm || State.quote.paymentMethod || 'cash';
   const cashTotal = qbTotalAt(items, 'cash');
   const bankTotal = qbTotalAt(items, 'bank');
+  // Ship vs collect — default by method (cash → collect, bank/card → ship)
+  // unless the user has explicitly chosen.
+  const fulfil = State.quote._modalFulfil || (pm === 'cash' ? 'collect' : 'ship');
+  const pmTile = (val, icon, label, total, vatNote) => `
+        <label class="qb-pm-option ${pm === val ? 'selected' : ''}">
+          <input type="radio" name="qb-pm" value="${val}" ${pm === val ? 'checked' : ''} onchange="qbSetModalPm('${val}')" style="display:none">
+          <div>
+            <div style="font-size:12px;color:var(--ink-soft);font-weight:600">${icon} ${label}</div>
+            <div style="font-size:18px;font-weight:700">${gbp(total)}</div>
+            <div style="font-size:10px;color:var(--ink-soft)">${vatNote}</div>
+          </div>
+          ${pm === val ? '<div style="font-size:11px;color:var(--brand-primary);font-weight:600">✓ Selected</div>' : ''}
+        </label>`;
   return `
     <div style="background:var(--bg-soft);padding:12px;border-radius:8px;margin-bottom:14px">
       <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Confirm payment method · final chance to switch</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        <label class="qb-pm-option ${pm === 'cash' ? 'selected' : ''}">
-          <input type="radio" name="qb-pm" value="cash" ${pm === 'cash' ? 'checked' : ''} onchange="qbSetModalPm('cash')" style="display:none">
-          <div>
-            <div style="font-size:12px;color:var(--ink-soft);font-weight:600">💰 Cash on collection</div>
-            <div style="font-size:20px;font-weight:700">${gbp(cashTotal)}</div>
-          </div>
-          ${pm === 'cash' ? '<div style="font-size:11px;color:var(--brand-primary);font-weight:600">✓ Selected</div>' : ''}
-        </label>
-        <label class="qb-pm-option ${pm === 'bank' ? 'selected' : ''}">
-          <input type="radio" name="qb-pm" value="bank" ${pm === 'bank' ? 'checked' : ''} onchange="qbSetModalPm('bank')" style="display:none">
-          <div>
-            <div style="font-size:12px;color:var(--ink-soft);font-weight:600">🏦 Bank transfer</div>
-            <div style="font-size:20px;font-weight:700">${gbp(bankTotal)}</div>
-          </div>
-          ${pm === 'bank' ? '<div style="font-size:11px;color:var(--brand-primary);font-weight:600">✓ Selected</div>' : ''}
-        </label>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+        ${pmTile('cash', '💰', 'Cash on collection', cashTotal, 'No VAT')}
+        ${pmTile('bank', '🏦', 'Bank transfer', bankTotal, 'VAT invoice')}
+        ${pmTile('card', '💳', 'Card / Stripe', bankTotal, 'VAT invoice')}
       </div>
       <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">${items.length} item${items.length === 1 ? '' : 's'} · payment method becomes permanent once the pro-forma is generated.</div>
+    </div>
+    <div style="background:var(--bg-soft);padding:12px;border-radius:8px;margin-bottom:14px">
+      <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Fulfilment</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <label class="qb-pm-option ${fulfil === 'ship' ? 'selected' : ''}">
+          <input type="radio" name="qb-fulfil" value="ship" ${fulfil === 'ship' ? 'checked' : ''} onchange="qbSetModalFulfil('ship')" style="display:none">
+          <div><div style="font-size:13px;font-weight:600">📦 Shipping</div><div style="font-size:11px;color:var(--ink-soft)">Goes to dispatch — add tracking to mark sent</div></div>
+        </label>
+        <label class="qb-pm-option ${fulfil === 'collect' ? 'selected' : ''}">
+          <input type="radio" name="qb-fulfil" value="collect" ${fulfil === 'collect' ? 'checked' : ''} onchange="qbSetModalFulfil('collect')" style="display:none">
+          <div><div style="font-size:13px;font-weight:600">🏪 Collection</div><div style="font-size:11px;color:var(--ink-soft)">Customer picks up — mark collected</div></div>
+        </label>
+      </div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Customer name *</label><input id="pf-name" placeholder="Required" autofocus value="${escapeAttr(State.quote.customer.name || '')}"></div>
@@ -7939,7 +8041,7 @@ function qbRenderProformaModalBody() {
 
 // Switch the payment method inside the modal — re-renders totals + re-priced summary.
 // Persists field values by reading them before the re-paint and writing them back.
-function qbSetModalPm(method) {
+function qbSnapshotCustomerFields() {
   // Snapshot field values before re-render (we paint the same fields).
   State.quote.customer = {
     name: el('pf-name')?.value || '',
@@ -7950,7 +8052,19 @@ function qbSetModalPm(method) {
     orderNum: el('pf-ordernum')?.value || '',
     notes: el('pf-notes')?.value || '',
   };
+}
+function qbSetModalPm(method) {
+  qbSnapshotCustomerFields();
   State.quote._modalPm = method;
+  // If the user hasn't explicitly picked a fulfilment, follow the sensible
+  // default for the new method (cash → collect, bank/card → ship).
+  if (!State.quote._modalFulfilTouched) State.quote._modalFulfil = method === 'cash' ? 'collect' : 'ship';
+  el('qb-modal-content').innerHTML = qbRenderProformaModalBody();
+}
+function qbSetModalFulfil(method) {
+  qbSnapshotCustomerFields();
+  State.quote._modalFulfil = method;
+  State.quote._modalFulfilTouched = true;
   el('qb-modal-content').innerHTML = qbRenderProformaModalBody();
 }
 
@@ -7967,13 +8081,16 @@ async function qbSubmitProforma(sendEmail, confirmed = false) {
   // after confirming with the customer.
   const pm = State.quote._modalPm || State.quote.paymentMethod || 'cash';
   State.quote.paymentMethod = pm;
-  const channel = pm === 'cash' ? 'direct_cash' : 'direct_bank';
+  const channel = pm === 'cash' ? 'direct_cash' : pm === 'card' ? 'direct_card' : 'direct_bank';
+  const fulfillmentMethod = State.quote._modalFulfil || (pm === 'cash' ? 'collect' : 'ship');
+  // Card/Stripe uses the same (non-cash) price tier as bank transfer.
+  const priceKey = pm === 'card' ? 'bank' : pm;
 
   // Compute per-item prices using the chosen method.
   let lineItems = items.map(i => {
     const p = State.products.find(x => x.id == i.productId);
     const prices = p ? qbComputePrices(p) : { cash: 0, bank: 0 };
-    return { productId: i.productId, qty: i.qty, unitPrice: +(prices[pm] || 0).toFixed(2) };
+    return { productId: i.productId, qty: i.qty, unitPrice: +(prices[priceKey] || 0).toFixed(2) };
   });
 
   // For cash, scale the line prices so the recorded total equals the rounded
@@ -7996,6 +8113,7 @@ async function qbSubmitProforma(sendEmail, confirmed = false) {
   const payload = {
     channel,
     paymentMethod: pm,
+    fulfillmentMethod,
     // confirmed=true → a real order (shows in Sales + Dispatch, decrements stock),
     // recorded as unpaid so it lands in the dispatch worklist + unpaid list until
     // payment/collection. confirmed=false → a pro-forma estimate (quote only).

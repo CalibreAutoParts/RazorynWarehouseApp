@@ -310,7 +310,10 @@ router.post('/:saleId/mark-collected', requireAdmin, async (req, res) => {
     if (!s.rows[0]) return { error: 'not_found' };
     if (s.rows[0].is_estimate) return { error: 'is_estimate' };
     if (s.rows[0].collected_at) return { error: 'already_collected', collectedAt: s.rows[0].collected_at };
-    if (s.rows[0].payment_method !== 'cash') return { error: 'not_a_cash_order', message: 'Only cash-on-collection orders can be marked as collected.' };
+    // Collection is allowed for any order whose fulfilment is 'collect' — that's
+    // every cash order plus any bank/card order explicitly set to collection.
+    const fulfil = s.rows[0].fulfillment_method || (s.rows[0].payment_method === 'cash' ? 'collect' : 'ship');
+    if (fulfil !== 'collect') return { error: 'not_a_collection_order', message: 'This order is set for shipping — use Mark dispatched (with tracking) instead.' };
 
     const updated = await c.query(`
       UPDATE sales SET
