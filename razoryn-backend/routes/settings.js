@@ -161,6 +161,20 @@ router.put('/sound-prefs', requireAdmin, async (req, res) => {
   res.json({ ok: true, soundPrefs: clean });
 });
 
+// PATCH /api/settings/tracking (admin) — merge GA4/Meta config into data JSONB
+// without clobbering other keys (the generic PATCH replaces the whole blob).
+router.patch('/tracking', requireAdmin, async (req, res) => {
+  const keys = ['ga4_measurement_id', 'ga4_api_secret', 'meta_pixel_id', 'meta_capi_token', 'meta_test_code', 'tracking_enabled'];
+  const incoming = {};
+  for (const k of keys) if (req.body[k] !== undefined) incoming[k] = req.body[k];
+  const cur = await query(`SELECT data FROM app_settings WHERE id = 1`);
+  const data = { ...(cur.rows[0]?.data || {}), ...incoming };
+  await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify(data)]);
+  try { require('./track').invalidateConfig(); } catch (_) {}
+  await audit(req, 'update_tracking_settings', null, null, { keys: Object.keys(incoming) });
+  res.json({ ok: true });
+});
+
 // PATCH /api/settings (admin)
 router.patch('/', requireAdmin, async (req, res) => {
   const b = req.body || {};

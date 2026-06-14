@@ -1236,6 +1236,7 @@ function adaptProduct(p) {
     qtyShopify: p.qty_on_hand,
     qtyEbay: p.qty_on_hand,
     qtyOnHand: p.qty_on_hand,
+    largePanel: !!p.large_panel,
     lowThresh: p.low_stock_threshold,
     location: p.location_name || (p.location_code ? `(${p.location_code})` : ''),
     locationCode: p.location_code,
@@ -1292,6 +1293,9 @@ function adaptSale(s) {
     isEstimate: !!s.is_estimate,
     paymentMethod: s.payment_method,
     fulfillmentMethod: s.fulfillment_method || (s.payment_method === 'cash' ? 'collect' : 'ship'),
+    needsFitment: !!s.needs_fitment,
+    largePanel: !!s.large_panel,
+    vehicleReg: s.vehicle_reg || '',
     paymentReference: s.payment_reference,
     status: s.status,
     // #13 — payment state. unpaid = issued invoice (parts given) not yet paid.
@@ -3814,6 +3818,7 @@ function openProductModal(id) {
       </div>
       <div class="field"><label>Storage location</label><input id="m-loc" value="${p.location||''}" placeholder="Aisle B, Rack 3, Shelf 2"></div>
       <div class="field"><label>Storage notes</label><textarea id="m-locdesc" rows="2">${p.locationDesc||''}</textarea></div>
+      <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="m-lp" ${p.largePanel?'checked':''}><span></span></label> Large panel (needs special courier — flags any order containing it)</label></div>
       ${id ? `<div class="field"><label>Shopify shop categories (collections)</label><div id="m-collections" style="font-size:12px;color:var(--ink-soft)">Loading…</div></div>` : ''}
     `,
     actions: [
@@ -3823,6 +3828,7 @@ function openProductModal(id) {
           model: el('m-model').value, partNumber: el('m-pn').value, position: el('m-pos').value,
           barcode: el('m-bc').value, lowStockThreshold: +el('m-thresh').value,
           priceShopify: +el('m-pshop').value, priceEbay: +el('m-peby').value,
+          largePanel: el('m-lp')?.checked || false,
         };
         try {
           let newProduct = null;
@@ -6248,6 +6254,7 @@ function renderSales() {
         <button data-sf="bank">Bank</button>
         <button data-sf="card">Card</button>
         <button data-sf="unpaid">⏳ Unpaid${(State.sales||[]).filter(s=>s.unpaid).length ? ' (' + (State.sales||[]).filter(s=>s.unpaid).length + ')' : ''}</button>
+        <button data-sf="fitment">🔧 Needs fitment${(State.sales||[]).filter(s=>s.needsFitment && !s.isEstimate && !s.dispatchedAt && !s.collectedAt).length ? ' (' + (State.sales||[]).filter(s=>s.needsFitment && !s.isEstimate && !s.dispatchedAt && !s.collectedAt).length + ')' : ''}</button>
         <button data-sf="estimates">Estimates</button>
       </div>
 
@@ -6292,6 +6299,7 @@ function renderSales() {
     let list;
     if (filter === 'estimates') list = State.sales.filter(s => s.isEstimate);
     else if (filter === 'unpaid') list = State.sales.filter(s => s.unpaid);
+    else if (filter === 'fitment') list = State.sales.filter(s => s.needsFitment && !s.isEstimate && !s.dispatchedAt && !s.collectedAt);
     else if (filter === 'all') list = State.sales.filter(s => !s.isEstimate);
     // 'ebay' is the legacy single-store bucket — matches any ebay_* channel.
     else if (filter === 'ebay') list = State.sales.filter(s => (s.channel || '').startsWith('ebay') && !s.isEstimate);
@@ -6345,6 +6353,11 @@ function renderSales() {
         ? ` <span class="pill green" style="font-size:10px;margin-left:4px" title="${s.collectedAt ? 'Collected ' + new Date(s.collectedAt).toLocaleDateString() : 'Dispatched ' + new Date(s.dispatchedAt).toLocaleDateString()}">${s.collectedAt ? '✓ Collected' : '✓ Shipped'}</span>`
         : '';
       const unpaidBadge = s.unpaid ? ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="Parts given, payment not received yet">⏳ Unpaid</span>` : '';
+      // Fitment + large-panel flags (auto-parts ops). Only meaningful on live orders.
+      const fitmentBadge = (!s.isEstimate && s.needsFitment && !s.dispatchedAt && !s.collectedAt)
+        ? ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="No vehicle reg captured — confirm fitment before dispatch">🔧 Confirm fitment</span>` : '';
+      const lpBadge = (!s.isEstimate && s.largePanel)
+        ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--amber-light);color:var(--amber)" title="Contains a large panel — route to the special courier">📦 Large panel</span>` : '';
       // Quick "Mark dispatched" shortcut: shows for paid non-cash orders that haven't shipped yet
       // AND fall within the dispatch worklist's 10-day cutoff. Older orders are assumed to have
       // been handled on the source channel before this app's dispatch tracking existed.
@@ -6365,7 +6378,7 @@ function renderSales() {
         <td onclick="event.stopPropagation()"><input type="checkbox" class="sale-row-check" data-sid="${s.id}" ${State.salesSelected.has(s.id)?'checked':''} onchange="salesToggleRow('${s.id}',this.checked)"></td>
         <td>${fmtDate(s.date)}</td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${s.invoice||'—'}</td>
-        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}${unpaidBadge}</td>
+        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}${unpaidBadge}${fitmentBadge}${lpBadge}</td>
         <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
         <td>${s.customer}</td>
         <td class="num"><strong>${gbp(s.amount)}</strong></td>
@@ -12122,6 +12135,39 @@ function renderSettings() {
       <div class="page-head"><h1>Settings</h1></div>
 
       <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Storefront integrations</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:14px">
+            Server-side conversion tracking, eBay→Shopify review stars, and back-in-stock alerts.
+          </p>
+
+          <div style="font-weight:600;font-size:14px;margin-bottom:6px">Server-side tracking (GA4 + Meta)</div>
+          <p style="color:var(--ink-soft);font-size:12px;margin-bottom:10px">The storefront Web Pixel posts events to <code>/api/track</code>, which forwards them to GA4 + Meta server-side (survives ad-blockers). Leave blank to disable a provider. <a href="#" onclick="return false" style="color:var(--ink-soft)">Pixel deploys via the Shopify CLI</a> — see razoryn-ops/.</p>
+          <div class="grid-2" style="grid-template-columns:1fr 1fr">
+            <div class="field"><label>GA4 Measurement ID</label><input id="trk-ga4-id" placeholder="G-XXXXXXX"></div>
+            <div class="field"><label>GA4 API secret</label><input id="trk-ga4-secret" placeholder="••••••" type="password"></div>
+            <div class="field"><label>Meta Pixel ID</label><input id="trk-meta-pixel" placeholder="1234567890"></div>
+            <div class="field"><label>Meta CAPI token</label><input id="trk-meta-token" placeholder="••••••" type="password"></div>
+          </div>
+          <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="trk-enabled" checked><span></span></label> Tracking enabled</label></div>
+          <button class="btn btn-primary" onclick="saveTrackingSettings()">Save tracking config</button>
+
+          <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">eBay reviews → Shopify stars</div>
+            <p style="color:var(--ink-soft);font-size:12px;margin-bottom:10px">Pulls eBay seller feedback, aggregates per product, and writes <code>reviews.rating</code> / <code>reviews.rating_count</code> metafields (runs automatically nightly).</p>
+            <button class="btn btn-outline" onclick="syncEbayReviewsNow(this)">★ Sync eBay reviews now</button>
+            <span id="reviews-sync-result" style="font-size:12px;color:var(--ink-soft);margin-left:8px"></span>
+          </div>
+
+          <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">Back-in-stock</div>
+            <p style="color:var(--ink-soft);font-size:12px;margin-bottom:6px">Storefront signups post to <code>/api/notify</code>; waiting customers are auto-emailed when stock returns.</p>
+            <div id="bis-count" style="font-size:13px;color:var(--ink-soft)">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>Shopify integration</h3></div>
         <div class="card-body">
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">
@@ -12678,6 +12724,59 @@ function renderSettings() {
     </div>
   `;
   loadPricingConfig();
+  loadTrackingSettings();
+  loadBackInStockCount();
+}
+
+// Populate the tracking config inputs from app_settings.data.
+async function loadTrackingSettings() {
+  try {
+    const r = await Api.get('/api/settings');
+    const d = r.settings?.data || {};
+    if (el('trk-ga4-id')) el('trk-ga4-id').value = d.ga4_measurement_id || '';
+    if (el('trk-ga4-secret')) el('trk-ga4-secret').value = d.ga4_api_secret || '';
+    if (el('trk-meta-pixel')) el('trk-meta-pixel').value = d.meta_pixel_id || '';
+    if (el('trk-meta-token')) el('trk-meta-token').value = d.meta_capi_token || '';
+    if (el('trk-enabled')) el('trk-enabled').checked = d.tracking_enabled !== false;
+  } catch (_) {}
+}
+async function saveTrackingSettings() {
+  try {
+    await Api.patch('/api/settings/tracking', {
+      ga4_measurement_id: el('trk-ga4-id').value.trim(),
+      ga4_api_secret: el('trk-ga4-secret').value.trim(),
+      meta_pixel_id: el('trk-meta-pixel').value.trim(),
+      meta_capi_token: el('trk-meta-token').value.trim(),
+      tracking_enabled: el('trk-enabled').checked,
+    });
+    toast('Tracking config saved', 'success');
+  } catch (e) {
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+async function syncEbayReviewsNow(btn) {
+  const out = el('reviews-sync-result');
+  if (btn) btn.disabled = true;
+  if (out) out.textContent = 'Syncing…';
+  try {
+    const r = await Api.post('/api/reviews/sync', {});
+    const msg = r.skipped ? 'eBay/Shopify not configured'
+      : `${r.updated || 0} product rating(s) updated from ${r.feedback || 0} feedback rows`;
+    if (out) out.textContent = msg;
+    toast(msg, r.skipped ? 'warn' : 'success', 6000);
+  } catch (e) {
+    if (out) out.textContent = '';
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  } finally { if (btn) btn.disabled = false; }
+}
+async function loadBackInStockCount() {
+  try {
+    const r = await Api.get('/api/notify');
+    const out = el('bis-count');
+    if (out) out.textContent = `${r.pending} customer(s) waiting · ${r.requests.length} total signup(s).`;
+  } catch (_) {
+    const out = el('bis-count'); if (out) out.textContent = 'No signups yet.';
+  }
 }
 
 async function findShopifyLocations() {

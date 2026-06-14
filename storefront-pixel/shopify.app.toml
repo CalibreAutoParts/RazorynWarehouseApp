@@ -1,0 +1,16 @@
+# Razoryn storefront pixel — Shopify app config (extension-only).
+#
+# This app exists ONLY to deploy the Web Pixel extension. All ops features
+# (orders/fitment, eBay→reviews, back-in-stock, server-side tracking endpoint)
+# now live in the warehouse app (razoryn-backend) — so there are no webhooks,
+# admin scopes, or embedded UI here. `client_id` is filled by
+# `shopify app config link`.
+name = "razoryn-storefront-pixel"
+embedded = false
+
+[access_scopes]
+# A Web Pixel needs no Admin API scopes; it reads customer events in its sandbox.
+scopes = ""
+
+[pos]
+embedded = false

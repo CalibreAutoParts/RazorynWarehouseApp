@@ -284,7 +284,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
                    'low_stock_threshold', 'price_shopify', 'price_ebay', 'cost_price',
                    'location_id', 'active', 'location_note', 'location_photo_data_url',
-                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo'];
+                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
@@ -292,7 +292,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
                 locationNote: 'location_note', locationPhotoDataUrl: 'location_photo_data_url',
                 itemPhotoDataUrl: 'item_photo_data_url',
                 locationPhotoDataUrl2: 'location_photo_data_url_2',
-                primaryPhoto: 'primary_photo' };
+                primaryPhoto: 'primary_photo', largePanel: 'large_panel' };
   const sets = [], params = [];
   // Always ensure the per-product location/photo columns (incl. updated_at)
   // exist before we touch them — cheap (cached after first run).
