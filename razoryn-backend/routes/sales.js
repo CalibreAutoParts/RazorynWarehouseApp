@@ -355,7 +355,10 @@ router.get('/export.xlsx', requireAdmin, async (req, res) => {
 });
 
 // GET /api/sales/:id
-router.get('/:id', requireAdmin, async (req, res) => {
+router.get('/:id', requireAdmin, async (req, res, next) => {
+  // Sale ids are numeric. Let non-numeric paths (e.g. /vat-report, /vat-report.csv)
+  // fall through to their dedicated handlers instead of being treated as an id.
+  if (!/^\d+$/.test(req.params.id)) return next();
   const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   const items = await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id]);
