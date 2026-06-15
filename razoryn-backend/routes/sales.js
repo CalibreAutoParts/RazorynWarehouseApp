@@ -27,6 +27,11 @@ async function ensurePaidColumn() {
     // LP item needing the special courier.
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS needs_fitment BOOLEAN NOT NULL DEFAULT false`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS large_panel BOOLEAN NOT NULL DEFAULT false`);
+    // Fitment is a storefront-only concern — clear it on staff-quoted direct
+    // sales (fitment was confirmed before quoting). Idempotent: only rewrites
+    // rows still flagged, so it's a no-op after the first boot.
+    await query(`UPDATE sales SET needs_fitment = false
+                  WHERE needs_fitment = true AND channel IN ('direct_cash','direct_bank','direct_card')`);
     // Allow card/Stripe as a manual-entry channel alongside cash + bank. The
     // channel CHECK is inline (auto-named sales_channel_check); widen it so
     // 'direct_card' is accepted without losing the guard on bad values.
@@ -490,9 +495,10 @@ router.post('/', requireAdmin, async (req, res) => {
     // (stock decrements like any invoice) but is flagged for payment follow-up.
     const isPaid = isEstimate ? true : (b.paid !== false);
     await ensurePaidColumn();
-    // Fitment + large-panel flags for the dispatch/fitment queue. needs_fitment
-    // when no vehicle reg was captured; large_panel if any line is a flagged part.
-    const needsFitment = !((b.vehicleReg || '').trim());
+    // Fitment only applies to self-service Shopify storefront orders. Direct
+    // sales (cash/bank/card) are quoted by staff who confirm fitment first, so
+    // they're never flagged. large_panel still applies (courier routing).
+    const needsFitment = false;
     let largePanel = false;
     const pids = itemsResolved.map(i => i.productId).filter(Boolean);
     if (pids.length) {
