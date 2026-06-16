@@ -1300,6 +1300,31 @@ router.post('/common-metafields', requireAdmin, async (req, res) => {
 // Check existing Shopify products by SKU
 router.post('/check-conflicts', requireAdmin, async (req, res) => {
   if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+
+  // Items mode: match each listing to an existing Shopify product by its SKU OR
+  // the part-number code in its title, returning the productId so the caller can
+  // offer to LINK instead of creating a duplicate.
+  const items = Array.isArray(req.body.items) ? req.body.items : null;
+  if (items) {
+    const codes = new Set();
+    const perItem = items.map(it => {
+      const cands = [];
+      if (it.sku) cands.push(String(it.sku));
+      const tail = String(it.title || '').match(/\s[-–]\s+([A-Za-z0-9][A-Za-z0-9-]*)\s*$/);
+      if (tail) cands.push(tail[1]);
+      cands.forEach(c => codes.add(c));
+      return { itemId: String(it.itemId), cands };
+    });
+    const found = codes.size ? await shopify.findProductsBySkus([...codes]) : {};
+    const conflicts = [];
+    for (const pi of perItem) {
+      const hit = pi.cands.find(c => found[c]);
+      if (hit) conflicts.push({ itemId: pi.itemId, matchedCode: hit, productId: found[hit].product_id, title: found[hit].title });
+    }
+    return res.json({ conflicts, mode: 'items' });
+  }
+
+  // Legacy SKU-only mode.
   const skus = (req.body.skus || []).filter(Boolean);
   const found = await shopify.findProductsBySkus(skus);
   const conflicts = Object.entries(found).map(([sku, info]) => ({ sku, ...info }));

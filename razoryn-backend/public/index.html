@@ -10101,6 +10101,16 @@ function editListingIdentity(target) {
   });
 }
 
+// "Mixed SKU" = two listings on the SAME channel that have DIFFERENT titles, i.e.
+// different parts wrongly sharing one code. Comparing titles within a channel is
+// reliable (the same item shouldn't be listed twice there); comparing across
+// channels isn't, because one item legitimately has different eBay/Shopify titles.
+function reconcileTitleSig(t) { return String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+function groupIsMixed(g) {
+  const distinct = arr => new Set((arr || []).map(x => reconcileTitleSig(x.title)).filter(Boolean)).size;
+  return (g.dupEbay && distinct(g.ebay) > 1) || (g.dupShopify && distinct(g.shopify) > 1);
+}
+
 function renderReconcile() {
   const data = State.reconcile;
   if (!data) return;
@@ -10112,6 +10122,7 @@ function renderReconcile() {
     switch (filter) {
       case 'needs': return g.needsEbayShopifyLink;
       case 'dup': return g.dupEbay || g.dupShopify;
+      case 'mixed': return groupIsMixed(g);
       case 'linked': return g.onEbay && g.onShopify && g.ebayShopifyLinked;
       case 'ebay-only': return g.onEbay && !g.onShopify && !g.onWarehouse;
       case 'shopify-only': return g.onShopify && !g.onEbay && !g.onWarehouse;
@@ -10156,6 +10167,7 @@ function renderReconcile() {
       ${segBtn('all', 'All', s.groups)}
       ${segBtn('needs', 'Needs link', s.needsLink, true)}
       ${segBtn('dup', 'Duplicates', s.duplicates, true)}
+      ${segBtn('mixed', 'Mixed SKU', (data.groups || []).filter(groupIsMixed).length, true)}
       ${segBtn('linked', 'Linked', s.fullyLinked)}
       ${segBtn('ebay-only', 'eBay only', s.ebayOnly)}
       ${segBtn('shopify-only', 'Shopify only', s.shopifyOnly)}
@@ -10189,6 +10201,7 @@ function reconcileRow(g) {
         <div style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           ${e.storeName ? `<span class="pill" style="font-size:9px;background:var(--bg-soft);color:var(--ink);font-weight:600">${escapeHtml(abbreviateStoreName(e.storeName))}</span>` : ''}
           <a href="${escapeAttr(e.url)}" target="_blank" rel="noopener" style="color:var(--brand-primary);text-decoration:none;font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(e.itemId)} ↗</a>
+          ${e.sku ? `<span style="font-family:ui-monospace,monospace;font-size:10px;color:var(--ink-soft);background:var(--bg-soft);padding:0 4px;border-radius:3px">${escapeHtml(e.sku)}</span>` : '<span style="font-size:10px;color:var(--amber)">no SKU</span>'}
           ${e.price != null ? `<span style="font-size:11px;color:var(--ink-soft)">£${Number(e.price).toFixed(2)}</span>` : ''}
           <button class="btn btn-ghost btn-sm" style="padding:0 4px" title="Edit code & push to eBay + Shopify + warehouse" onclick='${editIdClick({ ebayItemId: String(e.itemId), sku: e.sku || "", title: e.title || "", refresh: "reconcile" })}'>✏️</button>
           ${g.dupEbay ? `<button class="btn btn-ghost btn-sm" style="padding:0 4px;color:var(--red)" title="Delete this eBay listing (ends it on eBay)" onclick='${delListingClick({ channel: "ebay", id: String(e.itemId), storeCode: e.storeCode || "", label: e.title || String(e.itemId), refresh: "reconcile" })}'>🗑</button>` : ''}
@@ -10196,8 +10209,9 @@ function reconcileRow(g) {
     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
   const shopCell = g.shopify.length
     ? (g.dupShopify ? dupBadge(g.shopify.length, 'products') : '') + g.shopify.map(x => `
-        <div style="margin-bottom:4px;display:flex;align-items:center;gap:6px">
+        <div style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(x.productId)}</span>
+          ${x.sku ? `<span style="font-family:ui-monospace,monospace;font-size:10px;color:var(--ink-soft);background:var(--bg-soft);padding:0 4px;border-radius:3px">${escapeHtml(x.sku)}</span>` : '<span style="font-size:10px;color:var(--amber)">no SKU</span>'}
           ${x.price != null ? `<span style="font-size:11px;color:var(--ink-soft)">£${Number(x.price).toFixed(2)}</span>` : ''}
           <button class="btn btn-ghost btn-sm" style="padding:0 4px" title="Edit code & push to channels" onclick='${editIdClick({ shopifyProductId: String(x.productId), sku: x.sku || "", title: x.title || "", refresh: "reconcile" })}'>✏️</button>
           ${g.dupShopify ? `<button class="btn btn-ghost btn-sm" style="padding:0 4px;color:var(--red)" title="Delete this Shopify product" onclick='${delListingClick({ channel: "shopify", id: String(x.productId), label: x.title || String(x.productId), refresh: "reconcile" })}'>🗑</button>` : ''}
@@ -10205,7 +10219,7 @@ function reconcileRow(g) {
     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
   const whCell = g.warehouse.length
     ? g.warehouse.map(w => `<div style="margin-bottom:4px;font-size:12px;display:flex;align-items:flex-start;gap:6px">
-        <span style="flex:1">${escapeHtml(w.title || w.sku || '')}${w.qty != null ? `<span style="font-size:11px;color:var(--ink-soft);margin-left:4px">·${w.qty} in stock</span>` : ''}</span>
+        <span style="flex:1">${escapeHtml(w.title || w.sku || '')}${w.qty != null ? `<span style="font-size:11px;color:var(--ink-soft);margin-left:4px">·${w.qty} in stock</span>` : ''}${w.sku ? `<div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--ink-soft)">${escapeHtml(w.sku)}</div>` : ''}</span>
         <button class="btn btn-ghost btn-sm" style="padding:0 4px" title="Edit code & push to channels" onclick='${editIdClick({ warehouseProductId: w.id, sku: w.sku || "", title: w.title || "", refresh: "reconcile" })}'>✏️</button>
       </div>`).join('')
     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
@@ -12599,10 +12613,39 @@ async function mirrorSelected() {
   if (missingSku.length) {
     if (!confirm(`${missingSku.length} listing(s) have no SKU and will be skipped. Continue with the rest?`)) return;
   }
-  const valid = selected.filter(l => effectiveSku(l));
+  let valid = selected.filter(l => effectiveSku(l));
 
   // Up-front scope confirmation so a filtered push is unambiguous.
   if (!confirm(`Push ${valid.length} listing(s)${filterNote} to Shopify?`)) return;
+
+  // Guard against re-creating duplicates: for UNLINKED listings, check whether an
+  // existing Shopify product already matches by SKU or part number, and offer to
+  // LINK them instead of creating a new product.
+  try {
+    const unlinked = valid.filter(l => !l.existsOnShopify);
+    if (unlinked.length) {
+      const r = await Api.post('/api/listings/check-conflicts', {
+        items: unlinked.map(l => ({ itemId: l.itemId, sku: effectiveSku(l), title: (MirrorState.titleOverrides[l.itemId] != null ? MirrorState.titleOverrides[l.itemId] : l.title) })),
+      });
+      const matches = (r.conflicts || []).filter(m => unlinked.some(l => l.itemId === m.itemId));
+      if (matches.length) {
+        const list = matches.slice(0, 12).map(m => `• ${m.matchedCode} — ${m.title}`).join('\n') + (matches.length > 12 ? `\n…and ${matches.length - 12} more` : '');
+        const doLink = confirm(
+          `${matches.length} of these already exist on Shopify (matched by SKU / part number):\n\n${list}\n\n` +
+          `Pushing them would CREATE DUPLICATES.\n\nOK = Link them to the existing products (and skip creating these)\nCancel = create/overwrite them as normal`);
+        if (doLink) {
+          let linked = 0;
+          for (const m of matches) {
+            try { await Api.post('/api/listings/link-status/link', { ebayItemId: m.itemId, shopifyProductId: m.productId }); linked++; } catch (_) {}
+          }
+          const skip = new Set(matches.map(m => m.itemId));
+          valid = valid.filter(l => !skip.has(l.itemId));
+          toast(`Linked ${linked} listing(s) to existing Shopify products`, 'success');
+          if (!valid.length) { await pullEbayListings(); return; }
+        }
+      }
+    }
+  } catch (e) { /* non-blocking — fall through to the normal conflict check */ }
 
   // Check Shopify for conflicts
   toast('Checking Shopify for existing products…', 'info');
