@@ -106,6 +106,31 @@ router.post('/', requirePermission('inventory'), async (req, res) => {
     [productId, sku, title, partNumber, qty, b.containerRef || null, b.supplier || null,
      b.expectedDate || null, b.status || 'on_order', b.notes || null, req.user.id]);
   await audit(req, 'incoming_create', 'incoming', rows[0].id, { qty, container: b.containerRef });
+
+  // If staff linked this line to an existing product AND typed a part number that
+  // isn't already the product's master SKU/part number, capture it as a searchable
+  // sub part-number — so the factory/country code from this container can later be
+  // found in inventory, stock-check, quote builder and sales.
+  try {
+    const typed = String(b.partNumber || '').trim();
+    if (productId && typed) {
+      const pr = await query(`SELECT sku, part_number FROM products WHERE id = $1`, [productId]);
+      const m = pr.rows[0] || {};
+      const norm = s => String(s || '').trim().toLowerCase();
+      if (norm(typed) !== norm(m.sku) && norm(typed) !== norm(m.part_number)) {
+        await query(`CREATE TABLE IF NOT EXISTS product_part_numbers (
+          id SERIAL PRIMARY KEY,
+          product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+          code TEXT NOT NULL, note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+        await query(`CREATE UNIQUE INDEX IF NOT EXISTS ppn_product_code_uq ON product_part_numbers (product_id, upper(code))`);
+        await query(
+          `INSERT INTO product_part_numbers (product_id, code, note) VALUES ($1, $2, $3)
+           ON CONFLICT (product_id, upper(code)) DO NOTHING`,
+          [productId, typed, b.containerRef ? ('Container ' + b.containerRef) : 'From incoming stock']);
+      }
+    }
+  } catch (e) { /* non-critical — alias capture is best-effort */ }
+
   res.status(201).json({ item: rows[0] });
 });
 

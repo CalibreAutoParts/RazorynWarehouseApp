@@ -4085,7 +4085,7 @@ function handleScan(code) {
 }
 function handleManualSearch(q) {
   q = q.trim().toLowerCase(); if (!q) return;
-  const p = State.products.find(x => matchesKeywords(q, x.sku, x.partNumber, x.title));
+  const p = State.products.find(x => matchesKeywords(q, x.sku, x.partNumber, x.title, ...(x.partNumbers||[]).map(a => a.code)));
   if (!p) { toast('No match found', 'warn'); return; }
   showProductScanCard(p);
 }
@@ -4848,7 +4848,7 @@ function renderLabels() {
     const wrap = el('lab-suggest');
     if (!q || q.length < 2) { wrap.innerHTML = ''; return; }
     const matches = (State.products || []).filter(p =>
-      matchesKeywords(q, p.sku, p.title, p.partNumber, p.barcode)
+      matchesKeywords(q, p.sku, p.title, p.partNumber, p.barcode, ...(p.partNumbers||[]).map(a => a.code))
     ).slice(0, 12);
     wrap.innerHTML = matches.length
       ? `<div style="position:absolute;top:4px;left:0;right:0;background:var(--white);border:1px solid var(--line);border-radius:6px;max-height:280px;overflow-y:auto;z-index:20;box-shadow:var(--shadow)">
@@ -7280,7 +7280,7 @@ function manualSaleAddRow() {
     const q = searchInput.value.trim().toLowerCase();
     if (!q || q.length < 2) { suggest.style.display = 'none'; return; }
     const matches = (State.products || []).filter(p =>
-      matchesKeywords(q, p.sku, p.title, p.partNumber)
+      matchesKeywords(q, p.sku, p.title, p.partNumber, ...(p.partNumbers||[]).map(a => a.code))
     ).slice(0, 12);
     if (!matches.length) {
       suggest.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--ink-soft)">No matches — use "Custom item" below for non-inventory items</div>';
@@ -7646,16 +7646,25 @@ async function qbCopyUrl(url, label, note) {
 
 // Compute the cash + bank price for a product, given the current pricing config.
 function qbComputePrices(p) {
-  const cfg = State.pricingConfig || { cashDiscountPct: 10, bankTransferPct: 10, ebayBuyerProtectionMarkup: 0, shopifyFreeDeliveryOver: 50 };
+  const cfg = State.pricingConfig || { cashDiscountPct: 10, bankTransferPct: 10, priceLinkPct: 10, ebayBuyerProtectionMarkup: 0, shopifyFreeDeliveryOver: 50 };
+  // Warehouse-master model: eBay is the monitored top price; Shopify & bank are a
+  // fixed % below it, cash a % below it. We DERIVE Shopify/bank from eBay rather
+  // than trusting the stored Shopify figure, so quotes always follow the rule even
+  // if a Shopify recalc/push hasn't run yet. The "Shopify & bank" % is priceLinkPct
+  // (falls back to bankTransferPct for older configs).
+  const shopPct = (cfg.priceLinkPct != null ? cfg.priceLinkPct : (cfg.bankTransferPct != null ? cfg.bankTransferPct : 10));
   const ebayBasis = (p.priceEbay && p.priceEbay > 0) ? p.priceEbay : (p.priceShopify || 0);
   const fromShopify = !(p.priceEbay && p.priceEbay > 0) && (p.priceShopify || 0) > 0;
+  // Price-locked products keep their manually-set Shopify price (the lock exists
+  // precisely so automated derivation doesn't overwrite it).
+  const shopify = (p.priceLocked && p.priceShopify > 0) ? p.priceShopify : ebayBasis * (1 - shopPct / 100);
   return {
     cash: ebayBasis * (1 - cfg.cashDiscountPct / 100),
-    // #6: bank transfer price equals the Shopify price (fall back to the eBay
-    // discount only when no Shopify price exists for the product).
-    bank: (p.priceShopify && p.priceShopify > 0) ? p.priceShopify : ebayBasis * (1 - cfg.bankTransferPct / 100),
+    bank: shopify,            // bank transfer is invoiced at the Shopify price
     ebay: ebayBasis * (1 + cfg.ebayBuyerProtectionMarkup / 100),
-    shopify: p.priceShopify || 0,
+    shopify,
+    shopPct,
+    priceLocked: !!p.priceLocked,
     fromShopify,
     cfg,
   };
@@ -7736,7 +7745,7 @@ function renderQuoteBuilder() {
     const q = el('qb-q').value.trim().toLowerCase();
     if (!q) { el('qb-list').innerHTML = ''; return; }
     const matches = State.products.filter(p =>
-      matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model)
+      matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model, ...(p.partNumbers||[]).map(a => a.code))
     ).slice(0, 6);
     el('qb-list').innerHTML = matches.length ? matches.map(p => `
       <div onclick="qbSelectProduct('${p.id}')" style="padding:12px;border-top:1px solid var(--line);cursor:pointer;display:flex;align-items:center;gap:12px">
@@ -7811,7 +7820,7 @@ function qbSelectProduct(id) {
                ${bankAddable ? `onclick="qbAddToQuote('${p.id}', 'bank')"` : ''}>
             <div>
               <div class="ch-name">🏦 Bank transfer (trade)</div>
-              <div class="ch-meta">${(prices.shopify > 0) ? 'Same as Shopify price' : 'eBay price minus ' + prices.cfg.bankTransferPct + '%'} — invoiced</div>
+              <div class="ch-meta">${prices.priceLocked ? 'Same as Shopify price (locked)' : (prices.fromShopify ? 'Shopify' : 'eBay') + ' price minus ' + prices.shopPct + '%'} — invoiced</div>
             </div>
             <div>
               <div class="ch-price">${gbp(prices.bank)}</div>
@@ -14705,7 +14714,7 @@ async function openLinkProduct(saleId, itemId, sku, decrementStockEligible) {
       const q = search.value.trim().toLowerCase();
       if (!q || q.length < 2) { results.style.display = 'none'; return; }
       const matches = products.filter(p =>
-        matchesKeywords(q, p.sku, p.title, p.partNumber)
+        matchesKeywords(q, p.sku, p.title, p.partNumber, ...(p.partNumbers||[]).map(a => a.code))
       ).slice(0, 10);
       if (!matches.length) { results.innerHTML = '<div style="padding:10px;font-size:12px;color:var(--ink-soft)">No matches</div>'; results.style.display = 'block'; return; }
       results.innerHTML = matches.map(p => `
