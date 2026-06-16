@@ -10165,7 +10165,10 @@ function reconcileRow(g) {
         </div>`).join('')
     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
   const whCell = g.warehouse.length
-    ? g.warehouse.map(w => `<div style="margin-bottom:4px;font-size:12px">${escapeHtml(w.title || w.sku || '')}${w.qty != null ? `<span style="font-size:11px;color:var(--ink-soft);margin-left:4px">·${w.qty} in stock</span>` : ''}</div>`).join('')
+    ? g.warehouse.map(w => `<div style="margin-bottom:4px;font-size:12px;display:flex;align-items:flex-start;gap:6px">
+        <span style="flex:1">${escapeHtml(w.title || w.sku || '')}${w.qty != null ? `<span style="font-size:11px;color:var(--ink-soft);margin-left:4px">·${w.qty} in stock</span>` : ''}</span>
+        <button class="btn btn-ghost btn-sm" style="padding:0 4px" title="Edit code & push to channels" onclick='${editIdClick({ warehouseProductId: w.id, sku: w.sku || "", title: w.title || "", refresh: "reconcile" })}'>✏️</button>
+      </div>`).join('')
     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
 
   // Status + actions

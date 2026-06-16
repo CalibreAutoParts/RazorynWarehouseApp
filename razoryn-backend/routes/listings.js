@@ -1679,7 +1679,15 @@ router.post('/update-identity', requireAdmin, async (req, res) => {
   const partNumber = b.partNumber != null && String(b.partNumber).trim() ? String(b.partNumber).trim() : sku;
   let shopifyProductId = b.shopifyProductId ? String(b.shopifyProductId) : null;
   let ebayItemId = b.ebayItemId ? String(b.ebayItemId) : null;
+  const warehouseProductId = b.warehouseProductId ? Number(b.warehouseProductId) : null;
   let storeCode = null;
+
+  // If we were given a specific warehouse product, use its own Shopify link as the
+  // target (unambiguous when several products share a bad SKU — pick the exact row).
+  if (warehouseProductId && !shopifyProductId) {
+    const pr = await query(`SELECT shopify_product_id FROM products WHERE id = $1`, [warehouseProductId]);
+    if (pr.rows[0]?.shopify_product_id) shopifyProductId = String(pr.rows[0].shopify_product_id);
+  }
 
   // Fill in the missing side from mirror_links.
   if (shopifyProductId && !ebayItemId) {
@@ -1692,14 +1700,17 @@ router.post('/update-identity', requireAdmin, async (req, res) => {
     const lk = await query(`SELECT store_code FROM mirror_links WHERE ebay_item_id = $1 LIMIT 1`, [ebayItemId]);
     if (lk.rows[0]) storeCode = lk.rows[0].store_code;
   }
-  if (!shopifyProductId && !ebayItemId) return res.status(400).json({ error: 'no_target' });
+  if (!shopifyProductId && !ebayItemId && !warehouseProductId) return res.status(400).json({ error: 'no_target' });
 
   const r = { sku, partNumber, warehouse: null, shopify: null, ebay: null, errors: [] };
 
-  // 1. Warehouse product (matched by Shopify link).
+  // 1. Warehouse product — by explicit id when given (exact row), else by Shopify link.
   try {
     let upd = { rowCount: 0 };
-    if (shopifyProductId) {
+    if (warehouseProductId) {
+      upd = await query(`UPDATE products SET sku = $1, barcode = $2, part_number = $3, updated_at = now() WHERE id = $4 RETURNING id`,
+        [sku, sku, partNumber, warehouseProductId]);
+    } else if (shopifyProductId) {
       upd = await query(`UPDATE products SET sku = $1, barcode = $2, part_number = $3, updated_at = now() WHERE shopify_product_id = $4 RETURNING id`,
         [sku, sku, partNumber, shopifyProductId]);
     }
@@ -1725,7 +1736,7 @@ router.post('/update-identity', requireAdmin, async (req, res) => {
   // Keep the link's last-synced SKU in step.
   try { if (ebayItemId) await query(`UPDATE mirror_links SET last_synced_sku = $1 WHERE ebay_item_id = $2`, [sku, ebayItemId]); } catch (_) {}
 
-  await audit(req, 'update_listing_identity', null, null, { sku, partNumber, shopifyProductId, ebayItemId });
+  await audit(req, 'update_listing_identity', null, null, { sku, partNumber, shopifyProductId, ebayItemId, warehouseProductId });
   res.json({ ok: !r.errors.length, result: r });
 });
 
