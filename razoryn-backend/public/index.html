@@ -9867,6 +9867,7 @@ function renderMirror() {
         </div>
         <div class="actions" id="mirror-page-actions">
           <button class="btn btn-outline" onclick="scanShopifyDuplicates()">🔍 Scan Shopify for duplicates</button>
+          <button class="btn btn-outline" onclick="importShopifyToWarehouse(this)" title="Create warehouse records for any Shopify product that's missing one — so it shows in Inventory and the stock-take">⇩ Import Shopify into warehouse</button>
           <button class="btn btn-outline" onclick="refreshLinks(true)">⟳ Refresh</button>
         </div>
       </div>
@@ -10032,6 +10033,32 @@ function openLinkSearch(side, anchor) {
 
 // Scan the whole Shopify catalogue for products that share a part number — the
 // duplicates created when a push failed to match an existing product. Read-only:
+// Backfill: create warehouse records for Shopify products that don't have one,
+// so items added on Shopify (or where the per-item mirror upsert failed) show up
+// in Inventory and the stock-take. Then refresh the local catalogue.
+async function importShopifyToWarehouse(btn) {
+  if (!confirm('Create warehouse records for any Shopify product that is missing one?\n\nThis is safe to run repeatedly — existing products are left untouched, and stock/title stay owned by Shopify only for the new ones.')) return;
+  const taskId = Task.start('Importing Shopify products into the warehouse…');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/listings/import-shopify-to-warehouse', {});
+    Task.done(taskId, `Imported ${r.created}`);
+    await Store.refresh('products').catch(() => {});
+    let msg = `Imported ${r.created} new item(s). Already present: ${r.skippedExisting}.`;
+    if (r.skippedNoSku) msg += ` Skipped ${r.skippedNoSku} with no SKU.`;
+    if (r.errors && r.errors.length) msg += ` ${r.errors.length} failed.`;
+    toast(msg, (r.errors && r.errors.length) ? 'warn' : 'success', 8000);
+    if (r.skippedNoSku) {
+      alert(`${r.skippedNoSku} Shopify product(s) were skipped because they have no SKU.\n\nThe warehouse needs a unique SKU per item (it's the printed code), so give those products a SKU in Shopify — or re-create them through the Bulk Editor — then run this again.`);
+    }
+  } catch (e) {
+    Task.fail(taskId, 'Import failed');
+    toast('Import failed: ' + (e.data?.message || e.message), 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 // it reports groups so you can review and merge/delete in Shopify yourself.
 async function scanShopifyDuplicates() {
   const taskId = Task.start('Scanning Shopify for duplicate products…');
@@ -12799,6 +12826,10 @@ async function mirrorSelected() {
     let msg = `Created: ${r.created}, Updated: ${r.updated}, Skipped: ${r.skipped}`;
     if (r.errors && r.errors.length) msg += `, Errors: ${r.errors.length}`;
     Task.done(taskId, `Mirrored ${r.created + r.updated}`);
+    // The mirror also creates/links a warehouse product row per item, so refresh
+    // the local catalogue — otherwise the new items wouldn't show in Inventory or
+    // the stock-take until the next full reload.
+    if (r.created || r.updated) Store.refresh('products').catch(() => {});
     const hadIssues = r.errors?.length || r.metafieldIssues?.length;
     toast(msg, hadIssues ? 'warn' : 'success');
     if (r.errors?.length) console.warn('Mirror errors:', r.errors);

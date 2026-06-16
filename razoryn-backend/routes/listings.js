@@ -1504,6 +1504,64 @@ router.post('/mirror', requireAdmin, async (req, res) => {
   res.json({ ok: true, ...results });
 });
 
+// POST /api/listings/import-shopify-to-warehouse
+// Repair/backfill: create a warehouse `products` row for every Shopify product
+// that doesn't already have one (matched by shopify_product_id, else by SKU).
+// Products created on Shopify before warehouse-mirroring existed — or where the
+// per-item upsert in /mirror failed — otherwise never appear in Inventory or the
+// monthly stock-take. Idempotent: safe to run repeatedly.
+router.post('/import-shopify-to-warehouse', requireAdmin, async (req, res) => {
+  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+
+  let variants = [];
+  try { for await (const v of shopify.iterateAllProductsAndVariants()) variants.push(v); }
+  catch (e) { return res.status(502).json({ error: 'shopify_pull_failed', message: e.message }); }
+
+  const { rows: existing } = await query(`SELECT sku, shopify_product_id FROM products`);
+  const haveSku = new Set(existing.map(r => String(r.sku || '').trim().toUpperCase()).filter(Boolean));
+  const haveSpid = new Set(existing.map(r => String(r.shopify_product_id || '')).filter(Boolean));
+
+  let created = 0, skippedExisting = 0, skippedNoSku = 0;
+  const errors = [];
+  const seenProduct = new Set(); // one warehouse row per Shopify product (first variant wins)
+  for (const v of variants) {
+    const spid = String(v.shopify_product_id || '');
+    if (spid && haveSpid.has(spid)) { skippedExisting++; continue; }
+    if (spid && seenProduct.has(spid)) continue;
+    // Skip Shopify's synthetic placeholder SKUs — they're not real codes and the
+    // warehouse SKU column is UNIQUE + the printed identifier.
+    const sku = (v.sku && !/^SHOPIFY-/i.test(v.sku)) ? String(v.sku).trim() : null;
+    if (!sku) { skippedNoSku++; continue; }
+    if (haveSku.has(sku.toUpperCase())) { skippedExisting++; continue; }
+    try {
+      await query(`
+        INSERT INTO products (sku, title, barcode, qty_on_hand, price_shopify,
+                              shopify_product_id, shopify_variant_id, shopify_inventory_id, active)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true)
+        ON CONFLICT (sku) DO UPDATE SET
+          shopify_product_id   = EXCLUDED.shopify_product_id,
+          shopify_variant_id   = EXCLUDED.shopify_variant_id,
+          shopify_inventory_id = COALESCE(EXCLUDED.shopify_inventory_id, products.shopify_inventory_id),
+          active = true,
+          updated_at = now()
+      `, [
+        sku, v.title || sku, v.barcode || sku,
+        v.qty_on_hand != null ? v.qty_on_hand : 0,
+        v.price_shopify != null ? v.price_shopify : null,
+        spid || null,
+        v.shopify_variant_id ? String(v.shopify_variant_id) : null,
+        v.shopify_inventory_id ? String(v.shopify_inventory_id) : null,
+      ]);
+      haveSku.add(sku.toUpperCase());
+      if (spid) { haveSpid.add(spid); seenProduct.add(spid); }
+      created++;
+    } catch (e) { errors.push({ sku, error: e.message }); }
+  }
+
+  await audit(req, 'import_shopify_to_warehouse', null, null, { created, skippedExisting, skippedNoSku, errors: errors.length });
+  res.json({ scanned: variants.length, created, skippedExisting, skippedNoSku, errors });
+});
+
 // POST /api/listings/resync-images — one-click re-push of the SELECTED images only.
 // Deliberately separate from /mirror: it touches images and nothing else (no
 // title/price/metafields), so refreshing photos to full resolution can't disturb
