@@ -1235,6 +1235,7 @@ function adaptProduct(p) {
     model: p.model,
     position: p.position,
     partNumber: p.part_number,
+    partNumbers: Array.isArray(p.part_numbers) ? p.part_numbers : [],
     priceShopify: parseFloat(p.price_shopify || 0),
     priceEbay: parseFloat(p.price_ebay || 0),
     qtyShopify: p.qty_on_hand,
@@ -2547,7 +2548,7 @@ function stFiltered() {
   const filter = el('st-filter')?.value || 'remaining';
   const checked = State._stChecked || new Set();
   return (State.products || []).filter(p => {
-    if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model)) return false;
+    if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model, ...(p.partNumbers||[]).map(x => x.code))) return false;
     const isChecked = checked.has(String(p.id));
     if (filter === 'remaining' && isChecked) return false;
     if (filter === 'counted' && !isChecked) return false;
@@ -3563,7 +3564,7 @@ function renderInventory() {
     const b = el('inv-brand').value;
     const s = el('inv-stock').value;
     const filtered = State.products.filter(p => {
-      if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model)) return false;
+      if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model, ...(p.partNumbers||[]).map(x => x.code))) return false;
       if (b && p.brand !== b) return false;
       const tq = totalQty(p);
       if (s === 'low' && tq > p.lowThresh) return false;
@@ -3825,6 +3826,7 @@ function openProductModal(id) {
       <div class="field"><label>Storage notes</label><textarea id="m-locdesc" rows="2">${p.locationDesc||''}</textarea></div>
       <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="m-lp" ${p.largePanel?'checked':''}><span></span></label> Large panel (needs special courier — flags any order containing it)</label></div>
       <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="m-plock" ${p.priceLocked?'checked':''}><span></span></label> Lock price (keep manual — automated price tools won't overwrite this product)</label></div>
+      ${id ? `<div class="field"><label>Sub part numbers <span style="font-weight:400;color:var(--ink-soft)">— alternate factory / country codes. All are searchable and resolve to the SKU above (the printed master code).</span></label><div id="m-subpn">Loading…</div></div>` : `<div class="field" style="font-size:11px;color:var(--ink-soft)">Save the product first, then re-open it to add alternate (sub) part numbers.</div>`}
       ${id ? `<div class="field"><label>Shopify shop categories (collections)</label><div id="m-collections" style="font-size:12px;color:var(--ink-soft)">Loading…</div></div>` : ''}
     `,
     actions: [
@@ -3876,6 +3878,46 @@ function openProductModal(id) {
     ]
   });
   if (id) loadProductCollections(id);
+  if (id) renderSubPartNumbers(id);
+}
+
+// ── Sub part numbers (alternate factory/country codes) inside the product modal.
+async function renderSubPartNumbers(productId) {
+  const wrap = el('m-subpn');
+  if (!wrap) return;
+  let list = [];
+  try { const r = await Api.get(`/api/products/${productId}/part-numbers`); list = r.partNumbers || []; }
+  catch (e) { wrap.innerHTML = `<div style="font-size:12px;color:var(--red)">Failed to load: ${escapeHtml(e.message)}</div>`; return; }
+  wrap.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+      ${list.length ? list.map(pn => `
+        <span class="pill" style="background:var(--bg-soft);color:var(--ink);font-family:ui-monospace,monospace;font-size:12px;display:inline-flex;align-items:center;gap:6px">
+          ${escapeHtml(pn.code)}${pn.note ? `<span style="font-family:inherit;color:var(--ink-soft);font-size:10px">(${escapeHtml(pn.note)})</span>` : ''}
+          <button onclick="removeSubPartNumber(${productId},${pn.id})" title="Remove" style="border:none;background:none;cursor:pointer;color:var(--red);font-weight:700;padding:0;line-height:1">✕</button>
+        </span>`).join('') : '<span style="font-size:12px;color:var(--ink-soft)">None yet.</span>'}
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <input id="m-subpn-code" placeholder="Part number (e.g. 92102-AT000)" style="flex:1;min-width:160px;font-family:ui-monospace,monospace" onkeydown="if(event.key==='Enter'){event.preventDefault();addSubPartNumber(${productId})}">
+      <input id="m-subpn-note" placeholder="Note (optional, e.g. Korea factory)" style="flex:1;min-width:140px">
+      <button class="btn btn-outline btn-sm" onclick="addSubPartNumber(${productId})">+ Add</button>
+    </div>`;
+}
+async function addSubPartNumber(productId) {
+  const code = (el('m-subpn-code')?.value || '').trim();
+  const note = (el('m-subpn-note')?.value || '').trim();
+  if (!code) { toast('Enter a part number', 'warn'); return; }
+  try {
+    await Api.post(`/api/products/${productId}/part-numbers`, { code, note });
+    await renderSubPartNumbers(productId);
+    Store.refresh('products'); // so client-side search picks up the new alias
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function removeSubPartNumber(productId, pnId) {
+  try {
+    await Api.delete(`/api/products/${productId}/part-numbers/${pnId}`);
+    await renderSubPartNumbers(productId);
+    Store.refresh('products');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 // Shopify collections (shop categories) picker inside the product modal.
@@ -9682,29 +9724,34 @@ function renderBulkEditor() {
 }
 
 function bulkActionsPanelHtml() {
-  const arrow = (bg, fg, t) => `<span class="pill" style="background:${bg};color:${fg};font-weight:600;font-size:10px;margin-left:6px;vertical-align:middle">${t}</span>`;
+  const arrow = (bg, fg, t) => `<span class="pill" style="background:${bg};color:${fg};font-weight:600;font-size:10px;margin-left:auto;white-space:nowrap">${t}</span>`;
   const E2S = arrow('#e8f0fe', '#1a56db', 'eBay → Shopify');
   const TO_E = arrow('#fff4e5', '#b45309', '→ eBay');
-  const ALL = arrow('#e7f6ec', '#137333', '→ eBay + Shopify + Warehouse');
-  const group = (title, note, buttons) => `
-    <div style="padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg-soft);flex:1;min-width:280px">
-      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);margin-bottom:4px">${title}</div>
-      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">${note}</div>
-      <div style="display:flex;flex-direction:column;gap:6px">${buttons}</div>
+  const ALL = arrow('#e7f6ec', '#137333', '→ eBay + Shopify + Whse');
+  const WH = arrow('#e7f6ec', '#137333', 'Warehouse → eBay + Shopify');
+  // Each column = one "source of truth", so the direction is unmistakable.
+  const group = (accent, title, note, buttons) => `
+    <div style="border:1px solid var(--line);border-top:3px solid ${accent};border-radius:10px;background:var(--bg-soft);flex:1;min-width:300px;display:flex;flex-direction:column">
+      <div style="padding:10px 14px 8px">
+        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--ink)">${title}</div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">${note}</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;padding:0 14px 12px">${buttons}</div>
     </div>`;
-  const btn = (fn, label, chip) => `<button class="btn btn-outline btn-sm" style="justify-content:flex-start;text-align:left" onclick="${fn}">${label}${chip}</button>`;
+  const btn = (fn, label, chip, sub) => `<button class="btn btn-outline btn-sm" style="display:flex;align-items:center;gap:8px;text-align:left;width:100%" onclick="${fn}"><span style="flex:1">${label}${sub ? `<span style="display:block;font-size:10px;color:var(--ink-soft);font-weight:400">${sub}</span>` : ''}</span>${chip}</button>`;
   return `
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px">
-      ${group('Mirror to Shopify', 'eBay is the source; these write to the linked Shopify product.',
-        btn('mirrorSelected()', '⬆ Push selected → Shopify', E2S) +
-        btn('resyncSelectedImages()', '📷 Re-push images', E2S) +
-        btn('pullSpecificsToShopify()', '📥 Item specifics → Shopify metafields', E2S))}
-      ${group('Push to eBay', 'Writes to the live eBay listing only.',
-        btn('applyEbayTemplate()', '🏷 Apply branded description template', TO_E))}
-      ${group('Sync across all', 'Warehouse is master; pushes to both channels + warehouse.',
-        btn('bulkSyncSkus()', '🔁 Sync SKU (matches eBay + Shopify)', ALL) +
-        btn('bulkTitleEdit()', '✏️ Bulk title (find &amp; replace)', ALL) +
-        btn('bulkPriceEdit()', '💷 Set / adjust price', ALL))}
+      ${group('#137333', 'Warehouse is master', 'The warehouse owns SKU, price &amp; stock — push them out to the channels.',
+        btn('pushWarehouseSku()', '🔁 Push warehouse SKU', WH, 'Force eBay + Shopify to match the printed warehouse SKU') +
+        btn('bulkPriceEdit()', '💷 Set / adjust price', ALL, 'Updates warehouse + derives channel prices') +
+        btn('bulkTitleEdit()', '✏️ Bulk title (find &amp; replace)', ALL, 'Rewrites titles on eBay + Shopify'))}
+      ${group('#1a56db', 'Mirror eBay → Shopify', 'eBay is the source; these write to the linked Shopify product.',
+        btn('mirrorSelected()', '⬆ Create / update on Shopify', E2S, 'Mirror the listing (title, price, images, metafields)') +
+        btn('resyncSelectedImages()', '📷 Re-push images', E2S, 'Replace Shopify images only') +
+        btn('pullSpecificsToShopify()', '📥 Item specifics → metafields', E2S, 'eBay specifics → Shopify custom data'))}
+      ${group('#b45309', 'Edit eBay listing', 'Writes to the live eBay listing.',
+        btn('applyEbayTemplate()', '🏷 Apply description template', TO_E, 'Wrap the description in your branded HTML') +
+        btn('bulkSyncSkus()', '🔧 Normalise SKU from row', ALL, 'Use the SKU typed in each row, set it everywhere'))}
     </div>`;
 }
 
@@ -12436,6 +12483,38 @@ async function bulkSyncSkus() {
   } catch (e) {
     Task.fail(taskId, 'SKU sync failed');
     toast('SKU sync failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// Warehouse is master: force eBay + Shopify to match each linked listing's
+// warehouse product SKU (the printed code). The opposite direction to "Normalise
+// SKU from row" — here the warehouse wins, not the listing.
+async function pushWarehouseSku() {
+  const selected = mirrorSelectedListings().filter(l => l.existsOnShopify);
+  if (!selected.length) { toast('Select one or more LINKED listings first — only linked listings have a warehouse product to read the SKU from.', 'warn', 7000); return; }
+  if (!confirm(`Push the warehouse master SKU to eBay + Shopify for ${selected.length} linked listing(s)?\n\n` +
+    `• Reads each listing's warehouse product SKU (the printed code)\n` +
+    `• eBay: updates the custom label (counts toward revision limits)\n` +
+    `• Shopify: updates the variant SKU + barcode\n\nThis edits LIVE listings.`)) return;
+
+  const taskId = Task.start(`Pushing warehouse SKU for ${selected.length} listing(s)`);
+  try {
+    const r = await Api.post('/api/listings/push-warehouse-sku', { itemIds: selected.map(l => l.itemId) });
+    Task.done(taskId, `${r.summary.ok}/${r.summary.total} pushed`);
+    const errs = r.results.filter(x => x.errors?.length);
+    let msg = `Warehouse SKU pushed: ${r.summary.ok}/${r.summary.total}`;
+    if (errs.length) {
+      const noWh = errs.filter(e => e.errors.includes('no_warehouse_product')).length;
+      const noLink = errs.filter(e => e.errors.includes('not_linked')).length;
+      msg += ` · ${errs.length} skipped`;
+      if (noLink) msg += ` (${noLink} not linked)`;
+      if (noWh) msg += ` (${noWh} no warehouse product)`;
+      console.warn('push-warehouse-sku issues:', errs);
+      toast(msg, 'warn', 10000);
+    } else toast(msg, 'success');
+  } catch (e) {
+    Task.fail(taskId, 'Push failed');
+    toast('Push failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 

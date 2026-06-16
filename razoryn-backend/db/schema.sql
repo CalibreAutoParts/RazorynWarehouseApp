@@ -83,6 +83,22 @@ CREATE INDEX IF NOT EXISTS products_barcode_idx ON products (barcode) WHERE barc
 CREATE INDEX IF NOT EXISTS products_sku_idx ON products (sku);
 CREATE INDEX IF NOT EXISTS products_low_stock_idx ON products (qty_on_hand) WHERE active = true;
 
+-- ---------- Sub part numbers (alternate factory/country codes) ----------
+-- A product has ONE master SKU (the printed code) but may carry several
+-- alternate part numbers — e.g. the same item produced in different factories
+-- or countries. Staff can search by any of these and the master SKU surfaces.
+CREATE TABLE IF NOT EXISTS product_part_numbers (
+  id          SERIAL PRIMARY KEY,
+  product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  code        TEXT NOT NULL,
+  note        TEXT,                          -- e.g. "Korea factory", "OEM equiv"
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ppn_product_idx ON product_part_numbers (product_id);
+CREATE INDEX IF NOT EXISTS ppn_code_idx ON product_part_numbers (upper(code));
+-- One product can't list the same code twice.
+CREATE UNIQUE INDEX IF NOT EXISTS ppn_product_code_uq ON product_part_numbers (product_id, upper(code));
+
 -- ---------- Stock movements (audit trail of every change) ----------
 -- Replaces ad-hoc stock adjustments. Every change goes through here.
 CREATE TABLE IF NOT EXISTS stock_movements (

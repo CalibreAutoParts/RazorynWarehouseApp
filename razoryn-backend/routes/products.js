@@ -38,6 +38,27 @@ async function ensureProductLocationColumns() {
 }
 ensureProductLocationColumns();
 
+// Self-healing migration for the sub part-numbers table (alternate factory codes
+// that all resolve to one master SKU). Idempotent; safe on every cold boot.
+let _ppnMigrated = false;
+async function ensurePartNumbersTable() {
+  if (_ppnMigrated) return;
+  try {
+    await query(`CREATE TABLE IF NOT EXISTS product_part_numbers (
+      id SERIAL PRIMARY KEY,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      code TEXT NOT NULL,
+      note TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
+    await query(`CREATE INDEX IF NOT EXISTS ppn_product_idx ON product_part_numbers (product_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS ppn_code_idx ON product_part_numbers (upper(code))`);
+    await query(`CREATE UNIQUE INDEX IF NOT EXISTS ppn_product_code_uq ON product_part_numbers (product_id, upper(code))`);
+    _ppnMigrated = true;
+  } catch (e) { console.warn('[products] part-numbers migration warning:', e.message); }
+}
+ensurePartNumbersTable();
+
 // Decode a base64 data URL stored in the DB and stream it as a cached binary
 // image, so list payloads don't have to inline megabytes of base64.
 function sendPhoto(res, dataUrl) {
@@ -59,15 +80,17 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   // frontend also paginates as a safety net for catalogues beyond 1000.
   const pageSize = Math.min(1000, Math.max(1, parseInt(req.query.pageSize) || 50));
 
+  await ensurePartNumbersTable();
   const where = ['active = true'];
   const params = [];
   if (search) {
     params.push(`%${search}%`);
     const i = params.length;
-    // All four columns use ILIKE for consistent partial matching. The barcode
-    // clause previously used exact `= $i` against a wildcard-wrapped param, so
-    // it never matched anything — now it's ILIKE like the others.
-    where.push(`(title ILIKE $${i} OR sku ILIKE $${i} OR part_number ILIKE $${i} OR barcode ILIKE $${i})`);
+    // All columns use ILIKE for consistent partial matching. Also match any of
+    // the product's sub part-numbers so searching an alternate factory/country
+    // code surfaces the master SKU.
+    where.push(`(title ILIKE $${i} OR sku ILIKE $${i} OR part_number ILIKE $${i} OR barcode ILIKE $${i}
+      OR EXISTS (SELECT 1 FROM product_part_numbers ppn WHERE ppn.product_id = p.id AND ppn.code ILIKE $${i}))`);
   }
   if (brand) { params.push(brand); where.push(`brand = $${params.length}`); }
   if (lowStock === '1') where.push('qty_on_hand <= low_stock_threshold');
@@ -81,7 +104,7 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
     LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}
   `;
   const { rows } = await query(sql, params);
-  const count = await query(`SELECT COUNT(*)::int AS n FROM products WHERE ${where.join(' AND ')}`, params);
+  const count = await query(`SELECT COUNT(*)::int AS n FROM products p WHERE ${where.join(' AND ')}`, params);
   // Don't ship base64 photos in the list — they ballooned the payload (every
   // product carried full data URLs). Replace with booleans; the frontend
   // lazy-loads each image from its photo endpoint.
@@ -115,7 +138,49 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
       }
     }
   } catch (e) { /* incoming table not ready yet — non-critical */ }
+  // Attach sub part-numbers so the client-side search can match them and the UI
+  // can show them. Done as one batched query, guarded.
+  try {
+    const ids = rows.map(r => r.id);
+    if (ids.length) {
+      const pn = await query(`SELECT id, product_id, code, note FROM product_part_numbers WHERE product_id = ANY($1) ORDER BY id`, [ids]);
+      const byProd = new Map();
+      for (const x of pn.rows) { if (!byProd.has(x.product_id)) byProd.set(x.product_id, []); byProd.get(x.product_id).push(x); }
+      for (const r of rows) r.part_numbers = byProd.get(r.id) || [];
+    }
+  } catch (e) { for (const r of rows) r.part_numbers = r.part_numbers || []; }
   res.json({ products: rows, total: count.rows[0].n, page, pageSize });
+});
+
+// ── Sub part-numbers (alternate factory/country codes) for a product ─────────
+router.get('/:id/part-numbers', requirePermission('inventory'), async (req, res) => {
+  await ensurePartNumbersTable();
+  const { rows } = await query(`SELECT id, code, note, created_at FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [req.params.id]);
+  res.json({ partNumbers: rows });
+});
+router.post('/:id/part-numbers', requirePermission('inventory'), async (req, res) => {
+  await ensurePartNumbersTable();
+  const code = String(req.body?.code || '').trim();
+  const note = req.body?.note != null ? String(req.body.note).trim() || null : null;
+  if (!code) return res.status(400).json({ error: 'code_required' });
+  const p = await query(`SELECT id FROM products WHERE id = $1`, [req.params.id]);
+  if (!p.rows[0]) return res.status(404).json({ error: 'product_not_found' });
+  try {
+    const { rows } = await query(
+      `INSERT INTO product_part_numbers (product_id, code, note) VALUES ($1, $2, $3)
+       ON CONFLICT (product_id, upper(code)) DO UPDATE SET note = EXCLUDED.note
+       RETURNING id, code, note, created_at`,
+      [req.params.id, code, note]
+    );
+    await audit(req, 'add_part_number', 'product', Number(req.params.id), { code, note });
+    res.json({ ok: true, partNumber: rows[0] });
+  } catch (e) { res.status(500).json({ error: 'insert_failed', message: e.message }); }
+});
+router.delete('/:id/part-numbers/:pnId', requirePermission('inventory'), async (req, res) => {
+  await ensurePartNumbersTable();
+  await query(`DELETE FROM product_part_numbers WHERE id = $1 AND product_id = $2`, [req.params.pnId, req.params.id]);
+  await audit(req, 'remove_part_number', 'product', Number(req.params.id), { pnId: req.params.pnId });
+  res.json({ ok: true });
 });
 
 // Per-product photo endpoints — stream the stored base64 as cached binary

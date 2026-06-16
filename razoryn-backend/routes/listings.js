@@ -1543,6 +1543,58 @@ router.post('/bulk-sku', requireAdmin, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// POST /api/listings/push-warehouse-sku — warehouse is master. For each selected
+// eBay item we resolve its linked Shopify product → its warehouse product, then
+// force eBay + Shopify to that product's master SKU. Use this to make the live
+// channels match the printed warehouse SKU (the opposite of typing a SKU per row).
+// Body: { itemIds: [..] }
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/push-warehouse-sku', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
+  const itemIds = (Array.isArray(req.body?.itemIds) ? req.body.itemIds : []).map(String).filter(Boolean);
+  if (!itemIds.length) return res.status(400).json({ error: 'no_items' });
+
+  const links = await query(
+    `SELECT ebay_item_id, shopify_product_id, store_code FROM mirror_links WHERE ebay_item_id = ANY($1)`,
+    [itemIds]
+  );
+  const linkByItem = new Map(links.rows.map(l => [String(l.ebay_item_id), l]));
+
+  const results = [];
+  for (const itemId of itemIds) {
+    const r = { itemId, sku: null, ebay: null, shopify: null, errors: [] };
+    const link = linkByItem.get(itemId);
+    if (!link || !link.shopify_product_id) { r.errors.push('not_linked'); results.push(r); continue; }
+    const spId = String(link.shopify_product_id);
+
+    // Resolve the warehouse product + its master SKU.
+    const prod = await query(`SELECT id, sku FROM products WHERE shopify_product_id = $1 LIMIT 1`, [spId]);
+    const sku = prod.rows[0]?.sku ? String(prod.rows[0].sku).trim() : '';
+    if (!sku) { r.errors.push('no_warehouse_product'); results.push(r); continue; }
+    r.sku = sku;
+
+    // eBay (custom label) — needs the store the listing belongs to.
+    if (ebay.isConfigured(link.store_code)) {
+      try { await ebay.reviseItem(itemId, { sku }, link.store_code); r.ebay = 'ok'; }
+      catch (e) { r.ebay = 'error'; r.errors.push('eBay: ' + e.message); }
+    } else { r.ebay = link.store_code ? 'store_not_configured' : 'not_configured'; }
+
+    // Shopify variant SKU + barcode.
+    if (shopify.isConfigured()) {
+      try { await shopify.setVariantSku(spId, sku); r.shopify = 'ok'; }
+      catch (e) { r.shopify = 'error'; r.errors.push('Shopify: ' + e.message); }
+    } else { r.shopify = 'not_configured'; }
+
+    try { await query(`UPDATE mirror_links SET last_synced_sku = $1 WHERE ebay_item_id = $2`, [sku, itemId]); } catch (_) {}
+    results.push(r);
+  }
+
+  await audit(req, 'push_warehouse_sku', null, null, { count: itemIds.length });
+  const okCount = results.filter(r => !r.errors.length).length;
+  res.json({ ok: true, results, summary: { total: itemIds.length, ok: okCount, errors: itemIds.length - okCount } });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
 // PHASE 2 — bulk title / description / item specifics across linked listings.
 // ──────────────────────────────────────────────────────────────────────────
 
