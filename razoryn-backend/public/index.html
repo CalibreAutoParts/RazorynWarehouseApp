@@ -2458,6 +2458,13 @@ function routeTo(page) {
     if (!confirm('You have unsaved changes on this page. Leave without saving?')) return;
   }
   Editing.dirty = false;
+  // Tear down any running barcode camera before leaving — otherwise it keeps
+  // decoding and firing the scan handler on other pages, writing to a now-missing
+  // element ("Cannot set properties of null (setting 'innerHTML')").
+  if (page !== State.page) {
+    try { if (typeof stopCamera === 'function') stopCamera(); } catch (_) {}
+    try { if (typeof stStopScanCamera === 'function') stStopScanCamera(); } catch (_) {}
+  }
   State.page = page;
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
   // Close mobile sidebar
@@ -4099,8 +4106,12 @@ async function handleScan(code) {
   const find = () => State.products.find(x => x.barcode === code || x.sku === code);
   let p = find();
   if (!p && await scanRefreshCatalogue(code)) p = find();
+  // A camera scanner can fire this after the user has navigated away from the
+  // scan page — bail rather than write innerHTML to a now-missing element.
+  const out = el('scan-result');
+  if (!out) return;
   if (!p) {
-    el('scan-result').innerHTML = `<div class="empty"><div class="t">Not found: ${escapeHtml(String(code))}</div>No product matches this barcode. <br><br><button class="btn btn-primary admin-only" onclick="openProductModal()">+ Add as new product</button></div>`;
+    out.innerHTML = `<div class="empty"><div class="t">Not found: ${escapeHtml(String(code))}</div>No product matches this barcode. <br><br><button class="btn btn-primary admin-only" onclick="openProductModal()">+ Add as new product</button></div>`;
     toast('Barcode not in inventory', 'warn');
     return;
   }
@@ -4116,7 +4127,9 @@ async function handleManualSearch(q) {
   showProductScanCard(p);
 }
 function showProductScanCard(p) {
-  el('scan-result').innerHTML = `
+  const out = el('scan-result');
+  if (!out) return;
+  out.innerHTML = `
     <div style="font-weight:600;font-size:15px;margin-bottom:4px">${p.title}</div>
     <div style="color:var(--ink-soft);font-size:12px;margin-bottom:14px">${p.sku} · ${p.partNumber||''}</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
@@ -10044,12 +10057,23 @@ async function importShopifyToWarehouse(btn) {
     const r = await Api.post('/api/listings/import-shopify-to-warehouse', {});
     Task.done(taskId, `Imported ${r.created}`);
     await Store.refresh('products').catch(() => {});
-    let msg = `Imported ${r.created} new, updated ${r.enriched || 0} (photo/links), linked ${r.ebayLinked || 0} to eBay.`;
+    let msg = `Imported ${r.created} new, updated ${r.enriched || 0} (photo/links), linked ${r.ebayLinked || 0} to eBay, set ${r.pricesBackfilled || 0} eBay price(s).`;
     if (r.skippedNoSku) msg += ` Skipped ${r.skippedNoSku} with no SKU.`;
     if (r.errors && r.errors.length) msg += ` ${r.errors.length} failed.`;
     toast(msg, (r.errors && r.errors.length) ? 'warn' : 'success', 8000);
-    if (r.skippedNoSku) {
-      alert(`${r.skippedNoSku} Shopify product(s) were skipped because they have no SKU.\n\nThe warehouse needs a unique SKU per item (it's the printed code), so give those products a SKU in Shopify — or re-create them through the Bulk Editor — then run this again.`);
+    if (r.skippedNoSku && r.skippedItems && r.skippedItems.length) {
+      const base = r.adminUrlBase;
+      const rows = r.skippedItems.map(it => `
+        <tr>
+          <td style="padding:4px 8px">${escapeHtml(it.title || '(untitled)')}</td>
+          <td style="padding:4px 8px;white-space:nowrap">${base && it.productId ? `<a href="${escapeAttr(base + '/' + it.productId)}" target="_blank" rel="noopener" style="color:var(--brand-primary)">Open in Shopify ↗</a>` : `<span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(String(it.productId || ''))}</span>`}</td>
+        </tr>`).join('');
+      modal({
+        title: `${r.skippedNoSku} Shopify product(s) skipped — no SKU`,
+        body: `<div style="font-size:13px;color:var(--ink-soft);margin-bottom:10px">The warehouse needs a unique SKU per item (it's the printed code). Give each of these a SKU in Shopify, then run <strong>Import Shopify into warehouse</strong> again.</div>
+          <table style="width:100%;border-collapse:collapse;font-size:13px"><tbody>${rows}</tbody></table>`,
+        actions: [{ label: 'Close', onClick: closeModal }],
+      });
     }
   } catch (e) {
     Task.fail(taskId, 'Import failed');
