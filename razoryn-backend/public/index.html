@@ -2524,9 +2524,18 @@ function renderStockTake() {
     </div>`;
 
   State._stChecked = State._stChecked || new Set();
-  Api.get('/api/stock-checks/this-month')
-    .then(r => { State._stChecked = new Set((r.productIds || []).map(String)); stPaint(); })
-    .catch(() => stPaint());
+  // Pull BOTH a fresh product catalogue and this month's counted IDs before
+  // painting. The take list is built from State.products, which is otherwise the
+  // boot-time snapshot — so an item added since (or added on another device)
+  // would never show up here until a full reload. Refreshing on entry guarantees
+  // every new warehouse item appears in the take without a manual push.
+  el('st-progress-text') && (el('st-progress-text').textContent = 'Loading latest items…');
+  Promise.all([
+    Store.refresh('products').catch(() => {}),
+    Api.get('/api/stock-checks/this-month')
+      .then(r => { State._stChecked = new Set((r.productIds || []).map(String)); })
+      .catch(() => {}),
+  ]).then(stPaint).catch(stPaint);
 
   // If a push-all is in progress (or recently finished), resume showing it.
   Api.get('/api/settings/push-all-stock/status')
@@ -4035,6 +4044,9 @@ function renderScan() {
   el('scan-manual').addEventListener('keypress', e => {
     if (e.key === 'Enter') { handleManualSearch(el('scan-manual').value); el('scan-manual').value=''; }
   });
+  // Refresh the catalogue when the page opens so items added since this device
+  // booted (or added on another device) are scannable straight away.
+  Store.refresh('products').catch(() => {});
 }
 function switchScanMethod(m) {
   document.querySelectorAll('.seg button[data-method]').forEach(b => b.classList.toggle('active', b.dataset.method===m));
@@ -4068,24 +4080,38 @@ function stopCamera() {
 // Debounce tracker — html5-qrcode fires onScanSuccess 5-15x for one physical
 // scan, which spammed toasts and re-rendered the result card repeatedly.
 let _lastScan = { code: null, at: 0 };
-function handleScan(code) {
+// On a cache miss the item may have been added after this device loaded its
+// catalogue (e.g. on another device). Pull a fresh list once — rate-limited so a
+// burst of scans doesn't hammer the API — and let the caller retry.
+let _scanRefreshAt = 0;
+async function scanRefreshCatalogue(code) {
+  if (Date.now() - _scanRefreshAt < 1500) return false;
+  _scanRefreshAt = Date.now();
+  try { el('scan-result').innerHTML = `<div class="empty"><div class="t">Checking latest inventory…</div>${escapeHtml(String(code || ''))}</div>`; } catch (_) {}
+  try { await Store.refresh('products'); return true; } catch (_) { return false; }
+}
+async function handleScan(code) {
   // Ignore the same code seen again within 2s (the duplicate-fire window).
   const now = Date.now();
   if (code === _lastScan.code && now - _lastScan.at < 2000) return;
   _lastScan = { code, at: now };
 
-  const p = State.products.find(x => x.barcode === code || x.sku === code);
+  const find = () => State.products.find(x => x.barcode === code || x.sku === code);
+  let p = find();
+  if (!p && await scanRefreshCatalogue(code)) p = find();
   if (!p) {
-    el('scan-result').innerHTML = `<div class="empty"><div class="t">Not found: ${code}</div>No product matches this barcode. <br><br><button class="btn btn-primary admin-only" onclick="openProductModal()">+ Add as new product</button></div>`;
+    el('scan-result').innerHTML = `<div class="empty"><div class="t">Not found: ${escapeHtml(String(code))}</div>No product matches this barcode. <br><br><button class="btn btn-primary admin-only" onclick="openProductModal()">+ Add as new product</button></div>`;
     toast('Barcode not in inventory', 'warn');
     return;
   }
   toast('Found: ' + p.title, 'success');
   showProductScanCard(p);
 }
-function handleManualSearch(q) {
+async function handleManualSearch(q) {
   q = q.trim().toLowerCase(); if (!q) return;
-  const p = State.products.find(x => matchesKeywords(q, x.sku, x.partNumber, x.title, ...(x.partNumbers||[]).map(a => a.code)));
+  const find = () => State.products.find(x => matchesKeywords(q, x.sku, x.partNumber, x.title, ...(x.partNumbers||[]).map(a => a.code)));
+  let p = find();
+  if (!p && await scanRefreshCatalogue(q)) p = find();
   if (!p) { toast('No match found', 'warn'); return; }
   showProductScanCard(p);
 }
