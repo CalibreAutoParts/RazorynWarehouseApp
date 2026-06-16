@@ -1681,7 +1681,6 @@ router.post('/update-identity', requireAdmin, async (req, res) => {
   let shopifyProductId = b.shopifyProductId ? String(b.shopifyProductId) : null;
   let ebayItemId = b.ebayItemId ? String(b.ebayItemId) : null;
   let warehouseProductId = b.warehouseProductId ? Number(b.warehouseProductId) : null;
-  const oldSku = b.oldSku != null && String(b.oldSku).trim() ? String(b.oldSku).trim() : null;
   let storeCode = null;
 
   // If we were given a specific warehouse product, use its own Shopify link as the
@@ -1701,22 +1700,6 @@ router.post('/update-identity', requireAdmin, async (req, res) => {
   } else if (ebayItemId) {
     const lk = await query(`SELECT store_code FROM mirror_links WHERE ebay_item_id = $1 LIMIT 1`, [ebayItemId]);
     if (lk.rows[0]) storeCode = lk.rows[0].store_code;
-  }
-
-  // Shared-SKU fallback: in Listing Links, an eBay listing, Shopify product and
-  // warehouse product are often grouped only because they share a SKU — with no
-  // mirror_link. Editing one side then left the others on the old code ("I pushed
-  // it but it's still there"). So if we couldn't resolve the warehouse/Shopify by
-  // an explicit link, find them by the OLD code and update those too (only when
-  // it's unambiguous — exactly one match — to avoid touching the wrong product).
-  if (oldSku) {
-    if (!warehouseProductId) {
-      const pr = await query(`SELECT id, shopify_product_id FROM products WHERE upper(sku) = upper($1) LIMIT 2`, [oldSku]);
-      if (pr.rows.length === 1) {
-        warehouseProductId = pr.rows[0].id;
-        if (!shopifyProductId && pr.rows[0].shopify_product_id) shopifyProductId = String(pr.rows[0].shopify_product_id);
-      }
-    }
   }
   if (!shopifyProductId && !ebayItemId && !warehouseProductId) return res.status(400).json({ error: 'no_target' });
 
