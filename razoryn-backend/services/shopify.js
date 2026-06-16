@@ -634,6 +634,20 @@ async function getMetafieldDefinitions() {
   }
 }
 
+// deleteProduct — permanently delete a Shopify product (used to remove duplicate
+// products). Idempotent: a 404 (already gone) is treated as success.
+async function deleteProduct(productId) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  if (!productId) throw new Error('missing_product_id');
+  try {
+    await shopifyRequest('delete', `/products/${productId}.json`);
+    return { ok: true, productId: String(productId) };
+  } catch (e) {
+    if (e.response?.status === 404) return { ok: true, alreadyDeleted: true, productId: String(productId) };
+    throw new Error('Shopify delete failed: ' + (e.response?.data?.errors || e.message));
+  }
+}
+
 // Write the part number into the store's "Part Number" product metafield (the
 // one shown on the Shopify product page). SKU + barcode are variant fields and
 // already set by setVariantSku, but the catalogue's Part Number metafield is
@@ -1062,6 +1076,7 @@ module.exports = {
   findProductsBySkus,
   createProduct,
   updateProduct,
+  deleteProduct,
   setVariantPrice,
   setVariantSku,
   setPartNumberMetafield,

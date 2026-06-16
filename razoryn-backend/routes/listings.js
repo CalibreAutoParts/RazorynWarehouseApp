@@ -1748,6 +1748,44 @@ router.post('/update-identity', requireAdmin, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// POST /api/listings/delete-listing — remove a duplicate listing from a channel.
+// Destructive + outward-facing: ENDS a live eBay listing (EndFixedPriceItem) or
+// DELETES a Shopify product. The warehouse product is kept; we just drop the
+// link(s). Body: { channel: 'ebay'|'shopify', id, storeCode? }
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/delete-listing', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
+  const channel = String(req.body?.channel || '');
+  const id = String(req.body?.id || '').trim();
+  if (!id || !['ebay', 'shopify'].includes(channel)) return res.status(400).json({ error: 'bad_request' });
+
+  if (channel === 'ebay') {
+    if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
+    let storeCode = req.body?.storeCode || null;
+    if (!storeCode) {
+      const lk = await query(`SELECT store_code FROM mirror_links WHERE ebay_item_id = $1 LIMIT 1`, [id]);
+      storeCode = lk.rows[0]?.store_code || null;
+    }
+    try {
+      const r = await ebay.endItem(id, {}, storeCode);
+      await query(`DELETE FROM mirror_links WHERE ebay_item_id = $1`, [id]);
+      await audit(req, 'delete_ebay_listing', null, null, { itemId: id, storeCode });
+      return res.json({ ok: true, channel, id, alreadyGone: !!r.alreadyEnded });
+    } catch (e) { return res.status(502).json({ error: 'ebay_end_failed', message: e.message }); }
+  }
+
+  // Shopify
+  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+  try {
+    const r = await shopify.deleteProduct(id);
+    await query(`DELETE FROM mirror_links WHERE shopify_product_id = $1`, [id]);
+    await query(`UPDATE products SET shopify_product_id = NULL, updated_at = now() WHERE shopify_product_id = $1`, [id]);
+    await audit(req, 'delete_shopify_product', null, null, { productId: id });
+    return res.json({ ok: true, channel, id, alreadyGone: !!r.alreadyDeleted });
+  } catch (e) { return res.status(502).json({ error: 'shopify_delete_failed', message: e.message }); }
+});
+
+// ──────────────────────────────────────────────────────────────────────────
 // PHASE 2 — bulk title / description / item specifics across linked listings.
 // ──────────────────────────────────────────────────────────────────────────
 

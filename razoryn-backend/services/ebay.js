@@ -804,6 +804,25 @@ async function reviseItem(itemId, { sku, title, price, description, itemSpecific
   return { ok: true, itemId, storeCode: resolveStore(storeArg)?.code };
 }
 
+// endItem — end (delete) a live fixed-price listing via EndFixedPriceItem. Used to
+// remove duplicate listings. EndingReason 'NotAvailable' is the neutral default;
+// an already-ended listing is treated as success (idempotent).
+async function endItem(itemId, { reason = 'NotAvailable' } = {}, storeArg) {
+  if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
+  if (!itemId) throw new Error('missing_item_id');
+  const body = `<ItemID>${escapeXml(String(itemId))}</ItemID><EndingReason>${escapeXml(reason)}</EndingReason>`;
+  const xml = await tradingCall('EndFixedPriceItem', body, storeArg);
+  if (xml.includes('<Ack>Failure</Ack>')) {
+    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+    // Already ended / can't be ended again → fine for our "remove duplicate" purpose.
+    if (/already.*end|cannot be ended|invalid.*item.*state|status/i.test(err)) {
+      return { ok: true, alreadyEnded: true, itemId };
+    }
+    throw new Error('eBay EndFixedPriceItem error: ' + decodeEntities(err));
+  }
+  return { ok: true, itemId, storeCode: resolveStore(storeArg)?.code };
+}
+
 // Read a listing's full current state (title, description, SKU, price, pictures,
 // and item specifics with their current values) — needed to edit/wrap before a
 // ReviseItem, and to pull specifics across to Shopify.
@@ -1798,6 +1817,7 @@ module.exports = {
   getQuantityTradingAPI,
   getActiveListings,
   reviseItem,
+  endItem,
   completeSale,
   addItem,
   getStoreCategories,

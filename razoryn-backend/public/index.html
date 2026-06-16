@@ -9928,6 +9928,28 @@ async function linkReconcile(ebayItemId, shopifyProductId) {
 function linkSearchClick(side, anchor) {
   return ('openLinkSearch(' + JSON.stringify(side) + ',' + JSON.stringify(anchor) + ')').replace(/&/g, '&amp;').replace(/'/g, '&#39;');
 }
+function delListingClick(obj) {
+  return ('deleteListing(' + JSON.stringify(obj) + ')').replace(/&/g, '&amp;').replace(/'/g, '&#39;');
+}
+
+// Delete a duplicate listing from a channel. Destructive + outward-facing: ENDS a
+// live eBay listing or DELETES a Shopify product. The warehouse record is kept.
+async function deleteListing(o) {
+  const what = o.channel === 'ebay' ? 'eBay listing' : 'Shopify product';
+  const verb = o.channel === 'ebay' ? 'END the live eBay listing' : 'DELETE the Shopify product';
+  if (!confirm(`Permanently remove this ${what}?\n\n${o.label || o.id}\n\nThis will ${verb} — it cannot be undone.\nThe warehouse product is kept; only the ${o.channel} listing is removed.`)) return;
+  const taskId = Task.start(`Removing ${what}…`);
+  try {
+    const r = await Api.post('/api/listings/delete-listing', { channel: o.channel, id: o.id, storeCode: o.storeCode || undefined });
+    Task.done(taskId, 'Removed');
+    toast(`${what} ${r.alreadyGone ? 'was already removed' : 'removed'}`, 'success');
+    if (o.refresh === 'rescan') scanShopifyDuplicates();
+    else loadReconcile(true);
+  } catch (e) {
+    Task.fail(taskId, 'Delete failed');
+    toast('Delete failed: ' + (e.data?.message || e.data?.error || e.message), 'error');
+  }
+}
 
 // Manually link a listing to its counterpart on the other channel when there's no
 // automatic 1:1 match (the case staff hit: "searched for the item to link to eBay
@@ -10005,6 +10027,7 @@ async function scanShopifyDuplicates() {
             <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">SKU ${escapeHtml(p.sku || '—')} · PN ${escapeHtml(p.partNumber || '—')} · ${gbp(p.price || 0)} · qty ${p.qty ?? '—'}</div></td>
           <td style="text-align:right;white-space:nowrap">
             <button class="btn btn-outline btn-sm" onclick='${editIdClick({ shopifyProductId: String(p.productId), sku: p.sku || p.partNumber || "", title: p.title || "", refresh: "rescan" })}'>✏️ Edit code</button>
+            <button class="btn btn-outline btn-sm" style="color:var(--red)" onclick='${delListingClick({ channel: "shopify", id: String(p.productId), label: p.title || String(p.productId), refresh: "rescan" })}'>🗑 Delete</button>
             ${adminLink(p.productId) ? `<a class="btn btn-outline btn-sm" href="${adminLink(p.productId)}" target="_blank" rel="noopener">Open ↗</a>` : ''}
           </td>
         </tr>`).join('')}
@@ -10167,6 +10190,7 @@ function reconcileRow(g) {
           <a href="${escapeAttr(e.url)}" target="_blank" rel="noopener" style="color:var(--brand-primary);text-decoration:none;font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(e.itemId)} ↗</a>
           ${e.price != null ? `<span style="font-size:11px;color:var(--ink-soft)">£${Number(e.price).toFixed(2)}</span>` : ''}
           <button class="btn btn-ghost btn-sm" style="padding:0 4px" title="Edit code & push to eBay + Shopify + warehouse" onclick='${editIdClick({ ebayItemId: String(e.itemId), sku: e.sku || "", title: e.title || "", refresh: "reconcile" })}'>✏️</button>
+          ${g.dupEbay ? `<button class="btn btn-ghost btn-sm" style="padding:0 4px;color:var(--red)" title="Delete this eBay listing (ends it on eBay)" onclick='${delListingClick({ channel: "ebay", id: String(e.itemId), storeCode: e.storeCode || "", label: e.title || String(e.itemId), refresh: "reconcile" })}'>🗑</button>` : ''}
         </div>`).join('')
     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
   const shopCell = g.shopify.length
@@ -10175,6 +10199,7 @@ function reconcileRow(g) {
           <span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(x.productId)}</span>
           ${x.price != null ? `<span style="font-size:11px;color:var(--ink-soft)">£${Number(x.price).toFixed(2)}</span>` : ''}
           <button class="btn btn-ghost btn-sm" style="padding:0 4px" title="Edit code & push to channels" onclick='${editIdClick({ shopifyProductId: String(x.productId), sku: x.sku || "", title: x.title || "", refresh: "reconcile" })}'>✏️</button>
+          ${g.dupShopify ? `<button class="btn btn-ghost btn-sm" style="padding:0 4px;color:var(--red)" title="Delete this Shopify product" onclick='${delListingClick({ channel: "shopify", id: String(x.productId), label: x.title || String(x.productId), refresh: "reconcile" })}'>🗑</button>` : ''}
         </div>`).join('')
     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
   const whCell = g.warehouse.length
