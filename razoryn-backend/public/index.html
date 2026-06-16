@@ -1060,6 +1060,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
           Listing Mirror
         </button>
+        <button class="nav-item admin-only" data-page="bulk">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          Bulk Editor
+        </button>
         <button class="nav-item admin-only" data-page="settings">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           Settings
@@ -2465,7 +2469,7 @@ function routeTo(page) {
     stocktake: renderStockTake,
     locations: renderLocations, returns: renderReturns, sales: renderSales,
     pricing: renderQuoteBuilder, schedule: renderSchedule, videos: renderVideos,
-    kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror,
+    kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror, bulk: renderBulkEditor,
     activity: renderActivity, pricingrules: renderPricingRules,
     labels: renderLabels, notes: renderNotes, dispatch: renderDispatch,
     competitors: renderCompetitors
@@ -9611,6 +9615,96 @@ function scheduleSaveOverride(itemId) {
   }, 600);
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// BULK EDITOR — one place for every cross-channel bulk action, grouped by
+// direction with explicit arrow chips + a legend. Reuses the Listing Mirror's
+// pulled listings (MirrorState), selection and row UI (paintMirrorList), so the
+// same data drives both pages.
+// ──────────────────────────────────────────────────────────────────────────
+function renderBulkEditor() {
+  const chip = (bg, fg, t) => `<span class="pill" style="background:${bg};color:${fg};font-weight:600">${t}</span>`;
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Bulk Editor</h1><div class="desc">Edit &amp; sync many listings at once — each action shows exactly what pushes where.</div></div>
+        <div class="actions"><button class="btn btn-primary" onclick="bulkPull(this)">⟳ Pull eBay listings</button></div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px"><div class="card-body" style="font-size:12.5px;line-height:1.8">
+        <strong>How syncing works —</strong>
+        ${chip('#e8f0fe', '#1a56db', 'eBay → Shopify')} read from eBay, write to Shopify ·
+        ${chip('#fff4e5', '#b45309', '→ eBay')} push to the live eBay listing ·
+        ${chip('#e7f6ec', '#137333', '→ eBay + Shopify + Warehouse')} pushes everywhere.<br>
+        <span style="color:var(--ink-soft)">Master model: <strong>Warehouse</strong> owns SKU / price / stock · <strong>eBay</strong> is the source for listings, specifics, images &amp; descriptions · <strong>Shopify</strong> is a downstream channel that receives.</span>
+      </div></div>
+
+      <div id="bulk-empty"></div>
+      <div id="bulk-actions" style="display:none"></div>
+
+      <div class="toolbar" id="bulk-toolbar" style="display:none;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <input type="search" id="bulk-filter" class="search-input" placeholder="Filter by title, SKU, item ID…" style="flex:1;min-width:220px" oninput="bulkFilter(this.value)">
+        <div class="seg" style="margin:0">
+          <button class="${(MirrorState.statusFilter||'all')==='all'?'active':''}" onclick="bulkStatus('all')">All</button>
+          <button class="${MirrorState.statusFilter==='new'?'active':''}" onclick="bulkStatus('new')">Not on Shopify</button>
+          <button class="${MirrorState.statusFilter==='mirrored'?'active':''}" onclick="bulkStatus('mirrored')">Linked</button>
+        </div>
+        <button class="btn btn-outline btn-sm" onclick="selectAll(true)">Select all</button>
+        <button class="btn btn-outline btn-sm" onclick="selectAll(false)">Select none</button>
+        <span id="mr-counter" style="font-size:13px;color:var(--ink-soft);margin-left:auto"></span>
+      </div>
+
+      <div id="mirror-list" style="display:none"></div>
+    </div>`;
+
+  if ((MirrorState.listings || []).length) {
+    el('bulk-toolbar').style.display = 'flex';
+    el('bulk-actions').style.display = 'block';
+    el('mirror-list').style.display = 'block';
+    el('bulk-actions').innerHTML = bulkActionsPanelHtml();
+    if (el('bulk-filter')) el('bulk-filter').value = MirrorState.filterText || '';
+    paintMirrorList();
+    updateMirrorCounter();
+  } else {
+    el('bulk-empty').innerHTML = `<div class="empty"><div class="t">No listings loaded</div><div class="s">Click <strong>⟳ Pull eBay listings</strong> above to load your live listings, then tick the ones to edit and use the actions.</div></div>`;
+  }
+}
+
+function bulkActionsPanelHtml() {
+  const arrow = (bg, fg, t) => `<span class="pill" style="background:${bg};color:${fg};font-weight:600;font-size:10px;margin-left:6px;vertical-align:middle">${t}</span>`;
+  const E2S = arrow('#e8f0fe', '#1a56db', 'eBay → Shopify');
+  const TO_E = arrow('#fff4e5', '#b45309', '→ eBay');
+  const ALL = arrow('#e7f6ec', '#137333', '→ eBay + Shopify + Warehouse');
+  const group = (title, note, buttons) => `
+    <div style="padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg-soft);flex:1;min-width:280px">
+      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);margin-bottom:4px">${title}</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">${note}</div>
+      <div style="display:flex;flex-direction:column;gap:6px">${buttons}</div>
+    </div>`;
+  const btn = (fn, label, chip) => `<button class="btn btn-outline btn-sm" style="justify-content:flex-start;text-align:left" onclick="${fn}">${label}${chip}</button>`;
+  return `
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+      ${group('Mirror to Shopify', 'eBay is the source; these write to the linked Shopify product.',
+        btn('mirrorSelected()', '⬆ Push selected → Shopify', E2S) +
+        btn('resyncSelectedImages()', '📷 Re-push images', E2S) +
+        btn('pullSpecificsToShopify()', '📥 Item specifics → Shopify metafields', E2S))}
+      ${group('Push to eBay', 'Writes to the live eBay listing only.',
+        btn('applyEbayTemplate()', '🏷 Apply branded description template', TO_E))}
+      ${group('Sync across all', 'Warehouse is master; pushes to both channels + warehouse.',
+        btn('bulkSyncSkus()', '🔁 Sync SKU (matches eBay + Shopify)', ALL) +
+        btn('bulkTitleEdit()', '✏️ Bulk title (find &amp; replace)', ALL) +
+        btn('bulkPriceEdit()', '💷 Set / adjust price', ALL))}
+    </div>`;
+}
+
+async function bulkPull(btn) {
+  if (btn) btn.disabled = true;
+  try { await pullEbayListings(); }
+  finally { if (btn) btn.disabled = false; }
+  if (State.page === 'bulk') renderBulkEditor();
+}
+function bulkFilter(v) { MirrorState.filterText = v; MirrorState.page = 1; paintMirrorList(); }
+function bulkStatus(s) { MirrorState.statusFilter = s; MirrorState.page = 1; if (State.page === 'bulk') renderBulkEditor(); }
+
 function renderMirror() {
   el('content').innerHTML = `
     <div class="page">
@@ -9660,12 +9754,8 @@ function renderMirror() {
                   <div style="display:flex;gap:6px;flex-wrap:wrap">
                     <button class="btn btn-primary" onclick="mirrorSelected()" id="mr-push-btn">Push selected →</button>
                     <button class="btn btn-outline" onclick="resyncSelectedImages()" id="mr-resync-img-btn" title="Re-upload just the selected photos (full resolution) to the matching Shopify products. Images only — nothing else is changed.">📷 Re-push images</button>
-                    <button class="btn btn-outline" onclick="bulkSyncSkus()" id="mr-sync-sku-btn" title="Set ONE canonical SKU on eBay + Shopify + the warehouse for each selected linked listing. Uses the SKU shown in each row — edit it first to normalise.">🔁 Sync SKU → eBay + Shopify</button>
-                    <button class="btn btn-outline" onclick="bulkTitleEdit()" id="mr-title-btn" title="Find &amp; replace text across the selected listings' titles, then push to eBay + Shopify.">✏️ Bulk title</button>
-                    <button class="btn btn-outline" onclick="pullSpecificsToShopify()" id="mr-specifics-btn" title="Pull each selected listing's eBay item specifics and write them to the linked Shopify product as custom metafields.">📥 Specifics → Shopify</button>
-                    <button class="btn btn-outline" onclick="applyEbayTemplate()" id="mr-tpl-btn" title="Wrap each selected listing's eBay description in your branded header/footer template (edit it in Settings). Idempotent — re-applying won't double-wrap.">🏷 Apply eBay template</button>
-                    <button class="btn btn-outline" onclick="bulkPriceEdit()" id="mr-price-btn" title="Set or adjust the eBay (anchor) price, derive the website/Shopify price a fixed % cheaper, and push to both. Price-locked products keep their manual Shopify price.">💷 Set price</button>
                   </div>
+                  <div style="margin-top:8px;font-size:12px;color:var(--ink-soft)">Looking for SKU / title / price / specifics / template tools? They now live in the <a href="#" onclick="routeTo('bulk');return false" style="color:var(--brand-primary);font-weight:600">Bulk Editor</a> tab — clearer about what pushes where.</div>
                 </div>
               </div>
 
@@ -9722,9 +9812,11 @@ function renderMirror() {
   loadCommonMetafields();
   // If listings were previously pulled, restore the toolbar + list straight away
   if (MirrorState.listings && MirrorState.listings.length) {
-    el('mirror-empty').style.display = 'none';
-    el('mirror-toolbar').style.display = 'block';
-    el('mirror-list').style.display = 'block';
+    // These toggles only exist on the Listing Mirror page; the Bulk Editor calls
+    // these flows too, so guard them.
+    { const e = el('mirror-empty'); if (e) e.style.display = 'none'; }
+    { const t = el('mirror-toolbar'); if (t) t.style.display = 'block'; }
+    { const l = el('mirror-list'); if (l) l.style.display = 'block'; }
     paintMirrorList();
   }
 }
@@ -11036,9 +11128,11 @@ async function pullEbayListings() {
       const savedImgs = Array.isArray(l.overrideSelectedImages) ? l.overrideSelectedImages.filter(u => (l.pictureUrls || []).includes(u)) : null;
       MirrorState.selectedImages[l.itemId] = new Set(savedImgs && savedImgs.length ? savedImgs : (Array.isArray(l.pictureUrls) ? l.pictureUrls : []));
     }
-    el('mirror-empty').style.display = 'none';
-    el('mirror-toolbar').style.display = 'block';
-    el('mirror-list').style.display = 'block';
+    // These toggles only exist on the Listing Mirror page; the Bulk Editor calls
+    // these flows too, so guard them.
+    { const e = el('mirror-empty'); if (e) e.style.display = 'none'; }
+    { const t = el('mirror-toolbar'); if (t) t.style.display = 'block'; }
+    { const l = el('mirror-list'); if (l) l.style.display = 'block'; }
     paintMirrorList();
     paintMetafields();
     const noPhotos = MirrorState.listings.filter(l => !l.pictureUrls.length).length;
