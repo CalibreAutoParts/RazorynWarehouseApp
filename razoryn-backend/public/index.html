@@ -9840,6 +9840,7 @@ function renderMirror() {
           <div class="desc">Every eBay listing, Shopify product &amp; warehouse item in one place — see what's linked, connect what isn't, and catch duplicates. Creating &amp; pushing listings lives in the <a href="#" onclick="routeTo('bulk');return false" style="color:var(--brand-primary);font-weight:600">Bulk Editor</a>.</div>
         </div>
         <div class="actions" id="mirror-page-actions">
+          <button class="btn btn-outline" onclick="scanShopifyDuplicates()">🔍 Scan Shopify for duplicates</button>
           <button class="btn btn-outline" onclick="refreshLinks(true)">⟳ Refresh</button>
         </div>
       </div>
@@ -9906,6 +9907,46 @@ async function linkReconcile(ebayItemId, shopifyProductId) {
     toast('Linked', 'success');
     loadReconcile(true);
   } catch (e) { toast('Link failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// Scan the whole Shopify catalogue for products that share a part number — the
+// duplicates created when a push failed to match an existing product. Read-only:
+// it reports groups so you can review and merge/delete in Shopify yourself.
+async function scanShopifyDuplicates() {
+  const taskId = Task.start('Scanning Shopify for duplicate products…');
+  let data;
+  try { data = await Api.get('/api/listings/shopify-duplicates'); Task.done(taskId, 'Scan complete'); }
+  catch (e) { Task.fail(taskId, 'Scan failed'); toast('Scan failed: ' + (e.data?.message || e.message), 'error'); return; }
+
+  const adminLink = (id) => data.adminUrlBase ? `${data.adminUrlBase}/${id}` : null;
+  const groupsHtml = data.groups.length ? data.groups.map(g => `
+    <div style="border:1px solid var(--line);border-radius:8px;margin-bottom:10px;overflow:hidden">
+      <div style="background:var(--bg-soft);padding:8px 12px;font-size:12px;font-weight:700;display:flex;gap:8px;align-items:center">
+        <span style="font-family:ui-monospace,monospace">${escapeHtml(g.code)}</span>
+        <span class="pill" style="background:#fdecea;color:#b42318;font-size:10px">${g.count} products</span>
+      </div>
+      <table class="table" style="font-size:12px;margin:0"><tbody>
+        ${g.products.map(p => `<tr>
+          <td style="width:46px">${p.image ? `<img src="${escapeAttr(p.image)}" style="width:38px;height:38px;object-fit:cover;border-radius:4px">` : ''}</td>
+          <td><div style="font-weight:600">${escapeHtml(p.title || '(untitled)')}</div>
+            <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">SKU ${escapeHtml(p.sku || '—')} · PN ${escapeHtml(p.partNumber || '—')} · ${gbp(p.price || 0)} · qty ${p.qty ?? '—'}</div></td>
+          <td style="text-align:right;white-space:nowrap">${adminLink(p.productId) ? `<a class="btn btn-outline btn-sm" href="${adminLink(p.productId)}" target="_blank" rel="noopener">Open in Shopify ↗</a>` : `<span style="font-size:11px;color:var(--ink-soft)">ID ${escapeHtml(p.productId)}</span>`}</td>
+        </tr>`).join('')}
+      </tbody></table>
+    </div>`).join('') : '<div class="empty"><div class="t">No duplicates found 🎉</div>Every part number maps to a single Shopify product.</div>';
+
+  modal({
+    title: 'Duplicate Shopify products',
+    wide: true,
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:12px">
+        Scanned <strong>${data.summary.variantsScanned}</strong> Shopify variants · found
+        <strong>${data.summary.duplicateGroups}</strong> part number(s) carried by more than one product
+        (<strong>${data.summary.duplicateProducts}</strong> products total). Review each group and merge/delete the extras in Shopify — this report never deletes anything.
+      </div>
+      <div style="max-height:60vh;overflow:auto">${groupsHtml}</div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
 }
 
 function renderReconcile() {

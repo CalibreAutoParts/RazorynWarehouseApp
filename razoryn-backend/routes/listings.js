@@ -1076,25 +1076,46 @@ router.get('/ebay-active', requireAdmin, async (req, res) => {
       }
     }
 
-    // For listings with no link, fall back to SKU lookup (legacy mirrors before mirror_links existed)
+    // For listings with no link, look them up on Shopify by SKU. eBay custom
+    // labels are frequently EB-<itemid> while the Shopify product is keyed on the
+    // PART NUMBER (e.g. "… RH - 10788797"), so the eBay SKU alone misses and the
+    // listing looks un-mirrored — pushing it would then CREATE A DUPLICATE. We
+    // therefore check two candidate codes per listing against Shopify: the eBay
+    // SKU, and the part-number code at the end of the title.
     if (shopify.isConfigured()) {
       const unlinked = listings.filter(l => !l.existsOnShopify);
-      const skusToCheck = unlinked.map(l => l.overrideSku || l.sku).filter(Boolean);
-      if (skusToCheck.length) {
-        const found = await shopify.findProductsBySkus(skusToCheck);
+      const candFor = new Map(); // itemId -> [rawCode,...]
+      const allCodes = new Set();
+      for (const l of unlinked) {
+        const cands = [];
+        const sku = l.overrideSku || l.sku;
+        if (sku) cands.push(String(sku));
+        const title = l.overrideTitle || l.title || '';
+        // Trailing " - CODE" (spaces around the dash, so a year range like
+        // "2022-2025" is NOT captured). CODE may itself contain hyphens.
+        const tail = title.match(/\s[-–]\s+([A-Za-z0-9][A-Za-z0-9-]*)\s*$/);
+        if (tail) cands.push(tail[1]);
+        candFor.set(l.itemId, cands);
+        for (const c of cands) allCodes.add(c);
+      }
+      if (allCodes.size) {
+        const found = await shopify.findProductsBySkus([...allCodes]);
         for (const l of unlinked) {
-          const effectiveSku = l.overrideSku || l.sku;
-          if (effectiveSku && found[effectiveSku]) {
+          if (l.existsOnShopify) continue;
+          const ebaySku = l.overrideSku || l.sku;
+          const hit = (candFor.get(l.itemId) || []).find(c => found[c]);
+          if (hit) {
             l.existsOnShopify = true;
-            l.shopifyProductId = String(found[effectiveSku].product_id);
-            l.shopifyTitle = found[effectiveSku].title;
-            // Backfill the mirror_links table so future pulls don't need to SKU-search
+            l.shopifyProductId = String(found[hit].product_id);
+            l.shopifyTitle = found[hit].title;
+            l.matchedBy = (hit === String(ebaySku)) ? 'sku' : 'part_number';
+            // Backfill the mirror_links table so future pulls don't need to search.
             try {
               await query(`
                 INSERT INTO mirror_links (ebay_item_id, shopify_product_id, last_synced_sku, last_synced_title)
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (ebay_item_id) DO NOTHING
-              `, [l.itemId, found[effectiveSku].product_id, effectiveSku, found[effectiveSku].title]);
+              `, [l.itemId, found[hit].product_id, ebaySku || hit, found[hit].title]);
             } catch (e) { /* ignore — non-critical */ }
           }
         }
@@ -1592,6 +1613,54 @@ router.post('/push-warehouse-sku', requireAdmin, async (req, res) => {
   await audit(req, 'push_warehouse_sku', null, null, { count: itemIds.length });
   const okCount = results.filter(r => !r.errors.length).length;
   res.json({ ok: true, results, summary: { total: itemIds.length, ok: okCount, errors: itemIds.length - okCount } });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// GET /api/listings/shopify-duplicates — scan the whole Shopify catalogue and
+// group products that share a part number. Past pushes that failed to match an
+// existing Shopify product (eBay SKU EB-<itemid> vs Shopify part number) created
+// DUPLICATE products with different SKUs, so same-SKU dedup misses them. We group
+// by the part number (variant barcode), falling back to the trailing title code,
+// then the SKU — and report any code carried by more than one product. Read-only;
+// nothing is deleted.
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/shopify-duplicates', requireAdmin, async (req, res) => {
+  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+  const byCode = new Map(); // normalised code -> Map(productId -> {productId,title,sku,partNumber,price,qty,handle,image})
+  let variants = 0;
+  try {
+    for await (const v of shopify.iterateAllProductsAndVariants()) {
+      variants++;
+      // Prefer the part number (barcode), then a trailing "- CODE" in the title,
+      // then the SKU (ignoring the SHOPIFY-<id> placeholders).
+      let code = normCode(v.part_number);
+      if (!code) { const t = (v.title || '').match(/\s[-–]\s+([A-Za-z0-9][A-Za-z0-9-]*)\s*$/); if (t) code = normCode(t[1]); }
+      if (!code && v.sku && !/^SHOPIFY/i.test(v.sku)) code = normCode(v.sku);
+      if (!code || code.length < 4) continue;
+      if (!byCode.has(code)) byCode.set(code, new Map());
+      const m = byCode.get(code);
+      if (!m.has(v.shopify_product_id)) {
+        m.set(v.shopify_product_id, {
+          productId: v.shopify_product_id, title: v.title, sku: /^SHOPIFY/i.test(v.sku) ? null : v.sku,
+          partNumber: v.part_number || null, price: v.price_shopify, qty: v.qty_on_hand,
+          handle: v.shopify_handle, image: v.image_url,
+        });
+      }
+    }
+  } catch (e) { return res.status(502).json({ error: 'shopify_scan_failed', message: e.message }); }
+
+  const groups = [];
+  for (const [code, m] of byCode) {
+    if (m.size > 1) groups.push({ code, count: m.size, products: [...m.values()] });
+  }
+  groups.sort((a, b) => b.count - a.count);
+  await audit(req, 'shopify_duplicate_scan', null, null, { variants, dupGroups: groups.length });
+  const domain = process.env.SHOPIFY_STORE_DOMAIN || '';
+  res.json({
+    summary: { variantsScanned: variants, duplicateGroups: groups.length, duplicateProducts: groups.reduce((n, g) => n + g.count, 0) },
+    adminUrlBase: domain ? `https://${domain.replace(/^https?:\/\//, '').replace(/\/$/, '')}/admin/products` : null,
+    groups,
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
