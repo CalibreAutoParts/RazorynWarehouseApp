@@ -10044,7 +10044,7 @@ async function importShopifyToWarehouse(btn) {
     const r = await Api.post('/api/listings/import-shopify-to-warehouse', {});
     Task.done(taskId, `Imported ${r.created}`);
     await Store.refresh('products').catch(() => {});
-    let msg = `Imported ${r.created} new item(s). Already present: ${r.skippedExisting}.`;
+    let msg = `Imported ${r.created} new, updated ${r.enriched || 0} (photo/links), linked ${r.ebayLinked || 0} to eBay.`;
     if (r.skippedNoSku) msg += ` Skipped ${r.skippedNoSku} with no SKU.`;
     if (r.errors && r.errors.length) msg += ` ${r.errors.length} failed.`;
     toast(msg, (r.errors && r.errors.length) ? 'warn' : 'success', 8000);

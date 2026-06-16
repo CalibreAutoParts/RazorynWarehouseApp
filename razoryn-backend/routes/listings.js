@@ -1505,61 +1505,121 @@ router.post('/mirror', requireAdmin, async (req, res) => {
 });
 
 // POST /api/listings/import-shopify-to-warehouse
-// Repair/backfill: create a warehouse `products` row for every Shopify product
-// that doesn't already have one (matched by shopify_product_id, else by SKU).
-// Products created on Shopify before warehouse-mirroring existed — or where the
-// per-item upsert in /mirror failed — otherwise never appear in Inventory or the
-// monthly stock-take. Idempotent: safe to run repeatedly.
+// Repair/backfill so Shopify products show fully in the warehouse:
+//   • create a `products` row for any Shopify product missing one,
+//   • ENRICH rows already imported but lacking a photo or Shopify ids,
+//   • re-establish the eBay link (mirror_links, matched by SKU) + eBay price,
+//     since these items originally came from eBay.
+// Idempotent: safe to run repeatedly; never clobbers warehouse-owned title/stock.
 router.post('/import-shopify-to-warehouse', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
   if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
 
   let variants = [];
   try { for await (const v of shopify.iterateAllProductsAndVariants()) variants.push(v); }
   catch (e) { return res.status(502).json({ error: 'shopify_pull_failed', message: e.message }); }
 
-  const { rows: existing } = await query(`SELECT sku, shopify_product_id FROM products`);
-  const haveSku = new Set(existing.map(r => String(r.sku || '').trim().toUpperCase()).filter(Boolean));
-  const haveSpid = new Set(existing.map(r => String(r.shopify_product_id || '')).filter(Boolean));
+  const { rows: existing } = await query(`SELECT id, sku, shopify_product_id, image_url, price_ebay FROM products`);
+  const prodBySpid = new Map();
+  const prodBySku = new Map();
+  for (const r of existing) {
+    if (r.shopify_product_id) prodBySpid.set(String(r.shopify_product_id), r);
+    if (r.sku) prodBySku.set(String(r.sku).trim().toUpperCase(), r);
+  }
 
-  let created = 0, skippedExisting = 0, skippedNoSku = 0;
+  // eBay listings keyed by normalised SKU — to re-link by code (best-effort).
+  const ebayBySku = new Map();
+  try {
+    const listings = await getAllListingsAcrossStores();
+    for (const l of listings) { const k = normCode(l.sku); if (k && !ebayBySku.has(k)) ebayBySku.set(k, l); }
+  } catch (e) { console.warn('[import] eBay pull failed (links skipped):', e.message); }
+
+  const { rows: mlRows } = await query(`SELECT shopify_product_id FROM mirror_links`);
+  const linkedSpid = new Set(mlRows.map(r => String(r.shopify_product_id)).filter(Boolean));
+
+  let created = 0, enriched = 0, ebayLinked = 0, skippedExisting = 0, skippedNoSku = 0;
   const errors = [];
   const seenProduct = new Set(); // one warehouse row per Shopify product (first variant wins)
   for (const v of variants) {
     const spid = String(v.shopify_product_id || '');
-    if (spid && haveSpid.has(spid)) { skippedExisting++; continue; }
     if (spid && seenProduct.has(spid)) continue;
-    // Skip Shopify's synthetic placeholder SKUs — they're not real codes and the
-    // warehouse SKU column is UNIQUE + the printed identifier.
+    if (spid) seenProduct.add(spid);
+    // Skip Shopify's synthetic placeholder SKUs — the warehouse SKU is UNIQUE and
+    // the printed identifier, so a real code is required.
     const sku = (v.sku && !/^SHOPIFY-/i.test(v.sku)) ? String(v.sku).trim() : null;
     if (!sku) { skippedNoSku++; continue; }
-    if (haveSku.has(sku.toUpperCase())) { skippedExisting++; continue; }
+    const img = v.image_url || null;
     try {
-      await query(`
-        INSERT INTO products (sku, title, barcode, qty_on_hand, price_shopify,
-                              shopify_product_id, shopify_variant_id, shopify_inventory_id, active)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true)
-        ON CONFLICT (sku) DO UPDATE SET
-          shopify_product_id   = EXCLUDED.shopify_product_id,
-          shopify_variant_id   = EXCLUDED.shopify_variant_id,
-          shopify_inventory_id = COALESCE(EXCLUDED.shopify_inventory_id, products.shopify_inventory_id),
-          active = true,
-          updated_at = now()
-      `, [
-        sku, v.title || sku, v.barcode || sku,
-        v.qty_on_hand != null ? v.qty_on_hand : 0,
-        v.price_shopify != null ? v.price_shopify : null,
-        spid || null,
-        v.shopify_variant_id ? String(v.shopify_variant_id) : null,
-        v.shopify_inventory_id ? String(v.shopify_inventory_id) : null,
-      ]);
-      haveSku.add(sku.toUpperCase());
-      if (spid) { haveSpid.add(spid); seenProduct.add(spid); }
-      created++;
+      let row = prodBySpid.get(spid) || prodBySku.get(sku.toUpperCase());
+      let productId;
+      if (!row) {
+        const ins = await query(`
+          INSERT INTO products (sku, title, barcode, qty_on_hand, price_shopify, image_url,
+                                shopify_product_id, shopify_variant_id, shopify_inventory_id, active)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true)
+          ON CONFLICT (sku) DO UPDATE SET
+            shopify_product_id   = EXCLUDED.shopify_product_id,
+            shopify_variant_id   = EXCLUDED.shopify_variant_id,
+            shopify_inventory_id = COALESCE(EXCLUDED.shopify_inventory_id, products.shopify_inventory_id),
+            image_url            = COALESCE(products.image_url, EXCLUDED.image_url),
+            active = true, updated_at = now()
+          RETURNING id`,
+          [sku, v.title || sku, v.barcode || sku,
+           v.qty_on_hand != null ? v.qty_on_hand : 0,
+           v.price_shopify != null ? v.price_shopify : null, img,
+           spid || null,
+           v.shopify_variant_id ? String(v.shopify_variant_id) : null,
+           v.shopify_inventory_id ? String(v.shopify_inventory_id) : null]);
+        productId = ins.rows[0].id;
+        row = { id: productId, image_url: img, price_ebay: null };
+        prodBySpid.set(spid, row); prodBySku.set(sku.toUpperCase(), row);
+        created++;
+      } else {
+        productId = row.id;
+        // Fill the gaps the first import left: photo + Shopify ids. Never touch
+        // title / stock / Shopify price — the warehouse owns those.
+        const needsPhoto = !row.image_url && img;
+        const needsLink = !String(row.shopify_product_id || '');
+        if (needsPhoto || needsLink) {
+          await query(`
+            UPDATE products SET
+              image_url            = COALESCE(image_url, $2),
+              shopify_product_id   = COALESCE(shopify_product_id, $3),
+              shopify_variant_id   = COALESCE(shopify_variant_id, $4),
+              shopify_inventory_id = COALESCE(shopify_inventory_id, $5),
+              active = true, updated_at = now()
+            WHERE id = $1`,
+            [productId, img, spid || null,
+             v.shopify_variant_id ? String(v.shopify_variant_id) : null,
+             v.shopify_inventory_id ? String(v.shopify_inventory_id) : null]);
+          enriched++;
+        } else {
+          skippedExisting++;
+        }
+      }
+
+      // Re-link to eBay by SKU if this Shopify product isn't linked yet.
+      const match = spid && !linkedSpid.has(spid) ? ebayBySku.get(normCode(sku)) : null;
+      if (match) {
+        await query(`
+          INSERT INTO mirror_links (ebay_item_id, shopify_product_id, store_code, last_mirrored_at, last_synced_sku, last_synced_title)
+          VALUES ($1,$2,$3,now(),$4,$5)
+          ON CONFLICT (ebay_item_id) DO UPDATE SET
+            shopify_product_id = EXCLUDED.shopify_product_id,
+            store_code = COALESCE(EXCLUDED.store_code, mirror_links.store_code),
+            last_mirrored_at = now()`,
+          [String(match.itemId), spid, match.storeCode || null, sku, v.title || match.title || null]);
+        linkedSpid.add(spid);
+        if (match.priceEbay > 0 && !(row.price_ebay > 0)) {
+          await query(`UPDATE products SET price_ebay = $1, updated_at = now() WHERE id = $2 AND (price_ebay IS NULL OR price_ebay <= 0)`, [match.priceEbay, productId]);
+        }
+        ebayLinked++;
+      }
     } catch (e) { errors.push({ sku, error: e.message }); }
   }
 
-  await audit(req, 'import_shopify_to_warehouse', null, null, { created, skippedExisting, skippedNoSku, errors: errors.length });
-  res.json({ scanned: variants.length, created, skippedExisting, skippedNoSku, errors });
+  await audit(req, 'import_shopify_to_warehouse', null, null, { created, enriched, ebayLinked, skippedExisting, skippedNoSku, errors: errors.length });
+  res.json({ scanned: variants.length, created, enriched, ebayLinked, skippedExisting, skippedNoSku, errors });
 });
 
 // POST /api/listings/resync-images — one-click re-push of the SELECTED images only.
