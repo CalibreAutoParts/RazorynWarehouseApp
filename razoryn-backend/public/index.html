@@ -9879,6 +9879,7 @@ async function loadReconcile(force) {
   try {
     const r = await Api.get('/api/listings/reconcile');
     State.reconcile = r;
+    State.reconcileUnlinked = null; // fresh data — clear the pending-unlink banner
     Task.done(taskId, `${r.summary.groups} groups`);
     renderReconcile();
   } catch (e) {
@@ -10090,10 +10091,22 @@ function renderReconcile() {
     ? `<div style="padding:10px 12px;background:var(--amber-light);color:var(--amber);font-size:12px;border-radius:6px;margin-bottom:12px">⚠ ${!s.ebayConfigured ? 'eBay' : ''}${!s.ebayConfigured && !s.shopifyConfigured ? ' and ' : ''}${!s.shopifyConfigured ? 'Shopify' : ''} not configured — that side is empty, so links can't be verified.</div>`
     : '';
 
+  // After unlinking (which we do without a full re-pull), show a sticky reminder.
+  // Duplicate/linked status is recalculated by the backend, so it only updates on
+  // a Refresh — this lets staff unlink several rows, then refresh once.
+  const nUnlinked = State.reconcileUnlinked ? State.reconcileUnlinked.size : 0;
+  const unlinkBanner = nUnlinked
+    ? `<div style="padding:10px 12px;background:#e8f0fe;color:#1a56db;font-size:12px;border-radius:6px;margin-bottom:12px;display:flex;align-items:center;gap:10px">
+        <span>🔗 <strong>${nUnlinked}</strong> link(s) removed. Status &amp; duplicate counts update when you refresh.</span>
+        <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="refreshLinks(true)">⟳ Refresh now</button>
+      </div>`
+    : '';
+
   const segBtn = (key, label, count, danger) =>
     `<button class="${filter===key?'active':''}" onclick="setReconcileFilter('${key}')">${label}${count != null ? ` (${danger && count ? '⚠ ' : ''}${count})` : ''}</button>`;
 
   el('links-content').innerHTML = `
+    ${unlinkBanner}
     ${cfgWarn}
     <div class="grid-4" style="margin-bottom:14px">
       <div class="stat"><div class="label">eBay listings</div><div class="value">${s.ebayListings}</div></div>
@@ -10159,10 +10172,10 @@ function reconcileRow(g) {
   let status = '';
   if (g.dupEbay || g.dupShopify) {
     status = `<span class="pill" style="font-size:10px;background:#fde8e8;color:var(--red);font-weight:600">⚠ Duplicate</span>`;
-    if (g.onEbay) status += `<div style="margin-top:6px">${g.ebay.filter(e => e.linkedShopifyId).map(e => `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unlinkEbay('${escapeAttr(e.itemId)}')" title="Remove this eBay link">✕ Unlink ${escapeHtml(e.itemId)}</button>`).join('')}</div>`;
+    if (g.onEbay) status += `<div style="margin-top:6px">${g.ebay.filter(e => e.linkedShopifyId).map(e => `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unlinkEbay('${escapeAttr(e.itemId)}', {batch:true})" title="Remove this eBay link">✕ Unlink ${escapeHtml(e.itemId)}</button>`).join('')}</div>`;
   } else if (g.onEbay && g.onShopify && g.ebayShopifyLinked) {
     status = `<span class="pill green" style="font-size:10px">✓ Linked</span>`;
-    status += `<div style="margin-top:6px">${g.ebay.filter(e => e.linkedShopifyId).map(e => `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unlinkEbay('${escapeAttr(e.itemId)}')" title="Disconnect">✕ Unlink</button>`).join('')}</div>`;
+    status += `<div style="margin-top:6px">${g.ebay.filter(e => e.linkedShopifyId).map(e => `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unlinkEbay('${escapeAttr(e.itemId)}', {batch:true})" title="Disconnect">✕ Unlink</button>`).join('')}</div>`;
   } else if (g.needsEbayShopifyLink) {
     status = `<span class="pill amber" style="font-size:10px">⚠ Needs link</span>`;
     if (g.ebay.length === 1 && g.shopify.length === 1) {
@@ -10965,12 +10978,27 @@ function openLinkProductToEbay(productId) {
   });
 }
 
-async function unlinkEbay(ebayItemId) {
-  if (!confirm('Remove this eBay link?')) return;
+async function unlinkEbay(ebayItemId, opts = {}) {
+  // Batch mode (reconcile view): no blocking confirm and no full re-pull — update
+  // the cached data locally so the Unlink button vanishes instantly, and let the
+  // user remove several links before refreshing once.
+  if (!opts.batch && !confirm('Remove this eBay link?')) return;
   try {
     await Api.post('/api/listings/link-status/unlink', { ebayItemId });
-    toast('Unlinked', 'success');
-    refreshLinks(true);
+    if (opts.batch) {
+      State.reconcileUnlinked = State.reconcileUnlinked || new Set();
+      State.reconcileUnlinked.add(String(ebayItemId));
+      // Optimistic local update: clear the link on that eBay entry so its Unlink
+      // button (which keys off linkedShopifyId) disappears without a server pull.
+      for (const g of (State.reconcile?.groups || [])) {
+        for (const e of (g.ebay || [])) if (String(e.itemId) === String(ebayItemId)) e.linkedShopifyId = null;
+      }
+      renderReconcile();
+      toast('Unlinked ' + ebayItemId, 'success');
+    } else {
+      toast('Unlinked', 'success');
+      refreshLinks(true);
+    }
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
