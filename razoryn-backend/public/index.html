@@ -9775,23 +9775,204 @@ function bulkFilter(v) { MirrorState.filterText = v; MirrorState.page = 1; paint
 function bulkStatus(s) { MirrorState.statusFilter = s; MirrorState.page = 1; if (State.page === 'bulk') renderBulkEditor(); }
 
 function renderMirror() {
+  const view = State.linkView || 'all';
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
         <div>
           <h1>Listing Links</h1>
-          <div class="desc">SKU matching across eBay, Shopify &amp; the warehouse — see every product's active links, connect new ones, or disconnect. Creating &amp; pushing listings lives in the <a href="#" onclick="routeTo('bulk');return false" style="color:var(--brand-primary);font-weight:600">Bulk Editor</a>.</div>
+          <div class="desc">Every eBay listing, Shopify product &amp; warehouse item in one place — see what's linked, connect what isn't, and catch duplicates. Creating &amp; pushing listings lives in the <a href="#" onclick="routeTo('bulk');return false" style="color:var(--brand-primary);font-weight:600">Bulk Editor</a>.</div>
         </div>
         <div class="actions" id="mirror-page-actions">
-          <button class="btn btn-outline" onclick="loadLinkStatus()">⟳ Refresh links</button>
+          <button class="btn btn-outline" onclick="refreshLinks(true)">⟳ Refresh</button>
         </div>
       </div>
+      <div class="seg" style="margin-bottom:14px">
+        <button class="${view==='all'?'active':''}" data-ltab="all" onclick="switchLinkView('all')">All listings</button>
+        <button class="${view==='product'?'active':''}" data-ltab="product" onclick="switchLinkView('product')">By warehouse product</button>
+      </div>
       <div id="links-content">
-        <div class="empty"><div class="t">Loading link status…</div></div>
+        <div class="empty"><div class="t">Loading…</div></div>
       </div>
     </div>
   `;
-  loadLinkStatus();
+  switchLinkView(view);
+}
+
+function switchLinkView(view) {
+  State.linkView = view;
+  document.querySelectorAll('[data-ltab]').forEach(b => b.classList.toggle('active', b.dataset.ltab === view));
+  if (view === 'all') loadReconcile();
+  else loadLinkStatus();
+}
+
+// Refresh whichever Listing-Links view is active. force=true bypasses any cache.
+function refreshLinks(force) {
+  if ((State.linkView || 'all') === 'all') loadReconcile(force);
+  else loadLinkStatus();
+}
+
+// ── All-listings reconcile (eBay + Shopify + warehouse) ──────────────────────
+async function loadReconcile(force) {
+  const wrap = el('links-content');
+  if (!wrap) return;
+  if (State.reconcile && !force) { renderReconcile(); return; }
+  wrap.innerHTML = `<div class="empty"><div class="t">Pulling eBay + Shopify + warehouse…</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">This reads every listing across all three systems, so it can take a little while.</div></div>`;
+  const taskId = Task.start('Reconciling all listings');
+  try {
+    const r = await Api.get('/api/listings/reconcile');
+    State.reconcile = r;
+    Task.done(taskId, `${r.summary.groups} groups`);
+    renderReconcile();
+  } catch (e) {
+    Task.fail(taskId, 'Reconcile failed');
+    wrap.innerHTML = `<div class="empty"><div class="t">Failed to load: ${escapeHtml(e.data?.message || e.message)}</div></div>`;
+  }
+}
+
+function setReconcileFilter(f) { State.reconcileFilter = f; renderReconcile(); }
+let _reconcileSearchTimer;
+function reconcileSearch(v) {
+  State.reconcileSearch = v;
+  clearTimeout(_reconcileSearchTimer);
+  const cur = document.getElementById('rec-search');
+  const caret = cur ? cur.selectionStart : null;
+  _reconcileSearchTimer = setTimeout(() => {
+    renderReconcile();
+    const fresh = document.getElementById('rec-search');
+    if (fresh) { fresh.focus(); try { fresh.setSelectionRange(caret ?? fresh.value.length, caret ?? fresh.value.length); } catch (e) {} }
+  }, 200);
+}
+
+async function linkReconcile(ebayItemId, shopifyProductId) {
+  try {
+    await Api.post('/api/listings/link-status/link', { ebayItemId, shopifyProductId });
+    toast('Linked', 'success');
+    loadReconcile(true);
+  } catch (e) { toast('Link failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+function renderReconcile() {
+  const data = State.reconcile;
+  if (!data) return;
+  const s = data.summary;
+  const filter = State.reconcileFilter || 'all';
+  const search = (State.reconcileSearch || '').toLowerCase().trim();
+
+  const matchFilter = (g) => {
+    switch (filter) {
+      case 'needs': return g.needsEbayShopifyLink;
+      case 'dup': return g.dupEbay || g.dupShopify;
+      case 'linked': return g.onEbay && g.onShopify && g.ebayShopifyLinked;
+      case 'ebay-only': return g.onEbay && !g.onShopify && !g.onWarehouse;
+      case 'shopify-only': return g.onShopify && !g.onEbay && !g.onWarehouse;
+      default: return true;
+    }
+  };
+  let groups = (data.groups || []).filter(matchFilter);
+  if (search) groups = groups.filter(g => {
+    const hay = [...g.skus, ...g.ebay.map(e => e.title + ' ' + e.itemId), ...g.shopify.map(x => x.title + ' ' + x.productId), ...g.warehouse.map(w => w.title)].join(' ');
+    return matchesKeywords(search, hay);
+  });
+
+  const cfgWarn = (!s.shopifyConfigured || !s.ebayConfigured)
+    ? `<div style="padding:10px 12px;background:var(--amber-light);color:var(--amber);font-size:12px;border-radius:6px;margin-bottom:12px">⚠ ${!s.ebayConfigured ? 'eBay' : ''}${!s.ebayConfigured && !s.shopifyConfigured ? ' and ' : ''}${!s.shopifyConfigured ? 'Shopify' : ''} not configured — that side is empty, so links can't be verified.</div>`
+    : '';
+
+  const segBtn = (key, label, count, danger) =>
+    `<button class="${filter===key?'active':''}" onclick="setReconcileFilter('${key}')">${label}${count != null ? ` (${danger && count ? '⚠ ' : ''}${count})` : ''}</button>`;
+
+  el('links-content').innerHTML = `
+    ${cfgWarn}
+    <div class="grid-4" style="margin-bottom:14px">
+      <div class="stat"><div class="label">eBay listings</div><div class="value">${s.ebayListings}</div></div>
+      <div class="stat"><div class="label">Shopify variants</div><div class="value">${s.shopifyVariants}</div></div>
+      <div class="stat"><div class="label">Warehouse products</div><div class="value">${s.warehouseProducts}</div></div>
+      <div class="stat"><div class="label">Duplicates</div><div class="value" style="${s.duplicates?'color:var(--red)':''}">${s.duplicates}</div><div class="delta ${s.duplicates?'down':''}">${s.duplicates?'Review':'None'}</div></div>
+    </div>
+
+    <div class="seg" style="margin-bottom:14px;flex-wrap:wrap">
+      ${segBtn('all', 'All', s.groups)}
+      ${segBtn('needs', 'Needs link', s.needsLink, true)}
+      ${segBtn('dup', 'Duplicates', s.duplicates, true)}
+      ${segBtn('linked', 'Linked', s.fullyLinked)}
+      ${segBtn('ebay-only', 'eBay only', s.ebayOnly)}
+      ${segBtn('shopify-only', 'Shopify only', s.shopifyOnly)}
+    </div>
+
+    <div class="card" style="margin-bottom:14px"><div class="card-body" style="padding:10px 14px">
+      <input id="rec-search" placeholder="Search SKU, title or item ID…" oninput="reconcileSearch(this.value)" value="${escapeAttr(State.reconcileSearch || '')}" style="width:100%">
+    </div></div>
+
+    <div class="card">
+      <div style="overflow-x:auto">
+        <table class="table">
+          <thead><tr>
+            <th style="min-width:120px">SKU</th>
+            <th>eBay</th>
+            <th>Shopify</th>
+            <th>Warehouse</th>
+            <th style="min-width:140px">Status</th>
+          </tr></thead>
+          <tbody>${groups.slice(0, 300).map(reconcileRow).join('') || `<tr><td colspan="5" style="text-align:center;padding:18px;color:var(--ink-soft)">No matches</td></tr>`}</tbody>
+        </table>
+      </div>
+      ${groups.length > 300 ? `<div style="padding:10px;text-align:center;font-size:12px;color:var(--ink-soft)">Showing first 300 of ${groups.length}. Use search to narrow down.</div>` : ''}
+    </div>`;
+}
+
+function reconcileRow(g) {
+  const dupBadge = (n, label) => `<div style="font-size:10px;color:var(--red);font-weight:700;margin-bottom:3px">⚠ ${n} ${label} — possible duplicate</div>`;
+  const ebayCell = g.ebay.length
+    ? (g.dupEbay ? dupBadge(g.ebay.length, 'listings') : '') + g.ebay.map(e => `
+        <div style="margin-bottom:4px">
+          ${e.storeName ? `<span class="pill" style="font-size:9px;background:var(--bg-soft);color:var(--ink);margin-right:4px;font-weight:600">${escapeHtml(abbreviateStoreName(e.storeName))}</span>` : ''}
+          <a href="${escapeAttr(e.url)}" target="_blank" rel="noopener" style="color:var(--brand-primary);text-decoration:none;font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(e.itemId)} ↗</a>
+          ${e.price != null ? `<span style="font-size:11px;color:var(--ink-soft);margin-left:4px">£${Number(e.price).toFixed(2)}</span>` : ''}
+        </div>`).join('')
+    : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
+  const shopCell = g.shopify.length
+    ? (g.dupShopify ? dupBadge(g.shopify.length, 'products') : '') + g.shopify.map(x => `
+        <div style="margin-bottom:4px">
+          <span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(x.productId)}</span>
+          ${x.price != null ? `<span style="font-size:11px;color:var(--ink-soft);margin-left:4px">£${Number(x.price).toFixed(2)}</span>` : ''}
+        </div>`).join('')
+    : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
+  const whCell = g.warehouse.length
+    ? g.warehouse.map(w => `<div style="margin-bottom:4px;font-size:12px">${escapeHtml(w.title || w.sku || '')}${w.qty != null ? `<span style="font-size:11px;color:var(--ink-soft);margin-left:4px">·${w.qty} in stock</span>` : ''}</div>`).join('')
+    : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
+
+  // Status + actions
+  let status = '';
+  if (g.dupEbay || g.dupShopify) {
+    status = `<span class="pill" style="font-size:10px;background:#fde8e8;color:var(--red);font-weight:600">⚠ Duplicate</span>`;
+    if (g.onEbay) status += `<div style="margin-top:6px">${g.ebay.filter(e => e.linkedShopifyId).map(e => `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unlinkEbay('${escapeAttr(e.itemId)}')" title="Remove this eBay link">✕ Unlink ${escapeHtml(e.itemId)}</button>`).join('')}</div>`;
+  } else if (g.onEbay && g.onShopify && g.ebayShopifyLinked) {
+    status = `<span class="pill green" style="font-size:10px">✓ Linked</span>`;
+    status += `<div style="margin-top:6px">${g.ebay.filter(e => e.linkedShopifyId).map(e => `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unlinkEbay('${escapeAttr(e.itemId)}')" title="Disconnect">✕ Unlink</button>`).join('')}</div>`;
+  } else if (g.needsEbayShopifyLink) {
+    status = `<span class="pill amber" style="font-size:10px">⚠ Needs link</span>`;
+    if (g.ebay.length === 1 && g.shopify.length === 1) {
+      status += `<div style="margin-top:6px"><button class="btn btn-primary btn-sm" onclick="linkReconcile('${escapeAttr(g.ebay[0].itemId)}','${escapeAttr(g.shopify[0].productId)}')">🔗 Link these</button></div>`;
+    } else {
+      status += `<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Multiple matches — clean up duplicates first.</div>`;
+    }
+  } else if (g.onEbay && !g.onShopify) {
+    status = `<span class="pill" style="font-size:10px;background:#e8f0fe;color:#1a56db">eBay only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">No Shopify match${g.onWarehouse ? '' : ' or warehouse product'}.</div>`;
+  } else if (g.onShopify && !g.onEbay) {
+    status = `<span class="pill" style="font-size:10px;background:#e8f0fe;color:#1a56db">Shopify only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Not on eBay.</div>`;
+  } else if (g.onWarehouse && !g.onEbay && !g.onShopify) {
+    status = `<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">Warehouse only</span>`;
+  }
+
+  const rowBg = (g.dupEbay || g.dupShopify) ? 'background:#fff5f5' : '';
+  return `<tr style="${rowBg}">
+    <td style="font-family:ui-monospace,monospace;font-size:11px">${g.skus.length ? g.skus.map(escapeHtml).join('<br>') : '<span style="color:var(--ink-soft)">no SKU</span>'}</td>
+    <td>${ebayCell}</td>
+    <td>${shopCell}</td>
+    <td>${whCell}</td>
+    <td>${status}</td>
+  </tr>`;
 }
 
 async function loadLinkStatus() {
@@ -10573,7 +10754,7 @@ async function unlinkEbay(ebayItemId) {
   try {
     await Api.post('/api/listings/link-status/unlink', { ebayItemId });
     toast('Unlinked', 'success');
-    await loadLinkStatus();
+    refreshLinks(true);
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 

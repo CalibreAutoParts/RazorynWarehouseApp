@@ -396,10 +396,17 @@ router.post('/link-status/link', requireAdmin, async (req, res) => {
   await ensureMirrorLinksColumns();
   const { productId, ebayItemId, shopifyProductId, storeCode: storeCodeHint } = req.body || {};
   if (!ebayItemId) return res.status(400).json({ error: 'ebay_item_id_required' });
-  const p = await query(`SELECT id, shopify_product_id, sku, title FROM products WHERE id = $1`, [productId]);
-  if (!p.rows[0]) return res.status(404).json({ error: 'product_not_found' });
-  const spId = shopifyProductId || p.rows[0].shopify_product_id;
-  if (!spId) return res.status(400).json({ error: 'no_shopify_product_id', message: 'Product has no Shopify product_id. Sync from Shopify first.' });
+  // productId is optional: the All-listings reconcile view links an eBay item
+  // straight to a Shopify product (no warehouse row needed). When given, we use
+  // the product's shopify_product_id as a fallback and bump its price_ebay.
+  let prod = null;
+  if (productId) {
+    const p = await query(`SELECT id, shopify_product_id, sku, title FROM products WHERE id = $1`, [productId]);
+    if (!p.rows[0]) return res.status(404).json({ error: 'product_not_found' });
+    prod = p.rows[0];
+  }
+  const spId = shopifyProductId || prod?.shopify_product_id;
+  if (!spId) return res.status(400).json({ error: 'no_shopify_product_id', message: 'No Shopify product id supplied or found. Sync from Shopify first.' });
 
   // Try to look up the live listing — gives us store_code and live price.
   // Fail open if eBay isn't configured or the item isn't found; the link still
@@ -424,21 +431,21 @@ router.post('/link-status/link', requireAdmin, async (req, res) => {
        SET shopify_product_id = EXCLUDED.shopify_product_id,
            store_code = COALESCE(EXCLUDED.store_code, mirror_links.store_code),
            last_mirrored_at = now()`,
-    [String(ebayItemId), spId, detectedStoreCode || null, p.rows[0].sku, p.rows[0].title]
+    [String(ebayItemId), spId, detectedStoreCode || null, prod?.sku || (listing?.sku || null), prod?.title || (listing?.title || null)]
   );
 
-  // If we have the live listing, also bump price_ebay on the warehouse product
-  // so the quote builder + invoices reflect reality immediately.
+  // If we have the live listing AND a warehouse product, also bump price_ebay on
+  // it so the quote builder + invoices reflect reality immediately.
   let priceUpdated = false;
-  if (listing && listing.priceEbay > 0) {
+  if (prod && listing && listing.priceEbay > 0) {
     await query(
       `UPDATE products SET price_ebay = $1, updated_at = now() WHERE id = $2`,
-      [listing.priceEbay, p.rows[0].id]
+      [listing.priceEbay, prod.id]
     );
     priceUpdated = true;
   }
 
-  await audit(req, 'create_mirror_link', 'product', productId, { ebayItemId, shopifyProductId: spId, storeCode: detectedStoreCode, priceUpdated });
+  await audit(req, 'create_mirror_link', 'product', productId || null, { ebayItemId, shopifyProductId: spId, storeCode: detectedStoreCode, priceUpdated });
   res.json({ ok: true, storeCode: detectedStoreCode, priceUpdated, livePrice: listing?.priceEbay || null });
 });
 
@@ -448,6 +455,153 @@ router.post('/link-status/unlink', requireAdmin, async (req, res) => {
   await query(`DELETE FROM mirror_links WHERE ebay_item_id = $1`, [String(ebayItemId)]);
   await audit(req, 'delete_mirror_link', 'mirror_link', null, { ebayItemId });
   res.json({ ok: true });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// GET /api/listings/reconcile — the unified, three-way "all listings" view.
+//
+// Pulls EVERY eBay listing, EVERY Shopify product/variant and EVERY warehouse
+// product, then groups them so each row shows what exists where and whether it
+// is linked. Grouping joins on (a) explicit links — mirror_links (eBay↔Shopify)
+// and products.shopify_product_id (warehouse↔Shopify) — and (b) a normalised SKU
+// shared across platforms. This surfaces broken links and, crucially, duplicates
+// (two eBay listings or two Shopify products that resolve to the same item).
+//
+// Heavy (full Shopify + eBay pulls); intended to be triggered on demand.
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/reconcile', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
+
+  // Skip Shopify's synthetic placeholder SKUs (SHOPIFY-<variantId>) — they are
+  // not real, shared identifiers and would wrongly never match.
+  const skuKey = (s) => {
+    const n = normCode(s);
+    if (!n) return null;
+    if (/^SHOPIFY\d+$/.test(n)) return null;
+    return n;
+  };
+
+  // 1. Warehouse products
+  const { rows: products } = await query(`
+    SELECT id, sku, title, part_number, qty_on_hand, shopify_product_id, price_ebay, price_shopify
+    FROM products WHERE active = true LIMIT 5000
+  `);
+
+  // 2. Explicit eBay↔Shopify links
+  const { rows: links } = await query(`SELECT ebay_item_id, shopify_product_id, store_code FROM mirror_links`);
+
+  // 3. Shopify products (fail open if not configured)
+  let shopifyVariants = [];
+  if (shopify.isConfigured()) {
+    try {
+      for await (const v of shopify.iterateAllProductsAndVariants()) shopifyVariants.push(v);
+    } catch (e) { console.warn('[reconcile] shopify pull failed:', e.message); }
+  }
+
+  // 4. eBay listings (fail open if not configured)
+  let ebayListings = [];
+  if (ebay.isConfigured()) {
+    try { ebayListings = await getAllListingsAcrossStores(); }
+    catch (e) { console.warn('[reconcile] ebay pull failed:', e.message); }
+  }
+
+  // ── Union-Find over nodes: e:<itemId>, s:<productId>, w:<productId> ──
+  const parent = new Map();
+  const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+  const add = (x) => { if (!parent.has(x)) parent.set(x, x); };
+  const union = (a, b) => { add(a); add(b); const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb); };
+
+  // Register every node first
+  for (const l of ebayListings) add('e:' + l.itemId);
+  for (const s of shopifyVariants) add('s:' + s.shopify_product_id);
+  for (const p of products) add('w:' + p.id);
+
+  // Join by explicit links
+  for (const ml of links) {
+    if (ml.ebay_item_id && ml.shopify_product_id) union('e:' + ml.ebay_item_id, 's:' + ml.shopify_product_id);
+  }
+  for (const p of products) {
+    if (p.shopify_product_id) union('w:' + p.id, 's:' + String(p.shopify_product_id));
+  }
+
+  // Join by shared normalised SKU
+  const bySku = new Map(); // skuKey -> [node,...]
+  const pushSku = (sku, node) => { const k = skuKey(sku); if (!k) return; if (!bySku.has(k)) bySku.set(k, []); bySku.get(k).push(node); };
+  for (const l of ebayListings) pushSku(l.sku, 'e:' + l.itemId);
+  for (const s of shopifyVariants) pushSku(s.sku, 's:' + s.shopify_product_id);
+  for (const p of products) pushSku(p.sku, 'w:' + p.id);
+  for (const nodes of bySku.values()) { for (let i = 1; i < nodes.length; i++) union(nodes[0], nodes[i]); }
+
+  // Index entities by node for assembly
+  const linkByEbay = new Map(links.map(l => [String(l.ebay_item_id), l]));
+  const groups = new Map(); // root -> { ebay:[], shopify:[], warehouse:[] }
+  const grp = (node) => { const r = find(node); if (!groups.has(r)) groups.set(r, { ebay: [], shopify: [], warehouse: [] }); return groups.get(r); };
+
+  for (const l of ebayListings) {
+    grp('e:' + l.itemId).ebay.push({
+      itemId: String(l.itemId), sku: l.sku || null, title: l.title || '',
+      price: l.priceEbay ?? null, storeCode: l.storeCode || null, storeName: l.storeName || null,
+      url: l.viewItemURL || `https://www.ebay.co.uk/itm/${l.itemId}`,
+      linkedShopifyId: linkByEbay.get(String(l.itemId))?.shopify_product_id || null,
+    });
+  }
+  for (const s of shopifyVariants) {
+    grp('s:' + s.shopify_product_id).shopify.push({
+      productId: String(s.shopify_product_id), sku: /^SHOPIFY-/.test(s.sku) ? null : s.sku,
+      title: s.title || '', price: s.price_shopify ?? null, handle: s.shopify_handle || null,
+    });
+  }
+  for (const p of products) {
+    grp('w:' + p.id).warehouse.push({
+      id: p.id, sku: p.sku || null, title: p.title || '', qty: p.qty_on_hand ?? null,
+      shopifyProductId: p.shopify_product_id ? String(p.shopify_product_id) : null,
+    });
+  }
+
+  // Assemble + classify
+  const linkedShopifyIds = new Set(links.map(l => String(l.shopify_product_id)));
+  const out = [];
+  for (const [root, g] of groups) {
+    // A multi-variant Shopify product yields one entry per variant; collapse to
+    // distinct productIds so extra variants don't read as "duplicate products".
+    const seenSp = new Set();
+    g.shopify = g.shopify.filter(x => (seenSp.has(x.productId) ? false : seenSp.add(x.productId)));
+    const onEbay = g.ebay.length > 0, onShopify = g.shopify.length > 0, onWarehouse = g.warehouse.length > 0;
+    const platforms = (onEbay ? 1 : 0) + (onShopify ? 1 : 0) + (onWarehouse ? 1 : 0);
+    // Real links present within the group?
+    const ebayShopifyLinked = g.ebay.some(e => e.linkedShopifyId && g.shopify.some(s => s.productId === e.linkedShopifyId));
+    const whShopifyLinked = g.warehouse.some(w => w.shopifyProductId && g.shopify.some(s => s.productId === w.shopifyProductId));
+    // SKUs across the group (for display + duplicate hints)
+    const skus = [...new Set([...g.ebay, ...g.shopify, ...g.warehouse].map(x => x.sku).filter(Boolean))];
+    out.push({
+      key: root,
+      ebay: g.ebay, shopify: g.shopify, warehouse: g.warehouse,
+      onEbay, onShopify, onWarehouse, platforms, skus,
+      ebayShopifyLinked, whShopifyLinked,
+      dupEbay: g.ebay.length > 1, dupShopify: g.shopify.length > 1, dupWarehouse: g.warehouse.length > 1,
+      // "needsLink": exists on >1 platform but the cross-platform link is missing
+      needsEbayShopifyLink: onEbay && onShopify && !ebayShopifyLinked,
+    });
+  }
+
+  // Stable, useful ordering: problems first (duplicates, then needs-link), then the rest.
+  const score = (r) => (r.dupEbay || r.dupShopify ? 0 : r.needsEbayShopifyLink ? 1 : 2);
+  out.sort((a, b) => score(a) - score(b) || (b.platforms - a.platforms));
+
+  const summary = {
+    groups: out.length,
+    ebayListings: ebayListings.length,
+    shopifyVariants: shopifyVariants.length,
+    warehouseProducts: products.length,
+    fullyLinked: out.filter(r => r.onEbay && r.onShopify && r.ebayShopifyLinked).length,
+    needsLink: out.filter(r => r.needsEbayShopifyLink).length,
+    duplicates: out.filter(r => r.dupEbay || r.dupShopify).length,
+    ebayOnly: out.filter(r => r.onEbay && !r.onShopify && !r.onWarehouse).length,
+    shopifyOnly: out.filter(r => r.onShopify && !r.onEbay && !r.onWarehouse).length,
+    shopifyConfigured: shopify.isConfigured(),
+    ebayConfigured: ebay.isConfigured(),
+  };
+  res.json({ summary, groups: out });
 });
 
 // POST /api/listings/link-status/force-match
