@@ -30,6 +30,9 @@ async function ensureProductLocationColumns() {
     // Large-panel flag: marks bulky parts (bumpers, bonnets, doors) that need the
     // dedicated courier. Orders containing one are flagged for routing at ingest.
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS large_panel BOOLEAN NOT NULL DEFAULT false`);
+    // Price lock: when true, automated price derivation (eBay→Shopify link, bulk
+    // price tools) won't overwrite this product's prices — staff keep it manual.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS price_locked BOOLEAN NOT NULL DEFAULT false`);
     _prodLocMigrated = true;
   } catch (e) { console.warn('[products] location-columns migration warning:', e.message); }
 }
@@ -284,7 +287,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
                    'low_stock_threshold', 'price_shopify', 'price_ebay', 'cost_price',
                    'location_id', 'active', 'location_note', 'location_photo_data_url',
-                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel'];
+                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
@@ -292,7 +295,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
                 locationNote: 'location_note', locationPhotoDataUrl: 'location_photo_data_url',
                 itemPhotoDataUrl: 'item_photo_data_url',
                 locationPhotoDataUrl2: 'location_photo_data_url_2',
-                primaryPhoto: 'primary_photo', largePanel: 'large_panel' };
+                primaryPhoto: 'primary_photo', largePanel: 'large_panel', priceLocked: 'price_locked' };
   const sets = [], params = [];
   // Always ensure the per-product location/photo columns (incl. updated_at)
   // exist before we touch them — cheap (cached after first run).

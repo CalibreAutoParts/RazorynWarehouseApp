@@ -1516,6 +1516,69 @@ router.post('/bulk-title', requireAdmin, async (req, res) => {
   res.json({ ok: true, results, summary: { total: items.length, ok: results.filter(r => !r.error).length } });
 });
 
+// Bulk price update from the Mirror. Set/adjust the eBay (anchor) price, derive
+// the Shopify "website" price as a fixed % cheaper, and push to both channels +
+// warehouse. Respects per-product price_locked (those keep their manual Shopify
+// price; eBay is still the anchor so it's updated unless skipEbayWhenLocked).
+// Body: { items:[{ itemId, store, currentEbay }], mode:'set'|'adjust_amount'|'adjust_pct',
+//         value, websitePct, pushEbay, pushShopify }
+router.post('/bulk-price', requireAdmin, async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  const mode = ['set', 'adjust_amount', 'adjust_pct'].includes(req.body?.mode) ? req.body.mode : 'set';
+  const value = parseFloat(req.body?.value);
+  const websitePct = req.body?.websitePct != null ? parseFloat(req.body.websitePct) : 0;
+  const pushEbay = req.body?.pushEbay !== false;
+  const pushShopify = req.body?.pushShopify !== false;
+  if (!items.length) return res.status(400).json({ error: 'no_items' });
+  if (isNaN(value)) return res.status(400).json({ error: 'invalid_value' });
+  if (isNaN(websitePct) || websitePct < 0 || websitePct >= 100) return res.status(400).json({ error: 'invalid_website_pct' });
+
+  const results = [];
+  for (const it of items) {
+    const r = { itemId: String(it.itemId || ''), newEbay: null, newShopify: null, ebay: null, shopify: null, warehouse: null, locked: false, error: null };
+    const cur = parseFloat(it.currentEbay);
+    let newEbay;
+    if (mode === 'set') newEbay = value;
+    else if (mode === 'adjust_amount') newEbay = (isNaN(cur) ? 0 : cur) + value;
+    else newEbay = (isNaN(cur) ? 0 : cur) * (1 + value / 100);
+    newEbay = Math.round(newEbay * 100) / 100;
+    if (!(newEbay > 0)) { r.error = 'price_must_be_positive'; results.push(r); continue; }
+    const newShopify = Math.round(newEbay * (1 - websitePct / 100) * 100) / 100;
+    r.newEbay = newEbay; r.newShopify = newShopify;
+
+    // Resolve linked Shopify product + lock state.
+    let shopifyProductId = await shopifyIdForItem(it.itemId);
+    let locked = false, productId = null;
+    if (shopifyProductId) {
+      try { const pr = await query(`SELECT id, price_locked FROM products WHERE shopify_product_id = $1`, [shopifyProductId]); productId = pr.rows[0]?.id || null; locked = !!pr.rows[0]?.price_locked; } catch (_) {}
+    }
+    r.locked = locked;
+
+    // eBay (the anchor) — always updated when requested.
+    if (pushEbay) {
+      try { await ebay.reviseItem(it.itemId, { price: newEbay }, it.store); r.ebay = 'ok'; }
+      catch (e) { r.ebay = 'error'; r.error = 'eBay: ' + e.message; }
+    }
+    // Shopify (derived) — skipped for locked products.
+    if (pushShopify && !locked && shopifyProductId && shopify.isConfigured()) {
+      try { await shopify.setVariantPrice(shopifyProductId, newShopify); r.shopify = 'ok'; }
+      catch (e) { r.shopify = 'error'; r.error = (r.error ? r.error + '; ' : '') + 'Shopify: ' + e.message; }
+    } else if (pushShopify) { r.shopify = locked ? 'locked' : (shopifyProductId ? 'skip' : 'no_link'); }
+
+    // Warehouse: always store the new eBay anchor; store derived Shopify unless locked.
+    try {
+      if (productId) {
+        if (locked) await query(`UPDATE products SET price_ebay = $1, updated_at = now() WHERE id = $2`, [newEbay, productId]);
+        else await query(`UPDATE products SET price_ebay = $1, price_shopify = $2, updated_at = now() WHERE id = $3`, [newEbay, newShopify, productId]);
+        r.warehouse = 'ok';
+      } else r.warehouse = 'no_match';
+    } catch (e) { r.warehouse = 'error'; }
+    results.push(r);
+  }
+  await audit(req, 'bulk_price', null, null, { count: items.length, mode, value, websitePct });
+  res.json({ ok: true, results, summary: { total: items.length, ok: results.filter(r => !r.error).length } });
+});
+
 // Read the effective eBay description template (+ defaults, for "reset").
 router.get('/ebay-template', requireAdmin, async (req, res) => {
   res.json({ ...(await getDescTemplate()), defaults: defaultDescTemplate() });

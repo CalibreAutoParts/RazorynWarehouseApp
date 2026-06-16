@@ -1237,6 +1237,7 @@ function adaptProduct(p) {
     qtyEbay: p.qty_on_hand,
     qtyOnHand: p.qty_on_hand,
     largePanel: !!p.large_panel,
+    priceLocked: !!p.price_locked,
     lowThresh: p.low_stock_threshold,
     location: p.location_name || (p.location_code ? `(${p.location_code})` : ''),
     locationCode: p.location_code,
@@ -3819,6 +3820,7 @@ function openProductModal(id) {
       <div class="field"><label>Storage location</label><input id="m-loc" value="${p.location||''}" placeholder="Aisle B, Rack 3, Shelf 2"></div>
       <div class="field"><label>Storage notes</label><textarea id="m-locdesc" rows="2">${p.locationDesc||''}</textarea></div>
       <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="m-lp" ${p.largePanel?'checked':''}><span></span></label> Large panel (needs special courier — flags any order containing it)</label></div>
+      <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="m-plock" ${p.priceLocked?'checked':''}><span></span></label> Lock price (keep manual — automated price tools won't overwrite this product)</label></div>
       ${id ? `<div class="field"><label>Shopify shop categories (collections)</label><div id="m-collections" style="font-size:12px;color:var(--ink-soft)">Loading…</div></div>` : ''}
     `,
     actions: [
@@ -3829,6 +3831,7 @@ function openProductModal(id) {
           barcode: el('m-bc').value, lowStockThreshold: +el('m-thresh').value,
           priceShopify: +el('m-pshop').value, priceEbay: +el('m-peby').value,
           largePanel: el('m-lp')?.checked || false,
+          priceLocked: el('m-plock')?.checked || false,
         };
         try {
           let newProduct = null;
@@ -9661,6 +9664,7 @@ function renderMirror() {
                     <button class="btn btn-outline" onclick="bulkTitleEdit()" id="mr-title-btn" title="Find &amp; replace text across the selected listings' titles, then push to eBay + Shopify.">✏️ Bulk title</button>
                     <button class="btn btn-outline" onclick="pullSpecificsToShopify()" id="mr-specifics-btn" title="Pull each selected listing's eBay item specifics and write them to the linked Shopify product as custom metafields.">📥 Specifics → Shopify</button>
                     <button class="btn btn-outline" onclick="applyEbayTemplate()" id="mr-tpl-btn" title="Wrap each selected listing's eBay description in your branded header/footer template (edit it in Settings). Idempotent — re-applying won't double-wrap.">🏷 Apply eBay template</button>
+                    <button class="btn btn-outline" onclick="bulkPriceEdit()" id="mr-price-btn" title="Set or adjust the eBay (anchor) price, derive the website/Shopify price a fixed % cheaper, and push to both. Price-locked products keep their manual Shopify price.">💷 Set price</button>
                   </div>
                 </div>
               </div>
@@ -12254,6 +12258,78 @@ async function bulkTitleEdit() {
     let msg = `Titles updated: ${r.summary.ok}/${r.summary.total}`;
     if (errs.length) { msg += ` · ${errs.length} failed`; console.warn('title errors', errs); }
     toast(msg, errs.length ? 'warn' : 'success', 8000);
+    if (typeof paintMirrorList === 'function') paintMirrorList();
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// Bulk price: set/adjust the eBay anchor, derive the website (Shopify) price a
+// fixed % cheaper, push to both (locked products keep manual Shopify price).
+function bulkPriceEdit() {
+  const selected = mirrorSelectedListings();
+  if (!selected.length) { toast('Select one or more listings first.', 'warn', 6000); return; }
+  const defWebsite = State.settings?.bankTransferPct ?? 10;
+  const cashPct = State.settings?.cashDiscount ?? 10;
+  modal({
+    title: `Set price — ${selected.length} listing(s)`,
+    body: `
+      <div class="field"><label>Mode</label>
+        <select id="bp-mode" onchange="bpPreview()">
+          <option value="set">Set eBay price to (£)</option>
+          <option value="adjust_amount">Adjust eBay price by (£ ±)</option>
+          <option value="adjust_pct">Adjust eBay price by (% ±)</option>
+        </select>
+      </div>
+      <div class="field"><label id="bp-value-label">eBay price (£)</label><input id="bp-value" type="number" step="0.01" value="" oninput="bpPreview()"></div>
+      <div class="field"><label>Website (Shopify) is this % cheaper than eBay</label><input id="bp-website" type="number" step="0.5" value="${defWebsite}" oninput="bpPreview()"></div>
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Cash is ${cashPct}% off eBay (set in Pricing). Card uses the website price. Price-locked products keep their manual Shopify price.</div>
+      <div id="bp-preview" style="font-size:13px;background:var(--bg-soft);padding:10px 12px;border-radius:8px"></div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Apply to all selected', primary: true, onClick: () => bulkPriceApply(selected) },
+    ],
+  });
+  setTimeout(() => { const m = el('bp-mode'); if (m) m.onchange = () => { bpUpdateLabel(); bpPreview(); }; bpUpdateLabel(); bpPreview(); }, 40);
+}
+function bpUpdateLabel() {
+  const mode = el('bp-mode')?.value;
+  const lbl = el('bp-value-label');
+  if (lbl) lbl.textContent = mode === 'set' ? 'eBay price (£)' : mode === 'adjust_amount' ? 'Adjust by (£, use − to reduce)' : 'Adjust by (%, use − to reduce)';
+}
+function bpPreview() {
+  const sel = mirrorSelectedListings();
+  const sample = sel[0];
+  const box = el('bp-preview');
+  if (!box) return;
+  const mode = el('bp-mode')?.value, value = parseFloat(el('bp-value')?.value), website = parseFloat(el('bp-website')?.value) || 0;
+  if (!sample || isNaN(value)) { box.innerHTML = '<span style="color:var(--ink-soft)">Enter a value to preview.</span>'; return; }
+  const cur = Number(sample.priceEbay) || 0;
+  let ne = mode === 'set' ? value : mode === 'adjust_amount' ? cur + value : cur * (1 + value / 100);
+  ne = Math.round(ne * 100) / 100;
+  const ns = Math.round(ne * (1 - website / 100) * 100) / 100;
+  const cashPct = State.settings?.cashDiscount ?? 10;
+  const cash = Math.round(ne * (1 - cashPct / 100) * 100) / 100;
+  box.innerHTML = `<strong>Preview (first selected: ${escapeHtml(sample.sku || sample.itemId)})</strong><br>` +
+    `eBay £${cur.toFixed(2)} → <strong>£${ne.toFixed(2)}</strong> · Website £${ns.toFixed(2)} · Cash £${cash.toFixed(2)} · Card £${ns.toFixed(2)}`;
+}
+async function bulkPriceApply(selected) {
+  const mode = el('bp-mode')?.value || 'set';
+  const value = parseFloat(el('bp-value')?.value);
+  const websitePct = parseFloat(el('bp-website')?.value) || 0;
+  if (isNaN(value)) { toast('Enter a price/adjustment value.', 'warn'); return; }
+  const items = selected.map(l => ({ itemId: l.itemId, store: l.store || l.storeCode || undefined, currentEbay: Number(l.priceEbay) || 0 }));
+  closeModal();
+  const taskId = Task.start(`Updating prices for ${items.length} listing(s)`);
+  try {
+    const r = await Api.post('/api/listings/bulk-price', { items, mode, value, websitePct });
+    Task.done(taskId, `${r.summary.ok}/${r.summary.total} updated`);
+    // Reflect new prices locally.
+    r.results.forEach(res => { const l = selected.find(x => x.itemId === res.itemId); if (l && res.newEbay != null) { l.priceEbay = res.newEbay; if (!res.locked && res.newShopify != null) l.priceShopify = res.newShopify; } });
+    const errs = r.results.filter(x => x.error);
+    const locked = r.results.filter(x => x.locked).length;
+    let msg = `Prices updated: ${r.summary.ok}/${r.summary.total}`;
+    if (locked) msg += ` · ${locked} kept manual (locked)`;
+    if (errs.length) { msg += ` · ${errs.length} failed`; console.warn('price errors', errs); toast(`${msg}\n${errs.slice(0,4).map(e=>'• '+e.itemId+': '+e.error).join('\n')}`, 'warn', 12000); }
+    else toast(msg, 'success', 7000);
     if (typeof paintMirrorList === 'function') paintMirrorList();
   } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }

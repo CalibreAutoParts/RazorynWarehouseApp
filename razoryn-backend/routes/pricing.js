@@ -76,9 +76,12 @@ router.post('/link/preview', requireAdmin, async (req, res) => {
   const pct = parseFloat(req.body?.pct);
   if (isNaN(pct) || pct < 0 || pct >= 100) return res.status(400).json({ error: 'invalid_pct' });
 
+  // Skip price-locked products — staff keep those manual, so the linker must
+  // never auto-overwrite them.
   const { rows } = await query(`
     SELECT p.id, p.sku, p.title, p.price_ebay, p.price_shopify, p.shopify_product_id
-    FROM products p WHERE p.active = true ORDER BY p.title LIMIT 2000`);
+    FROM products p WHERE p.active = true AND COALESCE(p.price_locked, false) = false
+    ORDER BY p.title LIMIT 2000`);
 
   const items = [];
   for (const p of rows) {
