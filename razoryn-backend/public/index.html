@@ -9909,6 +9909,65 @@ async function linkReconcile(ebayItemId, shopifyProductId) {
   } catch (e) { toast('Link failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
+// Build a safe inline onclick for the manual search-to-link modal (same escaping
+// rules as editIdClick: single-quoted attribute, JSON payload).
+function linkSearchClick(side, anchor) {
+  return ('openLinkSearch(' + JSON.stringify(side) + ',' + JSON.stringify(anchor) + ')').replace(/&/g, '&amp;').replace(/'/g, '&#39;');
+}
+
+// Manually link a listing to its counterpart on the other channel when there's no
+// automatic 1:1 match (the case staff hit: "searched for the item to link to eBay
+// but couldn't find it"). `side` = the channel we're searching FOR ('ebay' or
+// 'shopify'); `anchor` carries the id we already have on the other side. Candidates
+// come from the already-loaded reconcile data, so no extra fetch is needed.
+function openLinkSearch(side, anchor) {
+  const groups = State.reconcile?.groups || [];
+  // Flatten every listing on the target channel, de-duplicated by id.
+  const seen = new Set();
+  const candidates = [];
+  for (const g of groups) {
+    const arr = side === 'ebay' ? g.ebay : g.shopify;
+    for (const c of (arr || [])) {
+      const id = side === 'ebay' ? String(c.itemId) : String(c.productId);
+      if (seen.has(id)) continue; seen.add(id);
+      candidates.push({
+        id, title: c.title || '', sku: c.sku || '', price: c.price,
+        linked: side === 'ebay' ? !!c.linkedShopifyId : false,
+        url: side === 'ebay' ? (c.url || '') : '',
+      });
+    }
+  }
+  const renderResults = (q) => {
+    const ql = (q || '').trim();
+    let list = candidates;
+    if (ql) list = candidates.filter(c => matchesKeywords(ql, c.id, c.title, c.sku));
+    list = list.slice(0, 50);
+    const linkCall = (id) => side === 'ebay'
+      ? `linkReconcile('${escapeAttr(id)}','${escapeAttr(anchor.shopifyProductId)}')`
+      : `linkReconcile('${escapeAttr(anchor.ebayItemId)}','${escapeAttr(id)}')`;
+    if (!list.length) return '<div style="padding:14px;color:var(--ink-soft);font-size:12px">No matching ' + (side === 'ebay' ? 'eBay listings' : 'Shopify products') + '. Try the part number or a word from the title.</div>';
+    return list.map(c => `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line)">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(c.title || '(untitled)')}</div>
+          <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(c.id)}${c.sku ? ' · SKU ' + escapeHtml(c.sku) : ''}${c.price != null ? ' · £' + Number(c.price).toFixed(2) : ''}${c.linked ? ' · <span style="color:var(--amber)">already linked</span>' : ''}</div>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="closeModal();${linkCall(c.id)}">Link</button>
+      </div>`).join('');
+  };
+  modal({
+    title: side === 'ebay' ? 'Link to an eBay listing' : 'Link to a Shopify product',
+    wide: true,
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Linking <strong>${escapeHtml(anchor.label || '')}</strong> to a ${side === 'ebay' ? 'eBay listing' : 'Shopify product'}. Search by part number, SKU or title.</div>
+      <input id="lnk-search" placeholder="Search ${side === 'ebay' ? 'eBay listings' : 'Shopify products'}…" autocomplete="off" style="width:100%;margin-bottom:10px">
+      <div id="lnk-results" style="max-height:55vh;overflow:auto;border:1px solid var(--line);border-radius:8px">${renderResults('')}</div>`,
+    actions: [{ label: 'Cancel', onClick: closeModal }],
+  });
+  const input = el('lnk-search');
+  if (input) { input.focus(); input.addEventListener('input', () => { el('lnk-results').innerHTML = renderResults(input.value); }); }
+}
+
 // Scan the whole Shopify catalogue for products that share a part number — the
 // duplicates created when a push failed to match an existing product. Read-only:
 // it reports groups so you can review and merge/delete in Shopify yourself.
@@ -10109,12 +10168,15 @@ function reconcileRow(g) {
     if (g.ebay.length === 1 && g.shopify.length === 1) {
       status += `<div style="margin-top:6px"><button class="btn btn-primary btn-sm" onclick="linkReconcile('${escapeAttr(g.ebay[0].itemId)}','${escapeAttr(g.shopify[0].productId)}')">🔗 Link these</button></div>`;
     } else {
-      status += `<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Multiple matches — clean up duplicates first.</div>`;
+      status += `<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Multiple matches — unlink the wrong one, or link manually:</div>
+        <div style="margin-top:6px">${g.ebay.map(e => `<button class="btn btn-outline btn-sm" onclick='${linkSearchClick("shopify", { ebayItemId: String(e.itemId), label: String(e.itemId) })}'>🔗 Link ${escapeHtml(e.itemId)} → Shopify</button>`).join(' ')}</div>`;
     }
   } else if (g.onEbay && !g.onShopify) {
     status = `<span class="pill" style="font-size:10px;background:#e8f0fe;color:#1a56db">eBay only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">No Shopify match${g.onWarehouse ? '' : ' or warehouse product'}.</div>`;
+    status += `<div style="margin-top:6px">${g.ebay.map(e => `<button class="btn btn-outline btn-sm" onclick='${linkSearchClick("shopify", { ebayItemId: String(e.itemId), label: e.title || String(e.itemId) })}'>🔗 Find Shopify product to link</button>`).join(' ')}</div>`;
   } else if (g.onShopify && !g.onEbay) {
     status = `<span class="pill" style="font-size:10px;background:#e8f0fe;color:#1a56db">Shopify only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Not on eBay.</div>`;
+    status += `<div style="margin-top:6px">${g.shopify.map(x => `<button class="btn btn-outline btn-sm" onclick='${linkSearchClick("ebay", { shopifyProductId: String(x.productId), label: x.title || String(x.productId) })}'>🔗 Find eBay listing to link</button>`).join(' ')}</div>`;
   } else if (g.onWarehouse && !g.onEbay && !g.onShopify) {
     status = `<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">Warehouse only</span>`;
   }
