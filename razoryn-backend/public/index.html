@@ -9640,6 +9640,7 @@ function renderBulkEditor() {
 
       <div id="bulk-empty"></div>
       <div id="bulk-actions" style="display:none"></div>
+      <div id="bulk-mirror-settings" style="display:none"></div>
 
       <div class="toolbar" id="bulk-toolbar" style="display:none;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
         <input type="search" id="bulk-filter" class="search-input" placeholder="Filter by title, SKU, item ID…" style="flex:1;min-width:220px" oninput="bulkFilter(this.value)">
@@ -9661,6 +9662,17 @@ function renderBulkEditor() {
     el('bulk-actions').style.display = 'block';
     el('mirror-list').style.display = 'block';
     el('bulk-actions').innerHTML = bulkActionsPanelHtml();
+    const settings = el('bulk-mirror-settings');
+    settings.style.display = 'block';
+    settings.innerHTML = bulkMirrorSettingsHtml();
+    // These controls drive the "Push selected → Shopify" create flow, so load the
+    // saved common metafields + shipping profiles and sync the pricing-mode UI.
+    loadCommonMetafields();
+    populateShippingProfileDropdown();
+    if (el('mr-pricing-mode')) { el('mr-pricing-mode').value = MirrorState.pricingMode || 'percent'; updatePricingMode(); }
+    if (el('mr-percent')) el('mr-percent').value = MirrorState.percentDiscount || 0;
+    if (el('mr-percent-applied')) el('mr-percent-applied').textContent = (MirrorState.percentDiscount || 0) + '%';
+    if (MirrorState.commonCategoryName && el('mr-category-current')) el('mr-category-current').textContent = '✓ ' + MirrorState.commonCategoryName;
     if (el('bulk-filter')) el('bulk-filter').value = MirrorState.filterText || '';
     paintMirrorList();
     updateMirrorCounter();
@@ -9696,6 +9708,63 @@ function bulkActionsPanelHtml() {
     </div>`;
 }
 
+// Mirror-to-Shopify create settings (pricing, Shopify category, common metafields).
+// Collapsible because they only matter for "Push selected → Shopify". Element ids
+// are kept identical to the old Listing Mirror toolbar so every handler
+// (updatePricingMode, applyDiscount, mrCategorySearch, addMetafield, …) keeps
+// working with no rewiring.
+function bulkMirrorSettingsHtml() {
+  return `
+    <details class="card" style="margin-bottom:14px" ${MirrorState.percentDiscount || (MirrorState.metafields||[]).length || MirrorState.commonCategoryName ? 'open' : ''}>
+      <summary style="cursor:pointer;padding:12px 14px;font-weight:600;font-size:13px;list-style:revert">⚙️ Push-to-Shopify settings <span style="font-weight:400;color:var(--ink-soft)">— pricing, Shopify category &amp; common metafields applied when you push/create on Shopify</span></summary>
+      <div class="card-body" style="border-top:1px solid var(--line)">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:end">
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Pricing</div>
+            <select id="mr-pricing-mode" class="select" onchange="updatePricingMode()">
+              <option value="percent">% off eBay price</option>
+              <option value="manual">Set each price manually</option>
+            </select>
+          </div>
+          <div id="mr-percent-wrap">
+            <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">% Discount</div>
+            <div style="display:flex;gap:6px">
+              <input type="number" id="mr-percent" value="0" min="0" max="100" step="0.5" placeholder="e.g. 10 for 10% off" style="flex:1">
+              <button class="btn btn-primary btn-sm" onclick="applyDiscount()">Apply</button>
+            </div>
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Applied: <span id="mr-percent-applied" style="font-weight:600;color:var(--ink)">0%</span></div>
+          </div>
+        </div>
+
+        <div style="margin-top:12px;position:relative">
+          <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Shopify category <span style="font-weight:400;text-transform:none">— applied to mirrored products</span></div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input id="mr-category-search" placeholder="Search Shopify categories (e.g. bumpers, headlights)…" oninput="mrCategorySearch(this.value)" autocomplete="off" style="flex:1;min-width:240px">
+            <span id="mr-category-current" style="font-size:12px;color:var(--green);font-weight:600"></span>
+            <button class="btn btn-ghost btn-sm" onclick="mrClearCategory()" style="color:var(--ink-soft)">Clear</button>
+          </div>
+          <div id="mr-category-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:260px;overflow:auto"></div>
+        </div>
+
+        <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+            <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">
+              Common metafields <span style="font-weight:400;text-transform:none">— applied to every mirrored listing (e.g. Position, Finish, Part Number). Use {{sku}} / {{title}} tokens. Per-listing values override these.</span>
+            </div>
+            <span id="mr-mf-saved" style="font-size:11px;color:var(--green);font-weight:600;opacity:0;transition:opacity .2s">✓ Saved</span>
+          </div>
+          <div id="mr-metafields"></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+            <button class="btn btn-outline btn-sm" onclick="addMetafield()">+ Add metafield</button>
+            <button class="btn btn-outline btn-sm" onclick="addSeoDescriptionTemplate()">+ SEO description</button>
+          </div>
+        </div>
+
+        <div id="mirror-stores-banner" style="display:none;margin-top:12px;font-size:12px;color:var(--ink-soft);background:var(--bg-soft);padding:8px 12px;border-radius:6px"></div>
+      </div>
+    </details>`;
+}
+
 async function bulkPull(btn) {
   if (btn) btn.disabled = true;
   try { await pullEbayListings(); }
@@ -9710,122 +9779,19 @@ function renderMirror() {
     <div class="page">
       <div class="page-head">
         <div>
-          <h1>Listing Mirror &amp; Link Status</h1>
-          <div class="desc">Mirror eBay → Shopify + manage which listings are linked across platforms</div>
+          <h1>Listing Links</h1>
+          <div class="desc">SKU matching across eBay, Shopify &amp; the warehouse — see every product's active links, connect new ones, or disconnect. Creating &amp; pushing listings lives in the <a href="#" onclick="routeTo('bulk');return false" style="color:var(--brand-primary);font-weight:600">Bulk Editor</a>.</div>
         </div>
         <div class="actions" id="mirror-page-actions">
-          <button class="btn btn-primary" onclick="pullEbayListings()">⟳ Pull eBay listings</button>
+          <button class="btn btn-outline" onclick="loadLinkStatus()">⟳ Refresh links</button>
         </div>
       </div>
-      <div class="seg" style="margin-bottom:14px">
-        <button class="active" data-mtab="mirror" onclick="switchMirrorTab('mirror')">Mirror to Shopify</button>
-        <button data-mtab="links" onclick="switchMirrorTab('links')">Link Status</button>
-      </div>
-
-      <div id="mirror-pane-mirror">
-        <div id="mirror-empty" class="card">
-          <div class="card-body empty">
-            <div class="t">No listings loaded yet</div>
-            <div class="d">Click <strong>Pull eBay listings</strong> to fetch your active eBay listings. Make sure <code>EBAY_CLIENT_ID</code>, <code>EBAY_CLIENT_SECRET</code>, and <code>EBAY_REFRESH_TOKEN</code> are set in Railway first.</div>
-          </div>
-        </div>
-
-        <div id="mirror-toolbar" style="display:none">
-          <div class="card" style="margin-bottom:14px">
-            <div class="card-body">
-              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;align-items:end">
-                <div>
-                  <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Pricing</div>
-                  <select id="mr-pricing-mode" class="select" onchange="updatePricingMode()">
-                    <option value="percent">% off eBay price</option>
-                    <option value="manual">Set each price manually</option>
-                  </select>
-                </div>
-                <div id="mr-percent-wrap">
-                  <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">% Discount</div>
-                  <div style="display:flex;gap:6px">
-                    <input type="number" id="mr-percent" value="0" min="0" max="100" step="0.5" placeholder="e.g. 10 for 10% off" style="flex:1">
-                    <button class="btn btn-primary btn-sm" onclick="applyDiscount()">Apply</button>
-                  </div>
-                  <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Applied: <span id="mr-percent-applied" style="font-weight:600;color:var(--ink)">0%</span></div>
-                </div>
-                <div>
-                  <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Push to Shopify</div>
-                  <div style="display:flex;gap:6px;flex-wrap:wrap">
-                    <button class="btn btn-primary" onclick="mirrorSelected()" id="mr-push-btn">Push selected →</button>
-                    <button class="btn btn-outline" onclick="resyncSelectedImages()" id="mr-resync-img-btn" title="Re-upload just the selected photos (full resolution) to the matching Shopify products. Images only — nothing else is changed.">📷 Re-push images</button>
-                  </div>
-                  <div style="margin-top:8px;font-size:12px;color:var(--ink-soft)">Looking for SKU / title / price / specifics / template tools? They now live in the <a href="#" onclick="routeTo('bulk');return false" style="color:var(--brand-primary);font-weight:600">Bulk Editor</a> tab — clearer about what pushes where.</div>
-                </div>
-              </div>
-
-              <div style="margin-top:12px;position:relative">
-                <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Shopify category <span style="font-weight:400;text-transform:none">— applied to mirrored products</span></div>
-                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                  <input id="mr-category-search" placeholder="Search Shopify categories (e.g. bumpers, headlights)…" oninput="mrCategorySearch(this.value)" autocomplete="off" style="flex:1;min-width:240px">
-                  <span id="mr-category-current" style="font-size:12px;color:var(--green);font-weight:600"></span>
-                  <button class="btn btn-ghost btn-sm" onclick="mrClearCategory()" style="color:var(--ink-soft)">Clear</button>
-                </div>
-                <div id="mr-category-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:260px;overflow:auto"></div>
-              </div>
-
-              <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
-                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">
-                  <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">
-                    Common metafields <span style="font-weight:400;text-transform:none">— applied to every mirrored listing (e.g. Position, Finish, Part Number). Use {{sku}} / {{title}} tokens. Per-listing values override these.</span>
-                  </div>
-                  <span id="mr-mf-saved" style="font-size:11px;color:var(--green);font-weight:600;opacity:0;transition:opacity .2s">✓ Saved</span>
-                </div>
-                <div id="mr-metafields"></div>
-                <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
-                  <button class="btn btn-outline btn-sm" onclick="addMetafield()">+ Add metafield</button>
-                  <button class="btn btn-outline btn-sm" onclick="addSeoDescriptionTemplate()">+ SEO description</button>
-                </div>
-              </div>
-
-              <div id="mirror-stores-banner" style="display:none;margin-top:12px;font-size:12px;color:var(--ink-soft);background:var(--bg-soft);padding:8px 12px;border-radius:6px"></div>
-              <div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-                <input id="mr-search" placeholder="Filter by title, SKU, or item ID…" oninput="updateFilter(this.value)" style="flex:1;min-width:240px">
-                <div class="seg">
-                  <button class="active" data-mstatus="all" onclick="setStatusFilter('all')">All</button>
-                  <button data-mstatus="new" onclick="setStatusFilter('new')">Not mirrored</button>
-                  <button data-mstatus="mirrored" onclick="setStatusFilter('mirrored')">Already mirrored</button>
-                </div>
-                <button class="btn btn-outline btn-sm" onclick="selectAll(true)" title="Select every listing in the current filter">✓ Select all</button>
-                <button class="btn btn-outline btn-sm" onclick="selectAll(false)" title="Deselect every listing in the current filter">✗ Select none</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div id="mirror-list" style="display:none"></div>
-      </div>
-
-      <div id="mirror-pane-links" style="display:none">
-        <div id="links-content">
-          <div class="empty"><div class="t">Loading link status…</div></div>
-        </div>
+      <div id="links-content">
+        <div class="empty"><div class="t">Loading link status…</div></div>
       </div>
     </div>
   `;
-  // Load the saved common metafields (shared across the team) so they're ready.
-  loadCommonMetafields();
-  // If listings were previously pulled, restore the toolbar + list straight away
-  if (MirrorState.listings && MirrorState.listings.length) {
-    // These toggles only exist on the Listing Mirror page; the Bulk Editor calls
-    // these flows too, so guard them.
-    { const e = el('mirror-empty'); if (e) e.style.display = 'none'; }
-    { const t = el('mirror-toolbar'); if (t) t.style.display = 'block'; }
-    { const l = el('mirror-list'); if (l) l.style.display = 'block'; }
-    paintMirrorList();
-  }
-}
-
-function switchMirrorTab(tab) {
-  document.querySelectorAll('[data-mtab]').forEach(b => b.classList.toggle('active', b.dataset.mtab === tab));
-  el('mirror-pane-mirror').style.display = tab === 'mirror' ? '' : 'none';
-  el('mirror-pane-links').style.display = tab === 'links' ? '' : 'none';
-  if (tab === 'links') loadLinkStatus();
+  loadLinkStatus();
 }
 
 async function loadLinkStatus() {
@@ -9873,7 +9839,7 @@ function debouncedLinkSearch(value) {
 function renderLinkStatus() {
   const data = State.linkStatus;
   if (!data) return;
-  const filter = State.linkFilter || 'unlinked';
+  const filter = State.linkFilter || 'all';
   // Fire the stores-status fetch (async, separate request — repaints when done)
   refreshLinkMirrorStoresStatus();
   const products = data.products || [];
