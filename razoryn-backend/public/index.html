@@ -10192,7 +10192,13 @@ function reconcileRow(g) {
     status += `<div style="margin-top:6px">${g.ebay.map(e => `<button class="btn btn-outline btn-sm" onclick='${linkSearchClick("shopify", { ebayItemId: String(e.itemId), label: e.title || String(e.itemId) })}'>🔗 Find Shopify product to link</button>`).join(' ')}</div>`;
   } else if (g.onShopify && !g.onEbay) {
     status = `<span class="pill" style="font-size:10px;background:#e8f0fe;color:#1a56db">Shopify only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Not on eBay.</div>`;
-    status += `<div style="margin-top:6px">${g.shopify.map(x => `<button class="btn btn-outline btn-sm" onclick='${linkSearchClick("ebay", { shopifyProductId: String(x.productId), label: x.title || String(x.productId) })}'>🔗 Find eBay listing to link</button>`).join(' ')}</div>`;
+    // Create a new eBay listing from a linked warehouse product (Shopify → eBay).
+    const creatable = g.warehouse.filter(w => w.shopifyProductId);
+    if (creatable.length) {
+      status += `<div style="margin-top:6px">${creatable.map(w => `<button class="btn btn-primary btn-sm" onclick="openCreateEbayListing(${w.id})" title="Create a new eBay listing from this product">+ Create on eBay</button>`).join(' ')}</div>`;
+    }
+    // Or connect to an eBay listing that already exists.
+    status += `<div style="margin-top:6px">${g.shopify.map(x => `<button class="btn btn-outline btn-sm" onclick='${linkSearchClick("ebay", { shopifyProductId: String(x.productId), label: x.title || String(x.productId) })}'>🔗 Find existing eBay listing</button>`).join(' ')}</div>`;
   } else if (g.onWarehouse && !g.onEbay && !g.onShopify) {
     status = `<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">Warehouse only</span>`;
   }
@@ -10395,8 +10401,15 @@ function renderOrphanMirrors(orphans) {
 // pointing the user to Settings if any are missing.
 // ──────────────────────────────────────────────────────────────────────────
 async function openCreateEbayListing(productId) {
-  const product = State.linkStatus?.products.find(p => p.id === productId);
-  if (!product) { toast('Product not found in list', 'error'); return; }
+  // Find the product in the "By warehouse product" cache, else fetch it directly
+  // so this works from the "All listings" reconcile view too.
+  let product = State.linkStatus?.products?.find(p => p.id === productId);
+  if (!product) {
+    try { const r = await Api.get('/api/products/' + productId); product = r.product || r; }
+    catch (e) { /* fall through to the error below */ }
+  }
+  if (!product) { toast('Product not found', 'error'); return; }
+  if (!product.shopify_product_id) { toast('This product isn’t linked to Shopify yet — link it first, then create the eBay listing.', 'warn', 8000); return; }
 
   // Always pull the latest pricing config so the modal reflects saved templates
   // and defaults — a cached copy can predate the user's most recent Settings
@@ -10928,7 +10941,9 @@ async function submitCreateEbayListing(productId) {
       else toast(`Listing is live, but promotion didn’t apply: ${r.promotion.message}`, 'warn', 11000);
     }
     // Reload listing mirror to reflect the new link
-    if (typeof refreshLinkStatus === 'function') await refreshLinkStatus();
+    // Refresh whichever Listing Links view is open so the new eBay link shows.
+    if ((State.linkView || 'all') === 'all') loadReconcile(true);
+    else if (typeof refreshLinkStatus === 'function') await refreshLinkStatus();
     else if (typeof renderLinkStatus === 'function') renderLinkStatus();
   } catch (e) {
     Task.fail(taskId, 'Failed');
