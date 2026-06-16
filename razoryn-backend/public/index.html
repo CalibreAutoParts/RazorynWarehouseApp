@@ -9930,7 +9930,10 @@ async function scanShopifyDuplicates() {
           <td style="width:46px">${p.image ? `<img src="${escapeAttr(p.image)}" style="width:38px;height:38px;object-fit:cover;border-radius:4px">` : ''}</td>
           <td><div style="font-weight:600">${escapeHtml(p.title || '(untitled)')}</div>
             <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">SKU ${escapeHtml(p.sku || '—')} · PN ${escapeHtml(p.partNumber || '—')} · ${gbp(p.price || 0)} · qty ${p.qty ?? '—'}</div></td>
-          <td style="text-align:right;white-space:nowrap">${adminLink(p.productId) ? `<a class="btn btn-outline btn-sm" href="${adminLink(p.productId)}" target="_blank" rel="noopener">Open in Shopify ↗</a>` : `<span style="font-size:11px;color:var(--ink-soft)">ID ${escapeHtml(p.productId)}</span>`}</td>
+          <td style="text-align:right;white-space:nowrap">
+            <button class="btn btn-outline btn-sm" onclick='${editIdClick({ shopifyProductId: String(p.productId), sku: p.sku || p.partNumber || "", title: p.title || "", refresh: "rescan" })}'>✏️ Edit code</button>
+            ${adminLink(p.productId) ? `<a class="btn btn-outline btn-sm" href="${adminLink(p.productId)}" target="_blank" rel="noopener">Open ↗</a>` : ''}
+          </td>
         </tr>`).join('')}
       </tbody></table>
     </div>`).join('') : '<div class="empty"><div class="t">No duplicates found 🎉</div>Every part number maps to a single Shopify product.</div>';
@@ -9942,10 +9945,62 @@ async function scanShopifyDuplicates() {
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:12px">
         Scanned <strong>${data.summary.variantsScanned}</strong> Shopify variants · found
         <strong>${data.summary.duplicateGroups}</strong> part number(s) carried by more than one product
-        (<strong>${data.summary.duplicateProducts}</strong> products total). Review each group and merge/delete the extras in Shopify — this report never deletes anything.
+        (<strong>${data.summary.duplicateProducts}</strong> products total). Fix a clash by giving one product a new code below — it pushes to the warehouse, Shopify and the linked eBay listing. Or merge/delete in Shopify (this report never deletes anything).
       </div>
       <div style="max-height:60vh;overflow:auto">${groupsHtml}</div>`,
     actions: [{ label: 'Close', onClick: closeModal }],
+  });
+}
+
+// Change a product's code (SKU = barcode = part number) in one place and push it
+// to the warehouse + Shopify (SKU & barcode) + the linked eBay listing. This is
+// the action staff were missing: editing the SKU in Inventory only updates the
+// warehouse row, so the channels kept the old code. `target` carries whichever
+// IDs we know (shopifyProductId and/or ebayItemId); the backend fills the rest.
+// Build a safe inline onclick that opens the edit-code modal. The payload is JSON
+// (double quotes), so the attribute is single-quoted and we escape & and ' to
+// survive titles containing apostrophes/ampersands.
+function editIdClick(obj) {
+  return ('editListingIdentity(' + JSON.stringify(obj) + ')').replace(/&/g, '&amp;').replace(/'/g, '&#39;');
+}
+function editListingIdentity(target) {
+  const cur = target.sku || target.partNumber || '';
+  modal({
+    title: 'Edit code & push to channels',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">${escapeHtml(target.title || '')}</div>
+      <div class="field">
+        <label>SKU / barcode / part number</label>
+        <input id="eid-sku" value="${escapeAttr(cur)}" autocomplete="off" style="font-family:ui-monospace,monospace" placeholder="e.g. 11183329">
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Saving sets this as the warehouse SKU, barcode &amp; part number, then pushes it to the Shopify variant (SKU + barcode)${target.shopifyProductId ? '' : ' (no Shopify product linked)'} and the linked eBay listing's custom label. Edits LIVE listings.</div>
+      </div>`,
+    actions: [
+      { label: 'Save & push', primary: true, onClick: async () => {
+        const sku = (el('eid-sku')?.value || '').trim();
+        if (!sku) { toast('Enter a code', 'warn'); return; }
+        const taskId = Task.start('Pushing new code to channels…');
+        try {
+          const r = await Api.post('/api/listings/update-identity', {
+            shopifyProductId: target.shopifyProductId || undefined,
+            ebayItemId: target.ebayItemId || undefined,
+            sku, partNumber: sku,
+          });
+          Task.done(taskId, 'Pushed');
+          closeModal();
+          const res = r.result || {};
+          const part = (lbl, v) => `${lbl}: ${v === 'ok' ? '✓' : (v || '—')}`;
+          const msg = `Code set to ${sku} — ${part('warehouse', res.warehouse)} · ${part('Shopify', res.shopify)} · ${part('eBay', res.ebay)}`;
+          if (res.errors?.length) { console.warn('update-identity errors', res.errors); toast(msg + ' · ' + res.errors.join('; '), 'warn', 10000); }
+          else toast(msg, 'success');
+          if (target.refresh === 'rescan') scanShopifyDuplicates();
+          else if (target.refresh === 'reconcile') loadReconcile(true);
+        } catch (e) {
+          Task.fail(taskId, 'Push failed');
+          toast('Failed: ' + (e.data?.message || e.data?.error || e.message), 'error');
+        }
+      }},
+      { label: 'Cancel', onClick: closeModal },
+    ],
   });
 }
 
@@ -10030,9 +10085,10 @@ function reconcileRow(g) {
     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
   const shopCell = g.shopify.length
     ? (g.dupShopify ? dupBadge(g.shopify.length, 'products') : '') + g.shopify.map(x => `
-        <div style="margin-bottom:4px">
+        <div style="margin-bottom:4px;display:flex;align-items:center;gap:6px">
           <span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(x.productId)}</span>
-          ${x.price != null ? `<span style="font-size:11px;color:var(--ink-soft);margin-left:4px">£${Number(x.price).toFixed(2)}</span>` : ''}
+          ${x.price != null ? `<span style="font-size:11px;color:var(--ink-soft)">£${Number(x.price).toFixed(2)}</span>` : ''}
+          <button class="btn btn-ghost btn-sm" style="padding:0 4px" title="Edit code & push to channels" onclick='${editIdClick({ shopifyProductId: String(x.productId), sku: x.sku || "", title: x.title || "", refresh: "reconcile" })}'>✏️</button>
         </div>`).join('')
     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
   const whCell = g.warehouse.length

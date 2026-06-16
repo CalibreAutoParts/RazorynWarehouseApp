@@ -1664,6 +1664,72 @@ router.get('/shopify-duplicates', requireAdmin, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// POST /api/listings/update-identity — change a product's code (SKU = barcode =
+// part number) in ONE place and push it everywhere: warehouse record + Shopify
+// variant (SKU & barcode) + the linked eBay listing (custom label). This is the
+// fix for "I edited the SKU in inventory but Shopify/eBay still show the old one"
+// — the inventory modal only touches the warehouse row; this pushes to channels.
+// Body: { shopifyProductId?, ebayItemId?, sku, partNumber?, barcode? }
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/update-identity', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
+  const b = req.body || {};
+  const sku = String(b.sku || '').trim();
+  if (!sku) return res.status(400).json({ error: 'sku_required' });
+  const partNumber = b.partNumber != null && String(b.partNumber).trim() ? String(b.partNumber).trim() : sku;
+  let shopifyProductId = b.shopifyProductId ? String(b.shopifyProductId) : null;
+  let ebayItemId = b.ebayItemId ? String(b.ebayItemId) : null;
+  let storeCode = null;
+
+  // Fill in the missing side from mirror_links.
+  if (shopifyProductId && !ebayItemId) {
+    const lk = await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id = $1 LIMIT 1`, [shopifyProductId]);
+    if (lk.rows[0]) { ebayItemId = String(lk.rows[0].ebay_item_id); storeCode = lk.rows[0].store_code; }
+  } else if (ebayItemId && !shopifyProductId) {
+    const lk = await query(`SELECT shopify_product_id, store_code FROM mirror_links WHERE ebay_item_id = $1 LIMIT 1`, [ebayItemId]);
+    if (lk.rows[0]) { shopifyProductId = lk.rows[0].shopify_product_id ? String(lk.rows[0].shopify_product_id) : null; storeCode = lk.rows[0].store_code; }
+  } else if (ebayItemId) {
+    const lk = await query(`SELECT store_code FROM mirror_links WHERE ebay_item_id = $1 LIMIT 1`, [ebayItemId]);
+    if (lk.rows[0]) storeCode = lk.rows[0].store_code;
+  }
+  if (!shopifyProductId && !ebayItemId) return res.status(400).json({ error: 'no_target' });
+
+  const r = { sku, partNumber, warehouse: null, shopify: null, ebay: null, errors: [] };
+
+  // 1. Warehouse product (matched by Shopify link).
+  try {
+    let upd = { rowCount: 0 };
+    if (shopifyProductId) {
+      upd = await query(`UPDATE products SET sku = $1, barcode = $2, part_number = $3, updated_at = now() WHERE shopify_product_id = $4 RETURNING id`,
+        [sku, sku, partNumber, shopifyProductId]);
+    }
+    r.warehouse = upd.rowCount ? 'ok' : 'no_match';
+  } catch (e) { r.warehouse = 'error'; r.errors.push('Warehouse: ' + e.message); }
+
+  // 2. Shopify variant — SKU + barcode (setVariantSku sets both to the same value).
+  if (shopifyProductId) {
+    if (shopify.isConfigured()) {
+      try { await shopify.setVariantSku(shopifyProductId, sku); r.shopify = 'ok'; }
+      catch (e) { r.shopify = 'error'; r.errors.push('Shopify: ' + e.message); }
+    } else { r.shopify = 'not_configured'; }
+  } else { r.shopify = 'no_target'; }
+
+  // 3. eBay custom label.
+  if (ebayItemId) {
+    if (ebay.isConfigured(storeCode)) {
+      try { await ebay.reviseItem(ebayItemId, { sku }, storeCode); r.ebay = 'ok'; }
+      catch (e) { r.ebay = 'error'; r.errors.push('eBay: ' + e.message); }
+    } else { r.ebay = storeCode ? 'store_not_configured' : 'not_configured'; }
+  } else { r.ebay = 'no_target'; }
+
+  // Keep the link's last-synced SKU in step.
+  try { if (ebayItemId) await query(`UPDATE mirror_links SET last_synced_sku = $1 WHERE ebay_item_id = $2`, [sku, ebayItemId]); } catch (_) {}
+
+  await audit(req, 'update_listing_identity', null, null, { sku, partNumber, shopifyProductId, ebayItemId });
+  res.json({ ok: !r.errors.length, result: r });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
 // PHASE 2 — bulk title / description / item specifics across linked listings.
 // ──────────────────────────────────────────────────────────────────────────
 
