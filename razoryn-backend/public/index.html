@@ -10214,7 +10214,15 @@ function reconcileRow(g) {
   let status = '';
   if (g.dupEbay || g.dupShopify) {
     status = `<span class="pill" style="font-size:10px;background:#fde8e8;color:var(--red);font-weight:600">⚠ Duplicate</span>`;
-    if (g.onEbay) status += `<div style="margin-top:6px">${g.ebay.filter(e => e.linkedShopifyId).map(e => `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unlinkEbay('${escapeAttr(e.itemId)}', {batch:true})" title="Remove this eBay link">✕ Unlink ${escapeHtml(e.itemId)}</button>`).join('')}</div>`;
+    // Explain what kind of duplicate this is + the right fix, so staff don't keep
+    // re-coding when the real issue is a bad link or a true duplicate listing.
+    const linkedEbay = g.ebay.filter(e => e.linkedShopifyId);
+    const hint = (linkedEbay.length > 1)
+      ? 'Different items linked to the same Shopify product — <strong>unlink</strong> the one that doesn’t belong.'
+      : (g.dupEbay ? 'Two eBay listings here — <strong>🗑 delete</strong> a true duplicate, or <strong>✏️ re-code</strong> if they’re different parts.'
+                   : 'Two Shopify products here — <strong>🗑 delete</strong> a true duplicate, or <strong>✏️ re-code</strong> if they’re different parts.');
+    status += `<div style="font-size:11px;color:var(--ink-soft);margin-top:4px;max-width:200px">${hint}</div>`;
+    if (g.onEbay) status += `<div style="margin-top:6px">${linkedEbay.map(e => `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unlinkEbay('${escapeAttr(e.itemId)}', {batch:true})" title="Remove this eBay link">✕ Unlink ${escapeHtml(e.itemId)}</button>`).join('')}</div>`;
   } else if (g.onEbay && g.onShopify && g.ebayShopifyLinked) {
     status = `<span class="pill green" style="font-size:10px">✓ Linked</span>`;
     status += `<div style="margin-top:6px">${g.ebay.filter(e => e.linkedShopifyId).map(e => `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unlinkEbay('${escapeAttr(e.itemId)}', {batch:true})" title="Disconnect">✕ Unlink</button>`).join('')}</div>`;
