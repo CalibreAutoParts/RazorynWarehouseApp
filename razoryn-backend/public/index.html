@@ -11721,10 +11721,16 @@ function paintMirrorList() {
                 <div style="flex:1;min-width:0">
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap">
                     ${l.existsOnShopify ? '<span class="pill green" style="font-size:10px"><span class="dot"></span>On Shopify</span>' : '<span class="pill blue" style="font-size:10px">New</span>'}
-                    <select onchange="setItemStatus('${l.itemId}',this.value)" style="font-size:11px;padding:2px 6px;height:auto;line-height:1.4" title="Status on Shopify">
-                      <option value="draft" ${(MirrorState.itemStatuses[l.itemId] || MirrorState.productStatus) === 'draft' ? 'selected' : ''}>Draft</option>
-                      <option value="active" ${(MirrorState.itemStatuses[l.itemId] || MirrorState.productStatus) === 'active' ? 'selected' : ''}>Active</option>
-                    </select>
+                    ${l.existsOnShopify ? `
+                    <select onchange="setItemStatus('${l.itemId}',this.value)" style="font-size:11px;padding:2px 6px;height:auto;line-height:1.4" title="A push only changes the Shopify status if you pick one here. 'Keep current' leaves an Active listing Active and a Draft listing Draft.">
+                      <option value="" ${!MirrorState.itemStatuses[l.itemId] ? 'selected' : ''}>Keep current status</option>
+                      <option value="active" ${MirrorState.itemStatuses[l.itemId] === 'active' ? 'selected' : ''}>Set Active</option>
+                      <option value="draft" ${MirrorState.itemStatuses[l.itemId] === 'draft' ? 'selected' : ''}>Set Draft</option>
+                    </select>` : `
+                    <select onchange="setItemStatus('${l.itemId}',this.value)" style="font-size:11px;padding:2px 6px;height:auto;line-height:1.4" title="Status the new Shopify product will be created with">
+                      <option value="draft" ${(MirrorState.itemStatuses[l.itemId] || 'draft') === 'draft' ? 'selected' : ''}>Create as Draft</option>
+                      <option value="active" ${MirrorState.itemStatuses[l.itemId] === 'active' ? 'selected' : ''}>Create as Active</option>
+                    </select>`}
                     ${(MirrorState.skuOverrides[l.itemId] || MirrorState.titleOverrides[l.itemId]) ? `<button class="btn btn-ghost btn-sm" onclick="pushToEbay('${l.itemId}')" style="font-size:11px;color:var(--ink-soft)" title="Push edited SKU/title back to eBay (uses ReviseItem)">↑ Push to eBay</button>` : ''}
                   </div>
                   <input type="text" value="${escapeAttr(titleVal)}" oninput="MirrorState.titleOverrides['${l.itemId}']=this.value;scheduleSaveOverride('${l.itemId}')" style="width:100%;font-weight:600;font-size:14px;border:none;background:transparent;padding:2px 0">
@@ -12020,7 +12026,9 @@ function toggleHideTemplates(on) {
 }
 
 function setItemStatus(itemId, status) {
-  if (status === MirrorState.productStatus) delete MirrorState.itemStatuses[itemId];
+  // Empty value = "Keep current status" (existing listings) → no explicit choice,
+  // so the push leaves the live Shopify status untouched.
+  if (!status) delete MirrorState.itemStatuses[itemId];
   else MirrorState.itemStatuses[itemId] = status;
   paintMirrorList();
 }
@@ -12315,7 +12323,10 @@ async function mirrorSelected() {
     title: MirrorState.titleOverrides[l.itemId] != null ? MirrorState.titleOverrides[l.itemId] : l.title,
     price: computeShopifyPrice(l),
     imageUrls: Array.from(MirrorState.selectedImages[l.itemId] || []),
-    status: MirrorState.itemStatuses[l.itemId] || MirrorState.productStatus,
+    // Explicit choice wins. For an already-mirrored listing with no explicit
+    // choice, send undefined so the backend PRESERVES its live Shopify status
+    // (never silently flips Active → Draft). New listings default to draft.
+    status: MirrorState.itemStatuses[l.itemId] || (l.existsOnShopify ? undefined : (MirrorState.productStatus || 'draft')),
     metafields: metafieldsForListing(l),
     qty: l.quantityAvailable != null ? l.quantityAvailable : null,
     tags: MirrorState.itemTags[l.itemId] != null ? MirrorState.itemTags[l.itemId] : (MirrorState.commonTags || null),

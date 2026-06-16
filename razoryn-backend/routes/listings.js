@@ -1324,7 +1324,11 @@ router.post('/mirror', requireAdmin, async (req, res) => {
         sku: item.sku,
         price: item.price,
         imageUrls: item.imageUrls || [],
-        status: item.status || 'draft',
+        // Do NOT force a status. New products default to 'draft' inside
+        // createProduct; updates must PRESERVE the live Shopify status unless the
+        // user explicitly picked one — otherwise re-pushing an Active listing
+        // would silently flip it to Draft.
+        status: item.status || undefined,
         metafields: item.metafields || [],
         qty: item.qty != null ? item.qty : null,
         tags: item.tags || null,
@@ -1366,6 +1370,34 @@ router.post('/mirror', requireAdmin, async (req, res) => {
         `, [item.itemId, product.id, item.sku, item.title]);
       } catch (e) {
         console.warn('[listings/mirror] failed to record link:', e.message);
+      }
+
+      // Mirror a warehouse product row so newly-created items immediately show in
+      // Inventory + the stock-take. On conflict (SKU already exists) we only
+      // refresh the Shopify link ids + reactivate — we do NOT overwrite the
+      // warehouse title or stock qty, which the warehouse owns.
+      try {
+        const v = product?.variants?.[0];
+        await query(`
+          INSERT INTO products (sku, title, barcode, qty_on_hand, price_shopify,
+                                shopify_product_id, shopify_variant_id, shopify_inventory_id, active)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+          ON CONFLICT (sku) DO UPDATE SET
+            shopify_product_id   = EXCLUDED.shopify_product_id,
+            shopify_variant_id   = EXCLUDED.shopify_variant_id,
+            shopify_inventory_id = COALESCE(EXCLUDED.shopify_inventory_id, products.shopify_inventory_id),
+            active = true,
+            updated_at = now()
+        `, [
+          item.sku, item.title || item.sku, item.sku,
+          item.qty != null ? item.qty : 0,
+          item.price != null ? item.price : null,
+          String(product.id),
+          v?.id ? String(v.id) : null,
+          v?.inventory_item_id ? String(v.inventory_item_id) : null,
+        ]);
+      } catch (e) {
+        console.warn('[listings/mirror] failed to upsert warehouse product:', e.message);
       }
 
       // Group shipping profile assignment for batch (only non-default)
