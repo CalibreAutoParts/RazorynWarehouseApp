@@ -10077,10 +10077,11 @@ function reconcileRow(g) {
   const dupBadge = (n, label) => `<div style="font-size:10px;color:var(--red);font-weight:700;margin-bottom:3px">⚠ ${n} ${label} — possible duplicate</div>`;
   const ebayCell = g.ebay.length
     ? (g.dupEbay ? dupBadge(g.ebay.length, 'listings') : '') + g.ebay.map(e => `
-        <div style="margin-bottom:4px">
-          ${e.storeName ? `<span class="pill" style="font-size:9px;background:var(--bg-soft);color:var(--ink);margin-right:4px;font-weight:600">${escapeHtml(abbreviateStoreName(e.storeName))}</span>` : ''}
+        <div style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          ${e.storeName ? `<span class="pill" style="font-size:9px;background:var(--bg-soft);color:var(--ink);font-weight:600">${escapeHtml(abbreviateStoreName(e.storeName))}</span>` : ''}
           <a href="${escapeAttr(e.url)}" target="_blank" rel="noopener" style="color:var(--brand-primary);text-decoration:none;font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(e.itemId)} ↗</a>
-          ${e.price != null ? `<span style="font-size:11px;color:var(--ink-soft);margin-left:4px">£${Number(e.price).toFixed(2)}</span>` : ''}
+          ${e.price != null ? `<span style="font-size:11px;color:var(--ink-soft)">£${Number(e.price).toFixed(2)}</span>` : ''}
+          <button class="btn btn-ghost btn-sm" style="padding:0 4px" title="Edit code & push to eBay + Shopify + warehouse" onclick='${editIdClick({ ebayItemId: String(e.itemId), sku: e.sku || "", title: e.title || "", refresh: "reconcile" })}'>✏️</button>
         </div>`).join('')
     : '<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">—</span>';
   const shopCell = g.shopify.length
