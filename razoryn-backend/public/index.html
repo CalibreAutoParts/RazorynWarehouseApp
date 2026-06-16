@@ -10058,6 +10058,7 @@ async function importShopifyToWarehouse(btn) {
     Task.done(taskId, `Imported ${r.created}`);
     await Store.refresh('products').catch(() => {});
     let msg = `Imported ${r.created} new, updated ${r.enriched || 0} (photo/links), linked ${r.ebayLinked || 0} to eBay, set ${r.pricesBackfilled || 0} eBay price(s).`;
+    if (r.skuFixed) msg += ` Fixed ${r.skuFixed} placeholder SKU(s) to match Shopify.`;
     if (r.skippedNoSku) msg += ` Skipped ${r.skippedNoSku} with no SKU.`;
     if (r.errors && r.errors.length) msg += ` ${r.errors.length} failed.`;
     toast(msg, (r.errors && r.errors.length) ? 'warn' : 'success', 8000);

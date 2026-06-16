@@ -1547,7 +1547,7 @@ router.post('/import-shopify-to-warehouse', requireAdmin, async (req, res) => {
     if (spid) { linkedSpid.add(spid); if (!itemIdBySpid.has(spid)) itemIdBySpid.set(spid, String(r.ebay_item_id)); }
   }
 
-  let created = 0, enriched = 0, ebayLinked = 0, pricesBackfilled = 0, skippedExisting = 0, skippedNoSku = 0;
+  let created = 0, enriched = 0, ebayLinked = 0, pricesBackfilled = 0, skuFixed = 0, skippedExisting = 0, skippedNoSku = 0;
   const errors = [];
   const skippedItems = [];
   const seenProduct = new Set(); // one warehouse row per Shopify product (first variant wins)
@@ -1595,7 +1595,24 @@ router.post('/import-shopify-to-warehouse', requireAdmin, async (req, res) => {
         // title / stock / Shopify price — the warehouse owns those.
         const needsPhoto = !row.image_url && img;
         const needsLink = !String(row.shopify_product_id || '');
-        if (needsPhoto || needsLink) {
+        // Adopt the REAL Shopify SKU/barcode when the warehouse row still carries a
+        // synthetic SHOPIFY-<variant> placeholder (created by an early sync before
+        // the product had a code). This is how a freshly-SKU'd Shopify product gets
+        // its proper code pushed down into the warehouse.
+        const placeholder = /^SHOPIFY-/i.test(String(row.sku || ''));
+        const skuNeedsFix = placeholder && sku.toUpperCase() !== String(row.sku || '').toUpperCase();
+        if (skuNeedsFix) {
+          try {
+            await query(`UPDATE products SET sku = $2, barcode = $3, updated_at = now() WHERE id = $1`,
+              [productId, sku, v.barcode || sku]);
+            skuFixed++;
+            prodBySku.set(sku.toUpperCase(), row);
+          } catch (e) {
+            if (e.code === '23505') { errors.push({ sku, error: 'real SKU already used by another warehouse product — resolve the duplicate first' }); }
+            else throw e;
+          }
+        }
+        if (needsPhoto || needsLink || skuNeedsFix) {
           await query(`
             UPDATE products SET
               image_url            = COALESCE(image_url, $2),
@@ -1645,9 +1662,9 @@ router.post('/import-shopify-to-warehouse', requireAdmin, async (req, res) => {
   }
 
   const domain = process.env.SHOPIFY_STORE_DOMAIN || '';
-  await audit(req, 'import_shopify_to_warehouse', null, null, { created, enriched, ebayLinked, pricesBackfilled, skippedExisting, skippedNoSku, errors: errors.length });
+  await audit(req, 'import_shopify_to_warehouse', null, null, { created, enriched, ebayLinked, pricesBackfilled, skuFixed, skippedExisting, skippedNoSku, errors: errors.length });
   res.json({
-    scanned: variants.length, created, enriched, ebayLinked, pricesBackfilled, skippedExisting, skippedNoSku, errors,
+    scanned: variants.length, created, enriched, ebayLinked, pricesBackfilled, skuFixed, skippedExisting, skippedNoSku, errors,
     skippedItems,
     adminUrlBase: domain ? `https://${domain.replace(/^https?:\/\//, '').replace(/\/$/, '')}/admin/products` : null,
   });
