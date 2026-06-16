@@ -1357,6 +1357,182 @@ router.post('/bulk-sku', requireAdmin, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// PHASE 2 — bulk title / description / item specifics across linked listings.
+// ──────────────────────────────────────────────────────────────────────────
+
+// Branded eBay-description wrapper (the "Ad-Lister look"). The user-chosen mode
+// is "wrap existing description in a header/footer". Header/footer HTML live in
+// app_settings.data (ebay_desc_header / ebay_desc_footer) with sensible brand
+// defaults. Tokens: {{brand}} {{tagline}} {{domain}} {{title}} {{sku}} {{partno}}.
+const DESC_BODY_START = '<!--RZN_DESC_BODY-->';
+const DESC_BODY_END = '<!--/RZN_DESC_BODY-->';
+
+function defaultDescTemplate() {
+  const brand = require('../lib/brand');
+  const color = brand.primaryColor || '#c8202d';
+  const header =
+    `<div style="font-family:Arial,Helvetica,sans-serif;max-width:900px;margin:0 auto;border:1px solid #e5e5e5;border-radius:8px;overflow:hidden">` +
+      `<div style="background:${color};color:#fff;padding:16px 20px">` +
+        `<div style="font-size:22px;font-weight:800;letter-spacing:.5px">{{brand}}</div>` +
+        `<div style="font-size:13px;opacity:.92">{{tagline}}</div>` +
+      `</div>` +
+      `<div style="padding:18px 20px;color:#222;font-size:15px;line-height:1.6">` +
+        `<div style="font-size:18px;font-weight:700;margin-bottom:10px">{{title}}</div>`;
+  const footer =
+      `</div>` +
+      `<div style="background:#111;color:#ddd;padding:18px 20px;font-size:13px;line-height:1.6">` +
+        `<div style="font-weight:700;color:#fff;margin-bottom:6px">Secure payment</div>` +
+        `<div style="margin-bottom:12px">Visa &middot; Mastercard &middot; Maestro &middot; PayPal &middot; Apple Pay &middot; Google Pay</div>` +
+        `<div style="font-weight:700;color:#fff;margin-bottom:6px">Why buy from {{brand}}</div>` +
+        `<div style="margin-bottom:12px">OEM-quality collision &amp; body parts &middot; fast dispatch &middot; message us with your reg for fitment help.</div>` +
+        `<div style="color:#aaa">{{brand}} &middot; {{domain}}</div>` +
+      `</div>` +
+    `</div>`;
+  return { header, footer };
+}
+
+async function getDescTemplate() {
+  const def = defaultDescTemplate();
+  try {
+    const r = await query(`SELECT data FROM app_settings WHERE id = 1`);
+    const d = r.rows[0]?.data || {};
+    return {
+      header: d.ebay_desc_header != null ? d.ebay_desc_header : def.header,
+      footer: d.ebay_desc_footer != null ? d.ebay_desc_footer : def.footer,
+    };
+  } catch (_) { return def; }
+}
+
+// Strip a previously-applied wrapper so re-applying never double-wraps.
+function unwrapDesc(desc) {
+  const s = String(desc || '');
+  const i = s.indexOf(DESC_BODY_START), j = s.indexOf(DESC_BODY_END);
+  if (i >= 0 && j > i) return s.slice(i + DESC_BODY_START.length, j);
+  return s;
+}
+function wrapDesc(body, tpl, ctx) {
+  const brand = require('../lib/brand');
+  const fill = (s) => String(s || '').replace(/\{\{(\w+)\}\}/g, (_, k) => {
+    const map = { brand: brand.name || 'Our Store', tagline: brand.tagline || '',
+      domain: (brand.domain || '').replace(/^https?:\/\//, ''),
+      title: ctx.title || '', sku: ctx.sku || '', partno: ctx.partno || '' };
+    return map[k] != null ? map[k] : '';
+  });
+  return fill(tpl.header) + DESC_BODY_START + (body || '') + DESC_BODY_END + fill(tpl.footer);
+}
+
+const skuKeyify = (n) => String(n || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
+
+async function shopifyIdForItem(itemId) {
+  try {
+    const lk = await query(`SELECT shopify_product_id FROM mirror_links WHERE ebay_item_id = $1`, [String(itemId)]);
+    return lk.rows[0]?.shopify_product_id ? String(lk.rows[0].shopify_product_id) : null;
+  } catch (_) { return null; }
+}
+
+// GET current eBay listing details (title, description, specifics, pictures).
+router.get('/item-details', requireAdmin, async (req, res) => {
+  const { itemId, store } = req.query;
+  if (!itemId) return res.status(400).json({ error: 'missing_item_id' });
+  try {
+    res.json(await ebay.getItemDetails(itemId, store));
+  } catch (e) {
+    res.status(500).json({ error: 'fetch_failed', message: e.message });
+  }
+});
+
+// Pull each listing's eBay item specifics and write them to the linked Shopify
+// product as custom.<name> metafields. Read-eBay / write-Shopify only (low risk).
+router.post('/pull-specifics-to-shopify', requireAdmin, async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) return res.status(400).json({ error: 'no_items' });
+  const results = [];
+  for (const it of items) {
+    const r = { itemId: String(it.itemId || ''), specifics: 0, ok: false, error: null };
+    try {
+      const shopifyProductId = await shopifyIdForItem(it.itemId);
+      if (!shopifyProductId) { r.error = 'not linked to Shopify'; results.push(r); continue; }
+      const details = await ebay.getItemDetails(it.itemId, it.store);
+      const metafields = (details.specifics || [])
+        .filter(s => s.name && s.values.length)
+        .map(s => ({ namespace: 'custom', key: skuKeyify(s.name), value: s.values.join(', '), type: 'single_line_text_field' }))
+        .filter(m => m.key);
+      r.specifics = metafields.length;
+      if (metafields.length) await shopify.applyMetafields(shopifyProductId, metafields);
+      r.ok = true;
+    } catch (e) { r.error = e.message; }
+    results.push(r);
+  }
+  await audit(req, 'pull_specifics_to_shopify', null, null, { count: items.length });
+  res.json({ ok: true, results, summary: { total: items.length, ok: results.filter(r => r.ok).length } });
+});
+
+// Apply the branded header/footer template to each listing's eBay description
+// (wrapping the listing's CURRENT description; idempotent via body sentinels).
+router.post('/apply-ebay-template', requireAdmin, async (req, res) => {
+  if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) return res.status(400).json({ error: 'no_items' });
+  const tpl = await getDescTemplate();
+  const results = [];
+  for (const it of items) {
+    const r = { itemId: String(it.itemId || ''), ok: false, error: null };
+    try {
+      const details = await ebay.getItemDetails(it.itemId, it.store);
+      const body = unwrapDesc(details.description);
+      const wrapped = wrapDesc(body, tpl, { title: details.title, sku: details.sku, partno: it.partNumber || '' });
+      await ebay.reviseItem(it.itemId, { description: wrapped }, it.store);
+      r.ok = true;
+    } catch (e) { r.error = e.message; }
+    results.push(r);
+  }
+  await audit(req, 'apply_ebay_template', null, null, { count: items.length });
+  res.json({ ok: true, results, summary: { total: items.length, ok: results.filter(r => r.ok).length } });
+});
+
+// Bulk title edit. Frontend computes each new title (find/replace or prefix);
+// we push to eBay (ReviseItem) and, if linked, Shopify (product title).
+router.post('/bulk-title', requireAdmin, async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  const pushShopify = req.body?.pushShopify !== false;
+  if (!items.length) return res.status(400).json({ error: 'no_items' });
+  const results = [];
+  for (const it of items) {
+    const title = String(it.title || '').trim().slice(0, 80); // eBay caps titles at 80
+    const r = { itemId: String(it.itemId || ''), title, ebay: null, shopify: null, error: null };
+    if (!title) { r.error = 'empty_title'; results.push(r); continue; }
+    try { await ebay.reviseItem(it.itemId, { title }, it.store); r.ebay = 'ok'; }
+    catch (e) { r.ebay = 'error'; r.error = 'eBay: ' + e.message; }
+    if (pushShopify) {
+      const shopifyProductId = await shopifyIdForItem(it.itemId);
+      if (shopifyProductId) {
+        try { await shopify.updateProduct(shopifyProductId, { title }); r.shopify = 'ok'; }
+        catch (e) { r.shopify = 'error'; r.error = (r.error ? r.error + '; ' : '') + 'Shopify: ' + e.message; }
+      } else r.shopify = 'no_link';
+    }
+    results.push(r);
+  }
+  await audit(req, 'bulk_title', null, null, { count: items.length });
+  res.json({ ok: true, results, summary: { total: items.length, ok: results.filter(r => !r.error).length } });
+});
+
+// Read the effective eBay description template (+ defaults, for "reset").
+router.get('/ebay-template', requireAdmin, async (req, res) => {
+  res.json({ ...(await getDescTemplate()), defaults: defaultDescTemplate() });
+});
+// Save the eBay description header/footer into app_settings.data.
+router.post('/ebay-template', requireAdmin, async (req, res) => {
+  const { header, footer } = req.body || {};
+  const cur = await query(`SELECT data FROM app_settings WHERE id = 1`);
+  const data = { ...(cur.rows[0]?.data || {}) };
+  if (header !== undefined) data.ebay_desc_header = header;
+  if (footer !== undefined) data.ebay_desc_footer = footer;
+  await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify(data)]);
+  await audit(req, 'save_ebay_template');
+  res.json({ ok: true });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
 // GET /api/listings/test-ebay-connection
 // Pings eBay per-store with a tiny GetMyeBaySelling call and reports back the
 // exact result for each store. Used to diagnose silent eBay failures (expired

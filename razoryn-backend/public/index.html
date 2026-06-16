@@ -9658,6 +9658,9 @@ function renderMirror() {
                     <button class="btn btn-primary" onclick="mirrorSelected()" id="mr-push-btn">Push selected →</button>
                     <button class="btn btn-outline" onclick="resyncSelectedImages()" id="mr-resync-img-btn" title="Re-upload just the selected photos (full resolution) to the matching Shopify products. Images only — nothing else is changed.">📷 Re-push images</button>
                     <button class="btn btn-outline" onclick="bulkSyncSkus()" id="mr-sync-sku-btn" title="Set ONE canonical SKU on eBay + Shopify + the warehouse for each selected linked listing. Uses the SKU shown in each row — edit it first to normalise.">🔁 Sync SKU → eBay + Shopify</button>
+                    <button class="btn btn-outline" onclick="bulkTitleEdit()" id="mr-title-btn" title="Find &amp; replace text across the selected listings' titles, then push to eBay + Shopify.">✏️ Bulk title</button>
+                    <button class="btn btn-outline" onclick="pullSpecificsToShopify()" id="mr-specifics-btn" title="Pull each selected listing's eBay item specifics and write them to the linked Shopify product as custom metafields.">📥 Specifics → Shopify</button>
+                    <button class="btn btn-outline" onclick="applyEbayTemplate()" id="mr-tpl-btn" title="Wrap each selected listing's eBay description in your branded header/footer template (edit it in Settings). Idempotent — re-applying won't double-wrap.">🏷 Apply eBay template</button>
                   </div>
                 </div>
               </div>
@@ -12180,6 +12183,81 @@ async function bulkSyncSkus() {
   }
 }
 
+// Selected, visible listings (helper shared by the Phase-2 bulk actions).
+function mirrorSelectedListings() {
+  const visibleSet = new Set(mirrorFilteredListings().map(l => l.itemId));
+  return MirrorState.listings.filter(l => MirrorState.selected.has(l.itemId) && visibleSet.has(l.itemId));
+}
+
+// Pull eBay item specifics → Shopify metafields for selected linked listings.
+async function pullSpecificsToShopify() {
+  const selected = mirrorSelectedListings().filter(l => l.existsOnShopify);
+  if (!selected.length) { toast('Select one or more linked (already-mirrored) listings.', 'warn', 6000); return; }
+  if (!confirm(`Pull eBay item specifics for ${selected.length} listing(s) and write them to the linked Shopify products as custom metafields?`)) return;
+  const items = selected.map(l => ({ itemId: l.itemId, store: l.store || l.storeCode || undefined }));
+  const taskId = Task.start(`Pulling specifics for ${items.length} listing(s)`);
+  try {
+    const r = await Api.post('/api/listings/pull-specifics-to-shopify', { items });
+    Task.done(taskId, `${r.summary.ok}/${r.summary.total} done`);
+    const errs = r.results.filter(x => x.error);
+    const total = r.results.reduce((a, x) => a + (x.specifics || 0), 0);
+    let msg = `Specifics → Shopify: ${r.summary.ok}/${r.summary.total} listings (${total} fields)`;
+    if (errs.length) { msg += ` · ${errs.length} failed`; console.warn('specifics errors', errs); }
+    toast(msg, errs.length ? 'warn' : 'success', 8000);
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// Wrap selected listings' eBay descriptions in the branded template.
+async function applyEbayTemplate() {
+  const selected = mirrorSelectedListings();
+  if (!selected.length) { toast('Select one or more listings first.', 'warn', 6000); return; }
+  if (!confirm(`Apply your branded eBay description template to ${selected.length} listing(s)?\n\nThis wraps each listing's current description with your header/footer (edit it in Settings) and revises the live eBay listing. Re-applying won't double-wrap.`)) return;
+  const items = selected.map(l => ({ itemId: l.itemId, store: l.store || l.storeCode || undefined }));
+  const taskId = Task.start(`Applying template to ${items.length} listing(s)`);
+  try {
+    const r = await Api.post('/api/listings/apply-ebay-template', { items });
+    Task.done(taskId, `${r.summary.ok}/${r.summary.total} updated`);
+    const errs = r.results.filter(x => !x.ok);
+    let msg = `eBay descriptions updated: ${r.summary.ok}/${r.summary.total}`;
+    if (errs.length) { msg += ` · ${errs.length} failed`; console.warn('template errors', errs); toast(`${msg}\n${errs.slice(0,4).map(e=>'• '+e.itemId+': '+e.error).join('\n')}`, 'warn', 12000); }
+    else toast(msg, 'success');
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// Find & replace across selected listings' titles, then push to eBay + Shopify.
+async function bulkTitleEdit() {
+  const selected = mirrorSelectedListings();
+  if (!selected.length) { toast('Select one or more listings first.', 'warn', 6000); return; }
+  const find = prompt(`Find & replace in ${selected.length} title(s).\n\nText to FIND (leave blank to PREFIX instead):`, '');
+  if (find === null) return;
+  let replace, items;
+  if (find.trim() === '') {
+    const prefix = prompt('Text to PREPEND to each title:', '');
+    if (prefix === null || !prefix.trim()) return;
+    items = selected.map(l => ({ itemId: l.itemId, store: l.store || l.storeCode || undefined, title: (prefix + ' ' + (l.title || '')).trim() }));
+  } else {
+    replace = prompt(`Replace "${find}" with:`, '');
+    if (replace === null) return;
+    items = selected
+      .filter(l => (l.title || '').includes(find))
+      .map(l => ({ itemId: l.itemId, store: l.store || l.storeCode || undefined, title: (l.title || '').split(find).join(replace) }));
+    if (!items.length) { toast(`No selected titles contain "${find}".`, 'warn', 6000); return; }
+  }
+  const tooLong = items.filter(i => i.title.length > 80).length;
+  if (!confirm(`Update ${items.length} title(s) on eBay + Shopify?${tooLong ? `\n\n⚠ ${tooLong} will be truncated to eBay's 80-char limit.` : ''}\n\nExample: "${items[0].title.slice(0,80)}"`)) return;
+  const taskId = Task.start(`Updating ${items.length} title(s)`);
+  try {
+    const r = await Api.post('/api/listings/bulk-title', { items });
+    Task.done(taskId, `${r.summary.ok}/${r.summary.total} updated`);
+    selected.forEach(l => { const it = items.find(i => i.itemId === l.itemId); if (it) l.title = it.title.slice(0,80); });
+    const errs = r.results.filter(x => x.error);
+    let msg = `Titles updated: ${r.summary.ok}/${r.summary.total}`;
+    if (errs.length) { msg += ` · ${errs.length} failed`; console.warn('title errors', errs); }
+    toast(msg, errs.length ? 'warn' : 'success', 8000);
+    if (typeof paintMirrorList === 'function') paintMirrorList();
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
 /* ==========================================================
    SETTINGS
    ========================================================== */
@@ -12223,6 +12301,23 @@ function renderSettings() {
             <p style="color:var(--ink-soft);font-size:12px;margin-bottom:6px">Storefront signups post to <code>/api/notify</code>; waiting customers are auto-emailed when stock returns.</p>
             <div id="bis-count" style="font-size:13px;color:var(--ink-soft)">Loading…</div>
           </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>eBay description template</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">
+            Branded header/footer wrapped around each listing's description when you click <strong>🏷 Apply eBay template</strong> in the Listing Mirror. Inline-styled HTML only (eBay strips scripts). Tokens: <code>{{brand}}</code> <code>{{tagline}}</code> <code>{{domain}}</code> <code>{{title}}</code> <code>{{sku}}</code> <code>{{partno}}</code>.
+          </p>
+          <div class="field"><label>Header HTML (before the description)</label><textarea id="tpl-header" rows="6" style="font-family:ui-monospace,monospace;font-size:12px"></textarea></div>
+          <div class="field"><label>Footer HTML (after the description)</label><textarea id="tpl-footer" rows="6" style="font-family:ui-monospace,monospace;font-size:12px"></textarea></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-primary" onclick="saveEbayTemplate()">Save template</button>
+            <button class="btn btn-outline" onclick="resetEbayTemplate()">Reset to default</button>
+            <button class="btn btn-outline" onclick="previewEbayTemplate()">👁 Preview</button>
+          </div>
+          <div id="tpl-preview" style="margin-top:12px"></div>
         </div>
       </div>
 
@@ -12785,6 +12880,41 @@ function renderSettings() {
   loadPricingConfig();
   loadTrackingSettings();
   loadBackInStockCount();
+  loadEbayTemplate();
+}
+
+let _ebayTplDefaults = null;
+async function loadEbayTemplate() {
+  try {
+    const r = await Api.get('/api/listings/ebay-template');
+    _ebayTplDefaults = r.defaults || { header: '', footer: '' };
+    if (el('tpl-header')) el('tpl-header').value = r.header || '';
+    if (el('tpl-footer')) el('tpl-footer').value = r.footer || '';
+  } catch (_) {}
+}
+async function saveEbayTemplate() {
+  try {
+    await Api.post('/api/listings/ebay-template', { header: el('tpl-header').value, footer: el('tpl-footer').value });
+    toast('eBay template saved', 'success');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+function resetEbayTemplate() {
+  if (!_ebayTplDefaults) return;
+  el('tpl-header').value = _ebayTplDefaults.header || '';
+  el('tpl-footer').value = _ebayTplDefaults.footer || '';
+  toast('Reset to default — click Save to keep it', 'info');
+}
+function previewEbayTemplate() {
+  const fill = (s) => String(s || '').replace(/\{\{(\w+)\}\}/g, (_, k) => ({
+    brand: State.brand?.name || 'Our Store', tagline: State.brand?.tagline || '',
+    domain: (State.brand?.domain || '').replace(/^https?:\/\//, ''),
+    title: 'EXAMPLE — Front Bumper 2019-2024', sku: 'CAP-0123', partno: '1694311-00-F',
+  }[k] ?? ''));
+  const html = fill(el('tpl-header').value) +
+    '<p style="color:#333">Your listing\'s existing description appears here.</p>' +
+    fill(el('tpl-footer').value);
+  const box = el('tpl-preview');
+  if (box) box.innerHTML = `<div style="border:1px solid var(--line);border-radius:8px;padding:6px;background:#fff"><iframe style="width:100%;height:360px;border:0" srcdoc="${html.replace(/"/g, '&quot;')}"></iframe></div>`;
 }
 
 // Populate the tracking config inputs from app_settings.data.

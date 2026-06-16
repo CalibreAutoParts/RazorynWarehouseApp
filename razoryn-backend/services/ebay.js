@@ -760,10 +760,25 @@ async function getActiveListings(storeArg, opts = {}) {
 // ReviseItem — push SKU, title, and/or price change back to eBay.
 // Risks: revision counts toward eBay's per-listing limit; major changes may affect search ranking;
 // some listings can't be revised (e.g. with bids). Use sparingly, with explicit user confirm.
-async function reviseItem(itemId, { sku, title, price } = {}, storeArg) {
+// Build an <ItemSpecifics> block from [{name, value}] or [{name, values:[...]}].
+// Sending the block REPLACES the listing's specifics, so callers should pass the
+// full set they want (merge before calling).
+function buildItemSpecificsXml(specifics) {
+  const lists = (specifics || []).filter(s => s && s.name).map(s => {
+    const vals = (Array.isArray(s.values) ? s.values : [s.value]).filter(v => v != null && String(v).trim());
+    if (!vals.length) return '';
+    return `<NameValueList><Name>${escapeXml(s.name)}</Name>${vals.map(v => `<Value>${escapeXml(v)}</Value>`).join('')}</NameValueList>`;
+  }).join('');
+  return lists ? `<ItemSpecifics>${lists}</ItemSpecifics>` : '';
+}
+
+async function reviseItem(itemId, { sku, title, price, description, itemSpecifics, pictureUrls } = {}, storeArg) {
   if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
   if (!itemId) throw new Error('missing_item_id');
-  if (sku == null && title == null && price == null) return { skipped: true };
+  if (sku == null && title == null && price == null && description == null
+      && !(itemSpecifics && itemSpecifics.length) && !(pictureUrls && pictureUrls.length)) {
+    return { skipped: true };
+  }
 
   const fields = [`<ItemID>${itemId}</ItemID>`];
   if (title) fields.push(`<Title>${escapeXml(title)}</Title>`);
@@ -773,6 +788,12 @@ async function reviseItem(itemId, { sku, title, price } = {}, storeArg) {
     const formatted = Number(price).toFixed(2);
     fields.push(`<StartPrice currencyID="GBP">${formatted}</StartPrice>`);
   }
+  // Description accepts HTML; CDATA-wrap so our markup isn't re-escaped by eBay.
+  if (description != null) fields.push(`<Description><![CDATA[${String(description)}]]></Description>`);
+  if (itemSpecifics && itemSpecifics.length) fields.push(buildItemSpecificsXml(itemSpecifics));
+  if (pictureUrls && pictureUrls.length) {
+    fields.push(`<PictureDetails>${pictureUrls.filter(Boolean).slice(0, 24).map(u => `<PictureURL>${escapeXml(u)}</PictureURL>`).join('')}</PictureDetails>`);
+  }
   const body = `<Item>${fields.join('')}</Item>`;
 
   const xml = await tradingCall('ReviseItem', body, storeArg);
@@ -781,6 +802,39 @@ async function reviseItem(itemId, { sku, title, price } = {}, storeArg) {
     throw new Error('eBay ReviseItem error: ' + decodeEntities(err));
   }
   return { ok: true, itemId, storeCode: resolveStore(storeArg)?.code };
+}
+
+// Read a listing's full current state (title, description, SKU, price, pictures,
+// and item specifics with their current values) — needed to edit/wrap before a
+// ReviseItem, and to pull specifics across to Shopify.
+async function getItemDetails(itemId, storeArg) {
+  if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
+  if (!itemId) throw new Error('missing_item_id');
+  const xml = await tradingCall('GetItem', `<ItemID>${itemId}</ItemID><DetailLevel>ReturnAll</DetailLevel>`, storeArg);
+  if (xml.includes('<Ack>Failure</Ack>')) {
+    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+    throw new Error('eBay GetItem error: ' + decodeEntities(err));
+  }
+  const specBlock = extractOne(xml, 'ItemSpecifics') || '';
+  const specifics = extractAll(specBlock, 'NameValueList').map(nv => ({
+    name: decodeEntities(extractOne(nv, 'Name') || '').trim(),
+    values: extractAll(nv, 'Value').map(v => decodeEntities(v).trim()).filter(Boolean),
+  })).filter(s => s.name);
+  const priceRaw = extractOne(xml, 'StartPrice') || extractOne(xml, 'CurrentPrice');
+  // GetItem returns Description entity-encoded (and sometimes CDATA-wrapped) —
+  // unwrap + decode so we get real HTML back to edit/wrap.
+  let desc = (extractOne(xml, 'Description') || '').replace(/^<!\[CDATA\[/, '').replace(/\]\]>$/, '');
+  desc = decodeEntities(desc);
+  return {
+    itemId: String(itemId),
+    title: decodeEntities(extractOne(xml, 'Title') || ''),
+    description: desc,
+    sku: decodeEntities(extractOne(xml, 'SKU') || ''),
+    price: priceRaw ? parseFloat(priceRaw) : null,
+    pictureUrls: extractAll(xml, 'PictureURL').map(decodeEntities),
+    specifics,
+    storeCode: resolveStore(storeArg)?.code,
+  };
 }
 
 function escapeXml(s) {
@@ -1749,6 +1803,7 @@ module.exports = {
   getStoreCategories,
   promoteListing,
   getItemDescription,
+  getItemDetails,
   getCategorySpecifics,
   getSuggestedCategories,
   getSellerActiveListings,
