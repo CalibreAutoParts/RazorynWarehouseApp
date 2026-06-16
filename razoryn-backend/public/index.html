@@ -9876,16 +9876,29 @@ async function loadReconcile(force) {
   if (State.reconcile && !force) { renderReconcile(); return; }
   wrap.innerHTML = `<div class="empty"><div class="t">Pulling eBay + Shopify + warehouse…</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">This reads every listing across all three systems, so it can take a little while.</div></div>`;
   const taskId = Task.start('Reconciling all listings');
-  try {
-    const r = await Api.get('/api/listings/reconcile');
-    State.reconcile = r;
-    State.reconcileUnlinked = null; // fresh data — clear the pending-unlink banner
-    Task.done(taskId, `${r.summary.groups} groups`);
-    renderReconcile();
-  } catch (e) {
-    Task.fail(taskId, 'Reconcile failed');
-    wrap.innerHTML = `<div class="empty"><div class="t">Failed to load: ${escapeHtml(e.data?.message || e.message)}</div></div>`;
+  // The reconcile is a heavy pull; the first hit on a cold backend can time out
+  // ("Application failed to respond"). Retry once after a short pause — the second
+  // attempt almost always succeeds (which is why a manual refresh "fixed" it).
+  let r, lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { r = await Api.get('/api/listings/reconcile'); lastErr = null; break; }
+    catch (e) {
+      lastErr = e;
+      if (attempt === 0) {
+        wrap.innerHTML = `<div class="empty"><div class="t">Waking the server…</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">First load timed out — retrying.</div></div>`;
+        await new Promise(res => setTimeout(res, 1500));
+      }
+    }
   }
+  if (lastErr) {
+    Task.fail(taskId, 'Reconcile failed');
+    wrap.innerHTML = `<div class="empty"><div class="t">Failed to load: ${escapeHtml(lastErr.data?.message || lastErr.message)}</div><div style="margin-top:8px"><button class="btn btn-primary btn-sm" onclick="loadReconcile(true)">Try again</button></div></div>`;
+    return;
+  }
+  State.reconcile = r;
+  State.reconcileUnlinked = null; // fresh data — clear the pending-unlink banner
+  Task.done(taskId, `${r.summary.groups} groups`);
+  renderReconcile();
 }
 
 function setReconcileFilter(f) { State.reconcileFilter = f; renderReconcile(); }
@@ -10049,7 +10062,7 @@ function editListingIdentity(target) {
           closeModal();
           const res = r.result || {};
           const part = (lbl, v) => `${lbl}: ${v === 'ok' ? '✓' : (v || '—')}`;
-          const msg = `Code set to ${sku} — ${part('warehouse', res.warehouse)} · ${part('Shopify', res.shopify)} · ${part('eBay', res.ebay)}`;
+          const msg = `Code set to ${sku} — ${part('warehouse', res.warehouse)} · ${part('Shopify', res.shopify)} · ${part('eBay', res.ebay)}${res.shopifyPartNumber ? ' · ' + part('PN metafield', res.shopifyPartNumber) : ''}`;
           if (res.errors?.length) { console.warn('update-identity errors', res.errors); toast(msg + ' · ' + res.errors.join('; '), 'warn', 10000); }
           else toast(msg, 'success');
           if (target.refresh === 'rescan') scanShopifyDuplicates();

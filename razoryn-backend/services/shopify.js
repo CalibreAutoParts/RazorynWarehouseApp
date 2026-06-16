@@ -634,6 +634,21 @@ async function getMetafieldDefinitions() {
   }
 }
 
+// Write the part number into the store's "Part Number" product metafield (the
+// one shown on the Shopify product page). SKU + barcode are variant fields and
+// already set by setVariantSku, but the catalogue's Part Number metafield is
+// separate — without this it stays blank after a SKU push. Matches the definition
+// named exactly "Part Number" so it never clobbers "Part Number Purchased" etc.
+async function setPartNumberMetafield(productId, partNumber) {
+  if (!isConfigured() || !productId || !partNumber) return { skipped: 'no_input' };
+  const defs = await getMetafieldDefinitions();
+  const def = defs.find(d => String(d.name || '').trim().toLowerCase() === 'part number');
+  if (!def) return { skipped: 'no_definition' };
+  const results = await applyMetafields(productId, [{ namespace: def.namespace, key: def.key, value: String(partNumber), type: def.type }]);
+  const r = results[0] || {};
+  return r.ok ? { ok: true, namespace: def.namespace, key: def.key } : { error: r.error || 'failed' };
+}
+
 // Set the inventory quantity for a freshly-created product at the warehouse location.
 async function setInitialInventory(product, qty) {
   if (!LOCATION_ID || qty == null) return;
@@ -1049,6 +1064,7 @@ module.exports = {
   updateProduct,
   setVariantPrice,
   setVariantSku,
+  setPartNumberMetafield,
   setProductImages,
   publishProductToAllChannels,
   getPublications,

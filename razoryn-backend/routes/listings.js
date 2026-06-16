@@ -1600,10 +1600,11 @@ router.post('/push-warehouse-sku', requireAdmin, async (req, res) => {
       catch (e) { r.ebay = 'error'; r.errors.push('eBay: ' + e.message); }
     } else { r.ebay = link.store_code ? 'store_not_configured' : 'not_configured'; }
 
-    // Shopify variant SKU + barcode.
+    // Shopify variant SKU + barcode, and the "Part Number" metafield.
     if (shopify.isConfigured()) {
       try { await shopify.setVariantSku(spId, sku); r.shopify = 'ok'; }
       catch (e) { r.shopify = 'error'; r.errors.push('Shopify: ' + e.message); }
+      try { await shopify.setPartNumberMetafield(spId, sku); } catch (_) { /* non-critical */ }
     } else { r.shopify = 'not_configured'; }
 
     try { await query(`UPDATE mirror_links SET last_synced_sku = $1 WHERE ebay_item_id = $2`, [sku, itemId]); } catch (_) {}
@@ -1717,11 +1718,17 @@ router.post('/update-identity', requireAdmin, async (req, res) => {
     r.warehouse = upd.rowCount ? 'ok' : 'no_match';
   } catch (e) { r.warehouse = 'error'; r.errors.push('Warehouse: ' + e.message); }
 
-  // 2. Shopify variant — SKU + barcode (setVariantSku sets both to the same value).
+  // 2. Shopify variant — SKU + barcode (setVariantSku sets both to the same value),
+  //    plus the product's "Part Number" metafield (separate from SKU/barcode, so it
+  //    stays blank otherwise).
   if (shopifyProductId) {
     if (shopify.isConfigured()) {
       try { await shopify.setVariantSku(shopifyProductId, sku); r.shopify = 'ok'; }
       catch (e) { r.shopify = 'error'; r.errors.push('Shopify: ' + e.message); }
+      try {
+        const mf = await shopify.setPartNumberMetafield(shopifyProductId, partNumber);
+        r.shopifyPartNumber = mf.ok ? 'ok' : (mf.skipped || mf.error || 'n/a');
+      } catch (e) { r.shopifyPartNumber = 'error'; r.errors.push('Shopify part-number metafield: ' + e.message); }
     } else { r.shopify = 'not_configured'; }
   } else { r.shopify = 'no_target'; }
 
