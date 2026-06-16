@@ -573,10 +573,45 @@ router.get('/reconcile', requireAdmin, async (req, res) => {
     const whShopifyLinked = g.warehouse.some(w => w.shopifyProductId && g.shopify.some(s => s.productId === w.shopifyProductId));
     // SKUs across the group (for display + duplicate hints)
     const skus = [...new Set([...g.ebay, ...g.shopify, ...g.warehouse].map(x => x.sku).filter(Boolean))];
+
+    // Why did these nodes land in one group? Surface the bridging signals so a
+    // wrong link or a mis-keyed SKU that dragged two unrelated items together is
+    // visible (and fixable). A bridge is "suspect" when it connects entries whose
+    // titles differ — i.e. it's holding two different parts under one identifier.
+    const tSig = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const allEntries = [
+      ...g.ebay.map(e => ({ kind: 'ebay', id: e.itemId, title: e.title, sku: e.sku, storeCode: e.storeCode })),
+      ...g.shopify.map(x => ({ kind: 'shopify', id: x.productId, title: x.title, sku: x.sku })),
+      ...g.warehouse.map(w => ({ kind: 'warehouse', id: String(w.id), title: w.title, sku: w.sku })),
+    ];
+    const skuMap = new Map();
+    for (const en of allEntries) {
+      const k = skuKey(en.sku); if (!k) continue;
+      if (!skuMap.has(k)) skuMap.set(k, { sku: en.sku, entries: [] });
+      skuMap.get(k).entries.push(en);
+    }
+    const sharedSkus = [...skuMap.values()].filter(s => s.entries.length > 1).map(s => ({
+      sku: s.sku, entries: s.entries,
+      suspect: new Set(s.entries.map(e => tSig(e.title)).filter(Boolean)).size > 1,
+    }));
+    const linkEdges = g.ebay
+      .filter(e => e.linkedShopifyId && g.shopify.some(s => s.productId === e.linkedShopifyId))
+      .map(e => {
+        const sp = g.shopify.find(s => s.productId === e.linkedShopifyId) || {};
+        return { ebayItemId: e.itemId, ebayTitle: e.title, ebayStoreCode: e.storeCode || null, shopifyProductId: e.linkedShopifyId, shopifyTitle: sp.title || '', suspect: !!(e.title && sp.title && tSig(e.title) !== tSig(sp.title)) };
+      });
+    const whEdges = g.warehouse
+      .filter(w => w.shopifyProductId && g.shopify.some(s => s.productId === w.shopifyProductId))
+      .map(w => {
+        const sp = g.shopify.find(s => s.productId === w.shopifyProductId) || {};
+        return { warehouseId: w.id, warehouseTitle: w.title, shopifyProductId: w.shopifyProductId, shopifyTitle: sp.title || '', suspect: !!(w.title && sp.title && tSig(w.title) !== tSig(sp.title)) };
+      });
+    const whyGrouped = { sharedSkus, linkEdges, whEdges, suspect: sharedSkus.some(s => s.suspect) || linkEdges.some(e => e.suspect) || whEdges.some(e => e.suspect) };
+
     out.push({
       key: root,
       ebay: g.ebay, shopify: g.shopify, warehouse: g.warehouse,
-      onEbay, onShopify, onWarehouse, platforms, skus,
+      onEbay, onShopify, onWarehouse, platforms, skus, whyGrouped,
       ebayShopifyLinked, whShopifyLinked,
       dupEbay: g.ebay.length > 1, dupShopify: g.shopify.length > 1, dupWarehouse: g.warehouse.length > 1,
       // "needsLink": exists on >1 platform but the cross-platform link is missing

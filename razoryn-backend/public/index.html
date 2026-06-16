@@ -10236,7 +10236,9 @@ function reconcileRow(g) {
       : (g.dupEbay ? 'Two eBay listings here — <strong>🗑 delete</strong> a true duplicate, or <strong>✏️ re-code</strong> if they’re different parts.'
                    : 'Two Shopify products here — <strong>🗑 delete</strong> a true duplicate, or <strong>✏️ re-code</strong> if they’re different parts.');
     status += `<div style="font-size:11px;color:var(--ink-soft);margin-top:4px;max-width:200px">${hint}</div>`;
+    if (g.whyGrouped && g.whyGrouped.suspect) status += `<div style="font-size:11px;color:var(--red);margin-top:4px;max-width:200px">⚠ One code/link spans different parts — see Diagnose.</div>`;
     if (g.onEbay) status += `<div style="margin-top:6px">${linkedEbay.map(e => `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unlinkEbay('${escapeAttr(e.itemId)}', {batch:true})" title="Remove this eBay link">✕ Unlink ${escapeHtml(e.itemId)}</button>`).join('')}</div>`;
+    status += `<div style="margin-top:6px"><button class="btn btn-outline btn-sm" onclick="openDiagnose('${escapeAttr(g.key)}')" title="Explain why these are grouped and how to fix it">🔎 Diagnose</button></div>`;
   } else if (g.onEbay && g.onShopify && g.ebayShopifyLinked) {
     status = `<span class="pill green" style="font-size:10px">✓ Linked</span>`;
     status += `<div style="margin-top:6px">${g.ebay.filter(e => e.linkedShopifyId).map(e => `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unlinkEbay('${escapeAttr(e.itemId)}', {batch:true})" title="Disconnect">✕ Unlink</button>`).join('')}</div>`;
@@ -10272,6 +10274,84 @@ function reconcileRow(g) {
     <td>${whCell}</td>
     <td>${status}</td>
   </tr>`;
+}
+
+// Diagnose: explain WHY a group's listings were merged together (the bridging
+// SKU values / links), flag the bridge that spans different parts, and offer the
+// exact fix (unlink a wrong link, or re-code a mis-keyed listing) in one place.
+function openDiagnose(key) {
+  const g = ((State.reconcile && State.reconcile.groups) || []).find(x => String(x.key) === String(key));
+  if (!g) { toast('Group not found — refresh and try again', 'warn'); return; }
+  const wg = g.whyGrouped || { sharedSkus: [], linkEdges: [], whEdges: [] };
+  const kindLabel = { ebay: 'eBay', shopify: 'Shopify', warehouse: 'Warehouse' };
+  const suspectPill = '<span class="pill" style="font-size:9px;background:#fde8e8;color:var(--red);font-weight:600">spans different parts</span>';
+  const okPill = '<span class="pill green" style="font-size:9px">consistent</span>';
+
+  const recodeBtn = (en) => {
+    const opts = { sku: en.sku || '', title: en.title || '', refresh: 'reconcile' };
+    if (en.kind === 'ebay') opts.ebayItemId = String(en.id);
+    else if (en.kind === 'shopify') opts.shopifyProductId = String(en.id);
+    else opts.warehouseProductId = en.id;
+    return `<button class="btn btn-ghost btn-sm" style="padding:0 6px" onclick='${editIdClick(opts)}' title="Change this code & push to channels">✏️ re-code</button>`;
+  };
+  const entryLine = (en) => `<div style="display:flex;align-items:center;gap:6px;padding:2px 0;font-size:12px">
+      <span class="pill" style="font-size:9px;background:var(--bg-soft);color:var(--ink)">${kindLabel[en.kind] || en.kind}</span>
+      <span style="font-family:ui-monospace,monospace;font-size:10px;color:var(--ink-soft)">${escapeHtml(String(en.id))}</span>
+      <span style="flex:1">${escapeHtml(en.title || '—')}</span>
+      ${recodeBtn(en)}
+    </div>`;
+
+  let body = `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">
+      These listings were merged into one group because they share an identifier or a link below.
+      A row marked <strong style="color:var(--red)">spans different parts</strong> is what wrongly ties two unrelated items together — fix that one.
+    </div>`;
+
+  if (wg.sharedSkus && wg.sharedSkus.length) {
+    body += `<div style="font-weight:600;font-size:12px;margin:8px 0 4px">Shared SKU / code</div>`;
+    body += wg.sharedSkus.map(s => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;${s.suspect ? 'background:#fff5f5' : ''}">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-family:ui-monospace,monospace;font-weight:600">${escapeHtml(s.sku || '')}</span>
+          ${s.suspect ? suspectPill : okPill}
+          <span style="font-size:11px;color:var(--ink-soft)">on ${s.entries.length} listings</span>
+        </div>
+        ${s.entries.map(entryLine).join('')}
+        ${s.suspect ? '<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Fix: ✏️ re-code the listing(s) that don’t belong to this part so each item has its own code.</div>' : ''}
+      </div>`).join('');
+  }
+
+  if (wg.linkEdges && wg.linkEdges.length) {
+    body += `<div style="font-weight:600;font-size:12px;margin:8px 0 4px">eBay ↔ Shopify links</div>`;
+    body += wg.linkEdges.map(e => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;${e.suspect ? 'background:#fff5f5' : ''}">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(e.ebayItemId)}</span>
+          <span style="color:var(--ink-soft)">→</span>
+          <span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(String(e.shopifyProductId))}</span>
+          ${e.suspect ? suspectPill : okPill}
+        </div>
+        <div style="font-size:11px;color:var(--ink-soft)">eBay: ${escapeHtml(e.ebayTitle || '—')}<br>Shopify: ${escapeHtml(e.shopifyTitle || '—')}</div>
+        ${e.suspect ? `<div style="margin-top:6px"><button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="closeModal(); unlinkEbay('${escapeAttr(e.ebayItemId)}', {batch:true})">✕ Unlink this wrong link</button></div>` : ''}
+      </div>`).join('');
+  }
+
+  if (wg.whEdges && wg.whEdges.some(e => e.suspect)) {
+    body += `<div style="font-weight:600;font-size:12px;margin:8px 0 4px">Warehouse ↔ Shopify links</div>`;
+    body += wg.whEdges.filter(e => e.suspect).map(e => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;background:#fff5f5">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-size:11px">Warehouse #${escapeHtml(String(e.warehouseId))}</span>
+          <span style="color:var(--ink-soft)">→</span>
+          <span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(String(e.shopifyProductId))}</span>
+          ${suspectPill}
+        </div>
+        <div style="font-size:11px;color:var(--ink-soft)">Warehouse: ${escapeHtml(e.warehouseTitle || '—')}<br>Shopify: ${escapeHtml(e.shopifyTitle || '—')}</div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Fix: the warehouse product points at the wrong Shopify product — correct its Shopify link in Inventory.</div>
+      </div>`).join('');
+  }
+
+  if (!(wg.sharedSkus || []).length && !(wg.linkEdges || []).length && !(wg.whEdges || []).some(e => e.suspect)) {
+    body += `<div style="font-size:12px;color:var(--ink-soft)">No shared SKU or link found — these are likely two genuinely separate listings that happen to be grouped. Use 🗑 to remove a true duplicate, or ✏️ to give each its own code.</div>`;
+  }
+
+  modal({ title: 'Diagnose grouping', body, actions: [{ label: 'Close', onClick: closeModal }] });
 }
 
 async function loadLinkStatus() {
