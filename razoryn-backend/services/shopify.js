@@ -382,6 +382,22 @@ async function setProductImages(productId, imageUrls) {
   return { ok: count > 0, count };
 }
 
+// Lightweight SKU-only update — sets the first variant's SKU (and keeps barcode
+// in sync with it, so scanning works) without touching title, price, images or
+// inventory. Used by the cross-channel bulk-SKU tool.
+async function setVariantSku(shopifyProductId, sku) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const s = String(sku || '').trim();
+  if (!s) throw new Error('valid sku required');
+  const ex = await shopifyRequest('get', `/products/${encodeURIComponent(shopifyProductId)}.json`);
+  const variant = ex.data.product?.variants?.[0];
+  if (!variant) throw new Error('no_variant_for_product');
+  await shopifyRequest('put', `/variants/${variant.id}.json`, {
+    data: { variant: { id: variant.id, sku: s, barcode: s } },
+  });
+  return { ok: true, productId: String(shopifyProductId), sku: s };
+}
+
 // Lightweight price-only update — sets just the first variant's price without
 // touching title, images, or inventory. Used by the pricing-sync tool.
 async function setVariantPrice(shopifyProductId, price) {
@@ -1032,6 +1048,7 @@ module.exports = {
   createProduct,
   updateProduct,
   setVariantPrice,
+  setVariantSku,
   setProductImages,
   publishProductToAllChannels,
   getPublications,

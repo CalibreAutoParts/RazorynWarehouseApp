@@ -5025,6 +5025,15 @@ function labelsPrint(itemsArg) {
   // Fallback wordmark text (shown only if the logo image fails to load).
   const wordmark = escapeHtml(brandName);
 
+  // Identifier block: show the OEM part number prominently (helps staff find the
+  // item on the shelf) AND the SKU underneath when they differ (system matching).
+  const idBlock = (it) => {
+    const pn = (it.partNumber || '').trim();
+    const sku = (it.sku || '').trim();
+    if (pn && sku && pn !== sku) return `<div class="sku">${escapeHtml(pn)}</div><div class="sku-sub">${escapeHtml(sku)}</div>`;
+    return `<div class="sku">${escapeHtml(pn || sku)}</div>`;
+  };
+
   // Per-layout label HTML
   let labelTemplate;
   if (s.layout === 'large-landscape') {
@@ -5038,7 +5047,7 @@ function labelsPrint(itemsArg) {
         </div>
         <div class="body">
           <div class="title">${escapeHtml(it.title)}</div>
-          <div class="sku">${escapeHtml(it.partNumber || it.sku)}</div>
+          ${idBlock(it)}
         </div>
         <div class="barcode-wrap">
           <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
@@ -5054,7 +5063,7 @@ function labelsPrint(itemsArg) {
         </div>
         <div class="body">
           <div class="title">${escapeHtml(it.title)}</div>
-          <div class="sku">${escapeHtml(it.partNumber || it.sku)}</div>
+          ${idBlock(it)}
         </div>
         <div class="barcode-wrap">
           <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
@@ -5066,7 +5075,7 @@ function labelsPrint(itemsArg) {
     labelTemplate = (it, idx) => `
       <div class="label tall">
         <div class="title">${escapeHtml(it.title)}</div>
-        <div class="sku">${escapeHtml(it.partNumber || it.sku)}</div>
+        ${idBlock(it)}
         <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
       </div>`;
   } else {
@@ -5074,7 +5083,7 @@ function labelsPrint(itemsArg) {
     labelTemplate = (it, idx) => `
       <div class="label small">
         <div class="title">${escapeHtml(it.title)}</div>
-        <div class="sku">${escapeHtml(it.partNumber || it.sku)}</div>
+        ${idBlock(it)}
         <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
       </div>`;
   }
@@ -5113,6 +5122,8 @@ function labelsPrint(itemsArg) {
     overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .label.small .sku { font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace; color: #444; margin-top: 0.5mm; }
   .label.small .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 0.5mm; }
+  /* Secondary identifier (SKU shown under the part number) — smaller + muted. */
+  .label .sku-sub { font-size: ${Math.max(6, (s.fontSku || 9) - 2)}pt; font-family: ui-monospace, Menlo, monospace; color: #777; }
 
   /* ============ TALL 25×50 mm thermal ============ */
   .label.tall { padding: 2mm; justify-content: space-between; text-align: center; }
@@ -9646,6 +9657,7 @@ function renderMirror() {
                   <div style="display:flex;gap:6px;flex-wrap:wrap">
                     <button class="btn btn-primary" onclick="mirrorSelected()" id="mr-push-btn">Push selected →</button>
                     <button class="btn btn-outline" onclick="resyncSelectedImages()" id="mr-resync-img-btn" title="Re-upload just the selected photos (full resolution) to the matching Shopify products. Images only — nothing else is changed.">📷 Re-push images</button>
+                    <button class="btn btn-outline" onclick="bulkSyncSkus()" id="mr-sync-sku-btn" title="Set ONE canonical SKU on eBay + Shopify + the warehouse for each selected linked listing. Uses the SKU shown in each row — edit it first to normalise.">🔁 Sync SKU → eBay + Shopify</button>
                   </div>
                 </div>
               </div>
@@ -12123,6 +12135,48 @@ async function resyncSelectedImages() {
   } catch (e) {
     Task.fail(taskId, 'Image re-sync failed');
     toast('Image re-sync failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// Bulk-set ONE canonical SKU across eBay + Shopify + the warehouse for each
+// selected linked listing. Uses the SKU shown in each row (skuOverrides, else the
+// live eBay SKU) — staff edit the row SKU first to normalise it. Only linked
+// (already-mirrored) listings can sync to Shopify; eBay always gets the SKU.
+async function bulkSyncSkus() {
+  const visibleSet = new Set(mirrorFilteredListings().map(l => l.itemId));
+  const selected = MirrorState.listings.filter(l =>
+    MirrorState.selected.has(l.itemId) && visibleSet.has(l.itemId));
+  if (!selected.length) { toast('Select one or more listings first.', 'warn', 6000); return; }
+
+  const items = selected.map(l => {
+    const sku = (MirrorState.skuOverrides[l.itemId] != null ? MirrorState.skuOverrides[l.itemId] : (l.sku || '')).trim();
+    return { itemId: l.itemId, store: l.store || l.storeCode || undefined, sku, oldSku: l.sku || null, linked: !!l.existsOnShopify };
+  }).filter(i => i.sku);
+
+  if (!items.length) { toast('None of the selected rows have a SKU set.', 'warn', 6000); return; }
+  const noLink = items.filter(i => !i.linked).length;
+  if (!confirm(`Set the SKU on eBay + Shopify + warehouse for ${items.length} listing(s)?\n\n` +
+    `• eBay: updates the custom label (counts toward eBay revision limits)\n` +
+    `• Shopify: updates the variant SKU + barcode (linked products only${noLink ? `; ${noLink} not linked → eBay + warehouse only` : ''})\n` +
+    `• Warehouse: updates the product SKU\n\nThis edits LIVE listings.`)) return;
+
+  const taskId = Task.start(`Syncing SKUs for ${items.length} listing(s)`);
+  try {
+    const r = await Api.post('/api/listings/bulk-sku', { items });
+    Task.done(taskId, `${r.summary.ok}/${r.summary.total} synced`);
+    const errs = r.results.filter(x => x.errors?.length);
+    let msg = `SKUs synced: ${r.summary.ok}/${r.summary.total}`;
+    if (errs.length) {
+      msg += ` · ${errs.length} with issues`;
+      console.warn('SKU sync issues:', errs);
+      const sample = errs.slice(0, 5).map(e => `• ${e.sku || e.itemId}: ${e.errors.join(', ')}`).join('\n');
+      toast(`${msg}\n${sample}${errs.length > 5 ? `\n…and ${errs.length - 5} more` : ''}`, 'warn', 12000);
+    } else {
+      toast(msg, 'success');
+    }
+  } catch (e) {
+    Task.fail(taskId, 'SKU sync failed');
+    toast('SKU sync failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 

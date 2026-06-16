@@ -1292,6 +1292,71 @@ router.post('/push-to-ebay', requireAdmin, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// POST /api/listings/bulk-sku
+// Set ONE canonical SKU across both channels for a batch of linked listings:
+// pushes the SKU to eBay (custom label, via ReviseItem), to Shopify (variant SKU
+// + barcode), and to the warehouse product (+ optional part_number for labels).
+// Body: { items: [{ itemId, store, sku, partNumber?, oldSku? }], pushEbay, pushShopify }
+// Returns per-item results so partial failures are visible.
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/bulk-sku', requireAdmin, async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  const pushEbay = req.body?.pushEbay !== false;
+  const pushShopify = req.body?.pushShopify !== false;
+  if (!items.length) return res.status(400).json({ error: 'no_items' });
+
+  const results = [];
+  for (const it of items) {
+    const itemId = String(it.itemId || '');
+    const sku = String(it.sku || '').trim();
+    const partNumber = it.partNumber != null && String(it.partNumber).trim() ? String(it.partNumber).trim() : null;
+    const r = { itemId, sku, ebay: null, shopify: null, warehouse: null, errors: [] };
+    if (!sku) { r.errors.push('no_sku'); results.push(r); continue; }
+
+    // Resolve the linked Shopify product for this eBay item.
+    let shopifyProductId = null;
+    try {
+      const lk = await query(`SELECT shopify_product_id FROM mirror_links WHERE ebay_item_id = $1`, [itemId]);
+      shopifyProductId = lk.rows[0]?.shopify_product_id ? String(lk.rows[0].shopify_product_id) : null;
+    } catch (_) {}
+
+    // eBay
+    if (pushEbay && itemId && ebay.isConfigured(it.store)) {
+      try { await ebay.reviseItem(itemId, { sku }, it.store); r.ebay = 'ok'; }
+      catch (e) { r.ebay = 'error'; r.errors.push('eBay: ' + e.message); }
+    } else if (pushEbay) { r.ebay = ebay.isConfigured() ? 'ok' : 'not_configured'; if (!itemId) r.ebay = 'no_item'; }
+
+    // Shopify
+    if (pushShopify && shopifyProductId && shopify.isConfigured()) {
+      try { await shopify.setVariantSku(shopifyProductId, sku); r.shopify = 'ok'; }
+      catch (e) { r.shopify = 'error'; r.errors.push('Shopify: ' + e.message); }
+    } else if (pushShopify) { r.shopify = shopifyProductId ? 'not_configured' : 'no_link'; }
+
+    // Warehouse product — by linked Shopify id, else by the previous SKU.
+    try {
+      let upd = null;
+      if (shopifyProductId) {
+        upd = await query(`UPDATE products SET sku = $1, part_number = COALESCE($2, part_number), updated_at = now() WHERE shopify_product_id = $3 RETURNING id`, [sku, partNumber, shopifyProductId]);
+      }
+      if ((!upd || !upd.rowCount) && it.oldSku) {
+        upd = await query(`UPDATE products SET sku = $1, part_number = COALESCE($2, part_number), updated_at = now() WHERE sku = $3 RETURNING id`, [sku, partNumber, String(it.oldSku)]);
+      }
+      r.warehouse = (upd && upd.rowCount) ? 'ok' : 'no_match';
+    } catch (e) { r.warehouse = 'error'; r.errors.push('Warehouse: ' + e.message); }
+
+    // Keep the link + override in step so future drift detection is accurate.
+    try { await query(`UPDATE mirror_links SET last_synced_sku = $1 WHERE ebay_item_id = $2`, [sku, itemId]); } catch (_) {}
+    try { await query(`UPDATE ebay_listing_overrides SET override_sku = $1 WHERE ebay_item_id = $2`, [sku, itemId]); } catch (_) {}
+
+    results.push(r);
+  }
+
+  await audit(req, 'bulk_sku_sync', null, null, { count: items.length });
+  const okCount = results.filter(r => !r.errors.length).length;
+  res.json({ ok: true, results, summary: { total: items.length, ok: okCount, errors: items.length - okCount } });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
 // GET /api/listings/test-ebay-connection
 // Pings eBay per-store with a tiny GetMyeBaySelling call and reports back the
 // exact result for each store. Used to diagnose silent eBay failures (expired
