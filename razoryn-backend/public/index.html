@@ -2550,12 +2550,23 @@ function renderStockTake() {
           <option value="all">All items</option>
           <option value="counted">Counted ✓</option>
         </select>
+        <select class="filter-select" id="st-make"><option value="">All makes</option></select>
+        <select class="filter-select" id="st-location"><option value="">All locations</option></select>
+        <select class="filter-select" id="st-sort">
+          <option value="default">Sort: default</option>
+          <option value="qty-desc">Quantity: high → low</option>
+          <option value="qty-asc">Quantity: low → high</option>
+          <option value="make">Make (A–Z)</option>
+          <option value="location">Location (A–Z)</option>
+          <option value="title">Title (A–Z)</option>
+        </select>
       </div>
       <div class="card"><div id="st-list"></div></div>
       <div id="st-sentinel" style="height:1px"></div>
     </div>`;
 
   State._stChecked = State._stChecked || new Set();
+  stPopulateFilters();
   // Pull BOTH a fresh product catalogue and this month's counted IDs before
   // painting. The take list is built from State.products, which is otherwise the
   // boot-time snapshot — so an item added since (or added on another device)
@@ -2567,7 +2578,7 @@ function renderStockTake() {
     Api.get('/api/stock-checks/this-month')
       .then(r => { State._stChecked = new Set((r.productIds || []).map(String)); })
       .catch(() => {}),
-  ]).then(stPaint).catch(stPaint);
+  ]).then(() => { stPopulateFilters(); stPaint(); }).catch(stPaint);
 
   // If a push-all is in progress (or recently finished), resume showing it.
   Api.get('/api/settings/push-all-stock/status')
@@ -2582,14 +2593,57 @@ function renderStockTake() {
   if (State._stObserver) State._stObserver.disconnect();
   State._stObserver = new IntersectionObserver((en) => { if (en.some(x => x.isIntersecting)) stFill(); }, { rootMargin: '300px' });
   const s = el('st-sentinel'); if (s) State._stObserver.observe(s);
-  ['st-search', 'st-filter'].forEach(id => el(id).addEventListener('input', stPaint));
+  let _stPaintT;
+  el('st-search').addEventListener('input', () => { clearTimeout(_stPaintT); _stPaintT = setTimeout(stPaint, 160); });
+  ['st-filter', 'st-make', 'st-location', 'st-sort'].forEach(id => el(id).addEventListener('change', stPaint));
+}
+
+// Fill the Make + Location dropdowns from the distinct values actually present in
+// the catalogue (preserving the current selection), so the floors/makes shown
+// always match how stock is labelled — no hard-coded list to drift out of date.
+function stPopulateFilters() {
+  const products = State.products || [];
+  const makeSel = el('st-make'), locSel = el('st-location');
+  if (makeSel) {
+    const cur = makeSel.value;
+    const makes = [...new Set(products.map(p => p.brand).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    makeSel.innerHTML = '<option value="">All makes</option>' +
+      makes.map(m => `<option value="${escapeAttr(m)}"${m === cur ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
+  }
+  if (locSel) {
+    const cur = locSel.value;
+    const locs = [...new Set(products.map(p => p.location).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const hasBlank = products.some(p => !p.location);
+    locSel.innerHTML = '<option value="">All locations</option>' +
+      locs.map(l => `<option value="${escapeAttr(l)}"${l === cur ? ' selected' : ''}>${escapeHtml(l)}</option>`).join('') +
+      (hasBlank ? `<option value="__none__"${cur === '__none__' ? ' selected' : ''}>No location set</option>` : '');
+  }
+}
+
+// Sort the (already-filtered) take list in place per the Sort dropdown.
+function stSortList(list, sort) {
+  const q = p => totalQty(p);
+  const byTitle = (a, b) => String(a.title || '').localeCompare(String(b.title || ''));
+  switch (sort) {
+    case 'qty-asc':  list.sort((a, b) => q(a) - q(b) || byTitle(a, b)); break;
+    case 'qty-desc': list.sort((a, b) => q(b) - q(a) || byTitle(a, b)); break;
+    case 'make':     list.sort((a, b) => String(a.brand || '').localeCompare(String(b.brand || '')) || byTitle(a, b)); break;
+    case 'location': list.sort((a, b) => String(a.location || '').localeCompare(String(b.location || '')) || byTitle(a, b)); break;
+    case 'title':    list.sort(byTitle); break;
+  }
+  return list;
 }
 function stFiltered() {
   const q = (el('st-search')?.value || '');
   const filter = el('st-filter')?.value || 'remaining';
+  const make = el('st-make')?.value || '';
+  const loc = el('st-location')?.value || '';
   const checked = State._stChecked || new Set();
   return (State.products || []).filter(p => {
     if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model, ...(p.partNumbers||[]).map(x => x.code))) return false;
+    if (make && p.brand !== make) return false;
+    if (loc === '__none__') { if (p.location) return false; }
+    else if (loc && p.location !== loc) return false;
     const isChecked = checked.has(String(p.id));
     if (filter === 'remaining' && isChecked) return false;
     if (filter === 'counted' && !isChecked) return false;
@@ -2634,7 +2688,7 @@ function stFill() {
   if (s.getBoundingClientRect().top < window.innerHeight + 300) { stRenderChunk(); requestAnimationFrame(stFill); }
 }
 function stPaint() {
-  const list = stFiltered();
+  const list = stSortList(stFiltered(), el('st-sort')?.value || 'default');
   State._stItems = list; State._stShown = 0;
   const wrap = el('st-list');
   if (!wrap) return;
