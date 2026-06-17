@@ -2,11 +2,14 @@
 // products). See services/bundles.js for the availability model.
 const express = require('express');
 const { query } = require('../db');
-const { requireAdmin } = require('../middleware/auth');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 const bundles = require('../services/bundles');
 
 const router = express.Router();
+// Populate req.user from the bearer token before the per-route admin checks —
+// requireAdmin 401s without it (this was the "Save failed: unauthorized" bug).
+router.use(requireAuth);
 
 // GET /api/bundles — every bundle with its components, derived availability, and
 // the component titles/stock so the UI can render and explain each one.
