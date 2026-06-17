@@ -10,6 +10,7 @@
 const { query, withTx } = require('../db');
 const shopify = require('./shopify');
 const ebay = require('./ebay');
+const bundles = require('./bundles');
 
 // Try to find a warehouse product for an order's SKU.
 // Many sales channels send SKUs in slightly different formats. This helper
@@ -301,6 +302,14 @@ async function pullEbay() {
                VALUES ($1,$2,$3,$4)`,
               [productId, -qty, `sale_${channelCode}`, sale.rows[0].id]
             );
+          } else {
+            // No singular product matched — this may be a BUNDLE listing. If so,
+            // deduct each component (e.g. selling the Left+Right set reduces both)
+            // so the individual listings can't oversell.
+            try {
+              const bundle = await bundles.findBundleBySku(li.sku, c);
+              if (bundle) await bundles.deductBundleComponents(c, bundle.id, qty, sale.rows[0].id, `sale_bundle_${channelCode}`);
+            } catch (e) { console.warn('[sync.pullEbay] bundle deduct failed:', e.message); }
           }
         }
         for (const li of order.lineItems || []) {
@@ -418,6 +427,13 @@ async function runFullSync() {
     console.error('[sync] auto-dispatch failed:', e.message);
     results.autoDispatch = { error: e.message };
   }
+
+  // Backstop: after all stock changes (sales, propagation), recompute every
+  // bundle's availability and push it to eBay — catches component sales that
+  // came in through this sync without an immediate per-product recompute.
+  try { results.bundles = await bundles.recomputeAllBundles(); }
+  catch (e) { console.error('[sync] bundle recompute failed:', e.message); results.bundles = { error: e.message }; }
+
   return results;
 }
 

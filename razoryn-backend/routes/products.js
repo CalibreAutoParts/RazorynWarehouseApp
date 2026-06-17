@@ -497,6 +497,13 @@ async function pushProductStockToChannels(productId) {
     result.ebay.push({ error: e.message });
   }
 
+  // This product's stock just changed — refresh any bundle that uses it as a
+  // component so the bundle's eBay quantity tracks the scarcest part.
+  try {
+    const res = await require('../services/bundles').recomputeBundlesForProduct(productId);
+    if (res && res.length) result.bundles = res;
+  } catch (e) { /* best-effort — never fail the stock push over a bundle */ }
+
   return result;
 }
 

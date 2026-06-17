@@ -74,6 +74,7 @@ app.use('/api/audit',        require('./routes/audit'));
 app.use('/api/pricing',      require('./routes/pricing'));
 app.use('/api/settings',     require('./routes/settings'));
 app.use('/api/listings',     require('./routes/listings'));
+app.use('/api/bundles',      require('./routes/bundles'));
 app.use('/api/notes',        require('./routes/notes'));
 app.use('/api/brand',        require('./routes/brand'));
 app.use('/api/dispatch',     require('./routes/dispatch'));

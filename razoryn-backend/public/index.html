@@ -10099,8 +10099,116 @@ async function loadReconcile(force) {
   }
   State.reconcile = r;
   State.reconcileUnlinked = null; // fresh data — clear the pending-unlink banner
+  // Pull bundles too so eBay-only rows can show "this listing is a bundle" and
+  // offer the make/manage actions. Keyed by eBay item id.
+  try {
+    const br = await Api.get('/api/bundles');
+    State.bundles = br.bundles || [];
+    State.bundleByEbay = {}; for (const b of State.bundles) if (b.ebayItemId) State.bundleByEbay[String(b.ebayItemId)] = b;
+  } catch (e) { State.bundles = State.bundles || []; State.bundleByEbay = State.bundleByEbay || {}; }
   Task.done(taskId, `${r.summary.groups} groups`);
   renderReconcile();
+}
+
+// ── eBay bundle editor ───────────────────────────────────────────────────────
+// A bundle wraps an existing eBay listing with 2+ warehouse components. The eBay
+// quantity is kept = the most sets the scarcest component allows, and each
+// component is deducted when the bundle sells (so the singles can't oversell).
+let _bundleEdit = null;
+function openBundleEditor(bundleId, seed) {
+  if (bundleId) {
+    const b = (State.bundles || []).find(x => x.id === bundleId);
+    if (!b) { toast('Bundle not found — refresh', 'warn'); return; }
+    _bundleEdit = { id: b.id, ebayItemId: b.ebayItemId, storeCode: b.storeCode || '', sku: b.sku || '', title: b.title || '',
+      components: b.components.map(c => ({ productId: c.productId, qty: c.qty, title: c.title || '', sku: c.sku || '' })) };
+  } else {
+    _bundleEdit = { id: null, ebayItemId: seed.ebayItemId, storeCode: seed.storeCode || '', sku: seed.sku || '', title: seed.title || '', components: [] };
+  }
+  modal({
+    title: _bundleEdit.id ? 'Manage bundle' : 'Make bundle listing',
+    wide: true,
+    body: `<div id="bundle-edit-body">${bundleEditBody()}</div>`,
+    actions: [
+      ...(_bundleEdit.id ? [{ label: 'Delete bundle', onClick: () => deleteBundle(_bundleEdit.id) }] : []),
+      { label: 'Cancel', onClick: closeModal },
+      { label: _bundleEdit.id ? 'Save bundle' : 'Create bundle', primary: true, onClick: saveBundle },
+    ],
+  });
+  setTimeout(() => { const s = el('bundle-search'); if (s) s.focus(); }, 60);
+}
+function bundleEditBody() {
+  const b = _bundleEdit;
+  const comps = b.components.length ? b.components.map(c => `
+    <div style="display:flex;gap:8px;align-items:center;padding:6px 8px;border-bottom:1px solid var(--line-2)">
+      <div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600">${escapeHtml(c.title || ('#' + c.productId))}</div>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(c.sku || '')}</div></div>
+      <label style="font-size:11px;color:var(--ink-soft)">×<input type="number" min="1" step="1" value="${c.qty}" style="width:54px;margin-left:4px" onchange="bundleSetQty(${c.productId}, this.value)"></label>
+      <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="bundleRemoveComponent(${c.productId})">✕</button>
+    </div>`).join('') : '<div style="padding:10px;color:var(--ink-soft);font-size:12px">No components yet — add at least two below.</div>';
+  return `
+    <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">eBay listing <strong>${escapeHtml(b.title || b.ebayItemId || '')}</strong>${b.ebayItemId ? ` · <span style="font-family:ui-monospace,monospace">${escapeHtml(b.ebayItemId)}</span>` : ''}.<br>The eBay quantity becomes the most sets these components can make; each is deducted when the bundle sells.</div>
+    <div class="field"><label>Bundle SKU / eBay custom label <span style="color:var(--ink-soft);font-weight:400">— required so a bundle sale deducts the components</span></label>
+      <input id="bundle-sku" value="${escapeAttr(b.sku || '')}" placeholder="e.g. MG4-GRILLE-SET" style="font-family:ui-monospace,monospace"></div>
+    <div style="font-weight:600;font-size:12px;margin:10px 0 4px">Components (qty per set)</div>
+    <div style="border:1px solid var(--line);border-radius:8px;margin-bottom:10px">${comps}</div>
+    <div class="field"><label>Add a component</label>
+      <input id="bundle-search" placeholder="Search warehouse products by name / SKU…" autocomplete="off" oninput="bundleSearchProducts(this.value)"></div>
+    <div id="bundle-search-results" style="max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:8px"><div style="padding:10px;color:var(--ink-soft);font-size:12px">Type to search.</div></div>`;
+}
+function bundleRerender() { const w = el('bundle-edit-body'); if (w) w.innerHTML = bundleEditBody(); }
+function bundleSyncSkuFromInput() { const i = el('bundle-sku'); if (i) _bundleEdit.sku = i.value; }
+function bundleSearchProducts(q) {
+  const wrap = el('bundle-search-results'); if (!wrap) return;
+  q = (q || '').toLowerCase().trim();
+  if (!q) { wrap.innerHTML = '<div style="padding:10px;color:var(--ink-soft);font-size:12px">Type to search.</div>'; return; }
+  const chosen = new Set(_bundleEdit.components.map(c => c.productId));
+  const matches = (State.products || []).filter(p => !chosen.has(p.id) && matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model)).slice(0, 40);
+  wrap.innerHTML = matches.length ? matches.map(p => `
+    <div style="display:flex;gap:8px;align-items:center;padding:6px 8px;border-bottom:1px solid var(--line-2)">
+      <div style="flex:1;min-width:0"><div style="font-size:13px">${escapeHtml(p.title)}</div>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')} · ${totalQty(p)} in stock</div></div>
+      <button class="btn btn-primary btn-sm" onclick="bundleAddComponent(${p.id})">Add</button>
+    </div>`).join('') : '<div style="padding:10px;color:var(--ink-soft);font-size:12px">No matches.</div>';
+}
+function bundleAddComponent(productId) {
+  const p = (State.products || []).find(x => x.id === productId); if (!p) return;
+  if (_bundleEdit.components.some(c => c.productId === productId)) return;
+  bundleSyncSkuFromInput();
+  _bundleEdit.components.push({ productId: p.id, qty: 1, title: p.title, sku: p.sku || '' });
+  bundleRerender();
+  const s = el('bundle-search'); if (s) { s.value = ''; s.focus(); }
+}
+function bundleRemoveComponent(productId) {
+  bundleSyncSkuFromInput();
+  _bundleEdit.components = _bundleEdit.components.filter(c => c.productId !== productId);
+  bundleRerender();
+}
+function bundleSetQty(productId, qty) {
+  const c = _bundleEdit.components.find(x => x.productId === productId);
+  if (c) c.qty = Math.max(1, parseInt(qty) || 1);
+}
+async function saveBundle() {
+  bundleSyncSkuFromInput();
+  const b = _bundleEdit;
+  if (b.components.length < 2) { toast('Add at least two components', 'warn'); return; }
+  const payload = { ebayItemId: b.ebayItemId, storeCode: b.storeCode, sku: (b.sku || '').trim() || null, title: b.title, components: b.components.map(c => ({ productId: c.productId, qty: c.qty })) };
+  try {
+    const r = b.id ? await Api.patch('/api/bundles/' + b.id, payload) : await Api.post('/api/bundles', payload);
+    closeModal();
+    toast(`Bundle saved — eBay availability ${r.available}${r.pushed ? ' (pushed to eBay)' : ''}`, r.error ? 'warn' : 'success', 6000);
+    loadReconcile(true);
+  } catch (e) {
+    const code = e.data?.error;
+    const msg = code === 'bundle_exists_for_listing' ? 'This eBay listing is already a bundle.'
+      : code === 'need_at_least_two_components' ? 'Add at least two components.'
+      : (e.data?.message || e.message);
+    toast('Save failed: ' + msg, 'error');
+  }
+}
+async function deleteBundle(id) {
+  if (!confirm('Remove this bundle? The eBay listing and component stock are left untouched — it just stops being quantity-managed here.')) return;
+  try { await Api.delete('/api/bundles/' + id); closeModal(); toast('Bundle removed', 'success'); loadReconcile(true); }
+  catch (e) { toast('Delete failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 function setReconcileFilter(f) { State.reconcileFilter = f; renderReconcile(); }
@@ -10507,8 +10615,19 @@ function reconcileRow(g) {
         <div style="margin-top:6px">${g.ebay.map(e => `<button class="btn btn-outline btn-sm" onclick='${linkSearchClick("shopify", { ebayItemId: String(e.itemId), label: String(e.itemId) })}'>🔗 Link ${escapeHtml(e.itemId)} → Shopify</button>`).join(' ')}</div>`;
     }
   } else if (g.onEbay && !g.onShopify) {
-    status = `<span class="pill" style="font-size:10px;background:var(--blue-light);color:var(--blue)">eBay only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">No Shopify match${g.onWarehouse ? '' : ' or warehouse product'}.</div>`;
-    status += `<div style="margin-top:6px">${g.ebay.map(e => `<button class="btn btn-outline btn-sm" onclick='${linkSearchClick("shopify", { ebayItemId: String(e.itemId), label: e.title || String(e.itemId) })}'>🔗 Find Shopify product to link</button>`).join(' ')}</div>`;
+    // Is any of this group's eBay listings already a managed bundle?
+    const bundleByEbay = State.bundleByEbay || {};
+    const bundleHere = g.ebay.map(e => bundleByEbay[String(e.itemId)]).find(Boolean);
+    if (bundleHere) {
+      status = `<span class="pill" style="font-size:10px;background:var(--amber-light);color:var(--amber)">📦 Bundle</span>`
+        + `<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">${bundleHere.components.length} components · eBay availability <strong style="color:var(--ink)">${bundleHere.available}</strong></div>`
+        + `<div style="margin-top:6px"><button class="btn btn-outline btn-sm" onclick="openBundleEditor(${bundleHere.id})">📦 Manage bundle</button></div>`;
+    } else {
+      status = `<span class="pill" style="font-size:10px;background:var(--blue-light);color:var(--blue)">eBay only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">No Shopify match${g.onWarehouse ? '' : ' or warehouse product'}.</div>`;
+      status += `<div style="margin-top:6px">${g.ebay.map(e => `<button class="btn btn-outline btn-sm" onclick='${linkSearchClick("shopify", { ebayItemId: String(e.itemId), label: e.title || String(e.itemId) })}'>🔗 Find Shopify product to link</button>`).join(' ')}</div>`;
+      const e0 = g.ebay[0];
+      status += `<div style="margin-top:6px"><button class="btn btn-outline btn-sm" onclick='${('openBundleEditor(null,' + JSON.stringify({ ebayItemId: String(e0.itemId), storeCode: e0.storeCode || "", sku: e0.sku || "", title: e0.title || "" }) + ')').replace(/&/g, "&amp;").replace(/'/g, "&#39;")}' title="Make this eBay listing a bundle of 2+ warehouse items">📦 Make bundle</button></div>`;
+    }
   } else if (g.onShopify && !g.onEbay) {
     status = `<span class="pill" style="font-size:10px;background:var(--blue-light);color:var(--blue)">Shopify only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Not on eBay.</div>`;
     // Create a new eBay listing from a linked warehouse product (Shopify → eBay).
