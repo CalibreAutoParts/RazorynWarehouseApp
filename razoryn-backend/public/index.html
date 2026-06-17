@@ -8817,6 +8817,8 @@ function renderKB() {
       </div>
       <h3 style="font-size:14px;margin:6px 0 10px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">📘 Guides</h3>
       <div class="grid-2" id="kb-guides"></div>
+      <h3 style="font-size:14px;margin:20px 0 10px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em">📖 How-to &amp; feature notes</h3>
+      <div class="grid-2" id="kb-notes"></div>
       <div class="toolbar" style="margin-top:18px"><input type="search" class="search-input" id="kb-search" placeholder="Search..."></div>
       <div id="kb-list"></div>
     </div>
@@ -8826,6 +8828,13 @@ function renderKB() {
       <div class="kb-cat">▶ Walkthrough · ${g.steps.length} steps</div>
       <div class="kb-title">${g.title}</div>
       <div class="kb-desc">${g.desc}</div>
+    </div>
+  `).join('');
+  el('kb-notes').innerHTML = FEATURE_NOTES.map(n => `
+    <div class="kb-card" onclick="openFeatureNote('${n.id}')" style="border-left:3px solid var(--blue)">
+      <div class="kb-cat">📖 How-to</div>
+      <div class="kb-title">${n.title}</div>
+      <div class="kb-desc">${n.desc}</div>
     </div>
   `).join('');
   function paint() {
@@ -8852,6 +8861,108 @@ function renderKB() {
   }
   paint();
   el('kb-search').addEventListener('input', paint);
+}
+
+/* ==========================================================
+   FEATURE NOTES — written how-to references shown on the Key Information page.
+   Plain text/HTML (no animation); each opens in a readable modal. Keep these
+   updated when workflows change so staff always have a single source of truth.
+   ========================================================== */
+const FEATURE_NOTES = [
+  {
+    id: 'fn-create-list-workflow',
+    title: 'Listing a new part — the full workflow',
+    desc: 'Shopify first, copy to eBay, import to warehouse, then set the eBay price. The recommended order.',
+    body: `
+      <ol style="line-height:1.8;font-size:14px;padding-left:18px">
+        <li><strong>Create the product on Shopify</strong> — optimise the title, set the category and all metafields there (Shopify is best for this).</li>
+        <li><strong>Copy it to eBay</strong> via <strong>Bulk Editor</strong> → tick the listing → <em>Push selected → Shopify</em> / push to eBay. This also links the listing.</li>
+        <li><strong>Import into the warehouse</strong> — go to <strong>Listing Links → ⇩ Import Shopify into warehouse</strong> (this also runs automatically every few hours). It creates the warehouse record, pulls the photo, links eBay, and adopts the real SKU.</li>
+        <li><strong>Stock-take</strong> the item so quantities are correct (it appears in the take automatically once imported).</li>
+        <li><strong>Set the eBay price</strong> — see “Setting prices” below. eBay is the master; Shopify, bank and cash follow.</li>
+      </ol>`,
+  },
+  {
+    id: 'fn-pricing',
+    title: 'Setting prices — eBay is the master',
+    desc: 'Set each item’s eBay price; Shopify/bank/cash are derived automatically from your percentages.',
+    body: `
+      <p style="font-size:14px;line-height:1.7"><strong>The model:</strong> eBay is the highest (master) price. Shopify &amp; bank-transfer = eBay − [Shopify %]. Cash = eBay − [Cash %]. Set those percentages once on the <strong>Pricing</strong> page (“Pricing model”).</p>
+      <p style="font-size:14px;line-height:1.7"><strong>Set one item’s eBay price:</strong></p>
+      <ol style="line-height:1.8;font-size:14px;padding-left:18px">
+        <li>Go to <strong>Pricing → “Set eBay price per item”</strong>.</li>
+        <li>Search the product, type its <strong>eBay price</strong>, hit <strong>Set</strong> (or Enter).</li>
+        <li>The app pushes that price to the live eBay listing, then derives &amp; pushes the Shopify price; <strong>cash &amp; bank update automatically</strong> (they’re calculated live from the eBay price).</li>
+      </ol>
+      <p style="font-size:13px;color:var(--ink-soft);line-height:1.6">Notes: items marked <em>price-locked</em> keep their manual Shopify price (eBay is still set). If a listing isn’t linked to eBay yet, the master price is still recorded so the derived prices work. To rewrite ALL Shopify prices from eBay at once, use “Recalculate Shopify prices from eBay”.</p>`,
+  },
+  {
+    id: 'fn-bundles',
+    title: 'eBay bundles (sets of multiple parts)',
+    desc: 'Sell 2+ items as one eBay listing; stock and quantity are managed automatically from the components.',
+    body: `
+      <p style="font-size:14px;line-height:1.7">A <strong>bundle</strong> is an existing eBay listing (e.g. a Left+Right set) made up of 2+ warehouse parts. The bundle itself is <strong>not</strong> stocked or stock-taken — only the individual parts are.</p>
+      <p style="font-size:14px;line-height:1.7"><strong>To make a bundle:</strong></p>
+      <ol style="line-height:1.8;font-size:14px;padding-left:18px">
+        <li>List the bundle on eBay as normal (with its own price, e.g. £300).</li>
+        <li>In <strong>Listing Links → eBay only</strong>, find that listing and click <strong>📦 Make bundle</strong>.</li>
+        <li>Add each component part and the quantity per set (e.g. Left ×1, Right ×1), set a unique <strong>bundle SKU</strong> (the eBay custom label), and Create.</li>
+      </ol>
+      <p style="font-size:14px;line-height:1.7"><strong>How it behaves:</strong></p>
+      <ul style="line-height:1.8;font-size:14px;padding-left:18px">
+        <li>eBay quantity = the most sets the <strong>scarcest part</strong> allows (e.g. 5 Left + 3 Right → bundle qty 3).</li>
+        <li>Sell a single part → the bundle quantity drops if it can no longer be fulfilled; if a part hits 0 the bundle shows <strong>out of stock</strong> on eBay.</li>
+        <li>Sell the bundle → <strong>each component’s stock is reduced</strong>, so the individual listings can’t oversell. (This needs the bundle SKU to match the eBay listing’s custom label.)</li>
+      </ul>
+      <p style="font-size:13px;color:var(--ink-soft)">Manage or remove a bundle from the same eBay-only row (📦 Manage bundle). Deleting a bundle leaves the eBay listing and stock untouched — it just stops being quantity-managed.</p>`,
+  },
+  {
+    id: 'fn-import-shopify',
+    title: 'Import Shopify into warehouse',
+    desc: 'Pulls Shopify products that aren’t in the warehouse yet (photos, eBay links, SKUs). Runs automatically too.',
+    body: `
+      <p style="font-size:14px;line-height:1.7">Use <strong>Listing Links → ⇩ Import Shopify into warehouse</strong> when a product exists on Shopify but isn’t showing in Inventory / the stock-take. It is safe to run repeatedly.</p>
+      <p style="font-size:14px;line-height:1.7">It will:</p>
+      <ul style="line-height:1.8;font-size:14px;padding-left:18px">
+        <li>Create a warehouse record for any Shopify product that’s missing one.</li>
+        <li>Fill in the <strong>photo</strong> and Shopify IDs on items imported earlier without them.</li>
+        <li>Re-link to <strong>eBay</strong> by SKU and backfill the eBay price.</li>
+        <li>Adopt the <strong>real SKU</strong> where a product still has a temporary <code>SHOPIFY-…</code> code (after you’ve given it a SKU in Shopify).</li>
+      </ul>
+      <p style="font-size:13px;color:var(--ink-soft)">It also runs on its own in the background every few hours. Products <strong>with no SKU</strong> are skipped and listed so you can add a SKU in Shopify, then re-run. The import runs in the background — the button returns straight away and the result appears when it finishes.</p>`,
+  },
+  {
+    id: 'fn-duplicates',
+    title: 'Duplicates & “Mixed SKU” — diagnosing and fixing',
+    desc: 'Why a listing is flagged a duplicate and how to fix it (unlink, re-code, delete).',
+    body: `
+      <p style="font-size:14px;line-height:1.7">In <strong>Listing Links</strong>, the <strong>Duplicates</strong> and <strong>Mixed SKU</strong> tabs flag groups where more than one listing landed together — usually because two different parts share one code, or a wrong link ties them.</p>
+      <ol style="line-height:1.8;font-size:14px;padding-left:18px">
+        <li>Open the flagged row and click <strong>🔎 Diagnose</strong>. It shows exactly what bound the items together (a shared SKU, an eBay↔Shopify link, etc.) and highlights the one that “spans different parts”.</li>
+        <li>Fix from there: <strong>✕ Unlink</strong> a wrong link, or <strong>✏️ re-code</strong> the mis-coded listing so each part has its own SKU. Use <strong>🗑</strong> to delete a true duplicate listing.</li>
+        <li>Each listing now shows its own SKU in the row, so mismatches are easy to spot.</li>
+      </ol>`,
+  },
+  {
+    id: 'fn-stocktake',
+    title: 'Monthly stock-take — filter & sort',
+    desc: 'Filter by make and location (floor), sort by quantity, and count off the list. New items appear automatically.',
+    body: `
+      <p style="font-size:14px;line-height:1.7"><strong>Stock Check → Monthly stock-take</strong> lists every item to count; tick each as you go (progress is saved and resumes across devices).</p>
+      <ul style="line-height:1.8;font-size:14px;padding-left:18px">
+        <li><strong>Make</strong> dropdown — show only one brand.</li>
+        <li><strong>Location</strong> dropdown — show only one location/floor (e.g. Ground Floor, Mezzanine Floor). Options come from how your stock is labelled.</li>
+        <li><strong>Sort</strong> — by quantity (high→low / low→high), make, location, or title.</li>
+        <li><strong>Remaining / Counted / All</strong> — track progress.</li>
+      </ul>
+      <p style="font-size:13px;color:var(--ink-soft)">New items added (here or on another device) appear automatically when you open the take — no manual refresh needed. Scanning a barcode jumps straight to that item.</p>`,
+  },
+];
+
+function openFeatureNote(id) {
+  const n = FEATURE_NOTES.find(x => x.id === id);
+  if (!n) return;
+  modal({ title: n.title, wide: true, body: n.body, actions: [{ label: 'Close', onClick: closeModal }] });
 }
 
 /* ==========================================================
