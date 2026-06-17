@@ -213,14 +213,16 @@ if (cron.validate(cronExpr)) {
 // products appear in Inventory + the stock-take and get their eBay link, without
 // anyone clicking "Import Shopify into warehouse". This pulls the full catalogue
 // (heavier than the order sync), so it runs less often by default.
-const importCronExpr = (process.env.WAREHOUSE_IMPORT_CRON || '0 */3 * * *').trim(); // every 3h
+const importCronExpr = (process.env.WAREHOUSE_IMPORT_CRON || '0 */6 * * *').trim(); // every 6h
 if (cron.validate(importCronExpr)) {
   cron.schedule(importCronExpr, async () => {
     console.log(`[cron warehouse-import] tick @ ${new Date().toISOString()} (${importCronExpr})`);
     try {
       const listings = require('./routes/listings');
-      const r = await listings.runShopifyWarehouseImport();
-      console.log('[cron warehouse-import] complete', JSON.stringify({
+      const r = await listings.runWarehouseImport('cron');
+      if (r && r.skipped) console.log('[cron warehouse-import] skipped — a run is already in progress');
+      else if (r && r.error) console.warn('[cron warehouse-import] not run:', r.error);
+      else console.log('[cron warehouse-import] complete', JSON.stringify({
         created: r.created, enriched: r.enriched, ebayLinked: r.ebayLinked,
         skuFixed: r.skuFixed, pricesBackfilled: r.pricesBackfilled, skippedNoSku: r.skippedNoSku,
       }));

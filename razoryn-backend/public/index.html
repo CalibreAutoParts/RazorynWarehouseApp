@@ -4080,9 +4080,14 @@ function startCamera() {
   });
 }
 function stopCamera() {
-  if (scanner && scanner.isScanning) scanner.stop().then(()=>scanner.clear()).catch(()=>{});
-  el('scan-start').style.display='inline-flex';
-  el('scan-stop').style.display='none';
+  // Null the shared handle up front so a queued onScanSuccess can't re-enter, and
+  // clean up the local instance asynchronously. Guard the buttons — stopCamera is
+  // called from routeTo on navigation, when these elements no longer exist.
+  const inst = scanner;
+  scanner = null;
+  if (inst && inst.isScanning) inst.stop().then(() => inst.clear()).catch(() => {});
+  const s = el('scan-start'); if (s) s.style.display = 'inline-flex';
+  const t = el('scan-stop'); if (t) t.style.display = 'none';
 }
 // Debounce tracker — html5-qrcode fires onScanSuccess 5-15x for one physical
 // scan, which spammed toasts and re-rendered the result card repeatedly.
@@ -10077,6 +10082,8 @@ async function importShopifyToWarehouse(btn) {
       }
     }
     if (!r) { Task.done(taskId, 'Still running'); toast('Import is still running in the background — refresh shortly to see the results.', 'info', 7000); return; }
+    if (r.error) { Task.fail(taskId, 'Import failed'); toast('Import failed: ' + r.error, 'error'); return; }
+    if (r.skipped) { Task.done(taskId, 'Already running'); toast('An import is already in progress — try again shortly.', 'info', 6000); return; }
     Task.done(taskId, `Imported ${r.created}`);
     await Store.refresh('products').catch(() => {});
     let msg = `Imported ${r.created} new, updated ${r.enriched || 0} (photo/links), linked ${r.ebayLinked || 0} to eBay, set ${r.pricesBackfilled || 0} eBay price(s).`;
@@ -15501,6 +15508,7 @@ async function editCompetitor(id) {
   const c = (State.comp.list || []).find(x => x.id === id);
   if (!c) return;
   const name = await promptInput({ title: 'Edit competitor', label: 'Name', value: c.name || '' }); if (name === null) return;
+  if (!name.trim()) { toast('Name cannot be empty', 'warn'); return; }
   const username = c.source_type === 'ebay' ? await promptInput({ title: 'Edit competitor', label: 'eBay username', value: c.ebay_username || '' }) : c.ebay_username;
   if (c.source_type === 'ebay' && username === null) return;
   const activeStr = await promptInput({ title: 'Edit competitor', label: 'Active? (yes/no)', value: c.active ? 'yes' : 'no' });

@@ -1605,6 +1605,7 @@ async function runShopifyWarehouseImport() {
             await query(`UPDATE products SET sku = $2, barcode = $3, updated_at = now() WHERE id = $1`,
               [productId, sku, v.barcode || sku]);
             skuFixed++;
+            row.sku = sku; // keep the in-memory cache consistent with the new code
             prodBySku.set(sku.toUpperCase(), row);
           } catch (e) {
             if (e.code === '23505') { errors.push({ sku, error: 'real SKU already used by another warehouse product — resolve the duplicate first' }); }
@@ -1671,34 +1672,41 @@ async function runShopifyWarehouseImport() {
 // Background job state — the import pulls ALL Shopify products + ALL eBay
 // listings, which can take well over the platform's HTTP timeout. So the route
 // kicks it off and returns immediately; the UI polls /status for the result.
-let _importState = { running: false, startedAt: null, finishedAt: null, result: null, error: null };
+let _importState = { running: false, startedAt: null, finishedAt: null, result: null, error: null, triggeredBy: null };
 
-async function startWarehouseImport(triggeredBy) {
-  if (_importState.running) return _importState;
+// Single-flight gate shared by BOTH the manual button and the cron, so the two
+// can never run a full import concurrently (which would race upserts on the same
+// products/mirror_links rows). Returns { skipped:'already_running' } when busy.
+async function runImportSingleFlight(triggeredBy) {
+  if (_importState.running) return { skipped: 'already_running' };
   _importState = { running: true, startedAt: Date.now(), finishedAt: null, result: null, error: null, triggeredBy: triggeredBy || 'manual' };
-  // Detached — do NOT await; the caller responds right away.
-  (async () => {
-    try {
-      const result = await runShopifyWarehouseImport();
-      _importState.result = result;
-    } catch (e) {
-      _importState.error = e.message;
-      console.error('[import-shopify-to-warehouse] failed:', e.message);
-    } finally {
-      _importState.running = false;
-      _importState.finishedAt = Date.now();
-    }
-  })();
-  return _importState;
+  try {
+    const result = await runShopifyWarehouseImport();
+    _importState.result = result;
+    return result;
+  } catch (e) {
+    _importState.error = e.message;
+    throw e;
+  } finally {
+    _importState.running = false;
+    _importState.finishedAt = Date.now();
+  }
+}
+
+// Kick the import off in the background (detached). The worker sets running:true
+// synchronously before its first await, so _importState reflects the run at once.
+function startWarehouseImport(triggeredBy) {
+  if (_importState.running) return false;
+  runImportSingleFlight(triggeredBy).catch(e => console.error('[import-shopify-to-warehouse] failed:', e.message));
+  return true;
 }
 
 // POST /api/listings/import-shopify-to-warehouse — kick off the background import.
 router.post('/import-shopify-to-warehouse', requireAdmin, async (req, res) => {
   if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
-  const already = _importState.running;
-  await startWarehouseImport('manual');
-  if (!already) await audit(req, 'import_shopify_to_warehouse', null, null, { triggeredBy: 'manual' });
-  res.json({ started: !already, alreadyRunning: already });
+  const started = startWarehouseImport('manual');
+  if (started) await audit(req, 'import_shopify_to_warehouse', null, null, { triggeredBy: 'manual' });
+  res.json({ started, alreadyRunning: !started });
 });
 
 // GET /api/listings/import-shopify-to-warehouse/status — poll for progress/result.
@@ -2746,6 +2754,7 @@ router.post('/resolve-legacy-links', requireAdmin, async (req, res) => {
   });
 });
 
-// Expose the worker so the sync cron can run the warehouse import automatically.
-router.runShopifyWarehouseImport = runShopifyWarehouseImport;
+// Expose the single-flight runner so the sync cron can run the warehouse import
+// automatically without racing a manual run.
+router.runWarehouseImport = runImportSingleFlight;
 module.exports = router;
