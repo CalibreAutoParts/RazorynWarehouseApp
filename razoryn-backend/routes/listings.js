@@ -1526,24 +1526,40 @@ async function runShopifyWarehouseImport() {
     if (r.sku) prodBySku.set(String(r.sku).trim().toUpperCase(), r);
   }
 
-  // eBay listings keyed by normalised SKU AND by itemId — to re-link by code and
-  // to backfill the eBay price even on items that are already linked.
-  const ebayBySku = new Map();
-  const ebayByItemId = new Map();
-  try {
-    const listings = await getAllListingsAcrossStores();
-    for (const l of listings) {
-      ebayByItemId.set(String(l.itemId), l);
-      const k = normCode(l.sku); if (k && !ebayBySku.has(k)) ebayBySku.set(k, l);
-    }
-  } catch (e) { console.warn('[import] eBay pull failed (links/prices skipped):', e.message); }
-
   const { rows: mlRows } = await query(`SELECT ebay_item_id, shopify_product_id FROM mirror_links`);
   const linkedSpid = new Set();
   const itemIdBySpid = new Map();
   for (const r of mlRows) {
     const spid = String(r.shopify_product_id || '');
     if (spid) { linkedSpid.add(spid); if (!itemIdBySpid.has(spid)) itemIdBySpid.set(spid, String(r.ebay_item_id)); }
+  }
+
+  // Decide whether the eBay pull is worth it BEFORE doing it — pulling every
+  // store's active listings is the most quota-expensive step, and on the steady
+  // 6-hourly cron there's usually nothing left to link or price. We only need
+  // eBay data if some product is new, unlinked, or still missing its eBay price.
+  const realSku = (v) => (v.sku && !/^SHOPIFY-/i.test(v.sku)) ? String(v.sku).trim() : null;
+  const needsEbay = variants.some(v => {
+    const sku = realSku(v); if (!sku) return false;
+    const spid = String(v.shopify_product_id || '');
+    const row = prodBySpid.get(spid) || prodBySku.get(sku.toUpperCase());
+    if (!row) return true;                                   // new product → may link/price
+    if (spid && !linkedSpid.has(spid)) return true;          // unlinked → may link
+    return !(row.price_ebay > 0);                            // linked but no eBay price
+  });
+
+  // eBay listings keyed by normalised SKU AND by itemId — to re-link by code and
+  // to backfill the eBay price even on items that are already linked.
+  const ebayBySku = new Map();
+  const ebayByItemId = new Map();
+  if (needsEbay) {
+    try {
+      const listings = await getAllListingsAcrossStores();
+      for (const l of listings) {
+        ebayByItemId.set(String(l.itemId), l);
+        const k = normCode(l.sku); if (k && !ebayBySku.has(k)) ebayBySku.set(k, l);
+      }
+    } catch (e) { console.warn('[import] eBay pull failed (links/prices skipped):', e.message); }
   }
 
   let created = 0, enriched = 0, ebayLinked = 0, pricesBackfilled = 0, skuFixed = 0, skippedExisting = 0, skippedNoSku = 0;

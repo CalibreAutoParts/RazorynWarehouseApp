@@ -1503,13 +1503,25 @@ const Store = {
       staff:         () => Api.get('/api/staff').then(r => (r.users || []).map(adaptUser)),
     };
     if (!map[key]) return;
-    try { State[key] = await map[key](); }
+    try { State[key] = await map[key](); this._lastRefresh[key] = Date.now(); }
     catch (e) {
       if (e.status !== 403) console.warn('[store] refresh', key, e.message);
       // keep previous value, ensure it stays an array
       if (!Array.isArray(State[key])) State[key] = [];
     }
   },
+
+  _lastRefresh: {},
+  // Refresh only if the cached data is older than maxAgeMs. Lets pages that want
+  // fresh-on-entry data (stock-take, scan) pick up items added elsewhere without
+  // re-downloading the whole catalogue on every single navigation — which was
+  // freezing the UI for ~a minute after a sync.
+  async refreshIfStale(key, maxAgeMs = 60000) {
+    if (Date.now() - (this._lastRefresh[key] || 0) < maxAgeMs) return false;
+    await this.refresh(key);
+    return true;
+  },
+
 
   // No-ops kept for backwards compatibility with any older calls.
   async load(_key, def) { return def; },
@@ -2538,7 +2550,7 @@ function renderStockTake() {
   // every new warehouse item appears in the take without a manual push.
   el('st-progress-text') && (el('st-progress-text').textContent = 'Loading latest items…');
   Promise.all([
-    Store.refresh('products').catch(() => {}),
+    Store.refreshIfStale('products').catch(() => {}),
     Api.get('/api/stock-checks/this-month')
       .then(r => { State._stChecked = new Set((r.productIds || []).map(String)); })
       .catch(() => {}),
@@ -4051,9 +4063,10 @@ function renderScan() {
   el('scan-manual').addEventListener('keypress', e => {
     if (e.key === 'Enter') { handleManualSearch(el('scan-manual').value); el('scan-manual').value=''; }
   });
-  // Refresh the catalogue when the page opens so items added since this device
-  // booted (or added on another device) are scannable straight away.
-  Store.refresh('products').catch(() => {});
+  // Refresh the catalogue when the page opens (throttled) so items added since
+  // this device booted (or on another device) are scannable, without re-pulling
+  // the whole catalogue on every navigation.
+  Store.refreshIfStale('products').catch(() => {});
 }
 function switchScanMethod(m) {
   document.querySelectorAll('.seg button[data-method]').forEach(b => b.classList.toggle('active', b.dataset.method===m));
