@@ -10646,8 +10646,10 @@ function renderReconcile() {
       ${segBtn('linked', 'Linked', s.fullyLinked)}
       ${segBtn('ebay-only', 'eBay only', s.ebayOnly)}
       ${segBtn('shopify-only', 'Shopify only', s.shopifyOnly)}
+      ${segBtn('bundles', '📦 Bundles', (State.bundles || []).length)}
     </div>
 
+    ${filter === 'bundles' ? bundlesPanelHtml() : `
     <div class="card" style="margin-bottom:14px"><div class="card-body" style="padding:10px 14px">
       <input id="rec-search" placeholder="Search SKU, title or item ID…" oninput="reconcileSearch(this.value)" value="${escapeAttr(State.reconcileSearch || '')}" style="width:100%">
     </div></div>
@@ -10666,7 +10668,56 @@ function renderReconcile() {
         </table>
       </div>
       ${groups.length > 300 ? `<div style="padding:10px;text-align:center;font-size:12px;color:var(--ink-soft)">Showing first 300 of ${groups.length}. Use search to narrow down.</div>` : ''}
-    </div>`;
+    </div>`}`;
+}
+
+// Dedicated panel listing every bundle with its components, derived eBay
+// availability and per-bundle actions.
+function bundlesPanelHtml() {
+  const list = State.bundles || [];
+  if (!list.length) {
+    return `<div class="card"><div class="card-body" style="padding:24px;text-align:center;color:var(--ink-soft)">
+      <div style="font-weight:600;color:var(--ink);margin-bottom:6px">No bundles yet</div>
+      Create one from the <strong>eBay only</strong> tab — find the bundle's eBay listing and click <strong>📦 Make bundle</strong>.
+    </div></div>`;
+  }
+  const rows = list.map(b => {
+    const out = b.available <= 0;
+    const comps = (b.components || []).map(c => {
+      const short = c.stock != null && c.stock < c.qty;
+      return `<div style="font-size:11px;${short ? 'color:var(--red)' : 'color:var(--ink-soft)'}">${escapeHtml(c.title || ('#' + c.productId))} <strong>×${c.qty}</strong> · ${c.missing ? 'missing' : (c.stock != null ? c.stock + ' in stock' : '—')}</div>`;
+    }).join('');
+    return `<tr>
+      <td>
+        <div style="font-weight:600;font-size:13px">${escapeHtml(b.title || '(eBay listing)')}</div>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${b.sku ? escapeHtml(b.sku) : '<span style="color:var(--amber)">no bundle SKU — sales will not deduct</span>'}</div>
+        ${b.ebayItemId ? `<div style="font-size:11px;font-family:ui-monospace,monospace"><a href="https://www.ebay.co.uk/itm/${escapeAttr(b.ebayItemId)}" target="_blank" rel="noopener" style="color:var(--brand-primary)">${escapeHtml(b.ebayItemId)} ↗</a></div>` : ''}
+      </td>
+      <td style="white-space:nowrap"><span class="pill" style="font-size:11px;${out ? 'background:var(--red-light);color:var(--red)' : 'background:var(--green-light);color:var(--green)'};font-weight:700">${out ? 'Out of stock' : b.available + ' available'}</span></td>
+      <td>${comps}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-outline btn-sm" onclick="openBundleEditor(${b.id})">Manage</button>
+        <button class="btn btn-ghost btn-sm" onclick="recomputeBundle(${b.id})" title="Recompute availability & push to eBay now">↻</button>
+        <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="deleteBundle(${b.id})" title="Remove bundle">🗑</button>
+      </td>
+    </tr>`;
+  }).join('');
+  return `<div class="card">
+    <div class="card-body" style="padding:10px 14px;font-size:12px;color:var(--ink-soft)">
+      ${list.length} bundle${list.length === 1 ? '' : 's'}. Availability = the most sets the scarcest component allows; it's pushed to eBay automatically when component stock changes. Create new bundles from the <strong>eBay only</strong> tab.
+    </div>
+    <div style="overflow-x:auto"><table class="table">
+      <thead><tr><th style="min-width:200px">Bundle</th><th>eBay availability</th><th style="min-width:220px">Components</th><th style="min-width:150px">Actions</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+  </div>`;
+}
+async function recomputeBundle(id) {
+  try {
+    const r = await Api.post('/api/bundles/' + id + '/recompute', {});
+    toast(`Recomputed — availability ${r.available}${r.pushed ? ' (pushed to eBay)' : ''}`, r.error ? 'warn' : 'success', 5000);
+    loadReconcile(true);
+  } catch (e) { toast('Recompute failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 function reconcileRow(g) {
