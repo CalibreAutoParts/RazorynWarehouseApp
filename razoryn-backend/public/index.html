@@ -1997,7 +1997,12 @@ function enterApp() {
         returns: typeof renderReturns === 'function' ? renderReturns : null,
         schedule: typeof renderSchedule === 'function' ? renderSchedule : null,
       };
-      if (repaintMap[State.page]) repaintMap[State.page]();
+      // Don't blow away a text box the user is actively typing in — repainting
+      // replaces #content and would wipe their input/focus mid-keystroke. The
+      // refreshed data stays in State and paints on the next idle tick.
+      const a = document.activeElement;
+      const typing = a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && document.getElementById('content')?.contains(a);
+      if (repaintMap[State.page] && !typing) repaintMap[State.page]();
       refreshNavCounts();
     } catch (e) {
       // silent — surfacing every poll failure would be noisy
@@ -2385,6 +2390,12 @@ if (!window._beforeUnloadBound) {
 // data-label, so the CSS card layout can show "Header: value" with no sidescroll.
 // Runs on every content/table re-render via a debounced MutationObserver.
 function labelizeTables(root) {
+  // The per-cell data-label is ONLY consumed by the stacked-card table layout at
+  // ≤768px (see the @media block). On wider screens it's pure wasted DOM work —
+  // and this runs on every content mutation via the observer below, so walking
+  // every table×row×cell on desktop needlessly blocks the main thread (e.g. it
+  // made text inputs feel frozen for a moment after navigating to a busy page).
+  if (window.innerWidth > 768) return;
   (root || document).querySelectorAll('table.table').forEach(tbl => {
     const ths = tbl.querySelectorAll('thead th');
     if (!ths.length) return;
@@ -2404,13 +2415,15 @@ function initTableLabeller() {
   const content = document.getElementById('content');
   if (!content || content._tableLabelBound) return;
   content._tableLabelBound = true;
-  const obs = new MutationObserver(() => {
-    // Setting data-label is an attribute change (not childList) so it won't
-    // re-trigger this observer. Debounce to one pass per frame.
-    if (_labelizeRaf) return;
+  const schedule = () => {
+    // On desktop there's nothing to do — don't even schedule a frame.
+    if (window.innerWidth > 768 || _labelizeRaf) return;
     _labelizeRaf = requestAnimationFrame(() => { _labelizeRaf = null; labelizeTables(content); });
-  });
+  };
+  const obs = new MutationObserver(schedule);
   obs.observe(content, { childList: true, subtree: true });
+  // Re-label if the window is resized down into the stacked-table breakpoint.
+  window.addEventListener('resize', schedule);
   labelizeTables(content);
 }
 
@@ -3644,7 +3657,11 @@ function renderInventory() {
   if (sentinel) State._invObserver.observe(sentinel);
 
   paint();
-  ['inv-search','inv-brand','inv-stock'].forEach(id => el(id).addEventListener('input', paint));
+  // Debounce the text search — filtering the whole catalogue (can be 10k+ rows)
+  // on every keystroke made typing stutter. Selects stay immediate via 'change'.
+  let _invPaintT;
+  el('inv-search').addEventListener('input', () => { clearTimeout(_invPaintT); _invPaintT = setTimeout(paint, 160); });
+  ['inv-brand','inv-stock'].forEach(id => el(id).addEventListener('change', paint));
 }
 
 // Diagnose why a SKU that appears in Listing Mirror doesn't show in inventory.
