@@ -1714,7 +1714,7 @@ function showInstallPill(onInstall, iosText) {
     pill.innerHTML = `<span style="font-weight:500">${iosText}</span><button aria-label="Dismiss" style="background:none;border:0;color:#fff;font-size:18px;cursor:pointer;line-height:1;padding:0 2px">×</button>`;
     pill.querySelector('button').onclick = dismissInstallPill;
   } else {
-    pill.innerHTML = `<span>📲 Install app</span><button id="pwa-install-go" style="background:#fff;color:#111;border:0;border-radius:999px;padding:5px 12px;font-weight:700;cursor:pointer">Install</button><button aria-label="Dismiss" style="background:none;border:0;color:#fff;font-size:18px;cursor:pointer;line-height:1;padding:0 2px">×</button>`;
+    pill.innerHTML = `<span>📲 Install app</span><button id="pwa-install-go" style="background:var(--white);color:var(--ink);border:0;border-radius:999px;padding:5px 12px;font-weight:700;cursor:pointer">Install</button><button aria-label="Dismiss" style="background:none;border:0;color:#fff;font-size:18px;cursor:pointer;line-height:1;padding:0 2px">×</button>`;
     pill.querySelector('#pwa-install-go').onclick = async () => { await onInstall(); dismissInstallPill(); };
     pill.querySelectorAll('button')[1].onclick = dismissInstallPill;
   }
@@ -2842,13 +2842,13 @@ function renderPushAllStatus(s) {
   const sh = res.shopify || {}, eb = res.ebay || {};
   const pct = res.total ? Math.round((res.done / res.total) * 100) : 0;
   const scope = res.countedOnly ? 'counted stock' : 'all stock';
-  let tone = '#2563eb', heading = '';
+  let tone = 'var(--blue)', heading = '';
   if (s.state === 'running') { heading = `Pushing ${scope} to channels… ${res.done || 0}/${res.total || 0} (${pct}%)`; }
   else if (s.state === 'done') {
     const anyErr = (sh.errors || 0) || (eb.errors || 0);
-    tone = anyErr ? '#b45309' : '#15803d';
+    tone = anyErr ? 'var(--amber)' : '#15803d';
     heading = anyErr ? '⚠ Stock push finished with some errors' : '✓ Stock push complete';
-  } else if (s.state === 'error') { tone = '#b91c1c'; heading = '✕ Stock push failed'; }
+  } else if (s.state === 'error') { tone = 'var(--red)'; heading = '✕ Stock push failed'; }
   const byStore = res.ebayFailuresByStore && Object.keys(res.ebayFailuresByStore).length
     ? Object.entries(res.ebayFailuresByStore).map(([st, n]) => `${escapeHtml(st)}: ${n}`).join(', ')
     : '';
@@ -2856,8 +2856,8 @@ function renderPushAllStatus(s) {
     ? escapeHtml(s.error)
     : `Shopify: ${sh.pushed || 0} updated${sh.errors ? `, ${sh.errors} failed` : ''} · `
       + `eBay: ${eb.pushed || 0} updated${eb.errors ? `, ${eb.errors} failed` : ''}${eb.skipped ? `, ${eb.skipped} skipped` : ''}`
-      + (byStore ? `<br><span style="color:#b45309">eBay failures by store — ${byStore}</span>` : '')
-      + (res.sampleEbayError ? `<br><span style="color:#b91c1c">eBay error e.g.: ${escapeHtml(String(res.sampleEbayError).slice(0, 160))}</span>` : '');
+      + (byStore ? `<br><span style="color:var(--amber)">eBay failures by store — ${byStore}</span>` : '')
+      + (res.sampleEbayError ? `<br><span style="color:var(--red)">eBay error e.g.: ${escapeHtml(String(res.sampleEbayError).slice(0, 160))}</span>` : '');
   // List of the actual failed listings, collapsed behind a toggle so it doesn't
   // dominate the page. Each links straight to the eBay item.
   const fails = Array.isArray(res.ebayFailures) ? res.ebayFailures : [];
@@ -2865,19 +2865,19 @@ function renderPushAllStatus(s) {
   if (fails.length) {
     const rowsHtml = fails.map(f => {
       const id = f.itemId ? String(f.itemId) : '';
-      const link = id ? `<a href="https://www.ebay.co.uk/itm/${encodeURIComponent(id)}" target="_blank" rel="noopener" style="color:#2563eb">${escapeHtml(id)}</a>` : '<span style="color:#94a3b8">—</span>';
+      const link = id ? `<a href="https://www.ebay.co.uk/itm/${encodeURIComponent(id)}" target="_blank" rel="noopener" style="color:var(--blue)">${escapeHtml(id)}</a>` : '<span style="color:var(--ink-soft)">—</span>';
       return `<tr>
         <td style="padding:3px 8px;white-space:nowrap">${link}</td>
         <td style="padding:3px 8px">${escapeHtml(f.store || '')}</td>
         <td style="padding:3px 8px">${escapeHtml(f.sku || '')}</td>
-        <td style="padding:3px 8px;color:#b91c1c">${escapeHtml(String(f.error || '').slice(0, 140))}</td>
+        <td style="padding:3px 8px;color:var(--red)">${escapeHtml(String(f.error || '').slice(0, 140))}</td>
       </tr>`;
     }).join('');
     failsHtml = `<details style="margin-top:8px">
-      <summary style="cursor:pointer;font-size:13px;color:#b45309">Show ${fails.length} failed listing${fails.length === 1 ? '' : 's'}${(eb.errors || 0) > fails.length ? ` (of ${eb.errors})` : ''}</summary>
+      <summary style="cursor:pointer;font-size:13px;color:var(--amber)">Show ${fails.length} failed listing${fails.length === 1 ? '' : 's'}${(eb.errors || 0) > fails.length ? ` (of ${eb.errors})` : ''}</summary>
       <div style="overflow:auto;max-height:280px;margin-top:6px">
         <table style="width:100%;border-collapse:collapse;font-size:12px">
-          <thead><tr style="text-align:left;color:#64748b">
+          <thead><tr style="text-align:left;color:var(--ink-soft)">
             <th style="padding:3px 8px">eBay item</th><th style="padding:3px 8px">Store</th><th style="padding:3px 8px">SKU</th><th style="padding:3px 8px">Error</th>
           </tr></thead>
           <tbody>${rowsHtml}</tbody>
@@ -2894,13 +2894,13 @@ function renderPushAllStatus(s) {
     const rowsHtml = skips.map(f => `<tr>
         <td style="padding:3px 8px;white-space:nowrap">${escapeHtml(f.sku || '—')}</td>
         <td style="padding:3px 8px">${escapeHtml(f.title || '')}</td>
-        <td style="padding:3px 8px;color:#64748b">${escapeHtml(reasonLabel(f.reason))}</td>
+        <td style="padding:3px 8px;color:var(--ink-soft)">${escapeHtml(reasonLabel(f.reason))}</td>
       </tr>`).join('');
     skipsHtml = `<details style="margin-top:8px">
-      <summary style="cursor:pointer;font-size:13px;color:#64748b">Show ${skips.length} skipped item${skips.length === 1 ? '' : 's'}${(eb.skipped || 0) > skips.length ? ` (of ${eb.skipped})` : ''} — not listed on eBay</summary>
+      <summary style="cursor:pointer;font-size:13px;color:var(--ink-soft)">Show ${skips.length} skipped item${skips.length === 1 ? '' : 's'}${(eb.skipped || 0) > skips.length ? ` (of ${eb.skipped})` : ''} — not listed on eBay</summary>
       <div style="overflow:auto;max-height:280px;margin-top:6px">
         <table style="width:100%;border-collapse:collapse;font-size:12px">
-          <thead><tr style="text-align:left;color:#64748b">
+          <thead><tr style="text-align:left;color:var(--ink-soft)">
             <th style="padding:3px 8px">SKU</th><th style="padding:3px 8px">Item</th><th style="padding:3px 8px">Reason</th>
           </tr></thead>
           <tbody>${rowsHtml}</tbody>
@@ -2911,8 +2911,8 @@ function renderPushAllStatus(s) {
   box.style.display = 'block';
   box.innerHTML = `<div class="card"><div class="card-body" style="padding:12px 16px;border-left:4px solid ${tone}">
     <div style="font-weight:600;color:${tone}">${escapeHtml(heading)}</div>
-    <div style="margin-top:4px;font-size:13px;color:#475569">${detail}</div>
-    ${s.state === 'running' ? `<div style="margin-top:8px;height:6px;background:#e2e8f0;border-radius:4px;overflow:hidden"><div style="height:100%;width:${pct}%;background:${tone};transition:width .3s"></div></div>` : ''}
+    <div style="margin-top:4px;font-size:13px;color:var(--ink-soft)">${detail}</div>
+    ${s.state === 'running' ? `<div style="margin-top:8px;height:6px;background:var(--line-2);border-radius:4px;overflow:hidden"><div style="height:100%;width:${pct}%;background:${tone};transition:width .3s"></div></div>` : ''}
     ${failsHtml}
     ${skipsHtml}
   </div></div>`;
@@ -9819,9 +9819,9 @@ function renderBulkEditor() {
 
       <div class="card" style="margin-bottom:14px"><div class="card-body" style="font-size:12.5px;line-height:1.8">
         <strong>How syncing works —</strong>
-        ${chip('#e8f0fe', '#1a56db', 'eBay → Shopify')} read from eBay, write to Shopify ·
-        ${chip('#fff4e5', '#b45309', '→ eBay')} push to the live eBay listing ·
-        ${chip('#e7f6ec', '#137333', '→ eBay + Shopify + Warehouse')} pushes everywhere.<br>
+        ${chip('var(--blue-light)', 'var(--blue)', 'eBay → Shopify')} read from eBay, write to Shopify ·
+        ${chip('var(--amber-light)', 'var(--amber)', '→ eBay')} push to the live eBay listing ·
+        ${chip('var(--green-light)', 'var(--green)', '→ eBay + Shopify + Warehouse')} pushes everywhere.<br>
         <span style="color:var(--ink-soft)">Master model: <strong>Warehouse</strong> owns SKU / price / stock · <strong>eBay</strong> is the source for listings, specifics, images &amp; descriptions · <strong>Shopify</strong> is a downstream channel that receives.</span>
       </div></div>
 
@@ -9870,10 +9870,10 @@ function renderBulkEditor() {
 
 function bulkActionsPanelHtml() {
   const arrow = (bg, fg, t) => `<span class="pill" style="background:${bg};color:${fg};font-weight:600;font-size:10px;margin-left:auto;white-space:nowrap">${t}</span>`;
-  const E2S = arrow('#e8f0fe', '#1a56db', 'eBay → Shopify');
-  const TO_E = arrow('#fff4e5', '#b45309', '→ eBay');
-  const ALL = arrow('#e7f6ec', '#137333', '→ eBay + Shopify + Whse');
-  const WH = arrow('#e7f6ec', '#137333', 'Warehouse → eBay + Shopify');
+  const E2S = arrow('var(--blue-light)', 'var(--blue)', 'eBay → Shopify');
+  const TO_E = arrow('var(--amber-light)', 'var(--amber)', '→ eBay');
+  const ALL = arrow('var(--green-light)', 'var(--green)', '→ eBay + Shopify + Whse');
+  const WH = arrow('var(--green-light)', 'var(--green)', 'Warehouse → eBay + Shopify');
   // Each column = one "source of truth", so the direction is unmistakable.
   const group = (accent, title, note, buttons) => `
     <div style="border:1px solid var(--line);border-top:3px solid ${accent};border-radius:10px;background:var(--bg-soft);flex:1;min-width:300px;display:flex;flex-direction:column">
@@ -9886,15 +9886,15 @@ function bulkActionsPanelHtml() {
   const btn = (fn, label, chip, sub) => `<button class="btn btn-outline btn-sm" style="display:flex;align-items:center;gap:8px;text-align:left;width:100%" onclick="${fn}"><span style="flex:1">${label}${sub ? `<span style="display:block;font-size:10px;color:var(--ink-soft);font-weight:400">${sub}</span>` : ''}</span>${chip}</button>`;
   return `
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px">
-      ${group('#137333', 'Warehouse is master', 'The warehouse owns SKU, price &amp; stock — push them out to the channels.',
+      ${group('var(--green)', 'Warehouse is master', 'The warehouse owns SKU, price &amp; stock — push them out to the channels.',
         btn('pushWarehouseSku()', '🔁 Push warehouse SKU', WH, 'Force eBay + Shopify to match the printed warehouse SKU') +
         btn('bulkPriceEdit()', '💷 Set / adjust price', ALL, 'Updates warehouse + derives channel prices') +
         btn('bulkTitleEdit()', '✏️ Bulk title (find &amp; replace)', ALL, 'Rewrites titles on eBay + Shopify'))}
-      ${group('#1a56db', 'Mirror eBay → Shopify', 'eBay is the source; these write to the linked Shopify product.',
+      ${group('var(--blue)', 'Mirror eBay → Shopify', 'eBay is the source; these write to the linked Shopify product.',
         btn('mirrorSelected()', '⬆ Create / update on Shopify', E2S, 'Mirror the listing (title, price, images, metafields)') +
         btn('resyncSelectedImages()', '📷 Re-push images', E2S, 'Replace Shopify images only') +
         btn('pullSpecificsToShopify()', '📥 Item specifics → metafields', E2S, 'eBay specifics → Shopify custom data'))}
-      ${group('#b45309', 'Edit eBay listing', 'Writes to the live eBay listing.',
+      ${group('var(--amber)', 'Edit eBay listing', 'Writes to the live eBay listing.',
         btn('applyEbayTemplate()', '🏷 Apply description template', TO_E, 'Wrap the description in your branded HTML') +
         btn('bulkSyncSkus()', '🔧 Normalise SKU from row', ALL, 'Use the SKU typed in each row, set it everywhere'))}
     </div>`;
@@ -10209,7 +10209,7 @@ async function scanShopifyDuplicates() {
     <div style="border:1px solid var(--line);border-radius:8px;margin-bottom:10px;overflow:hidden">
       <div style="background:var(--bg-soft);padding:8px 12px;font-size:12px;font-weight:700;display:flex;gap:8px;align-items:center">
         <span style="font-family:ui-monospace,monospace">${escapeHtml(g.code)}</span>
-        <span class="pill" style="background:#fdecea;color:#b42318;font-size:10px">${g.count} products</span>
+        <span class="pill" style="background:var(--red-light);color:var(--red);font-size:10px">${g.count} products</span>
       </div>
       <table class="table" style="font-size:12px;margin:0"><tbody>
         ${g.products.map(p => `<tr>
@@ -10335,7 +10335,7 @@ function renderReconcile() {
   // a Refresh — this lets staff unlink several rows, then refresh once.
   const nUnlinked = State.reconcileUnlinked ? State.reconcileUnlinked.size : 0;
   const unlinkBanner = nUnlinked
-    ? `<div style="padding:10px 12px;background:#e8f0fe;color:#1a56db;font-size:12px;border-radius:6px;margin-bottom:12px;display:flex;align-items:center;gap:10px">
+    ? `<div style="padding:10px 12px;background:var(--blue-light);color:var(--blue);font-size:12px;border-radius:6px;margin-bottom:12px;display:flex;align-items:center;gap:10px">
         <span>🔗 <strong>${nUnlinked}</strong> link(s) removed. Status &amp; duplicate counts update when you refresh.</span>
         <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="refreshLinks(true)">⟳ Refresh now</button>
       </div>`
@@ -10418,7 +10418,7 @@ function reconcileRow(g) {
   // Status + actions
   let status = '';
   if (g.dupEbay || g.dupShopify) {
-    status = `<span class="pill" style="font-size:10px;background:#fde8e8;color:var(--red);font-weight:600">⚠ Duplicate</span>`;
+    status = `<span class="pill" style="font-size:10px;background:var(--red-light);color:var(--red);font-weight:600">⚠ Duplicate</span>`;
     // Explain what kind of duplicate this is + the right fix, so staff don't keep
     // re-coding when the real issue is a bad link or a true duplicate listing.
     const linkedEbay = g.ebay.filter(e => e.linkedShopifyId);
@@ -10442,10 +10442,10 @@ function reconcileRow(g) {
         <div style="margin-top:6px">${g.ebay.map(e => `<button class="btn btn-outline btn-sm" onclick='${linkSearchClick("shopify", { ebayItemId: String(e.itemId), label: String(e.itemId) })}'>🔗 Link ${escapeHtml(e.itemId)} → Shopify</button>`).join(' ')}</div>`;
     }
   } else if (g.onEbay && !g.onShopify) {
-    status = `<span class="pill" style="font-size:10px;background:#e8f0fe;color:#1a56db">eBay only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">No Shopify match${g.onWarehouse ? '' : ' or warehouse product'}.</div>`;
+    status = `<span class="pill" style="font-size:10px;background:var(--blue-light);color:var(--blue)">eBay only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">No Shopify match${g.onWarehouse ? '' : ' or warehouse product'}.</div>`;
     status += `<div style="margin-top:6px">${g.ebay.map(e => `<button class="btn btn-outline btn-sm" onclick='${linkSearchClick("shopify", { ebayItemId: String(e.itemId), label: e.title || String(e.itemId) })}'>🔗 Find Shopify product to link</button>`).join(' ')}</div>`;
   } else if (g.onShopify && !g.onEbay) {
-    status = `<span class="pill" style="font-size:10px;background:#e8f0fe;color:#1a56db">Shopify only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Not on eBay.</div>`;
+    status = `<span class="pill" style="font-size:10px;background:var(--blue-light);color:var(--blue)">Shopify only</span><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Not on eBay.</div>`;
     // Create a new eBay listing from a linked warehouse product (Shopify → eBay).
     const creatable = g.warehouse.filter(w => w.shopifyProductId);
     if (creatable.length) {
@@ -10457,7 +10457,7 @@ function reconcileRow(g) {
     status = `<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink-soft)">Warehouse only</span>`;
   }
 
-  const rowBg = (g.dupEbay || g.dupShopify) ? 'background:#fff5f5' : '';
+  const rowBg = (g.dupEbay || g.dupShopify) ? 'background:var(--red-light)' : '';
   return `<tr style="${rowBg}">
     <td style="font-family:ui-monospace,monospace;font-size:11px">${g.skus.length ? g.skus.map(escapeHtml).join('<br>') : '<span style="color:var(--ink-soft)">no SKU</span>'}</td>
     <td>${ebayCell}</td>
@@ -10475,7 +10475,7 @@ function openDiagnose(key) {
   if (!g) { toast('Group not found — refresh and try again', 'warn'); return; }
   const wg = g.whyGrouped || { sharedSkus: [], linkEdges: [], whEdges: [] };
   const kindLabel = { ebay: 'eBay', shopify: 'Shopify', warehouse: 'Warehouse' };
-  const suspectPill = '<span class="pill" style="font-size:9px;background:#fde8e8;color:var(--red);font-weight:600">spans different parts</span>';
+  const suspectPill = '<span class="pill" style="font-size:9px;background:var(--red-light);color:var(--red);font-weight:600">spans different parts</span>';
   const okPill = '<span class="pill green" style="font-size:9px">consistent</span>';
 
   const recodeBtn = (en) => {
@@ -10499,7 +10499,7 @@ function openDiagnose(key) {
 
   if (wg.sharedSkus && wg.sharedSkus.length) {
     body += `<div style="font-weight:600;font-size:12px;margin:8px 0 4px">Shared SKU / code</div>`;
-    body += wg.sharedSkus.map(s => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;${s.suspect ? 'background:#fff5f5' : ''}">
+    body += wg.sharedSkus.map(s => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;${s.suspect ? 'background:var(--red-light)' : ''}">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
           <span style="font-family:ui-monospace,monospace;font-weight:600">${escapeHtml(s.sku || '')}</span>
           ${s.suspect ? suspectPill : okPill}
@@ -10512,7 +10512,7 @@ function openDiagnose(key) {
 
   if (wg.linkEdges && wg.linkEdges.length) {
     body += `<div style="font-weight:600;font-size:12px;margin:8px 0 4px">eBay ↔ Shopify links</div>`;
-    body += wg.linkEdges.map(e => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;${e.suspect ? 'background:#fff5f5' : ''}">
+    body += wg.linkEdges.map(e => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;${e.suspect ? 'background:var(--red-light)' : ''}">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
           <span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(e.ebayItemId)}</span>
           <span style="color:var(--ink-soft)">→</span>
@@ -10526,7 +10526,7 @@ function openDiagnose(key) {
 
   if (wg.whEdges && wg.whEdges.some(e => e.suspect)) {
     body += `<div style="font-weight:600;font-size:12px;margin:8px 0 4px">Warehouse ↔ Shopify links</div>`;
-    body += wg.whEdges.filter(e => e.suspect).map(e => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;background:#fff5f5">
+    body += wg.whEdges.filter(e => e.suspect).map(e => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;background:var(--red-light)">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
           <span style="font-size:11px">Warehouse #${escapeHtml(String(e.warehouseId))}</span>
           <span style="color:var(--ink-soft)">→</span>
@@ -10848,7 +10848,7 @@ async function openCreateEbayListing(productId) {
         <textarea id="ce-desc" rows="5" placeholder="Type or paste a description (HTML allowed). Leave blank and the Shopify product description is used."></textarea>
       </div>
       ${policiesConfigured ? '' : `
-        <div style="font-size:12px;padding:10px;background:#fff8e6;border:1px solid #f0d171;border-radius:6px;color:#5a4400;margin-top:8px">
+        <div style="font-size:12px;padding:10px;background:var(--amber-light);border:1px solid var(--amber);border-radius:6px;color:var(--amber);margin-top:8px">
           <strong>⚠ No business policies set</strong> for ${escapeHtml(stores.length > 1 ? 'this store' : 'eBay')}. The listing will likely fail because eBay requires payment / shipping / return policies. Set them in Settings → eBay listing defaults first.
         </div>
       `}
@@ -11368,7 +11368,7 @@ async function refreshLinkMirrorStoresStatus() {
     let html = '';
     if (disabled.length) {
       html += `
-        <div style="background:#fff8e6;border:1px solid #f0d171;color:#5a4400;padding:10px 14px;border-radius:6px;font-size:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="background:var(--amber-light);border:1px solid var(--amber);color:var(--amber);padding:10px 14px;border-radius:6px;font-size:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <div style="font-size:18px">⏸</div>
           <div style="flex:1;min-width:220px">
             <strong>Store${disabled.length === 1 ? '' : 's'} disabled:</strong> ${disabled.map(s => escapeHtml(s.name)).join(', ')}.
@@ -11381,7 +11381,7 @@ async function refreshLinkMirrorStoresStatus() {
     }
     if (noToken.length) {
       html += `
-        <div style="background:#fee;border:1px solid #faa;color:#900;padding:8px 12px;border-radius:6px;font-size:12px;margin-top:6px">
+        <div style="background:var(--red-light);border:1px solid var(--red);color:var(--red);padding:8px 12px;border-radius:6px;font-size:12px;margin-top:6px">
           <strong>Store${noToken.length === 1 ? '' : 's'} with no token:</strong> ${noToken.map(s => escapeHtml(s.name)).join(', ')} — set the auth env var in Railway.
         </div>
       `;
@@ -11685,7 +11685,7 @@ function showEbayErrorsModal(storeErrors, fullResponse, quota) {
   `).join('');
   // Different remediation block based on whether it's a quota issue or auth issue
   const remediation = isRateLimit ? `
-    <div style="font-size:12px;color:#5a4400;background:#fff8e6;border:1px solid #f0d171;padding:12px;border-radius:6px;line-height:1.7;margin-top:8px">
+    <div style="font-size:12px;color:var(--amber);background:var(--amber-light);border:1px solid var(--amber);padding:12px;border-radius:6px;line-height:1.7;margin-top:8px">
       <strong>This is a quota issue — your tokens are fine.</strong><br><br>
       Your eBay developer app has hit its daily Trading API quota for one or more call-names. The quota is <strong>per-app</strong> (shared across all stores using the same <code>EBAY_CLIENT_ID</code>), not per-store.<br><br>
       <strong>Three options:</strong><br>
@@ -11780,12 +11780,12 @@ function renderQuotaTable(quota, quotaError) {
   const rows = quota.map(q => {
     const name = q.callName || '— total —';
     const dailyPct = q.dailyHardLimit > 0 ? Math.round((q.dailyUsage / q.dailyHardLimit) * 100) : 0;
-    const barColor = dailyPct >= 90 ? '#dc2626' : dailyPct >= 70 ? '#f59e0b' : '#10b981';
+    const barColor = dailyPct >= 90 ? 'var(--red)' : dailyPct >= 70 ? '#f59e0b' : '#10b981';
     return `
       <tr>
         <td style="padding:6px 10px;font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(name)}</td>
         <td style="padding:6px 10px;font-size:12px;white-space:nowrap">${q.dailyUsage.toLocaleString()} / ${q.dailyHardLimit.toLocaleString()}</td>
-        <td style="padding:6px 10px;font-size:11px;color:${dailyPct >= 90 ? '#dc2626' : 'var(--ink-soft)'}">${dailyPct}%</td>
+        <td style="padding:6px 10px;font-size:11px;color:${dailyPct >= 90 ? 'var(--red)' : 'var(--ink-soft)'}">${dailyPct}%</td>
         <td style="padding:6px 10px;width:100px"><div style="height:6px;background:var(--bg-soft);border-radius:3px;overflow:hidden"><div style="height:100%;width:${Math.min(100, dailyPct)}%;background:${barColor}"></div></div></td>
       </tr>
     `;
@@ -13662,9 +13662,9 @@ function renderSettings() {
           </div>
 
           <div style="font-size:12px;font-weight:600;margin-bottom:8px">Dark mode <span style="font-weight:400;color:var(--ink-soft)">— use a light/white version so it shows on the dark top bar</span></div>
-          <div id="logo-dark-current-wrap" style="display:none;margin-bottom:10px;padding:14px;background:#1a1d23;border-radius:8px">
+          <div id="logo-dark-current-wrap" style="display:none;margin-bottom:10px;padding:14px;background:var(--ink-2);border-radius:8px">
             <img id="logo-dark-current-img" src="" alt="Current dark logo" style="max-height:70px;max-width:280px;padding:8px;display:block">
-            <div id="logo-dark-current-name" style="font-size:11px;color:#9aa3b2;margin-top:6px;font-family:ui-monospace,monospace"></div>
+            <div id="logo-dark-current-name" style="font-size:11px;color:var(--ink-soft);margin-top:6px;font-family:ui-monospace,monospace"></div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
             <input type="file" id="logo-dark-upload-file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml,.png,.jpg,.jpeg,.gif,.webp,.svg" onchange="onLogoUpload(this,'dark')" style="font-size:12px">
@@ -13898,7 +13898,7 @@ function previewEbayTemplate() {
     title: 'EXAMPLE — Front Bumper 2019-2024', sku: 'CAP-0123', partno: '1694311-00-F',
   }[k] ?? ''));
   const html = fill(el('tpl-header').value) +
-    '<p style="color:#333">Your listing\'s existing description appears here.</p>' +
+    '<p style="color:var(--ink-soft)">Your listing\'s existing description appears here.</p>' +
     fill(el('tpl-footer').value);
   const box = el('tpl-preview');
   if (box) box.innerHTML = `<div style="border:1px solid var(--line);border-radius:8px;padding:6px;background:#fff"><iframe style="width:100%;height:360px;border:0" srcdoc="${html.replace(/"/g, '&quot;')}"></iframe></div>`;
@@ -14581,15 +14581,15 @@ function showStockTakeBanner(day, monthKey, dismissedKey) {
   if (document.getElementById('stocktake-banner')) return;
   const banner = document.createElement('div');
   banner.id = 'stocktake-banner';
-  banner.style.cssText = 'background:#fff8e6;border:1px solid #f0d171;color:#5a4400;padding:14px 18px;border-radius:8px;margin:0 0 16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:13px;line-height:1.5';
+  banner.style.cssText = 'background:var(--amber-light);border:1px solid var(--amber);color:var(--amber);padding:14px 18px;border-radius:8px;margin:0 0 16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:13px;line-height:1.5';
   banner.innerHTML = `
     <div style="font-size:22px">📋</div>
     <div style="flex:1;min-width:200px">
       <strong>Monthly stock-take reminder</strong>
-      <div style="font-size:12px;margin-top:2px;color:#7a5a00">You scheduled a physical stock check for day ${day} of each month. Start the guided checklist and tick off each item as you count it.</div>
+      <div style="font-size:12px;margin-top:2px;color:var(--amber)">You scheduled a physical stock check for day ${day} of each month. Start the guided checklist and tick off each item as you count it.</div>
     </div>
-    <button class="btn btn-primary btn-sm" onclick="routeTo('stocktake'); dismissStockTakeBanner('${dismissedKey}');" style="background:#5a4400;color:#fff;border:0">Start stock-take</button>
-    <button class="btn btn-ghost btn-sm" onclick="dismissStockTakeBanner('${dismissedKey}')" style="color:#5a4400">Dismiss for this month</button>
+    <button class="btn btn-primary btn-sm" onclick="routeTo('stocktake'); dismissStockTakeBanner('${dismissedKey}');" style="background:var(--amber);color:#fff;border:0">Start stock-take</button>
+    <button class="btn btn-ghost btn-sm" onclick="dismissStockTakeBanner('${dismissedKey}')" style="color:var(--amber)">Dismiss for this month</button>
   `;
   // Insert at the top of the main content area. The dashboard has an outer
   // container — we just prepend.
@@ -14628,7 +14628,7 @@ function paintTemplatesEditor() {
   container.innerHTML = templates.map(t => `
     <details class="tpl-row" data-id="${t.id}" style="border:1px solid var(--line);border-radius:6px;background:var(--bg-soft)">
       <summary style="cursor:pointer;padding:10px 14px;display:flex;align-items:center;gap:8px;font-weight:500;font-size:13px">
-        ${t.isBuiltin ? '<span style="font-size:10px;color:var(--ink-soft);padding:2px 6px;background:var(--white);border-radius:3px">BUILT-IN</span>' : '<span style="font-size:10px;color:var(--blue);padding:2px 6px;background:#e5f0ff;border-radius:3px">CUSTOM</span>'}
+        ${t.isBuiltin ? '<span style="font-size:10px;color:var(--ink-soft);padding:2px 6px;background:var(--white);border-radius:3px">BUILT-IN</span>' : '<span style="font-size:10px;color:var(--blue);padding:2px 6px;background:var(--blue-light);border-radius:3px">CUSTOM</span>'}
         ${escapeHtml(t.label)}
         <span style="margin-left:auto;font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(t.key)}</span>
       </summary>
@@ -15687,8 +15687,8 @@ function compShipLabel(l) {
   return 'P&P n/a';
 }
 function compMatchBadge(l) {
-  if (l.is_opportunity) return `<span style="display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;background:#fde68a;color:#92400e">Opportunity</span>`;
-  const map = { exact_part_number: ['Exact', '#bbf7d0', '#166534'], make_model_parttype: ['Make/Model', '#bfdbfe', '#1e40af'], fuzzy: ['Fuzzy', '#e9d5ff', '#6b21a8'] };
+  if (l.is_opportunity) return `<span style="display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;background:var(--amber-light);color:var(--amber)">Opportunity</span>`;
+  const map = { exact_part_number: ['Exact', 'var(--green-light)', 'var(--green)'], make_model_parttype: ['Make/Model', 'var(--blue-light)', 'var(--blue)'], fuzzy: ['Fuzzy', 'var(--blue-light)', 'var(--blue)'] };
   const m = map[l.match_type];
   if (!m) return '';
   return `<span style="display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;background:${m[1]};color:${m[2]}">${m[0]}</span>`;
