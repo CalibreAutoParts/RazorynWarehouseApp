@@ -9341,9 +9341,74 @@ function renderPricingRules() {
           </div>
         </div>
       </div>
+
+      <div class="card" style="margin-top:16px">
+        <div class="card-head"><h3>Set eBay price per item</h3><div class="card-desc">eBay is the master price. Setting it here pushes it to the live eBay listing and updates the Shopify &amp; bank price (eBay − [Shopify %]); cash follows automatically.</div></div>
+        <div class="card-body">
+          <input type="search" class="search-input" id="pr-item-search" placeholder="Search a product by name, SKU or part #…" style="margin-bottom:10px">
+          <div id="pr-item-list" style="max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:8px"></div>
+        </div>
+      </div>
     </div>`;
   prUpdateExample();
+  prRenderItemList();
+  let _prItemT;
+  el('pr-item-search')?.addEventListener('input', () => { clearTimeout(_prItemT); _prItemT = setTimeout(prRenderItemList, 160); });
   ['pr-shop-pct', 'pr-cash-pct'].forEach(id => el(id)?.addEventListener('input', prUpdateExample));
+}
+
+// Per-item eBay (master) price setter — search a product, set its eBay price, and
+// it pushes to eBay + derives/pushes Shopify; cash & bank follow automatically.
+function prItemFiltered() {
+  const q = (el('pr-item-search')?.value || '').toLowerCase().trim();
+  let list = State.products || [];
+  if (q) list = list.filter(p => matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model, ...(p.partNumbers || []).map(x => x.code)));
+  return list.slice(0, 80);
+}
+function prRenderItemList() {
+  const wrap = el('pr-item-list'); if (!wrap) return;
+  const cfg = State.pricingConfig || {};
+  const shopPct = cfg.priceLinkPct != null ? cfg.priceLinkPct : 10;
+  const cashPct = cfg.cashDiscountPct != null ? cfg.cashDiscountPct : 10;
+  const list = prItemFiltered();
+  const total = (State.products || []).length;
+  if (!list.length) { wrap.innerHTML = `<div class="empty" style="padding:18px;text-align:center"><div class="t">No matching products</div></div>`; return; }
+  wrap.innerHTML = list.map(p => {
+    const eb = p.priceEbay || 0;
+    const shop = eb ? eb * (1 - shopPct / 100) : 0;
+    const cash = eb ? eb * (1 - cashPct / 100) : 0;
+    return `<div style="display:flex;gap:10px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--line-2)">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:13px">${escapeHtml(p.title)}</div>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')}</div>
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);white-space:nowrap;text-align:right">
+        eBay <strong style="color:var(--ink)">${gbp(eb)}</strong><br>Shopify ${gbp(shop)} · cash ${gbp(cash)}
+      </div>
+      <input type="number" min="0" step="0.01" id="pr-eb-${p.id}" value="${eb || ''}" placeholder="New £" style="width:96px" onkeydown="if(event.key==='Enter')prSetEbayPrice(${p.id})">
+      <button class="btn btn-primary btn-sm" onclick="prSetEbayPrice(${p.id})">Set</button>
+    </div>`;
+  }).join('') + (list.length >= 80 ? `<div style="padding:8px 10px;font-size:11px;color:var(--ink-soft)">Showing first 80 of ${total} — search to narrow.</div>` : '');
+}
+async function prSetEbayPrice(id) {
+  const inp = el('pr-eb-' + id); if (!inp) return;
+  const price = parseFloat(inp.value);
+  if (isNaN(price) || price < 0) { toast('Enter a valid eBay price', 'warn'); return; }
+  inp.disabled = true;
+  try {
+    const r = await Api.post('/api/pricing/set-ebay-price', { productId: id, ebayPrice: price });
+    const p = (State.products || []).find(x => String(x.id) === String(id));
+    if (p) { p.priceEbay = r.ebayPrice; if (!r.priceLocked) p.priceShopify = r.shopifyPrice; }
+    let msg = `eBay ${gbp(r.ebayPrice)} set` + (r.ebayPushed ? ` · pushed to ${r.ebayPushed} eBay listing${r.ebayPushed > 1 ? 's' : ''}` : ' · no eBay listing linked yet');
+    if (r.shopifyPushed) msg += ` · Shopify ${gbp(r.shopifyPrice)}`;
+    else if (r.shopifySkipped === 'price_locked') msg += ` · Shopify left as-is (price-locked)`;
+    toast(msg, (r.errors && r.errors.length) ? 'warn' : 'success', 6500);
+    if (r.errors && r.errors.length) console.warn('set-ebay-price issues:', r.errors);
+    prRenderItemList();
+  } catch (e) {
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+    if (el('pr-eb-' + id)) el('pr-eb-' + id).disabled = false;
+  }
 }
 function prUpdateExample() {
   const ex = el('pr-example'); if (!ex) return;

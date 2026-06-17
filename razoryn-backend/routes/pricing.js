@@ -151,4 +151,57 @@ router.post('/link/apply', requireAdmin, async (req, res) => {
   res.json({ applied: okCount, total: items.length, results });
 });
 
+// POST /api/pricing/set-ebay-price { productId, ebayPrice }
+// Per-item master-price setter. eBay is the master: this pushes the new price to
+// the linked eBay listing(s), stores price_ebay, then DERIVES the Shopify/bank
+// price (eBay − priceLinkPct%) and pushes + stores that too. Cash & bank are
+// computed live from price_ebay elsewhere, so they follow automatically.
+router.post('/set-ebay-price', requireAdmin, async (req, res) => {
+  const productId = req.body?.productId;
+  const ebayPrice = parseFloat(req.body?.ebayPrice);
+  if (!productId || isNaN(ebayPrice) || ebayPrice < 0) return res.status(400).json({ error: 'invalid_price' });
+
+  const shopify = require('../services/shopify');
+  const ebay = require('../services/ebay');
+
+  const pr = await query(`SELECT id, sku, shopify_product_id, price_locked FROM products WHERE id = $1`, [productId]);
+  const product = pr.rows[0];
+  if (!product) return res.status(404).json({ error: 'not_found' });
+
+  // Shopify-derivation % (priceLinkPct, falling back to bankTransferPct).
+  const sr = await query(`SELECT price_link_pct, bank_transfer_pct FROM app_settings WHERE id = 1`);
+  const s = sr.rows[0] || {};
+  const shopPct = s.price_link_pct != null ? parseFloat(s.price_link_pct)
+    : (s.bank_transfer_pct != null ? parseFloat(s.bank_transfer_pct) : 10);
+  const shopifyPrice = +(ebayPrice * (1 - shopPct / 100)).toFixed(2);
+
+  const result = { ok: true, ebayPrice, shopifyPrice, shopPct, ebayPushed: 0, shopifyPushed: false, priceLocked: !!product.price_locked, errors: [] };
+
+  // 1) Push the master price to every linked eBay listing + store it.
+  try {
+    const links = await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [product.shopify_product_id]);
+    const stores = ebay.listStores().filter(st => st.hasToken && !st.disabled);
+    for (const link of links.rows) {
+      const store = stores.find(st => st.code === link.store_code) || (link.store_code ? null : (stores.find(st => st.primary) || stores[0]));
+      if (!store) { result.errors.push(`eBay ${link.ebay_item_id}: store unavailable`); continue; }
+      try { await ebay.reviseItem(link.ebay_item_id, { price: ebayPrice }, store.code); result.ebayPushed++; }
+      catch (e) { result.errors.push(`eBay ${link.ebay_item_id}: ${e.message}`); }
+    }
+  } catch (e) { result.errors.push(`eBay: ${e.message}`); }
+  await query(`UPDATE products SET price_ebay = $1, updated_at = now() WHERE id = $2`, [ebayPrice, product.id]);
+
+  // 2) Derive + push the Shopify price (skip if the product is price-locked —
+  // the lock exists precisely to keep its Shopify price manual).
+  if (product.price_locked) {
+    result.shopifySkipped = 'price_locked';
+  } else if (product.shopify_product_id) {
+    try { await shopify.setVariantPrice(product.shopify_product_id, shopifyPrice); result.shopifyPushed = true; }
+    catch (e) { result.errors.push(`Shopify: ${e.message}`); }
+    await query(`UPDATE products SET price_shopify = $1, updated_at = now() WHERE id = $2`, [shopifyPrice, product.id]);
+  }
+
+  await audit(req, 'set_ebay_price', 'product', product.id, { ebayPrice, shopifyPrice, ebayPushed: result.ebayPushed });
+  res.json(result);
+});
+
 module.exports = router;
