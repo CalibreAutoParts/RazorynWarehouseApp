@@ -6558,7 +6558,13 @@ async function salesReload() {
 // VAT period (defaults to today if left blank).
 async function markSalePaid(id) {
   const today = new Date().toISOString().slice(0, 10);
-  const input = prompt('Mark invoice as PAID.\n\nDate payment was received (YYYY-MM-DD) — leave as-is for today.\nThis only records payment; stock was already given.', today);
+  const input = await promptInput({
+    title: 'Mark invoice as PAID',
+    label: 'Date payment was received (YYYY-MM-DD)',
+    value: today,
+    help: 'Leave as-is for today. This only records payment; stock was already given.',
+    okLabel: 'Mark paid',
+  });
   if (input === null) return;
   const paidAt = input.trim() && /^\d{4}-\d{2}-\d{2}$/.test(input.trim()) ? input.trim() : null;
   try {
@@ -7679,7 +7685,9 @@ async function qbCopyUrl(url, label, note) {
     if (note) msg += `\n\n${note}`;
     toast(msg, 'success', note ? 7000 : 4000);
   } catch (e) {
-    prompt(`Copy this ${label}:`, url);
+    // Clipboard API unavailable — show the value in a modal to copy manually
+    // (native prompt() is blocked in the installed desktop/PWA app).
+    await promptInput({ title: `Copy this ${label}`, label: 'Select and copy:', value: url, okLabel: 'Done' });
   }
 }
 
@@ -10050,11 +10058,25 @@ function openLinkSearch(side, anchor) {
 // so items added on Shopify (or where the per-item mirror upsert failed) show up
 // in Inventory and the stock-take. Then refresh the local catalogue.
 async function importShopifyToWarehouse(btn) {
-  if (!confirm('Create warehouse records for any Shopify product that is missing one?\n\nThis is safe to run repeatedly — existing products are left untouched, and stock/title stay owned by Shopify only for the new ones.')) return;
+  if (!confirm('Create warehouse records for any Shopify product that is missing one?\n\nThis is safe to run repeatedly — existing products are left untouched, and stock/title stay owned by Shopify only for the new ones.\n\n(This also runs automatically in the background every few hours.)')) return;
   const taskId = Task.start('Importing Shopify products into the warehouse…');
   if (btn) btn.disabled = true;
   try {
-    const r = await Api.post('/api/listings/import-shopify-to-warehouse', {});
+    // The import pulls the whole Shopify catalogue + eBay listings, which can run
+    // longer than the platform HTTP timeout — so it runs as a background job and
+    // we poll for the result instead of holding the request open.
+    await Api.post('/api/listings/import-shopify-to-warehouse', {});
+    let r = null;
+    for (let i = 0; i < 150; i++) {           // up to ~5 min
+      await new Promise(res => setTimeout(res, 2000));
+      const s = await Api.get('/api/listings/import-shopify-to-warehouse/status').catch(() => null);
+      if (s && !s.running) {
+        if (s.error) throw new Error(s.error);
+        r = s.result;
+        break;
+      }
+    }
+    if (!r) { Task.done(taskId, 'Still running'); toast('Import is still running in the background — refresh shortly to see the results.', 'info', 7000); return; }
     Task.done(taskId, `Imported ${r.created}`);
     await Store.refresh('products').catch(() => {});
     let msg = `Imported ${r.created} new, updated ${r.enriched || 0} (photo/links), linked ${r.ebayLinked || 0} to eBay, set ${r.pricesBackfilled || 0} eBay price(s).`;
@@ -13030,15 +13052,15 @@ async function applyEbayTemplate() {
 async function bulkTitleEdit() {
   const selected = mirrorSelectedListings();
   if (!selected.length) { toast('Select one or more listings first.', 'warn', 6000); return; }
-  const find = prompt(`Find & replace in ${selected.length} title(s).\n\nText to FIND (leave blank to PREFIX instead):`, '');
+  const find = await promptInput({ title: `Find & replace in ${selected.length} title(s)`, label: 'Text to FIND', help: 'Leave blank to PREFIX each title instead.', okLabel: 'Next' });
   if (find === null) return;
   let replace, items;
   if (find.trim() === '') {
-    const prefix = prompt('Text to PREPEND to each title:', '');
+    const prefix = await promptInput({ title: 'Prefix titles', label: 'Text to PREPEND to each title:', okLabel: 'Next' });
     if (prefix === null || !prefix.trim()) return;
     items = selected.map(l => ({ itemId: l.itemId, store: l.store || l.storeCode || undefined, title: (prefix + ' ' + (l.title || '')).trim() }));
   } else {
-    replace = prompt(`Replace "${find}" with:`, '');
+    replace = await promptInput({ title: 'Replace', label: `Replace "${find}" with:`, okLabel: 'Next' });
     if (replace === null) return;
     items = selected
       .filter(l => (l.title || '').includes(find))
@@ -15478,9 +15500,11 @@ async function saveCompetitor(btn) {
 async function editCompetitor(id) {
   const c = (State.comp.list || []).find(x => x.id === id);
   if (!c) return;
-  const name = prompt('Name', c.name); if (name === null) return;
-  const username = c.source_type === 'ebay' ? prompt('eBay username', c.ebay_username || '') : c.ebay_username;
-  const activeStr = prompt('Active? (yes/no)', c.active ? 'yes' : 'no');
+  const name = await promptInput({ title: 'Edit competitor', label: 'Name', value: c.name || '' }); if (name === null) return;
+  const username = c.source_type === 'ebay' ? await promptInput({ title: 'Edit competitor', label: 'eBay username', value: c.ebay_username || '' }) : c.ebay_username;
+  if (c.source_type === 'ebay' && username === null) return;
+  const activeStr = await promptInput({ title: 'Edit competitor', label: 'Active? (yes/no)', value: c.active ? 'yes' : 'no' });
+  if (activeStr === null) return;
   try {
     await Api.put('/api/competitors/' + id, {
       name: name.trim(),

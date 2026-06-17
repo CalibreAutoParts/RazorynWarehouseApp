@@ -1504,20 +1504,19 @@ router.post('/mirror', requireAdmin, async (req, res) => {
   res.json({ ok: true, ...results });
 });
 
-// POST /api/listings/import-shopify-to-warehouse
+// Reusable warehouse-import worker (called by the manual button AND the cron).
 // Repair/backfill so Shopify products show fully in the warehouse:
 //   • create a `products` row for any Shopify product missing one,
 //   • ENRICH rows already imported but lacking a photo or Shopify ids,
-//   • re-establish the eBay link (mirror_links, matched by SKU) + eBay price,
-//     since these items originally came from eBay.
+//   • adopt a real Shopify SKU where the warehouse still has a SHOPIFY- placeholder,
+//   • re-establish the eBay link (mirror_links, matched by SKU) + eBay price.
 // Idempotent: safe to run repeatedly; never clobbers warehouse-owned title/stock.
-router.post('/import-shopify-to-warehouse', requireAdmin, async (req, res) => {
+async function runShopifyWarehouseImport() {
   await ensureMirrorLinksColumns();
-  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+  if (!shopify.isConfigured()) return { error: 'shopify_not_configured' };
 
   let variants = [];
-  try { for await (const v of shopify.iterateAllProductsAndVariants()) variants.push(v); }
-  catch (e) { return res.status(502).json({ error: 'shopify_pull_failed', message: e.message }); }
+  for await (const v of shopify.iterateAllProductsAndVariants()) variants.push(v);
 
   const { rows: existing } = await query(`SELECT id, sku, shopify_product_id, image_url, price_ebay FROM products`);
   const prodBySpid = new Map();
@@ -1662,12 +1661,49 @@ router.post('/import-shopify-to-warehouse', requireAdmin, async (req, res) => {
   }
 
   const domain = process.env.SHOPIFY_STORE_DOMAIN || '';
-  await audit(req, 'import_shopify_to_warehouse', null, null, { created, enriched, ebayLinked, pricesBackfilled, skuFixed, skippedExisting, skippedNoSku, errors: errors.length });
-  res.json({
+  return {
     scanned: variants.length, created, enriched, ebayLinked, pricesBackfilled, skuFixed, skippedExisting, skippedNoSku, errors,
     skippedItems,
     adminUrlBase: domain ? `https://${domain.replace(/^https?:\/\//, '').replace(/\/$/, '')}/admin/products` : null,
-  });
+  };
+}
+
+// Background job state — the import pulls ALL Shopify products + ALL eBay
+// listings, which can take well over the platform's HTTP timeout. So the route
+// kicks it off and returns immediately; the UI polls /status for the result.
+let _importState = { running: false, startedAt: null, finishedAt: null, result: null, error: null };
+
+async function startWarehouseImport(triggeredBy) {
+  if (_importState.running) return _importState;
+  _importState = { running: true, startedAt: Date.now(), finishedAt: null, result: null, error: null, triggeredBy: triggeredBy || 'manual' };
+  // Detached — do NOT await; the caller responds right away.
+  (async () => {
+    try {
+      const result = await runShopifyWarehouseImport();
+      _importState.result = result;
+    } catch (e) {
+      _importState.error = e.message;
+      console.error('[import-shopify-to-warehouse] failed:', e.message);
+    } finally {
+      _importState.running = false;
+      _importState.finishedAt = Date.now();
+    }
+  })();
+  return _importState;
+}
+
+// POST /api/listings/import-shopify-to-warehouse — kick off the background import.
+router.post('/import-shopify-to-warehouse', requireAdmin, async (req, res) => {
+  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+  const already = _importState.running;
+  await startWarehouseImport('manual');
+  if (!already) await audit(req, 'import_shopify_to_warehouse', null, null, { triggeredBy: 'manual' });
+  res.json({ started: !already, alreadyRunning: already });
+});
+
+// GET /api/listings/import-shopify-to-warehouse/status — poll for progress/result.
+router.get('/import-shopify-to-warehouse/status', requireAdmin, (req, res) => {
+  res.json(_importState);
 });
 
 // POST /api/listings/resync-images — one-click re-push of the SELECTED images only.
@@ -2710,4 +2746,6 @@ router.post('/resolve-legacy-links', requireAdmin, async (req, res) => {
   });
 });
 
+// Expose the worker so the sync cron can run the warehouse import automatically.
+router.runShopifyWarehouseImport = runShopifyWarehouseImport;
 module.exports = router;

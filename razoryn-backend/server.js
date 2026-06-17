@@ -209,6 +209,30 @@ if (cron.validate(cronExpr)) {
   console.error(`[boot] ⚠️  invalid SYNC_CRON expression "${cronExpr}" — AUTOMATIC SYNC IS DISABLED. Fix SYNC_CRON or unset it to use the default (${DEFAULT_SYNC_CRON}).`);
 }
 
+// Cron: auto-import Shopify products into the warehouse so newly-created Shopify
+// products appear in Inventory + the stock-take and get their eBay link, without
+// anyone clicking "Import Shopify into warehouse". This pulls the full catalogue
+// (heavier than the order sync), so it runs less often by default.
+const importCronExpr = (process.env.WAREHOUSE_IMPORT_CRON || '0 */3 * * *').trim(); // every 3h
+if (cron.validate(importCronExpr)) {
+  cron.schedule(importCronExpr, async () => {
+    console.log(`[cron warehouse-import] tick @ ${new Date().toISOString()} (${importCronExpr})`);
+    try {
+      const listings = require('./routes/listings');
+      const r = await listings.runShopifyWarehouseImport();
+      console.log('[cron warehouse-import] complete', JSON.stringify({
+        created: r.created, enriched: r.enriched, ebayLinked: r.ebayLinked,
+        skuFixed: r.skuFixed, pricesBackfilled: r.pricesBackfilled, skippedNoSku: r.skippedNoSku,
+      }));
+    } catch (e) {
+      console.error('[cron warehouse-import] failed:', e.message);
+    }
+  });
+  console.log(`[boot] warehouse-import cron scheduled: ${importCronExpr}`);
+} else {
+  console.error(`[boot] ⚠️  invalid WAREHOUSE_IMPORT_CRON "${importCronExpr}" — automatic warehouse import disabled.`);
+}
+
 // Auto-pull eBay returns every 15 minutes (or per RETURNS_SYNC_CRON env var).
 // Creates notifications for new return cases and state changes — so staff don't have
 // to manually click "Pull from eBay" to discover new returns or status updates.
