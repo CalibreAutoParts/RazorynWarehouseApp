@@ -1136,17 +1136,24 @@ let API_TOKEN = null;
 window.__lastError = null;
 (function () {
   let last = 0;
-  function show(msg) {
-    window.__lastError = msg;
-    try { console.error('[app error]', msg); } catch (_) {}
+  function show(msg, where, stack) {
+    const full = msg + (where ? `  @ ${where}` : '');
+    window.__lastError = full;
+    window.__lastErrorStack = stack || null;
+    try { console.error('[app error]', full, stack ? '\n' + stack : ''); } catch (_) {}
     const now = Date.now();
     if (now - last < 1500) return; // throttle bursts
     last = now;
-    try { if (typeof toast === 'function') toast('Error: ' + msg, 'error', 8000); } catch (_) {}
+    // Include the source location in the toast so an elusive error (e.g. an
+    // innerHTML on a missing element) can be pinpointed without a dev console.
+    try { if (typeof toast === 'function') toast('Error: ' + full, 'error', 8000); } catch (_) {}
   }
-  window.addEventListener('error', (e) => { show((e.error && e.error.message) || e.message || 'script error'); });
+  window.addEventListener('error', (e) => {
+    const where = e.filename ? `${String(e.filename).split('/').pop()}:${e.lineno}:${e.colno}` : '';
+    show((e.error && e.error.message) || e.message || 'script error', where, e.error && e.error.stack);
+  });
   window.addEventListener('unhandledrejection', (e) => {
-    const r = e.reason; show((r && (r.message || (r.data && r.data.message))) || String(r) || 'promise rejection');
+    const r = e.reason; show((r && (r.message || (r.data && r.data.message))) || String(r) || 'promise rejection', '', r && r.stack);
   });
 })();
 
@@ -9999,11 +10006,12 @@ function renderBulkEditor() {
       </div>
 
       <div class="card" style="margin-bottom:14px"><div class="card-body" style="font-size:12.5px;line-height:1.8">
-        <strong>How syncing works —</strong>
-        ${chip('var(--blue-light)', 'var(--blue)', 'eBay → Shopify')} read from eBay, write to Shopify ·
-        ${chip('var(--amber-light)', 'var(--amber)', '→ eBay')} push to the live eBay listing ·
-        ${chip('var(--green-light)', 'var(--green)', '→ eBay + Shopify + Warehouse')} pushes everywhere.<br>
-        <span style="color:var(--ink-soft)">Master model: <strong>Warehouse</strong> owns SKU / price / stock · <strong>eBay</strong> is the source for listings, specifics, images &amp; descriptions · <strong>Shopify</strong> is a downstream channel that receives.</span>
+        <strong>Two separate channels</strong>, both driven by the <strong>Warehouse</strong> (master for SKU / price / stock):<br>
+        <span style="color:var(--ink-soft)"><strong>eBay</strong> — your live eBay listings; the source for titles, specifics, images &amp; descriptions. &nbsp;·&nbsp; <strong>Shopify</strong> — a separate storefront the warehouse keeps in step.</span><br>
+        <span style="display:inline-block;margin-top:6px"><strong>Actions —</strong>
+        ${chip('var(--blue-light)', 'var(--blue)', '⟳ Pull eBay')} read your live eBay listings ·
+        ${chip('var(--green-light)', 'var(--green)', '→ Shopify')} create / update the matching Shopify product ·
+        ${chip('var(--amber-light)', 'var(--amber)', '→ eBay')} push changes back to the live eBay listing.</span>
       </div></div>
 
       <div id="bulk-empty"></div>
@@ -10026,11 +10034,12 @@ function renderBulkEditor() {
     </div>`;
 
   if ((MirrorState.listings || []).length) {
-    el('bulk-toolbar').style.display = 'flex';
-    el('bulk-actions').style.display = 'block';
-    el('mirror-list').style.display = 'block';
-    el('bulk-actions').innerHTML = bulkActionsPanelHtml();
-    const settings = el('bulk-mirror-settings');
+    const toolbar = el('bulk-toolbar'), actions = el('bulk-actions'), mlist = el('mirror-list'), settings = el('bulk-mirror-settings');
+    if (!toolbar || !actions || !mlist || !settings) return; // page swapped out mid-render — bail safely
+    toolbar.style.display = 'flex';
+    actions.style.display = 'block';
+    mlist.style.display = 'block';
+    actions.innerHTML = bulkActionsPanelHtml();
     settings.style.display = 'block';
     settings.innerHTML = bulkMirrorSettingsHtml();
     // These controls drive the "Push selected → Shopify" create flow, so load the
