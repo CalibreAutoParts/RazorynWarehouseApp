@@ -14145,8 +14145,33 @@ function renderSettings() {
         </div>
       </div>
 
-      <!-- Message templates are managed from a shipment: open a sale and use the
-           💬 Message button (template picker + per-send edit). No separate tab. -->
+      <!-- Message templates editor -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>📨 Message templates</h3>
+          <div class="card-desc">Customise the email / eBay / WhatsApp templates used by the 💬 Message button. Built-in templates can be edited but not deleted (use Reset to restore the original). Variables like <code>{customer_name}</code> are auto-filled from the order.</div>
+        </div>
+        <div class="card-body">
+          <div id="templates-list" style="display:flex;flex-direction:column;gap:8px">
+            <div style="font-size:12px;color:var(--ink-soft);padding:14px 0">Loading…</div>
+          </div>
+          <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+            <button class="btn btn-outline btn-sm" onclick="openNewTemplate()">+ New custom template</button>
+          </div>
+          <details style="margin-top:14px;font-size:12px;color:var(--ink-soft)">
+            <summary style="cursor:pointer;font-weight:500">Available variables</summary>
+            <div style="padding:10px 0;line-height:1.7;font-family:ui-monospace,monospace;font-size:11px">
+              <code>{customer_name}</code> · <code>{first_name}</code><br>
+              <code>{invoice}</code> · <code>{payment_reference}</code> · <code>{order_number}</code><br>
+              <code>{total}</code> · <code>{subtotal}</code><br>
+              <code>{tracking_number}</code> · <code>{carrier}</code> · <code>{tracking_url}</code><br>
+              <code>{item_first}</code> · <code>{item_count}</code> · <code>{item_count_extra}</code><br>
+              <code>{company_name}</code> · <code>{company_phone}</code> · <code>{company_website}</code> · <code>{company_email}</code><br>
+              <code>{review_url}</code> (Trustpilot or Google based on platform setting)
+            </div>
+          </details>
+        </div>
+      </div>
 
       <div class="card" style="margin-bottom:16px">
         <div class="card-head">
