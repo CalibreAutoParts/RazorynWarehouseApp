@@ -9998,11 +9998,14 @@ function scheduleSaveOverride(itemId) {
 // ──────────────────────────────────────────────────────────────────────────
 function renderBulkEditor() {
   const chip = (bg, fg, t) => `<span class="pill" style="background:${bg};color:${fg};font-weight:600">${t}</span>`;
+  const src = MirrorState.sourceTab || 'ebay';
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
         <div><h1>Bulk Editor</h1><div class="desc">Edit &amp; sync many listings at once — each action shows exactly what pushes where.</div></div>
-        <div class="actions"><button class="btn btn-primary" onclick="bulkPull(this)">⟳ Pull eBay listings</button></div>
+        <div class="actions">${src === 'ebay'
+          ? '<button class="btn btn-primary" onclick="bulkPull(this)">⟳ Pull eBay listings</button>'
+          : '<button class="btn btn-primary" onclick="loadBulkShopify(true)">⟳ Refresh Shopify products</button>'}</div>
       </div>
 
       <div class="card" style="margin-bottom:14px"><div class="card-body" style="font-size:12.5px;line-height:1.8">
@@ -10014,6 +10017,12 @@ function renderBulkEditor() {
         ${chip('var(--amber-light)', 'var(--amber)', '→ eBay')} push changes back to the live eBay listing.</span>
       </div></div>
 
+      <div class="seg" style="margin-bottom:14px">
+        <button class="${src === 'ebay' ? 'active' : ''}" onclick="bulkSource('ebay')">⬅ Export FROM eBay → Shopify</button>
+        <button class="${src === 'shopify' ? 'active' : ''}" onclick="bulkSource('shopify')">Export FROM Shopify → eBay ➡</button>
+      </div>
+
+      ${src === 'shopify' ? `<div id="bulk-shopify"></div>` : `
       <div id="bulk-empty"></div>
       <div id="bulk-actions" style="display:none"></div>
       <div id="bulk-mirror-settings" style="display:none"></div>
@@ -10030,8 +10039,10 @@ function renderBulkEditor() {
         <span id="mr-counter" style="font-size:13px;color:var(--ink-soft);margin-left:auto"></span>
       </div>
 
-      <div id="mirror-list" style="display:none"></div>
+      <div id="mirror-list" style="display:none"></div>`}
     </div>`;
+
+  if (src === 'shopify') { loadBulkShopify(); return; }
 
   if ((MirrorState.listings || []).length) {
     const toolbar = el('bulk-toolbar'), actions = el('bulk-actions'), mlist = el('mirror-list'), settings = el('bulk-mirror-settings');
@@ -10056,6 +10067,52 @@ function renderBulkEditor() {
   } else {
     el('bulk-empty').innerHTML = `<div class="empty"><div class="t">No listings loaded</div><div class="s">Click <strong>⟳ Pull eBay listings</strong> above to load your live listings, then tick the ones to edit and use the actions.</div></div>`;
   }
+}
+
+// Switch the Bulk Editor source channel (eBay vs Shopify).
+function bulkSource(tab) { MirrorState.sourceTab = tab; renderBulkEditor(); }
+
+// "From Shopify → eBay" tab: lists products that are on Shopify but NOT yet on
+// eBay (ready to export), each with the existing "+ Create on eBay" / "Link
+// existing" actions. Reuses the link-status data.
+async function loadBulkShopify(force) {
+  const wrap = el('bulk-shopify'); if (!wrap) return;
+  if (force || !State.linkStatus) {
+    wrap.innerHTML = '<div class="empty"><div class="t">Loading Shopify products…</div></div>';
+    try { State.linkStatus = await Api.get('/api/listings/link-status'); } catch (e) { wrap.innerHTML = `<div class="empty"><div class="t">Failed to load: ${escapeHtml(e.data?.message || e.message)}</div></div>`; return; }
+  }
+  renderBulkShopify();
+}
+function renderBulkShopify() {
+  const wrap = el('bulk-shopify'); if (!wrap) return;
+  const products = (State.linkStatus?.products) || [];
+  // On Shopify, not yet on eBay = ready to export to eBay.
+  const onShopify = products.filter(p => p.shopify_product_id);
+  const ready = onShopify.filter(p => !p.ebay_item_id);
+  const q = (MirrorState.shopifyFilter || '').toLowerCase().trim();
+  let list = ready;
+  if (q) list = list.filter(p => matchesKeywords(q, p.title, p.sku, p.part_number));
+  const rows = list.slice(0, 300).map(p => `
+    <tr>
+      <td><div style="font-weight:500">${escapeHtml(p.title || '')}</div>
+        <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escapeHtml(p.sku || '')}</div></td>
+      <td style="white-space:nowrap;font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escapeHtml(p.shopify_product_id || '')}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-primary btn-sm" onclick="openCreateEbayListing(${p.id})" title="Create a new eBay listing from this product's Shopify data" style="margin-right:4px">+ Create on eBay</button>
+        <button class="btn btn-outline btn-sm" onclick="openLinkProductToEbay(${p.id})" title="Link to an eBay listing you already created manually">🔗 Link existing</button>
+      </td>
+    </tr>`).join('');
+  wrap.innerHTML = `
+    <div class="card" style="margin-bottom:10px"><div class="card-body" style="padding:10px 14px;font-size:12px;color:var(--ink-soft)">
+      ${ready.length} Shopify product${ready.length === 1 ? '' : 's'} not yet on eBay (of ${onShopify.length} on Shopify). Create the eBay listing from the Shopify data, or link one you made manually.
+    </div></div>
+    <div class="card" style="margin-bottom:10px"><div class="card-body" style="padding:10px 14px">
+      <input id="bulk-shopify-search" class="search-input" placeholder="Filter by title, SKU, part #…" value="${escapeAttr(MirrorState.shopifyFilter || '')}" oninput="MirrorState.shopifyFilter=this.value; renderBulkShopify(); const i=el('bulk-shopify-search'); if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length);}" style="width:100%">
+    </div></div>
+    <div class="card"><div style="overflow-x:auto"><table class="table">
+      <thead><tr><th>Product</th><th>Shopify ID</th><th style="min-width:230px">Export to eBay</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="3" style="text-align:center;padding:18px;color:var(--ink-soft)">${q ? 'No matches' : 'Every Shopify product is already on eBay 🎉'}</td></tr>`}</tbody>
+    </table></div>${list.length > 300 ? `<div style="padding:10px;text-align:center;font-size:12px;color:var(--ink-soft)">Showing first 300 of ${list.length}. Use search to narrow down.</div>` : ''}</div>`;
 }
 
 function bulkActionsPanelHtml() {
