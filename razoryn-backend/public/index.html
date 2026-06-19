@@ -7029,57 +7029,56 @@ async function openMessageModal(saleId) {
   setTimeout(wireMessageModal, 0);
 }
 
-// Generates the inner body HTML — re-renderable for tab/template changes
+// Generates the inner body HTML — re-renderable for tab/template changes.
+// Clean flow: 1) pick a template card, 2) pick the channel, send. The editable
+// message is tucked into an expandable preview (auto-open only when blank).
 function messageModalBody() {
   const m = State.messageModal;
   const tpl = m.templates.find(t => t.key === m.selectedKey) || m.templates[0];
-  const channelTab = (id, icon, label, available) => `
-    <button class="msg-tab${m.selectedChannel === id ? ' active' : ''}"
-            onclick="selectMessageChannel('${id}')"
-            ${available ? '' : 'disabled title="No '+id+' contact info on this order"'}
-            style="padding:8px 14px;font-size:13px;border:none;background:${m.selectedChannel === id ? 'var(--brand-primary)' : 'var(--bg-soft)'};color:${m.selectedChannel === id ? 'white' : (available ? 'var(--ink)' : 'var(--ink-soft)')};border-radius:6px;cursor:${available?'pointer':'not-allowed'};opacity:${available?'1':'.5'};font-weight:500">
-      ${icon} ${label}
-    </button>`;
 
-  // Channel-specific recipient line
+  const chanBtn = (id, icon, label, available) => `
+    <button type="button" ${available ? '' : 'disabled title="No ' + id + ' contact on this order"'}
+            onclick="selectMessageChannel('${id}')"
+            style="padding:7px 13px;font-size:12.5px;border:1px solid ${m.selectedChannel === id ? 'var(--brand-primary)' : 'var(--line)'};background:${m.selectedChannel === id ? 'var(--brand-primary)' : 'var(--white)'};color:${m.selectedChannel === id ? 'var(--brand-on-primary)' : (available ? 'var(--ink)' : 'var(--ink-soft)')};border-radius:8px;cursor:${available ? 'pointer' : 'not-allowed'};opacity:${available ? '1' : '.45'};font-weight:600">${icon} ${label}</button>`;
+
   let recipientLine = '';
   if (m.selectedChannel === 'email') {
     recipientLine = `<div class="field"><label>To (email)</label><input id="msg-to" value="${escapeAttr(m.customer.email)}" placeholder="customer@example.com"></div>`;
   } else if (m.selectedChannel === 'whatsapp') {
-    recipientLine = `<div class="field"><label>To (WhatsApp)</label><input id="msg-to" value="${escapeAttr(m.customer.phone)}" placeholder="+44 7494 589542"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Will open WhatsApp Web/app with the message pre-filled — hit Send there.</div></div>`;
+    recipientLine = `<div class="field"><label>To (WhatsApp)</label><input id="msg-to" value="${escapeAttr(m.customer.phone)}" placeholder="+44 7494 589542"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Opens WhatsApp with the message pre-filled — hit Send there.</div></div>`;
   } else if (m.selectedChannel === 'ebay') {
-    recipientLine = `<div class="field"><label>To (eBay buyer)</label><input value="${escapeAttr(m.customer.name || 'eBay buyer')}" disabled style="background:var(--bg-soft)"><div style="font-size:11px;color:var(--ink-soft);margin-top:6px;line-height:1.5"><strong>How this works:</strong> sends a member message via the eBay Trading API. Requires:<br>• eBay tokens set up in Railway env (already done for this brand)<br>• At least one item in the order linked to a live eBay ItemID — run <strong>🔗 Force match all</strong> in Listing Mirror if a send fails with "no item ID"<br>• Order placed within the last ~30 days (after that eBay anonymises the buyer)</div></div>`;
+    recipientLine = `<div class="field"><label>To (eBay buyer)</label><input value="${escapeAttr(m.customer.name || 'eBay buyer')}" disabled style="background:var(--bg-soft)"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Sends a member message via eBay (order must be within ~30 days and linked to a live ItemID).</div></div>`;
   }
 
+  const cards = m.templates.map(t => `
+    <button type="button" onclick="selectMessageTemplate('${escapeAttr(t.key)}')"
+      style="text-align:left;border:1px solid ${t.key === m.selectedKey ? 'var(--brand-primary)' : 'var(--line)'};background:${t.key === m.selectedKey ? 'var(--brand-primary-light)' : 'var(--white)'};border-radius:8px;padding:9px 11px;cursor:pointer;font-size:12.5px;font-weight:600;color:var(--ink);line-height:1.3">${t.key === m.selectedKey ? '✓ ' : ''}${escapeHtml(t.label)}</button>`).join('');
+
+  const blank = !(tpl.renderedBody || '').trim();
   return `
-    <!-- Channel tabs -->
-    <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
-      ${channelTab('email',    '✉',  'Email',    m.channels.email)}
-      ${channelTab('whatsapp', '💬', 'WhatsApp', m.channels.whatsapp)}
-      ${channelTab('ebay',     '🟦', 'eBay',     m.channels.ebay)}
-    </div>
+    <div style="font-size:12px;color:var(--ink-soft);margin-bottom:12px">To <strong style="color:var(--ink)">${escapeHtml(m.customer.name || 'customer')}</strong></div>
 
-    <!-- Template picker -->
-    <div class="field">
-      <label>Template</label>
-      <select id="msg-template" onchange="selectMessageTemplate(this.value)">
-        ${m.templates.map(t => `<option value="${escapeAttr(t.key)}" ${t.key === m.selectedKey ? 'selected' : ''}>${escapeHtml(t.label)}</option>`).join('')}
-      </select>
-    </div>
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);margin-bottom:6px">1 · Choose a template</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:16px">${cards}</div>
 
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);margin-bottom:6px">2 · Send via</div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      ${chanBtn('email', '✉', 'Email', m.channels.email)}
+      ${chanBtn('whatsapp', '💬', 'WhatsApp', m.channels.whatsapp)}
+      ${chanBtn('ebay', '🟦', 'eBay', m.channels.ebay)}
+    </div>
     ${recipientLine}
 
-    ${m.selectedChannel === 'email' ? `
-      <div class="field"><label>Subject</label><input id="msg-subject" value="${escapeAttr(tpl.renderedSubject || '')}"></div>
-    ` : ''}
-
-    <div class="field">
-      <label>Message</label>
-      <textarea id="msg-body" rows="10" style="font-family:inherit;font-size:13px;line-height:1.5">${escapeHtml(tpl.renderedBody || '')}</textarea>
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">
-        Variables in {curly_braces} are auto-filled from the order. You can edit anything before sending.
+    <details ${blank ? 'open' : ''} style="margin-top:8px;border:1px solid var(--line);border-radius:8px;padding:8px 12px">
+      <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--brand-primary)">Preview / edit message</summary>
+      <div style="margin-top:10px">
+        ${m.selectedChannel === 'email' ? `<div class="field"><label>Subject</label><input id="msg-subject" value="${escapeAttr(tpl.renderedSubject || '')}"></div>` : ''}
+        <div class="field"><label>Message</label>
+          <textarea id="msg-body" rows="9" style="font-family:inherit;font-size:13px;line-height:1.5">${escapeHtml(tpl.renderedBody || '')}</textarea>
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Variables in {curly_braces} auto-fill from the order. Edit anything before sending.</div>
+        </div>
       </div>
-    </div>
+    </details>
   `;
 }
 
