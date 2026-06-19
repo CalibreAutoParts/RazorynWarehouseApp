@@ -36,8 +36,6 @@ async function ensureDispatchColumns() {
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS channel_push_error TEXT`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS collected_at       TIMESTAMPTZ`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS collected_by       INTEGER REFERENCES users(id) ON DELETE SET NULL`);
-    // Tracks the platform (DropFleet) review-request email so it sends once per order.
-    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS review_request_sent_at TIMESTAMPTZ`);
     // Index for the worklist query — paid sales ordered by oldest unshipped first.
     await query(`CREATE INDEX IF NOT EXISTS sales_dispatch_idx ON sales (occurred_at) WHERE is_estimate = false AND dispatched_at IS NULL AND collected_at IS NULL`);
     _migrationDone = true;
@@ -46,41 +44,6 @@ async function ensureDispatchColumns() {
   }
 }
 ensureDispatchColumns();
-
-// Platform-level review request (DropFleet). Sent ONCE per order after it ships
-// or is collected, on every account, to grow the platform's Trustpilot reviews.
-// This is separate from each company's own review templates/link. Best-effort:
-// never blocks or fails the dispatch. Disable with PLATFORM_REVIEW_DISABLED=1;
-// override the link with PLATFORM_REVIEW_URL.
-const PLATFORM_REVIEW_URL = (process.env.PLATFORM_REVIEW_URL || 'https://www.trustpilot.com/evaluate/dropfleet.co.uk').trim();
-async function sendPlatformReviewRequest(saleId) {
-  if (process.env.PLATFORM_REVIEW_DISABLED === '1' || !PLATFORM_REVIEW_URL) return;
-  try {
-    const { sendEmail, isConfigured } = require('../services/email');
-    if (!isConfigured || !isConfigured()) return;
-    const brand = require('../lib/brand');
-    const r = await query(`SELECT customer_name, customer_email, review_request_sent_at FROM sales WHERE id = $1`, [saleId]);
-    const sale = r.rows[0];
-    if (!sale || !sale.customer_email || sale.review_request_sent_at) return;
-    const firstName = (sale.customer_name || '').split(/[\s,]+/)[0] || 'there';
-    const brandName = brand.name || 'us';
-    const res = await sendEmail({
-      to: sale.customer_email,
-      subject: `How did we do? Leave a quick review`,
-      html:
-        `<p>Hi ${escapeHtmlSvr(firstName)},</p>
-         <p>Thanks for your order with ${escapeHtmlSvr(brandName)} — we hope everything arrived in great shape.</p>
-         <p>Your delivery was handled through our DropFleet network. If you have a minute, a quick review of your experience really helps:</p>
-         <p><a href="${PLATFORM_REVIEW_URL}">Leave a review on Trustpilot</a></p>
-         <p>If anything wasn't right, just reply to this email and we'll put it right.</p>
-         <p>Thank you!</p>`,
-    });
-    if (res && res.ok) await query(`UPDATE sales SET review_request_sent_at = now() WHERE id = $1`, [saleId]);
-  } catch (e) {
-    console.warn('[dispatch] platform review request failed:', e.message);
-  }
-}
-function escapeHtmlSvr(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
 // Carriers we know about. Keys map to tracking-URL templates so the UI can
 // generate clickable "track parcel" links for the customer-facing receipt.
@@ -314,7 +277,6 @@ router.post('/:saleId/mark-dispatched', requireAdmin, async (req, res) => {
 
   if (result.error) return res.status(409).json(result);
   await audit(req, 'dispatch_order', 'sale', result.sale.id, { carrier, trackingNumber: trackingClean });
-  setImmediate(() => sendPlatformReviewRequest(result.sale.id));
 
   // Async push to source channel. Don't block the response on this.
   if (pushToChannel !== false && (result.sale.channel || '').match(/^(shopify|ebay_)/)) {
@@ -365,7 +327,6 @@ router.post('/:saleId/mark-collected', requireAdmin, async (req, res) => {
 
   if (result.error) return res.status(409).json(result);
   await audit(req, 'collect_order', 'sale', result.sale.id, {});
-  setImmediate(() => sendPlatformReviewRequest(result.sale.id));
   res.json({ ok: true, sale: result.sale });
 });
 
