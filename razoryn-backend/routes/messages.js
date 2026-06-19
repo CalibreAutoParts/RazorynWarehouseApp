@@ -207,42 +207,6 @@ Thanks,
 {company_name}`,
     defaultChannel: 'email',
   },
-  {
-    key: 'review_quick',
-    label: 'Review request — quick & friendly',
-    subject: 'Quick favour, {first_name}? ⭐',
-    body:
-`Hi {first_name},
-
-Thanks again for choosing {company_name}! If everything went well, a quick review would mean the world to us and helps other customers buy with confidence:
-
-{review_url}
-
-It only takes a minute. If anything wasn't perfect, just reply here first and we'll make it right.
-
-Cheers,
-{company_name}`,
-    defaultChannel: 'email',
-  },
-  {
-    key: 'review_incentive',
-    label: 'Review request — with next-order discount',
-    subject: 'Leave us a review & save on your next order',
-    body:
-`Hi {first_name},
-
-Hope your order from {company_name} arrived safely and fitted perfectly.
-
-We'd really appreciate an honest review of your experience:
-
-{review_url}
-
-As a thank-you, reply once it's done and we'll send you a discount code for your next order at {website}.
-
-Thanks for your support,
-{company_name}`,
-    defaultChannel: 'email',
-  },
 ];
 
 // ──────────────────────────────────────────────────────────────────────────
