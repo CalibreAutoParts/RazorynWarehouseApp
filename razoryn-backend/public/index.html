@@ -10205,6 +10205,8 @@ function clCoreHtml() {
       <input id="cl-cat-search" placeholder="Search categories (e.g. grille, headlight)…" autocomplete="off" oninput="clSearchCats(this.value)">
       <div id="cl-cat-results" style="max-height:180px;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:6px;display:none"></div>
     </div>
+    <div class="field"><label>Sub / alternate part numbers <span style="color:var(--ink-soft);font-weight:400">— one per line. Searchable in the warehouse, added to eBay (Interchange Part Number) and a Shopify metafield.</span></label>
+      <textarea id="cl-subpn" rows="2" placeholder="e.g. 92102-AT000" style="font-family:ui-monospace,monospace"></textarea></div>
     <div class="field"><label>Custom metafields ${CL.defs.length ? '' : '<span style="color:var(--ink-soft);font-weight:400">— none defined in Shopify yet</span>'}</label>
       <div id="cl-mf-list"></div>
       ${CL.defs.length ? '<button type="button" class="btn btn-outline btn-sm" onclick="clAddMf()" style="margin-top:6px">+ Add metafield</button>' : ''}
@@ -10243,6 +10245,7 @@ async function submitUnifiedCreate(btn) {
       shippingProfileId: el('cl-shipprofile')?.value || null,
       imagesBase64: CL.images || [],
       categoryId: CL.categoryId || null,
+      subPartNumbers: (el('cl-subpn')?.value || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean),
       metafields,
     });
     Task.done(taskId, 'Shopify created');

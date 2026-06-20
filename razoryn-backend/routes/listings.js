@@ -1761,6 +1761,12 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   const taxable = b.taxable !== false;                       // Shopify "charge tax (VAT)"
   const templateSuffix = b.templateSuffix || null;           // theme product template
   const shippingProfileId = b.shippingProfileId || null;     // Shopify delivery profile
+  // Alternate / sub part numbers — stored in the warehouse, mirrored to a Shopify
+  // metafield, and added to the eBay listing (via create-ebay) as Interchange PN.
+  const subPartNumbers = Array.isArray(b.subPartNumbers) ? b.subPartNumbers.map(s => String(s || '').trim()).filter(Boolean) : [];
+  if (subPartNumbers.length) {
+    metafields.push({ namespace: 'custom', key: 'alternate_part_numbers', type: 'single_line_text_field', value: subPartNumbers.join(', ') });
+  }
 
   const result = { ok: true, sku, ebayPrice, shopifyPrice, shopPct };
   let shopifyProduct = null;
@@ -1806,7 +1812,13 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
      v?.inventory_item_id ? String(v.inventory_item_id) : null]);
   const productId = ins.rows[0].id;
 
-  await audit(req, 'create_listing', 'product', productId, { sku, ebayPrice, shopifyPrice, shopify: !!shopifyProduct });
+  // Store the alternate / sub part numbers against the new product (searchable).
+  for (const code of subPartNumbers) {
+    try { await query(`INSERT INTO product_part_numbers (product_id, code) VALUES ($1, $2)`, [productId, code]); }
+    catch (e) { /* dupe / table issue — non-fatal */ }
+  }
+
+  await audit(req, 'create_listing', 'product', productId, { sku, ebayPrice, shopifyPrice, subPartNumbers: subPartNumbers.length, shopify: !!shopifyProduct });
   res.status(201).json({ ...result, productId, shopifyProductId: shopifyProduct ? String(shopifyProduct.id) : null });
 });
 
@@ -2643,6 +2655,14 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
   const countryOfOrigin = (b.countryOfOrigin != null ? b.countryOfOrigin : (settings.ebay_country_of_origin || 'China'));
   if (countryOfOrigin) derivedSpecifics.push({ name: 'Country of Origin', value: countryOfOrigin });
   if (product.shopify_product_id) derivedSpecifics.push({ name: 'Product Number', value: String(product.shopify_product_id) });
+  // Alternate / sub part numbers → eBay "Interchange Part Number" so buyers can
+  // find the part by any of its codes. Skip if the user already supplied one.
+  try {
+    const spn = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [product.id]);
+    const codes = spn.rows.map(r => r.code).filter(Boolean);
+    const hasInterchange = (Array.isArray(b.itemSpecifics) ? b.itemSpecifics : []).some(s => /interchange|other part/i.test(s.name || ''));
+    if (codes.length && !hasInterchange) derivedSpecifics.push({ name: 'Interchange Part Number', value: codes.join(', ') });
+  } catch (e) { /* table may be empty/absent — non-fatal */ }
   // User-provided specifics win on name collisions (addItem dedupes, last wins).
   const mergedSpecifics = [...derivedSpecifics, ...(Array.isArray(b.itemSpecifics) ? b.itemSpecifics : [])];
 
