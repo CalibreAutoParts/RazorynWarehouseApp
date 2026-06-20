@@ -1028,3 +1028,39 @@ module.exports = router;
 // Reusable by other routers (e.g. Listing Mirror set-stock) so a quantity edit
 // propagates to Shopify + every linked eBay store consistently.
 module.exports.pushProductStockToChannels = pushProductStockToChannels;
+
+// Auto-link a product into a shared stock pool with any OTHER active products
+// that carry the same part number (normalised). Creates the pool if none of the
+// matches are pooled yet, then syncs every member's qty to the pool and pushes.
+// Returns pool info (or null when nothing else shares the part number) so callers
+// can tell the user their new listing was linked. Used by create-listing so
+// "make a second listing with the same part number" just works.
+async function autoPoolByPartNumber(productId, partNumber) {
+  await ensureStockGroupsSchema();
+  const code = sgNorm(partNumber);
+  if (!code) return null;
+  const others = await query(
+    `SELECT id, stock_group_id, qty_on_hand FROM products
+     WHERE active = true AND id <> $1
+       AND REGEXP_REPLACE(UPPER(COALESCE(part_number,'')), '[^A-Z0-9]', '', 'g') = $2`,
+    [productId, code]);
+  if (!others.rows.length) return null;
+  // Reuse an existing pool among the matches if there is one; otherwise create.
+  let gid = others.rows.find(o => o.stock_group_id)?.stock_group_id || null;
+  if (!gid) {
+    const g = await query(`INSERT INTO stock_groups (code) VALUES ($1) RETURNING id`, [partNumber]);
+    gid = g.rows[0].id;
+    const ungrouped = others.rows.filter(o => !o.stock_group_id).map(o => o.id);
+    if (ungrouped.length) await query(`UPDATE products SET stock_group_id = $1 WHERE id = ANY($2)`, [gid, ungrouped]);
+  }
+  await query(`UPDATE products SET stock_group_id = $1 WHERE id = $2`, [gid, productId]);
+  // Pool qty = the highest current member qty (safest — never undercounts).
+  const mx = await query(`SELECT COALESCE(MAX(qty_on_hand), 0)::int AS q FROM products WHERE stock_group_id = $1`, [gid]);
+  const qty = mx.rows[0].q;
+  await query(`UPDATE stock_groups SET qty_on_hand = $1, updated_at = now() WHERE id = $2`, [qty, gid]);
+  await query(`UPDATE products SET qty_on_hand = $1 WHERE stock_group_id = $2`, [qty, gid]);
+  const members = await query(`SELECT id FROM products WHERE stock_group_id = $1`, [gid]);
+  for (const m of members.rows) { try { await pushProductStockToChannels(m.id, { skipGroup: true }); } catch (_) {} }
+  return { groupId: gid, qty, memberCount: members.rows.length };
+}
+module.exports.autoPoolByPartNumber = autoPoolByPartNumber;

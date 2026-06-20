@@ -1738,12 +1738,23 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   const b = req.body || {};
   const sku = String(b.sku || '').trim();
   const title = String(b.title || '').trim();
+  // Part number is what links listings that fit several models into ONE shared
+  // stock pool. Each listing keeps its own unique SKU; a shared part number is
+  // what makes them draw from the same quantity. Defaults to the SKU when blank
+  // (the common single-model case where SKU == part number).
+  const partNumber = String(b.partNumber || '').trim() || sku;
+  // Barcode = the SCANNED code = the physical part. Multi-fitment siblings (same
+  // part, different make/model) share one barcode but each have a unique SKU.
+  const barcode = String(b.barcode || '').trim() || sku;
   const ebayPrice = parseFloat(b.ebayPrice);
   if (!sku || !title) return res.status(400).json({ error: 'sku_and_title_required' });
   if (isNaN(ebayPrice) || ebayPrice < 0) return res.status(400).json({ error: 'invalid_price' });
 
-  const dup = await query(`SELECT id FROM products WHERE TRIM(LOWER(sku)) = TRIM(LOWER($1))`, [sku]);
-  if (dup.rows[0]) return res.status(409).json({ error: 'sku_exists', productId: dup.rows[0].id });
+  const dup = await query(`SELECT id, sku, title, part_number, barcode FROM products WHERE TRIM(LOWER(sku)) = TRIM(LOWER($1))`, [sku]);
+  if (dup.rows[0]) return res.status(409).json({
+    error: 'sku_exists', productId: dup.rows[0].id,
+    existing: { sku: dup.rows[0].sku, title: dup.rows[0].title, part_number: dup.rows[0].part_number, barcode: dup.rows[0].barcode },
+  });
 
   // Shopify price is derived from the eBay (master) price using the configured %.
   const sr = await query(`SELECT price_link_pct, bank_transfer_pct FROM app_settings WHERE id = 1`);
@@ -1803,10 +1814,10 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   const imgSrcs = (shopifyProduct?.images || []).map(im => im.src).filter(Boolean);
   result.imageUrls = imgSrcs;
   const ins = await query(`
-    INSERT INTO products (sku, title, barcode, qty_on_hand, price_ebay, price_shopify, image_url,
+    INSERT INTO products (sku, title, barcode, part_number, qty_on_hand, price_ebay, price_shopify, image_url,
                           shopify_product_id, shopify_variant_id, shopify_inventory_id, active)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true) RETURNING id`,
-    [sku, title, sku, qty, ebayPrice, shopifyPrice, imgSrcs[0] || null,
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true) RETURNING id`,
+    [sku, title, barcode, partNumber, qty, ebayPrice, shopifyPrice, imgSrcs[0] || null,
      shopifyProduct ? String(shopifyProduct.id) : null,
      v?.id ? String(v.id) : null,
      v?.inventory_item_id ? String(v.inventory_item_id) : null]);
@@ -1818,8 +1829,16 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
     catch (e) { /* dupe / table issue — non-fatal */ }
   }
 
-  await audit(req, 'create_listing', 'product', productId, { sku, ebayPrice, shopifyPrice, subPartNumbers: subPartNumbers.length, shopify: !!shopifyProduct });
-  res.status(201).json({ ...result, productId, shopifyProductId: shopifyProduct ? String(shopifyProduct.id) : null });
+  // If another active listing already uses this part number, link them into a
+  // shared stock pool so a sale on any one decrements them all.
+  try {
+    const { autoPoolByPartNumber } = require('./products');
+    const pool = await autoPoolByPartNumber(productId, partNumber);
+    if (pool) result.stockPool = pool;
+  } catch (e) { /* best-effort — never fail the create over pooling */ }
+
+  await audit(req, 'create_listing', 'product', productId, { sku, partNumber, ebayPrice, shopifyPrice, subPartNumbers: subPartNumbers.length, shopify: !!shopifyProduct, pooled: !!result.stockPool });
+  res.status(201).json({ ...result, productId, partNumber, shopifyProductId: shopifyProduct ? String(shopifyProduct.id) : null });
 });
 
 // POST /api/listings/repush-ebay-images { productId }

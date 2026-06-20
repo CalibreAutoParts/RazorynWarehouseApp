@@ -10201,7 +10201,11 @@ async function renderCreateListing() {
 function clCoreHtml() {
   const pct = clPct();
   return `
-    <div class="field"><label>SKU *</label><input id="cl-sku" style="font-family:ui-monospace,monospace" placeholder="e.g. 7450B289" autocomplete="off"></div>
+    <div class="field"><label>SKU *</label><input id="cl-sku" style="font-family:ui-monospace,monospace" placeholder="e.g. 7450B289" autocomplete="off">
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Must be unique per listing (Shopify & eBay require it). For a part that fits several models, give each listing its own SKU.</div></div>
+    <div class="field"><label>Part number <span style="color:var(--ink-soft);font-weight:400">— blank = same as SKU</span></label>
+      <input id="cl-partnumber" style="font-family:ui-monospace,monospace" placeholder="e.g. 602001929AA" autocomplete="off">
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">🔗 Listings that fit multiple models should share <strong>the same part number</strong> — they'll be auto-linked into one shared stock pool (a sale on any one reduces them all).</div></div>
     <div class="field"><label>Photos</label>
       <input type="file" id="cl-photo-file" accept="image/*" multiple onchange="clAddPhotos(this)" style="font-size:12px">
       <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Uploaded to Shopify; the same photos are reused on the eBay listing.</div>
@@ -10241,8 +10245,10 @@ function clUpdateDerivedFromEbay() {
   const eb = parseFloat(el('ce-price')?.value) || 0;
   const o = el('cl-shop'); if (o) o.value = eb ? '£' + (eb * (1 - clPct() / 100)).toFixed(2) : '';
 }
-async function submitUnifiedCreate(btn) {
-  const sku = (el('cl-sku')?.value || '').trim();
+// overrides lets the SKU-collision flow re-submit with a unique SKU + a shared
+// barcode/part number (multi-fitment siblings) without re-reading the form.
+async function submitUnifiedCreate(btn, overrides = {}) {
+  const sku = overrides.sku || (el('cl-sku')?.value || '').trim();
   const ebayTitle = (el('ce-title')?.value || '').trim();
   const shopTitle = (el('cl-title')?.value || '').trim() || ebayTitle;
   const ebayPrice = parseFloat(el('ce-price')?.value);
@@ -10255,12 +10261,16 @@ async function submitUnifiedCreate(btn) {
     return (parts[0] && parts[1] && value) ? { namespace: parts[0], key: parts[1], type: parts[2] || 'single_line_text_field', value } : null;
   }).filter(Boolean);
 
+  const partNumber = overrides.partNumber !== undefined ? overrides.partNumber : ((el('cl-partnumber')?.value || '').trim() || null);
+
   if (btn) btn.disabled = true;
   const taskId = Task.start('Creating warehouse + Shopify…');
   let created;
   try {
     created = await Api.post('/api/listings/create-listing', {
       sku, title: shopTitle,
+      partNumber,
+      barcode: overrides.barcode,                      // shared barcode for multi-fitment siblings
       description: (el('cl-desc')?.value || '').trim() || null,
       ebayPrice, qty: parseInt(el('ce-qty')?.value) || 0,
       tags: (el('cl-tags')?.value || '').trim() || null,
@@ -10276,11 +10286,15 @@ async function submitUnifiedCreate(btn) {
     Task.done(taskId, 'Shopify created');
   } catch (e) {
     Task.fail(taskId, 'Failed');
-    const m = e.data?.error === 'sku_exists' ? 'A product with that SKU already exists.' : (e.data?.message || e.message);
-    toast('Create failed: ' + m, 'error', 8000);
     if (btn) btn.disabled = false;
+    // SKU clash → ask whether this is the same physical part on a different
+    // make/model (multi-fitment), and if so create it with a unique SKU but the
+    // same barcode + part number so they share one stock pool.
+    if (e.data?.error === 'sku_exists') { clPromptMultiFitment(sku, e.data.existing || {}, btn); return; }
+    toast('Create failed: ' + (e.data?.message || e.message), 'error', 9000);
     return;
   }
+  if (created.stockPool) toast(`🔗 Linked into a shared stock pool — ${created.stockPool.memberCount} listings now share part № ${escapeHtml(created.partNumber || partNumber || sku)} (qty ${created.stockPool.qty})`, 'success', 8000);
   await Store.refresh('products').catch(() => {});
   // Now create the eBay listing from the eBay panel's fields, linked to the new product.
   if (el('ce-product-number')) el('ce-product-number').value = created.shopifyProductId || '';
@@ -10293,6 +10307,45 @@ async function submitUnifiedCreate(btn) {
   if (btn) btn.disabled = false;
 }
 
+// Suggest a unique SKU by suffixing -2, -3, … (skipping ones already in use).
+function clSuggestUniqueSku(base) {
+  const skus = new Set((State.products || []).map(p => (p.sku || '').toLowerCase()));
+  for (let i = 2; i < 1000; i++) { const cand = `${base}-${i}`; if (!skus.has(cand.toLowerCase())) return cand; }
+  return `${base}-${Date.now()}`;
+}
+
+// SKU collision prompt: is this the same part fitting a different make/model?
+function clPromptMultiFitment(attemptedSku, existing, btn) {
+  const sharedBarcode = existing.barcode || attemptedSku;
+  const sharedPN = ((el('cl-partnumber')?.value || '').trim()) || existing.part_number || attemptedSku;
+  const suggested = clSuggestUniqueSku(attemptedSku);
+  modal({
+    title: 'That SKU already exists',
+    body: `
+      <p style="margin:0 0 10px">SKU <strong style="font-family:ui-monospace,monospace">${escapeHtml(attemptedSku)}</strong> is already used by:</p>
+      <div style="background:var(--bg-soft);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:12px">
+        <div style="font-weight:600">${escapeHtml(existing.title || '(existing product)')}</div>
+        ${existing.part_number ? `<div style="font-size:12px;color:var(--ink-soft)">Part № ${escapeHtml(existing.part_number)}</div>` : ''}
+      </div>
+      <p style="margin:0 0 12px;font-size:13px">Does this new listing fit a <strong>different make/model</strong> but is the <strong>same physical part</strong>? If so it can share stock with the existing listing — same barcode &amp; part number, with its own unique SKU.</p>
+      <div class="field"><label>New unique SKU for this listing</label><input id="cl-mf-sku" value="${escapeAttr(suggested)}" style="font-family:ui-monospace,monospace" autocomplete="off"></div>
+      <div style="font-size:11px;color:var(--ink-soft)">Barcode stays <strong>${escapeHtml(sharedBarcode)}</strong> and part № <strong>${escapeHtml(sharedPN)}</strong>, so both listings draw from one shared stock pool.</div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '✓ Same part, different fitment', primary: true, onClick: async () => {
+        const newSku = (el('cl-mf-sku')?.value || '').trim();
+        if (!newSku) { toast('Enter a unique SKU', 'warn'); return; }
+        if (newSku.toLowerCase() === attemptedSku.toLowerCase()) { toast('The new SKU must differ from the existing one', 'warn'); return; }
+        closeModal();
+        // Reflect the resolved values in the form so the UI + any later repeat match.
+        if (el('cl-sku')) el('cl-sku').value = newSku;
+        if (el('cl-partnumber')) el('cl-partnumber').value = sharedPN;
+        await submitUnifiedCreate(btn, { sku: newSku, barcode: sharedBarcode, partNumber: sharedPN });
+      }},
+    ],
+  });
+}
+
 // After a successful create, offer to make another listing from the same info
 // instead of bouncing straight back to the mirror. Keeps the form data so the
 // user can tweak a few fields (SKU, Left/Right, make/model) and submit again.
@@ -10301,7 +10354,7 @@ function clOfferRepeat(r) {
   modal({
     title: 'Listing created ✓',
     body: `<p style="margin:0 0 8px">Listed everywhere${r && r.itemId ? ` — eBay ItemID <strong>${escapeHtml(String(r.itemId))}</strong>` : ''}.</p>
-      <p style="margin:0;color:var(--ink-soft);font-size:13px">Create another listing using the same info? The form stays filled so you can tweak a few fields (e.g. SKU for Left/Right, or the make/model) before submitting. <strong>Set a new unique SKU</strong> for each item.</p>`,
+      <p style="margin:0;color:var(--ink-soft);font-size:13px">Create another listing using the same info? The form stays filled — just enter a <strong>new unique SKU</strong> and tweak anything else (e.g. make/model for a different fitment). Keep the <strong>same part number</strong> and they'll share one stock pool automatically.</p>`,
     actions: [
       { label: 'Done', onClick: () => { closeModal(); routeTo('mirror'); } },
       { label: '🔁 Repeat listing', primary: true, onClick: async () => { closeModal(); CL_REPEAT = snap; await renderCreateListing(); } },
@@ -10390,6 +10443,10 @@ async function clApplySnapshot(snap) {
     });
   }
   clUpdateDerivedFromEbay();
+  // A repeat is almost always a sibling listing, so force a fresh SKU: clear it
+  // and focus it. The PART NUMBER is kept — same part number = shared stock pool.
+  const skuEl = el('cl-sku');
+  if (skuEl) { skuEl.value = ''; setTimeout(() => { skuEl.focus(); }, 60); }
 }
 function clRenderPhotos() {
   const wrap = el('cl-photos'); if (!wrap) return;
