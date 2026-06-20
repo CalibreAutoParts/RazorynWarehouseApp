@@ -1942,6 +1942,12 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
   if (Array.isArray(b.subPartNumbers) && b.subPartNumbers.length) {
     metafields.push({ namespace: 'custom', key: 'alternate_part_numbers', type: 'single_line_text_field', value: b.subPartNumbers.join(', ') });
   }
+  // Image changes (e.g. swapping out watermarked photos). `images` is an ordered
+  // list mixing already-hosted URLs and freshly-uploaded base64 data URLs. We
+  // host them on Shopify, then reuse the resulting URLs on eBay so both channels
+  // show the same photos. Only touched when the user actually changed them.
+  const imagesChanged = !!b.imagesChanged && Array.isArray(b.images);
+  let hostedImageUrls = null;   // resulting Shopify-hosted URLs, in order
   if (product.shopify_product_id && shopify.isConfigured()) {
     try {
       await shopify.updateProduct(product.shopify_product_id, {
@@ -1951,7 +1957,7 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
         templateSuffix: b.templateSuffix != null ? b.templateSuffix : null,
         description: b.description != null ? b.description : null,
         metafields,
-        imageUrls: Array.isArray(b.imageUrls) ? b.imageUrls.filter(Boolean) : [],
+        imageUrls: [],   // images handled separately below (supports base64 uploads)
       });
       if (b.categoryId) {
         try { await shopify.applyProductSeo(product.shopify_product_id, { categoryId: b.categoryId }); }
@@ -1961,10 +1967,24 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
         try { await shopify.assignProductToDeliveryProfile(product.shopify_product_id, b.shippingProfileId); }
         catch (e) { result.shippingProfileError = e.message; }
       }
+      if (imagesChanged && b.images.length && shopify.replaceProductImagesOrdered) {
+        try {
+          hostedImageUrls = await shopify.replaceProductImagesOrdered(product.shopify_product_id, b.images);
+          result.images = { ok: true, count: hostedImageUrls.length };
+          if (hostedImageUrls[0]) await query(`UPDATE products SET image_url = $1 WHERE id = $2`, [hostedImageUrls[0], productId]);
+        } catch (e) { result.images = { error: e.message }; }
+      }
       result.shopify = { ok: true };
     } catch (e) { result.shopify = { error: e.message }; }
   } else {
     result.shopify = { skipped: product.shopify_product_id ? 'not_configured' : 'no_shopify_product' };
+  }
+  // eBay can only point at hosted URLs. Prefer the freshly-hosted Shopify set;
+  // fall back to the submitted list if it's already all URLs (no new uploads).
+  let ebayPictureUrls;
+  if (imagesChanged) {
+    if (hostedImageUrls && hostedImageUrls.length) ebayPictureUrls = hostedImageUrls;
+    else { const urlsOnly = (b.images || []).filter(u => /^https?:\/\//.test(String(u))); if (urlsOnly.length) ebayPictureUrls = urlsOnly; }
   }
 
   // 3) eBay — revise every linked listing (title/price/description/specifics/
@@ -1988,7 +2008,7 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
           price: ebayPrice != null ? ebayPrice : undefined,
           description: b.ebayDescription != null && String(b.ebayDescription).trim() !== '' ? b.ebayDescription : undefined,
           itemSpecifics: itemSpecifics && itemSpecifics.length ? itemSpecifics : undefined,
-          pictureUrls: Array.isArray(b.imageUrls) && b.imageUrls.length ? b.imageUrls.filter(Boolean) : undefined,
+          pictureUrls: ebayPictureUrls && ebayPictureUrls.length ? ebayPictureUrls : undefined,
         }, store.code);
         try { await ebay.setQuantityTradingAPI(link.ebay_item_id, qty, store.code); } catch (e) { /* qty push best-effort */ }
         result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true });

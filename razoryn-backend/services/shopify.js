@@ -390,6 +390,31 @@ async function setProductImages(productId, imageUrls) {
   return { ok: count > 0, count };
 }
 
+// Replace a product's images with an ORDERED set that can mix already-hosted
+// URLs and freshly-uploaded base64 data URLs (e.g. when swapping out watermarked
+// photos). Order is preserved (first = main image). Returns the resulting hosted
+// image src URLs in order — handy for then pointing eBay at the same photos.
+async function replaceProductImagesOrdered(productId, items = []) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const list = (items || []).map(s => String(s || '').trim()).filter(Boolean);
+  const ex = await shopifyRequest('get', `/products/${productId}.json`);
+  const existing = ex.data.product;
+  for (const img of existing.images || []) {
+    try { await shopifyRequest('delete', `/products/${productId}/images/${img.id}.json`); } catch (e) {}
+  }
+  let position = 1;
+  for (const item of list) {
+    const isData = /^data:[^;]+;base64,/.test(item);
+    const image = isData
+      ? { attachment: item.replace(/^data:[^;]+;base64,/, ''), position }
+      : { src: item, position };
+    try { await shopifyRequest('post', `/products/${productId}/images.json`, { data: { image } }); position++; }
+    catch (e) { console.warn('[shopify] ordered image set failed:', isData ? '(upload)' : item, e.message); }
+  }
+  const out = (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
+  return (out.images || []).map(im => im.src).filter(Boolean);
+}
+
 // Lightweight SKU-only update — sets the first variant's SKU (and keeps barcode
 // in sync with it, so scanning works) without touching title, price, images or
 // inventory. Used by the cross-channel bulk-SKU tool.
@@ -1089,6 +1114,7 @@ module.exports = {
   setVariantSku,
   setPartNumberMetafield,
   setProductImages,
+  replaceProductImagesOrdered,
   publishProductToAllChannels,
   getPublications,
   getMetafieldDefinitions,

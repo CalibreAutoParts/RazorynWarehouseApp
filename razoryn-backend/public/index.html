@@ -10224,7 +10224,7 @@ async function renderEditListing() {
       </div>
     </div>`;
   try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (_) {}
-  CL.categoryId = ''; CL.categoryName = ''; CL._catResults = []; CL.images = []; CL.imagesReadonly = true;
+  CL.categoryId = ''; CL.categoryName = ''; CL._catResults = []; CL.images = []; CL.imagesReadonly = false; CL.imagesDirty = false;
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
 
   let detail;
@@ -10345,6 +10345,8 @@ async function submitUnifiedUpdate(btn) {
       subPartNumbers: (el('cl-subpn')?.value || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean),
       metafields,
       itemSpecifics,
+      images: CL.imagesDirty ? (CL.images || []) : undefined,
+      imagesChanged: !!CL.imagesDirty,
     });
     Task.done(taskId, 'Saved');
   } catch (e) {
@@ -10360,7 +10362,8 @@ async function submitUnifiedUpdate(btn) {
   const ebOk = (r.ebay || []).filter(x => x.ok).length, ebErr = (r.ebay || []).filter(x => x.error).length;
   if (ebOk) bits.push(`eBay ✓${ebOk > 1 ? ' ×' + ebOk : ''}`);
   if (ebErr) bits.push('eBay ✗');
-  toast(`Saved & pushed — Warehouse ✓${bits.length ? ' · ' + bits.join(' · ') : ''}`, ebErr || r.shopify?.error ? 'warn' : 'success', 8000);
+  if (r.images?.ok) bits.push(`Photos ✓ (${r.images.count})`); else if (r.images?.error) bits.push('Photos ✗');
+  toast(`Saved & pushed — Warehouse ✓${bits.length ? ' · ' + bits.join(' · ') : ''}`, ebErr || r.shopify?.error || r.images?.error ? 'warn' : 'success', 8000);
   await Store.refresh('products').catch(() => {});
   routeTo('inventory');
 }
@@ -10374,10 +10377,10 @@ function clCoreHtml() {
       <input id="cl-partnumber" style="font-family:ui-monospace,monospace" placeholder="e.g. 602001929AA" autocomplete="off">
       <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">🔗 Listings that fit multiple models should share <strong>the same part number</strong> — they'll be auto-linked into one shared stock pool (a sale on any one reduces them all).</div></div>
     <div class="field"><label>Photos</label>
-      ${editing
-        ? `<div style="font-size:11px;color:var(--ink-soft)">Current photos (read-only here). To change them use <strong>Re-push images</strong> on the listing.</div>`
-        : `<input type="file" id="cl-photo-file" accept="image/*" multiple onchange="clAddPhotos(this)" style="font-size:12px">
-           <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Uploaded to Shopify; the same photos are reused on the eBay listing.</div>`}
+      <input type="file" id="cl-photo-file" accept="image/*" multiple onchange="clAddPhotos(this)" style="font-size:12px">
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">${editing
+        ? 'Remove a watermarked photo (×), add clean ones, and drag the main one first (◀ ▶). Saving replaces the photos on <strong>both Shopify &amp; eBay</strong>.'
+        : 'Uploaded to Shopify; the same photos are reused on the eBay listing.'}</div>
       <div id="cl-photos" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"></div>
     </div>
     <div class="field"><label>Shopify price <span style="color:var(--ink-soft);font-weight:400">— auto eBay − ${pct}%</span></label>
@@ -10638,6 +10641,7 @@ function clMovePhoto(i, dir) {
   const j = i + dir;
   if (j < 0 || j >= (CL.images || []).length) return;
   const t = CL.images[i]; CL.images[i] = CL.images[j]; CL.images[j] = t;
+  CL.imagesDirty = true;
   clRenderPhotos();
 }
 async function clAddPhotos(input) {
@@ -10652,9 +10656,10 @@ async function clAddPhotos(input) {
       CL.images.push(await readAsDataUrl(blob));
     } catch (_) { /* skip a bad file */ }
   }
+  CL.imagesDirty = true;
   clRenderPhotos();
 }
-function clRemovePhoto(i) { CL.images.splice(i, 1); clRenderPhotos(); }
+function clRemovePhoto(i) { CL.images.splice(i, 1); CL.imagesDirty = true; clRenderPhotos(); }
 function clDerivedShopify(eb) { return eb ? eb * (1 - clPct() / 100) : 0; }
 function clUpdateDerived() {
   const eb = parseFloat(el('cl-ebay')?.value) || 0;

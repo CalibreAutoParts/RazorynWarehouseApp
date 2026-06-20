@@ -13,8 +13,10 @@ const PORT = parseInt(process.env.PORT, 10) || 3000;
 
 // ---------- Middleware ----------
 app.set('trust proxy', 1); // Railway sits behind a proxy
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+// 25mb so create/edit listing can carry several base64 photo uploads at once
+// (downscaled client-side, but a full set of replacements can exceed 2mb).
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(cookieParser());
 
 if (process.env.CORS_ORIGIN) {
