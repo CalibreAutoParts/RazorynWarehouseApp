@@ -10161,6 +10161,13 @@ async function renderCreateListing() {
   CL.categoryId = ''; CL.categoryName = ''; CL._catResults = []; CL.images = [];
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
   if (el('cl-core')) { el('cl-core').innerHTML = clCoreHtml(); clRenderPhotos(); }
+  // Populate the Shopify delivery (shipping) profile dropdown.
+  Api.get('/api/listings/delivery-profiles').then(r => {
+    const sel = el('cl-shipprofile'); if (!sel) return;
+    const profiles = r.profiles || [];
+    sel.innerHTML = '<option value="">No override (Shopify default)</option>' +
+      profiles.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+  }).catch(() => { const sel = el('cl-shipprofile'); if (sel) sel.innerHTML = '<option value="">No override (Shopify default)</option>'; });
   // Render the full eBay form (draft mode) into the right panel.
   openCreateEbayListing(null, { draft: true, container: 'cl-ebay-panel', draftProduct: { id: null, title: '', sku: '', qty_on_hand: 1, brand: '', model: '', part_number: '', shopify_product_id: null } });
   // Keep the derived Shopify price in sync with the eBay price field.
@@ -10180,6 +10187,16 @@ function clCoreHtml() {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Tags (comma-separated)</label><input id="cl-tags" placeholder="MO18, grille"></div>
       <div class="field"><label>Shopify status</label><select id="cl-status"><option value="draft">Draft</option><option value="active">Active</option></select></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="field"><label>Product page template</label>
+        <select id="cl-template"><option value="">Default product</option><option value="large-parts">large-parts</option></select></div>
+      <div class="field"><label>Delivery profile</label>
+        <select id="cl-shipprofile"><option value="">Loading…</option></select></div>
+    </div>
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="cl-taxable" checked> Charge tax (VAT) on Shopify</label>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Shopify applies VAT from your store tax settings (it has no per-product VAT %, unlike eBay). Prices are VAT-inclusive in the UK.</div>
     </div>
     <div class="field"><label>Shopify title <span style="color:var(--ink-soft);font-weight:400">— blank = same as eBay title</span></label><input id="cl-title" placeholder="(optional)"></div>
     <div class="field"><label>Shopify description <span style="color:var(--ink-soft);font-weight:400">— blank = same as eBay</span></label><textarea id="cl-desc" rows="3"></textarea></div>
@@ -10221,6 +10238,9 @@ async function submitUnifiedCreate(btn) {
       ebayPrice, qty: parseInt(el('ce-qty')?.value) || 0,
       tags: (el('cl-tags')?.value || '').trim() || null,
       status: el('cl-status')?.value || 'draft',
+      taxable: el('cl-taxable') ? el('cl-taxable').checked : true,
+      templateSuffix: el('cl-template')?.value || null,
+      shippingProfileId: el('cl-shipprofile')?.value || null,
       imagesBase64: CL.images || [],
       categoryId: CL.categoryId || null,
       metafields,
@@ -10245,11 +10265,25 @@ async function submitUnifiedCreate(btn) {
 }
 function clRenderPhotos() {
   const wrap = el('cl-photos'); if (!wrap) return;
+  const n = (CL.images || []).length;
   wrap.innerHTML = (CL.images || []).map((d, i) => `
-    <div style="position:relative;width:56px;height:56px">
-      <img src="${d}" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid var(--line)">
-      <button type="button" onclick="clRemovePhoto(${i})" title="Remove" style="position:absolute;top:-6px;right:-6px;background:var(--red);color:#fff;border:none;border-radius:50%;width:18px;height:18px;cursor:pointer;font-size:11px;line-height:1">×</button>
+    <div style="width:64px">
+      <div style="position:relative;width:64px;height:64px">
+        <img src="${d}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--line);${i === 0 ? 'outline:2px solid var(--brand-primary);outline-offset:1px' : ''}">
+        <button type="button" onclick="clRemovePhoto(${i})" title="Remove" style="position:absolute;top:-6px;right:-6px;background:var(--red);color:#fff;border:none;border-radius:50%;width:18px;height:18px;cursor:pointer;font-size:11px;line-height:1">×</button>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:2px">
+        <button type="button" onclick="clMovePhoto(${i},-1)" ${i === 0 ? 'disabled' : ''} title="Move earlier" style="border:none;background:none;cursor:pointer;color:var(--ink-soft);font-size:12px;padding:0 2px">◀</button>
+        <span style="font-size:9px;color:${i === 0 ? 'var(--brand-primary)' : 'var(--ink-soft)'}">${i === 0 ? 'main' : (i + 1)}</span>
+        <button type="button" onclick="clMovePhoto(${i},1)" ${i === n - 1 ? 'disabled' : ''} title="Move later" style="border:none;background:none;cursor:pointer;color:var(--ink-soft);font-size:12px;padding:0 2px">▶</button>
+      </div>
     </div>`).join('');
+}
+function clMovePhoto(i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= (CL.images || []).length) return;
+  const t = CL.images[i]; CL.images[i] = CL.images[j]; CL.images[j] = t;
+  clRenderPhotos();
 }
 async function clAddPhotos(input) {
   const files = [...(input.files || [])].filter(f => /^image\//.test(f.type));

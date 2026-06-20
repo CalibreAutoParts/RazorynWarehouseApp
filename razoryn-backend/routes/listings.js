@@ -1758,6 +1758,9 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   const metafields = Array.isArray(b.metafields) ? b.metafields : [];
   const tags = b.tags || null;
   const status = ['active', 'draft'].includes(b.status) ? b.status : 'draft';
+  const taxable = b.taxable !== false;                       // Shopify "charge tax (VAT)"
+  const templateSuffix = b.templateSuffix || null;           // theme product template
+  const shippingProfileId = b.shippingProfileId || null;     // Shopify delivery profile
 
   const result = { ok: true, sku, ebayPrice, shopifyPrice, shopPct };
   let shopifyProduct = null;
@@ -1765,7 +1768,7 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
     try {
       shopifyProduct = await shopify.createProduct({
         title, sku, price: shopifyPrice, imageUrls, imageData, status, metafields, qty, tags,
-        description: b.description || null,
+        description: b.description || null, taxable, templateSuffix,
       });
       for (const mf of (shopifyProduct?.__metafieldResults || [])) {
         if (!mf.ok) (result.metafieldIssues = result.metafieldIssues || []).push({ key: `${mf.namespace}.${mf.key}`, error: mf.error });
@@ -1773,6 +1776,11 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
       if (b.categoryId && shopifyProduct?.id) {
         try { await shopify.applyProductSeo(shopifyProduct.id, { categoryId: b.categoryId }); }
         catch (e) { result.categoryError = e.message; }
+      }
+      // Assign the chosen Shopify delivery (shipping) profile, best-effort.
+      if (shippingProfileId && shopifyProduct?.id && shopify.assignProductToDeliveryProfile) {
+        try { await shopify.assignProductToDeliveryProfile(shopifyProduct.id, shippingProfileId); }
+        catch (e) { result.shippingProfileError = e.message; }
       }
     } catch (e) {
       return res.status(502).json({ error: 'shopify_create_failed', message: e.message });
