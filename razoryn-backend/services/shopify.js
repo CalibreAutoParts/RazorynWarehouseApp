@@ -281,9 +281,14 @@ function normaliseImageUrls(imageUrls = []) {
   return [...new Set((imageUrls || []).map(maxResImageUrl).filter(Boolean))];
 }
 
-async function createProduct({ title, sku, price, imageUrls = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null, description = null }) {
+async function createProduct({ title, sku, price, imageUrls = [], imageData = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null, description = null }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const imgs = normaliseImageUrls(imageUrls);
+  // imageData = base64 data URLs (uploaded files). Strip the data: prefix —
+  // Shopify wants raw base64 in `attachment`.
+  const attachments = (imageData || [])
+    .map(d => String(d || '').replace(/^data:[^;]+;base64,/, '').trim())
+    .filter(Boolean);
   const productPayload = {
     title,
     status,
@@ -293,7 +298,7 @@ async function createProduct({ title, sku, price, imageUrls = [], status = 'draf
       price: price != null ? String(price) : undefined,
       inventory_management: 'shopify',
     }],
-    images: imgs.map(src => ({ src })),
+    images: [...imgs.map(src => ({ src })), ...attachments.map(attachment => ({ attachment }))],
   };
   if (description != null) productPayload.body_html = description;
   if (tags) productPayload.tags = tags; // comma-separated string

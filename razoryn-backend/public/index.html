@@ -10129,13 +10129,13 @@ function bulkSource(tab) {
 }
 
 // ── WAREHOUSE-FIRST: Create listing (warehouse master → Shopify, then eBay) ──
-const CL = { categoryId: '', categoryName: '', defs: [], _catResults: [] };
+const CL = { categoryId: '', categoryName: '', defs: [], _catResults: [], images: [] };
 function clPct() {
   const c = State.pricingConfig || {};
   return c.priceLinkPct != null ? c.priceLinkPct : (c.bankTransferPct != null ? c.bankTransferPct : 10);
 }
 async function openCreateListing() {
-  CL.categoryId = ''; CL.categoryName = ''; CL.defs = []; CL._catResults = [];
+  CL.categoryId = ''; CL.categoryName = ''; CL.defs = []; CL._catResults = []; CL.images = [];
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) {}
   modal({
     title: 'Create listing', wide: true, body: clBody(),
@@ -10146,25 +10146,39 @@ async function openCreateListing() {
   });
   setTimeout(() => { const i = el('cl-sku'); if (i) i.focus(); }, 60);
 }
+function clSection(color, label) {
+  return `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:${color};margin:4px 0 8px">${label}</div>`;
+}
 function clBody() {
   const pct = clPct();
   return `
-    <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">The warehouse is the master. You set the <strong>eBay price</strong>; Shopify is auto-set to eBay − ${pct}%. This creates the warehouse product, pushes it to Shopify, then opens the eBay create step.</div>
+    <div style="font-size:12px;color:var(--ink-soft);margin-bottom:12px">The <strong>Warehouse is the master</strong>. Set the <strong>eBay price</strong>; Shopify is auto-set to eBay − ${pct}%. On <em>Create</em>, the warehouse + Shopify product are made, then the full <strong>eBay listing form</strong> opens pre-filled to finish the eBay side.</div>
+
+    ${clSection('var(--blue)', '1 · eBay & core (price is the master)')}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>SKU *</label><input id="cl-sku" style="font-family:ui-monospace,monospace" placeholder="e.g. 7450B289" autocomplete="off"></div>
       <div class="field"><label>Title *</label><input id="cl-title" placeholder="e.g. Mitsubishi Outlander 2018-2024 Front Grille"></div>
     </div>
-    <div class="field"><label>Description</label><textarea id="cl-desc" rows="3" placeholder="Optional — pushed to Shopify"></textarea></div>
+    <div class="field"><label>Description</label><textarea id="cl-desc" rows="3" placeholder="Used on Shopify; the eBay step can reuse it or apply a template"></textarea></div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
       <div class="field"><label>eBay price (£) *</label><input id="cl-ebay" type="number" min="0" step="0.01" oninput="clUpdateDerived()"></div>
       <div class="field"><label>Shopify price (auto −${pct}%)</label><input id="cl-shop" disabled style="background:var(--bg-soft)"></div>
       <div class="field"><label>Initial stock</label><input id="cl-qty" type="number" min="0" step="1" value="0"></div>
     </div>
+    <div class="field"><label>Photos</label>
+      <input type="file" id="cl-photo-file" accept="image/*" multiple onchange="clAddPhotos(this)" style="font-size:12px">
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Uploaded to Shopify and reused on the eBay listing.</div>
+      <div id="cl-photos" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"></div>
+      <details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px;color:var(--brand-primary)">…or paste image URLs</summary>
+        <textarea id="cl-images" rows="2" placeholder="https://… (one per line)" style="margin-top:6px"></textarea></details>
+    </div>
+
+    <div style="border-top:1px solid var(--line);margin:16px 0 12px"></div>
+    ${clSection('var(--green)', '2 · Shopify')}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Tags (comma-separated)</label><input id="cl-tags" placeholder="MO18, grille"></div>
       <div class="field"><label>Shopify status</label><select id="cl-status"><option value="draft">Draft</option><option value="active">Active</option></select></div>
     </div>
-    <div class="field"><label>Image URLs (one per line)</label><textarea id="cl-images" rows="2" placeholder="https://…"></textarea></div>
     <div class="field"><label>Shopify category</label>
       <div id="cl-cat-current" style="font-size:12px;margin-bottom:4px">${CL.categoryName ? '✓ ' + escapeHtml(CL.categoryName) : '<span style="color:var(--ink-soft)">None selected</span>'}</div>
       <input id="cl-cat-search" placeholder="Search categories (e.g. grille, headlight)…" autocomplete="off" oninput="clSearchCats(this.value)">
@@ -10175,6 +10189,29 @@ function clBody() {
       ${CL.defs.length ? '<button type="button" class="btn btn-outline btn-sm" onclick="clAddMf()" style="margin-top:6px">+ Add metafield</button>' : ''}
     </div>`;
 }
+function clRenderPhotos() {
+  const wrap = el('cl-photos'); if (!wrap) return;
+  wrap.innerHTML = (CL.images || []).map((d, i) => `
+    <div style="position:relative;width:56px;height:56px">
+      <img src="${d}" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid var(--line)">
+      <button type="button" onclick="clRemovePhoto(${i})" title="Remove" style="position:absolute;top:-6px;right:-6px;background:var(--red);color:#fff;border:none;border-radius:50%;width:18px;height:18px;cursor:pointer;font-size:11px;line-height:1">×</button>
+    </div>`).join('');
+}
+async function clAddPhotos(input) {
+  const files = [...(input.files || [])].filter(f => /^image\//.test(f.type));
+  input.value = '';
+  if (!files.length) return;
+  CL.images = CL.images || [];
+  for (const f of files) {
+    try {
+      // Downscale before encoding so several photos fit under the request limit.
+      const blob = await downscaleImage(f, { maxDim: 1600, quality: 0.82 });
+      CL.images.push(await readAsDataUrl(blob));
+    } catch (_) { /* skip a bad file */ }
+  }
+  clRenderPhotos();
+}
+function clRemovePhoto(i) { CL.images.splice(i, 1); clRenderPhotos(); }
 function clDerivedShopify(eb) { return eb ? eb * (1 - clPct() / 100) : 0; }
 function clUpdateDerived() {
   const eb = parseFloat(el('cl-ebay')?.value) || 0;
@@ -10234,6 +10271,7 @@ async function submitCreateListing() {
     tags: (el('cl-tags')?.value || '').trim() || null,
     status: el('cl-status')?.value || 'draft',
     imageUrls: (el('cl-images')?.value || '').split(/\n+/).map(s => s.trim()).filter(Boolean),
+    imagesBase64: CL.images || [],
     categoryId: CL.categoryId || null,
     metafields,
   };

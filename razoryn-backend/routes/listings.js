@@ -1754,6 +1754,7 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
 
   const qty = Number.isInteger(b.qty) ? b.qty : (parseInt(b.qty) || 0);
   const imageUrls = Array.isArray(b.imageUrls) ? b.imageUrls.filter(Boolean) : [];
+  const imageData = Array.isArray(b.imagesBase64) ? b.imagesBase64.filter(Boolean) : [];
   const metafields = Array.isArray(b.metafields) ? b.metafields : [];
   const tags = b.tags || null;
   const status = ['active', 'draft'].includes(b.status) ? b.status : 'draft';
@@ -1763,7 +1764,7 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   if (shopify.isConfigured()) {
     try {
       shopifyProduct = await shopify.createProduct({
-        title, sku, price: shopifyPrice, imageUrls, status, metafields, qty, tags,
+        title, sku, price: shopifyPrice, imageUrls, imageData, status, metafields, qty, tags,
         description: b.description || null,
       });
       for (const mf of (shopifyProduct?.__metafieldResults || [])) {
