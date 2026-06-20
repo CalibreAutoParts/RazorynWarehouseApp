@@ -281,7 +281,7 @@ function normaliseImageUrls(imageUrls = []) {
   return [...new Set((imageUrls || []).map(maxResImageUrl).filter(Boolean))];
 }
 
-async function createProduct({ title, sku, price, imageUrls = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null }) {
+async function createProduct({ title, sku, price, imageUrls = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null, description = null }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const imgs = normaliseImageUrls(imageUrls);
   const productPayload = {
@@ -295,6 +295,7 @@ async function createProduct({ title, sku, price, imageUrls = [], status = 'draf
     }],
     images: imgs.map(src => ({ src })),
   };
+  if (description != null) productPayload.body_html = description;
   if (tags) productPayload.tags = tags; // comma-separated string
   if (templateSuffix) productPayload.template_suffix = templateSuffix; // e.g. "large-parts"
 

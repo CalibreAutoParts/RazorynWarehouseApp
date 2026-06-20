@@ -1730,6 +1730,72 @@ router.get('/import-shopify-to-warehouse/status', requireAdmin, (req, res) => {
   res.json(_importState);
 });
 
+// POST /api/listings/create-listing — WAREHOUSE-FIRST listing creation.
+// Creates the warehouse product (master), pushes it to Shopify with price =
+// eBay − [Shopify %], plus category / tags / custom metafields, links them, and
+// returns the new productId so the caller can run the (proven) eBay-create flow.
+router.post('/create-listing', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const sku = String(b.sku || '').trim();
+  const title = String(b.title || '').trim();
+  const ebayPrice = parseFloat(b.ebayPrice);
+  if (!sku || !title) return res.status(400).json({ error: 'sku_and_title_required' });
+  if (isNaN(ebayPrice) || ebayPrice < 0) return res.status(400).json({ error: 'invalid_price' });
+
+  const dup = await query(`SELECT id FROM products WHERE TRIM(LOWER(sku)) = TRIM(LOWER($1))`, [sku]);
+  if (dup.rows[0]) return res.status(409).json({ error: 'sku_exists', productId: dup.rows[0].id });
+
+  // Shopify price is derived from the eBay (master) price using the configured %.
+  const sr = await query(`SELECT price_link_pct, bank_transfer_pct FROM app_settings WHERE id = 1`);
+  const s = sr.rows[0] || {};
+  const shopPct = s.price_link_pct != null ? parseFloat(s.price_link_pct)
+    : (s.bank_transfer_pct != null ? parseFloat(s.bank_transfer_pct) : 10);
+  const shopifyPrice = +(ebayPrice * (1 - shopPct / 100)).toFixed(2);
+
+  const qty = Number.isInteger(b.qty) ? b.qty : (parseInt(b.qty) || 0);
+  const imageUrls = Array.isArray(b.imageUrls) ? b.imageUrls.filter(Boolean) : [];
+  const metafields = Array.isArray(b.metafields) ? b.metafields : [];
+  const tags = b.tags || null;
+  const status = ['active', 'draft'].includes(b.status) ? b.status : 'draft';
+
+  const result = { ok: true, sku, ebayPrice, shopifyPrice, shopPct };
+  let shopifyProduct = null;
+  if (shopify.isConfigured()) {
+    try {
+      shopifyProduct = await shopify.createProduct({
+        title, sku, price: shopifyPrice, imageUrls, status, metafields, qty, tags,
+        description: b.description || null,
+      });
+      for (const mf of (shopifyProduct?.__metafieldResults || [])) {
+        if (!mf.ok) (result.metafieldIssues = result.metafieldIssues || []).push({ key: `${mf.namespace}.${mf.key}`, error: mf.error });
+      }
+      if (b.categoryId && shopifyProduct?.id) {
+        try { await shopify.applyProductSeo(shopifyProduct.id, { categoryId: b.categoryId }); }
+        catch (e) { result.categoryError = e.message; }
+      }
+    } catch (e) {
+      return res.status(502).json({ error: 'shopify_create_failed', message: e.message });
+    }
+  } else {
+    result.shopifySkipped = 'not_configured';
+  }
+
+  // Warehouse product = master. Store the Shopify ids so stock/price sync works.
+  const v = shopifyProduct?.variants?.[0];
+  const ins = await query(`
+    INSERT INTO products (sku, title, barcode, qty_on_hand, price_ebay, price_shopify,
+                          shopify_product_id, shopify_variant_id, shopify_inventory_id, active)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true) RETURNING id`,
+    [sku, title, sku, qty, ebayPrice, shopifyPrice,
+     shopifyProduct ? String(shopifyProduct.id) : null,
+     v?.id ? String(v.id) : null,
+     v?.inventory_item_id ? String(v.inventory_item_id) : null]);
+  const productId = ins.rows[0].id;
+
+  await audit(req, 'create_listing', 'product', productId, { sku, ebayPrice, shopifyPrice, shopify: !!shopifyProduct });
+  res.status(201).json({ ...result, productId, shopifyProductId: shopifyProduct ? String(shopifyProduct.id) : null });
+});
+
 // POST /api/listings/resync-images — one-click re-push of the SELECTED images only.
 // Deliberately separate from /mirror: it touches images and nothing else (no
 // title/price/metafields), so refreshing photos to full resolution can't disturb

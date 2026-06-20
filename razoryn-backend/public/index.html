@@ -10050,9 +10050,11 @@ function renderBulkEditor() {
     <div class="page">
       <div class="page-head">
         <div><h1>Bulk Editor</h1><div class="desc">Edit &amp; sync many listings at once — each action shows exactly what pushes where.</div></div>
-        <div class="actions">${src === 'ebay'
-          ? '<button class="btn btn-primary" onclick="bulkPull(this)">⟳ Pull eBay listings</button>'
-          : '<button class="btn btn-primary" onclick="loadBulkShopify(true)">⟳ Refresh Shopify products</button>'}</div>
+        <div class="actions">
+          <button class="btn btn-primary" onclick="openCreateListing()" title="Create a brand-new listing in the warehouse and push it to Shopify + eBay">✚ Create listing</button>
+          ${src === 'ebay'
+          ? '<button class="btn btn-outline" onclick="bulkPull(this)">⟳ Pull eBay listings</button>'
+          : '<button class="btn btn-outline" onclick="loadBulkShopify(true)">⟳ Refresh Shopify products</button>'}</div>
       </div>
 
       <div class="card" style="margin-bottom:14px"><div class="card-body" style="font-size:12.5px;line-height:1.8">
@@ -10122,6 +10124,135 @@ function bulkSource(tab) {
   renderBulkEditor();
   // Keep the matching sidebar direction item highlighted.
   document.querySelectorAll('.nav-item[data-page="bulk"]').forEach(n => n.classList.toggle('active', n.dataset.source === tab));
+}
+
+// ── WAREHOUSE-FIRST: Create listing (warehouse master → Shopify, then eBay) ──
+const CL = { categoryId: '', categoryName: '', defs: [], _catResults: [] };
+function clPct() {
+  const c = State.pricingConfig || {};
+  return c.priceLinkPct != null ? c.priceLinkPct : (c.bankTransferPct != null ? c.bankTransferPct : 10);
+}
+async function openCreateListing() {
+  CL.categoryId = ''; CL.categoryName = ''; CL.defs = []; CL._catResults = [];
+  try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) {}
+  modal({
+    title: 'Create listing', wide: true, body: clBody(),
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Create & continue to eBay', primary: true, onClick: submitCreateListing },
+    ],
+  });
+  setTimeout(() => { const i = el('cl-sku'); if (i) i.focus(); }, 60);
+}
+function clBody() {
+  const pct = clPct();
+  return `
+    <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">The warehouse is the master. You set the <strong>eBay price</strong>; Shopify is auto-set to eBay − ${pct}%. This creates the warehouse product, pushes it to Shopify, then opens the eBay create step.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="field"><label>SKU *</label><input id="cl-sku" style="font-family:ui-monospace,monospace" placeholder="e.g. 7450B289" autocomplete="off"></div>
+      <div class="field"><label>Title *</label><input id="cl-title" placeholder="e.g. Mitsubishi Outlander 2018-2024 Front Grille"></div>
+    </div>
+    <div class="field"><label>Description</label><textarea id="cl-desc" rows="3" placeholder="Optional — pushed to Shopify"></textarea></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      <div class="field"><label>eBay price (£) *</label><input id="cl-ebay" type="number" min="0" step="0.01" oninput="clUpdateDerived()"></div>
+      <div class="field"><label>Shopify price (auto −${pct}%)</label><input id="cl-shop" disabled style="background:var(--bg-soft)"></div>
+      <div class="field"><label>Initial stock</label><input id="cl-qty" type="number" min="0" step="1" value="0"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="field"><label>Tags (comma-separated)</label><input id="cl-tags" placeholder="MO18, grille"></div>
+      <div class="field"><label>Shopify status</label><select id="cl-status"><option value="draft">Draft</option><option value="active">Active</option></select></div>
+    </div>
+    <div class="field"><label>Image URLs (one per line)</label><textarea id="cl-images" rows="2" placeholder="https://…"></textarea></div>
+    <div class="field"><label>Shopify category</label>
+      <div id="cl-cat-current" style="font-size:12px;margin-bottom:4px">${CL.categoryName ? '✓ ' + escapeHtml(CL.categoryName) : '<span style="color:var(--ink-soft)">None selected</span>'}</div>
+      <input id="cl-cat-search" placeholder="Search categories (e.g. grille, headlight)…" autocomplete="off" oninput="clSearchCats(this.value)">
+      <div id="cl-cat-results" style="max-height:180px;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:6px;display:none"></div>
+    </div>
+    <div class="field"><label>Custom metafields ${CL.defs.length ? '' : '<span style="color:var(--ink-soft);font-weight:400">— none defined in Shopify yet</span>'}</label>
+      <div id="cl-mf-list"></div>
+      ${CL.defs.length ? '<button type="button" class="btn btn-outline btn-sm" onclick="clAddMf()" style="margin-top:6px">+ Add metafield</button>' : ''}
+    </div>`;
+}
+function clDerivedShopify(eb) { return eb ? eb * (1 - clPct() / 100) : 0; }
+function clUpdateDerived() {
+  const eb = parseFloat(el('cl-ebay')?.value) || 0;
+  const o = el('cl-shop'); if (o) o.value = eb ? '£' + clDerivedShopify(eb).toFixed(2) : '';
+}
+let _clCatT;
+function clSearchCats(q) {
+  clearTimeout(_clCatT);
+  _clCatT = setTimeout(async () => {
+    const wrap = el('cl-cat-results'); if (!wrap) return;
+    q = (q || '').trim();
+    if (!q) { wrap.style.display = 'none'; return; }
+    try {
+      const r = await Api.get('/api/listings/shopify-categories?q=' + encodeURIComponent(q));
+      CL._catResults = r.categories || [];
+      wrap.style.display = 'block';
+      wrap.innerHTML = CL._catResults.length
+        ? CL._catResults.map((c, i) => `<div onclick="clPickCat(${i})" style="padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--line-2);font-size:12px">${escapeHtml(c.name)}</div>`).join('')
+        : '<div style="padding:8px;color:var(--ink-soft);font-size:12px">No matches</div>';
+    } catch (e) { wrap.style.display = 'block'; wrap.innerHTML = '<div style="padding:8px;color:var(--red);font-size:12px">Search failed</div>'; }
+  }, 250);
+}
+function clPickCat(i) {
+  const c = CL._catResults[i]; if (!c) return;
+  CL.categoryId = c.id; CL.categoryName = c.name;
+  const cur = el('cl-cat-current'); if (cur) cur.innerHTML = '✓ ' + escapeHtml(c.name);
+  const res = el('cl-cat-results'); if (res) res.style.display = 'none';
+  const s = el('cl-cat-search'); if (s) s.value = '';
+}
+function clAddMf() {
+  const wrap = el('cl-mf-list'); if (!wrap) return;
+  const opts = CL.defs.map(d => `<option value="${escapeAttr(d.namespace + '|' + d.key + '|' + (d.type || 'single_line_text_field'))}">${escapeHtml(d.name || (d.namespace + '.' + d.key))}</option>`).join('');
+  const row = document.createElement('div');
+  row.className = 'cl-mf-row';
+  row.style.cssText = 'display:flex;gap:6px;margin-bottom:6px';
+  row.innerHTML = `<select class="cl-mf-def" style="flex:1">${opts}</select>
+    <input class="cl-mf-val" placeholder="value" style="flex:1">
+    <button type="button" class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="this.closest('.cl-mf-row').remove()">×</button>`;
+  wrap.appendChild(row);
+}
+async function submitCreateListing() {
+  const sku = (el('cl-sku')?.value || '').trim();
+  const title = (el('cl-title')?.value || '').trim();
+  const ebayPrice = parseFloat(el('cl-ebay')?.value);
+  if (!sku || !title) { toast('SKU and title are required', 'warn'); return; }
+  if (isNaN(ebayPrice) || ebayPrice < 0) { toast('Enter a valid eBay price', 'warn'); return; }
+  const metafields = [...document.querySelectorAll('#cl-mf-list .cl-mf-row')].map(r => {
+    const parts = (r.querySelector('.cl-mf-def')?.value || '').split('|');
+    const value = (r.querySelector('.cl-mf-val')?.value || '').trim();
+    return (parts[0] && parts[1] && value) ? { namespace: parts[0], key: parts[1], type: parts[2] || 'single_line_text_field', value } : null;
+  }).filter(Boolean);
+  const payload = {
+    sku, title,
+    description: (el('cl-desc')?.value || '').trim() || null,
+    ebayPrice,
+    qty: parseInt(el('cl-qty')?.value) || 0,
+    tags: (el('cl-tags')?.value || '').trim() || null,
+    status: el('cl-status')?.value || 'draft',
+    imageUrls: (el('cl-images')?.value || '').split(/\n+/).map(s => s.trim()).filter(Boolean),
+    categoryId: CL.categoryId || null,
+    metafields,
+  };
+  const taskId = Task.start('Creating listing…');
+  try {
+    const r = await Api.post('/api/listings/create-listing', payload);
+    Task.done(taskId, 'Created');
+    closeModal();
+    await Store.refresh('products').catch(() => {});
+    let msg = `Created ${sku} — Shopify ${gbp(r.shopifyPrice)}${r.shopifyProductId ? ' ✓' : ' (Shopify skipped)'}`;
+    if (r.metafieldIssues && r.metafieldIssues.length) msg += ` · ${r.metafieldIssues.length} metafield issue(s)`;
+    toast(msg, (r.metafieldIssues && r.metafieldIssues.length) ? 'warn' : 'success', 7000);
+    // Continue straight into the proven eBay-create flow, pre-filled from the new product.
+    if (confirm('Shopify listing created. Create the eBay listing now?')) openCreateEbayListing(r.productId);
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    const msg = e.data?.error === 'sku_exists' ? 'A product with that SKU already exists.'
+      : e.data?.error === 'shopify_create_failed' ? ('Shopify rejected it: ' + (e.data?.message || ''))
+      : (e.data?.message || e.message);
+    toast('Create failed: ' + msg, 'error');
+  }
 }
 
 // "From Shopify → eBay" tab: lists products that are on Shopify but NOT yet on
