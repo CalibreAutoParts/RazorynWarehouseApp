@@ -1810,6 +1810,40 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   res.status(201).json({ ...result, productId, shopifyProductId: shopifyProduct ? String(shopifyProduct.id) : null });
 });
 
+// POST /api/listings/repush-ebay-images { productId }
+// Re-send a product's Shopify photos to its linked eBay listing(s) — fixes
+// listings that ended up with no images.
+router.post('/repush-ebay-images', requireAdmin, async (req, res) => {
+  const productId = req.body?.productId;
+  if (!productId) return res.status(400).json({ error: 'productId_required' });
+  const pr = await query(`SELECT id, sku, shopify_product_id, image_url FROM products WHERE id = $1`, [productId]);
+  const product = pr.rows[0];
+  if (!product) return res.status(404).json({ error: 'not_found' });
+
+  // Source images: prefer the full Shopify set, fall back to the stored image_url.
+  let imageUrls = product.image_url ? [product.image_url] : [];
+  if (product.shopify_product_id && shopify.isConfigured()) {
+    try { const sp = await shopify.getShopifyProductFull(product.shopify_product_id); if (sp.imageUrls?.length) imageUrls = sp.imageUrls; }
+    catch (e) { /* fall back to image_url */ }
+  }
+  if (!imageUrls.length) return res.status(400).json({ error: 'no_images', message: 'No Shopify images found for this product.' });
+
+  const links = await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [product.shopify_product_id]);
+  if (!links.rows.length) return res.status(400).json({ error: 'no_ebay_link', message: 'This product has no linked eBay listing.' });
+
+  const ebay = require('../services/ebay');
+  const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
+  let pushed = 0; const errors = [];
+  for (const link of links.rows) {
+    const store = stores.find(s => s.code === link.store_code) || (link.store_code ? null : (stores.find(s => s.primary) || stores[0]));
+    if (!store) { errors.push(`${link.ebay_item_id}: store unavailable`); continue; }
+    try { await ebay.reviseItem(link.ebay_item_id, { pictureUrls: imageUrls }, store.code); pushed++; }
+    catch (e) { errors.push(`${link.ebay_item_id}: ${e.message}`); }
+  }
+  await audit(req, 'repush_ebay_images', 'product', product.id, { pushed, images: imageUrls.length });
+  res.json({ ok: pushed > 0, pushed, images: imageUrls.length, errors });
+});
+
 // POST /api/listings/resync-images — one-click re-push of the SELECTED images only.
 // Deliberately separate from /mirror: it touches images and nothing else (no
 // title/price/metafields), so refreshing photos to full resolution can't disturb

@@ -11393,6 +11393,7 @@ function renderLinkStatus() {
                     <button class="btn btn-outline btn-sm" onclick="openStockLabelForProduct(${p.id})" title="Set stock (pushes to Shopify + eBay) and/or print a stock-check label" style="margin-right:4px">🏷 Stock/label</button>
                     ${!p.ebay_item_id && p.shopify_product_id ? `<button class="btn btn-primary btn-sm" onclick="openCreateEbayListing(${p.id})" title="Create a new eBay listing using this product's Shopify data" style="margin-right:4px">+ Create on eBay</button>` : ''}
                     ${!p.ebay_item_id ? `<button class="btn btn-outline btn-sm" onclick="openLinkProductToEbay(${p.id})" title="Link to an EXISTING eBay listing (use this if you already created the listing manually)">🔗 Link existing</button>` : ''}
+                    ${p.ebay_item_id && p.shopify_product_id ? `<button class="btn btn-outline btn-sm" onclick="repushEbayImages(${p.id})" title="Re-send this product's Shopify photos to the eBay listing" style="margin-right:4px">📷 Push images to eBay</button>` : ''}
                     ${p.ebay_item_id ? `<button class="btn btn-ghost btn-sm" onclick="unlinkEbay('${escapeAttr(p.ebay_item_id)}')" title="Remove link" style="color:var(--red)">✕</button>` : ''}
                   </td>
                 </tr>
@@ -12014,6 +12015,23 @@ async function submitCreateEbayListing(productId, opts = {}) {
     } else {
       toast('Create failed: ' + msg, 'error', 10000);
     }
+  }
+}
+
+// Re-send a product's Shopify photos to its linked eBay listing(s).
+async function repushEbayImages(productId) {
+  const taskId = Task.start('Pushing images to eBay…');
+  try {
+    const r = await Api.post('/api/listings/repush-ebay-images', { productId });
+    Task.done(taskId, r.pushed ? 'Pushed' : 'No change');
+    toast(r.pushed ? `✓ Pushed ${r.images} photo(s) to ${r.pushed} eBay listing${r.pushed > 1 ? 's' : ''}` : 'No images pushed', r.pushed ? 'success' : 'warn', 6000);
+    if (r.errors && r.errors.length) console.warn('repush-ebay-images', r.errors);
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    const m = e.data?.error === 'no_images' ? 'No Shopify images found for this product.'
+      : e.data?.error === 'no_ebay_link' ? 'This product has no linked eBay listing.'
+      : (e.data?.message || e.message);
+    toast('Failed: ' + m, 'error', 7000);
   }
 }
 
