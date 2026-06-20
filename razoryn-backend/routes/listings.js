@@ -1791,11 +1791,16 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
 
   // Warehouse product = master. Store the Shopify ids so stock/price sync works.
   const v = shopifyProduct?.variants?.[0];
+  // The Shopify create response already carries the hosted image URLs — capture
+  // them so the eBay create can use the exact same photos (the live Shopify
+  // product can lag for a moment after an attachment upload).
+  const imgSrcs = (shopifyProduct?.images || []).map(im => im.src).filter(Boolean);
+  result.imageUrls = imgSrcs;
   const ins = await query(`
-    INSERT INTO products (sku, title, barcode, qty_on_hand, price_ebay, price_shopify,
+    INSERT INTO products (sku, title, barcode, qty_on_hand, price_ebay, price_shopify, image_url,
                           shopify_product_id, shopify_variant_id, shopify_inventory_id, active)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true) RETURNING id`,
-    [sku, title, sku, qty, ebayPrice, shopifyPrice,
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true) RETURNING id`,
+    [sku, title, sku, qty, ebayPrice, shopifyPrice, imgSrcs[0] || null,
      shopifyProduct ? String(shopifyProduct.id) : null,
      v?.id ? String(v.id) : null,
      v?.inventory_item_id ? String(v.inventory_item_id) : null]);
@@ -2551,16 +2556,22 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
   // Try to enrich with Shopify-side content (description + extra images).
   // Best-effort; if Shopify fetch fails we fall back to the warehouse data.
   let description = '';
-  let imageUrls = product.image_url ? [product.image_url] : [];
+  // Explicit image URLs (passed by the unified create flow) are the most reliable
+  // — they're the exact Shopify CDN URLs captured at create time.
+  let imageUrls = (Array.isArray(b.imageUrls) && b.imageUrls.length)
+    ? b.imageUrls.filter(Boolean)
+    : (product.image_url ? [product.image_url] : []);
   // A description typed/edited in the listing form takes priority over everything.
   if (b.descriptionOverride && String(b.descriptionOverride).trim()) {
     description = String(b.descriptionOverride);
   }
-  if (!description && b.useShopifyDescription !== false && product.shopify_product_id) {
+  // Pull Shopify images (and the description if we still need one) — independent
+  // of whether a description override was given, so photos always come through.
+  if (product.shopify_product_id) {
     try {
       const sp = await shopify.getShopifyProductFull(product.shopify_product_id);
-      if (sp.description) description = sp.description;
-      if (sp.imageUrls?.length) imageUrls = sp.imageUrls;
+      if (!(Array.isArray(b.imageUrls) && b.imageUrls.length) && sp.imageUrls?.length) imageUrls = sp.imageUrls;
+      if (!description && b.useShopifyDescription !== false && sp.description) description = sp.description;
     } catch (e) {
       console.warn('[create-ebay] Shopify fetch failed (continuing with warehouse data):', e.message);
     }

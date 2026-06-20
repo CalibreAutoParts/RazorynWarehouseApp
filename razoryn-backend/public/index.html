@@ -10259,6 +10259,7 @@ async function submitUnifiedCreate(btn) {
   State._ceCtx = State._ceCtx || {};
   State._ceCtx.product = { id: created.productId, title: shopTitle, sku, shopify_product_id: created.shopifyProductId };
   await submitCreateEbayListing(created.productId, {
+    imageUrls: created.imageUrls || [],
     onSuccess: (r) => { toast(`✓ Listed everywhere — eBay ItemID ${r.itemId}`, 'success', 8000); routeTo('mirror'); },
   });
   if (btn) btn.disabled = false;
@@ -11979,6 +11980,7 @@ async function submitCreateEbayListing(productId, opts = {}) {
       itemSpecifics, businessPolicies, preview,
       countryOfOrigin: countryOfOrigin || undefined,
       vatPercent, storeCategoryId, promote,
+      imageUrls: (opts.imageUrls && opts.imageUrls.length) ? opts.imageUrls : undefined,
     });
     // Preview mode: nothing was listed — show fees, keep the modal open so the
     // user can untick Preview and publish.
