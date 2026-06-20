@@ -61,6 +61,190 @@ function isConfigured(storeArg) {
 let cachedToken = null;
 let tokenExpiresAt = 0;
 
+// Application token via client_credentials — for public REST APIs like the
+// Commerce Taxonomy API. Needs only the App ID + Cert ID (no user consent or
+// refresh token), so it works wherever Trading works. Replaces the deprecated
+// Trading API category calls (GetCategorySpecifics now returns HTTP 503).
+let cachedAppToken = null, appTokenExpiresAt = 0;
+async function getAppToken() {
+  if (!CLIENT_ID || !CLIENT_SECRET) throw new Error('eBay App ID / Cert ID not set');
+  if (cachedAppToken && Date.now() < appTokenExpiresAt - 60000) return cachedAppToken;
+  const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
+  const r = await axios.post(`${BASE}/identity/v1/oauth2/token`,
+    new URLSearchParams({ grant_type: 'client_credentials', scope: 'https://api.ebay.com/oauth/api_scope' }),
+    { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 });
+  cachedAppToken = r.data.access_token;
+  appTokenExpiresAt = Date.now() + (r.data.expires_in * 1000);
+  return cachedAppToken;
+}
+async function taxonomyGet(path) {
+  const token = await getAppToken();
+  return axios.get(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, timeout: 20000 });
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Normalize one Browse item_summary into our internal listing shape, including
+// shipping (so prices compare delivered), condition and the actual seller.
+function normalizeBrowseItem(it) {
+  const ship = (it.shippingOptions && it.shippingOptions[0]) || null;
+  const buyOpts = it.buyingOptions || [];
+  let shippingCost = null, shippingType = 'unknown', shippingFree = false;
+  if (ship) {
+    const sc = ship.shippingCost && ship.shippingCost.value != null ? Number(ship.shippingCost.value) : null;
+    shippingCost = sc;
+    if (sc === 0) { shippingFree = true; shippingType = 'free'; }
+    else if (ship.shippingCostType === 'CALCULATED') shippingType = 'calculated';
+    else if (sc != null) shippingType = 'flat';
+  } else if (buyOpts.includes('LOCAL_PICKUP') || it.pickupOptions) {
+    shippingType = 'collection';
+  }
+  return {
+    external_id: it.itemId,
+    title: it.title || '',
+    price: it.price && it.price.value != null ? Number(it.price.value) : null,
+    currency: (it.price && it.price.currency) || 'GBP',
+    url: it.itemWebUrl || null,
+    image_url: (it.image && it.image.imageUrl) || (it.thumbnailImages && it.thumbnailImages[0]?.imageUrl) || null,
+    condition: it.condition || null,
+    condition_id: it.conditionId || null,
+    seller_username: (it.seller && it.seller.username) || null,
+    shipping_cost: shippingCost,
+    shipping_type: shippingType,
+    shipping_free: shippingFree,
+  };
+}
+
+// One Browse search request with the canonical 429/503 backoff. Returns the raw
+// axios response so callers can read both itemSummaries and the total count.
+async function browseSearch(url, marketplaceId) {
+  const token = await getAppToken();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+          'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+        },
+        timeout: 30000,
+      });
+    } catch (e) {
+      const status = e.response?.status;
+      if ((status === 429 || status === 503) && attempt < 5) {
+        const ra = parseInt(e.response?.headers?.['retry-after'], 10);
+        const waitMs = (!isNaN(ra) && ra > 0) ? ra * 1000 : Math.min(500 * 2 ** attempt, 8000);
+        await sleep(waitMs);
+        continue;
+      }
+      const msg = e.response?.data?.errors?.[0]?.message || e.message;
+      throw new Error(`eBay Browse search failed [${status || '?'}]: ${msg}`);
+    }
+  }
+}
+
+// Public Buy Browse API — list a competitor seller's active listings using the
+// app (client_credentials) token, NOT a per-store user token. This is the legal,
+// supported way to monitor competitors who sell on eBay.
+//
+// Notes / constraints:
+//  - The `sellers:{username}` filter cannot stand alone; eBay requires an
+//    accompanying q or category, so we pass a broad q=* .
+//  - Browse paginates via offset (max 200 per page); total results are capped at
+//    ~10k by eBay, so very large sellers are necessarily sampled.
+//  - Requires the application to have Buy API (Browse) access granted.
+// Condition is captured AND can be filtered: pass conditionIds (e.g. '1000' for
+// New only) to restrict results — competitor tracking uses New so we compare
+// like-for-like and don't treat salvage/used listings as price competitors.
+// Returns a normalized array of:
+//   { external_id, title, price, currency, url, image_url,
+//     condition, condition_id, seller_username,
+//     shipping_cost, shipping_type, shipping_free }
+async function getSellerActiveListings(sellerUsername, { limit = 1000, marketplaceId, conditionIds } = {}) {
+  if (!sellerUsername) throw new Error('seller username required');
+  const token = await getAppToken();
+  const mkt = marketplaceId || process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
+  const pageSize = 200;
+  const out = [];
+  let offset = 0;
+  let total = Infinity;
+  let pages = 0;
+  const maxPages = Math.ceil(limit / pageSize) + 1;
+
+  // Build the filter: seller is required; optionally restrict by condition.
+  let filterStr = 'sellers:{' + sellerUsername + '}';
+  if (conditionIds) {
+    const ids = Array.isArray(conditionIds) ? conditionIds.join('|') : String(conditionIds).replace(/,/g, '|');
+    filterStr += `,conditionIds:{${ids}}`;
+  }
+
+  while (offset < Math.min(limit, total) && pages < maxPages) {
+    const url = `${BASE}/buy/browse/v1/item_summary/search`
+      + `?q=${encodeURIComponent('*')}`
+      + `&filter=${encodeURIComponent(filterStr)}`
+      + `&limit=${pageSize}&offset=${offset}`;
+
+    const resp = await browseSearch(url, mkt);
+    const data = resp.data || {};
+    total = typeof data.total === 'number' ? data.total : 0;
+    const items = data.itemSummaries || [];
+    for (const it of items) out.push(normalizeBrowseItem(it));
+    pages++;
+    if (!items.length) break;
+    offset += pageSize;
+    if (offset < Math.min(limit, total)) await sleep(300); // gentle pacing between pages
+  }
+  return out;
+}
+
+// Market-wide search (no seller filter) — used to rank ALL sellers competing on
+// a part and to read the saturation (total active listing count). Returns
+// { items, total }. Pass conditionIds to scope to NEW (1000) etc.
+async function searchActiveListings({ q, conditionIds, marketplaceId, limit = 100 } = {}) {
+  const mkt = marketplaceId || process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
+  const pageSize = Math.min(100, limit);
+  const out = [];
+  let offset = 0, total = Infinity, pages = 0;
+  const maxPages = Math.ceil(limit / pageSize) + 1;
+  const filters = [];
+  if (conditionIds) {
+    const ids = Array.isArray(conditionIds) ? conditionIds.join('|') : String(conditionIds).replace(/,/g, '|');
+    filters.push(`conditionIds:{${ids}}`);
+  }
+  while (offset < Math.min(limit, total) && pages < maxPages) {
+    const url = `${BASE}/buy/browse/v1/item_summary/search`
+      + `?q=${encodeURIComponent(q || '*')}`
+      + (filters.length ? `&filter=${encodeURIComponent(filters.join(','))}` : '')
+      + `&limit=${pageSize}&offset=${offset}`;
+    const resp = await browseSearch(url, mkt);
+    const data = resp.data || {};
+    total = typeof data.total === 'number' ? data.total : 0;
+    const items = data.itemSummaries || [];
+    for (const it of items) out.push(normalizeBrowseItem(it));
+    pages++;
+    if (!items.length) break;
+    offset += pageSize;
+    if (offset < Math.min(limit, total)) await sleep(300);
+  }
+  return { items: out, total: total === Infinity ? out.length : total };
+}
+
+// Cheap saturation count for a query+condition (reads total without fetching all).
+async function countActiveListings({ q, conditionIds, marketplaceId } = {}) {
+  const mkt = marketplaceId || process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
+  const filters = [];
+  if (conditionIds) {
+    const ids = Array.isArray(conditionIds) ? conditionIds.join('|') : String(conditionIds).replace(/,/g, '|');
+    filters.push(`conditionIds:{${ids}}`);
+  }
+  const url = `${BASE}/buy/browse/v1/item_summary/search`
+    + `?q=${encodeURIComponent(q || '*')}`
+    + (filters.length ? `&filter=${encodeURIComponent(filters.join(','))}` : '')
+    + `&limit=1&offset=0`;
+  const resp = await browseSearch(url, mkt);
+  return typeof resp.data?.total === 'number' ? resp.data.total : 0;
+}
+
 async function getAccessToken() {
   if (!isConfigured()) {
     const have = {
@@ -258,8 +442,7 @@ async function pushStockForProduct(product) {
   if (!product.sku) return { skipped: 'no_sku' };
   // Route through the warehouse DB → mirror_links to find this product's eBay
   // ItemID(s) + store, then push via ReviseInventoryStatus (Trading API) which
-  // works for legacy listings. Falls back to the Inventory-API SKU update only
-  // if no mirror link exists (e.g. inventory-model listings).
+  // works for legacy listings.
   let links = [];
   try {
     const { query } = require('../db');
@@ -268,7 +451,7 @@ async function pushStockForProduct(product) {
       [product.shopify_product_id]
     );
     links = r.rows;
-  } catch (e) { /* db unavailable — fall through to SKU path */ }
+  } catch (e) { /* db unavailable — treat as no link */ }
 
   if (links.length) {
     const results = [];
@@ -284,13 +467,11 @@ async function pushStockForProduct(product) {
     return { ok: true, via: 'ReviseInventoryStatus', results };
   }
 
-  // No mirror link — try the Inventory API SKU update as a last resort.
-  try {
-    await setInventoryQty(product.sku, product.qty_on_hand);
-    return { ok: true, via: 'inventory_api' };
-  } catch (e) {
-    return { error: e.message };
-  }
+  // No mirror link → this product isn't listed on eBay (or hasn't been mirrored
+  // yet). Skip it silently rather than firing a wasted Inventory-API call: it
+  // would just fail for legacy Trading-API sellers (and burns API credits). Use
+  // Listing Mirror to link a product before its stock can push to eBay.
+  return { skipped: 'no_link' };
 }
 
 // setQuantityTradingAPI — update a listing's available quantity using the
@@ -333,6 +514,21 @@ async function getQuantityTradingAPI(itemId, storeArg) {
   const qty = parseInt(extractOne(xml, 'Quantity') || '0') || 0;
   const sold = parseInt(extractOne(xml, 'QuantitySold') || '0') || 0;
   return Math.max(0, qty - sold);
+}
+
+// Fetch a single eBay listing's HTML description (Trading API GetItem). Used by
+// the duplicate-listing scan to look for part numbers embedded in descriptions.
+// Best-effort: returns '' on any failure so a scan over many items keeps going.
+async function getItemDescription(itemId, storeArg) {
+  if (!isConfigured(storeArg) || !itemId) return '';
+  try {
+    const xml = await tradingCall('GetItem',
+      `<ItemID>${escapeXml(String(itemId))}</ItemID><DetailLevel>ItemReturnDescription</DetailLevel>`, storeArg);
+    if (xml.includes('<Ack>Failure</Ack>')) return '';
+    return decodeEntities(extractOne(xml, 'Description') || '');
+  } catch (e) {
+    return '';
+  }
 }
 
 // ---------- Trading API (XML) — needed for GetMyeBaySelling ----------
@@ -564,10 +760,25 @@ async function getActiveListings(storeArg, opts = {}) {
 // ReviseItem — push SKU, title, and/or price change back to eBay.
 // Risks: revision counts toward eBay's per-listing limit; major changes may affect search ranking;
 // some listings can't be revised (e.g. with bids). Use sparingly, with explicit user confirm.
-async function reviseItem(itemId, { sku, title, price } = {}, storeArg) {
+// Build an <ItemSpecifics> block from [{name, value}] or [{name, values:[...]}].
+// Sending the block REPLACES the listing's specifics, so callers should pass the
+// full set they want (merge before calling).
+function buildItemSpecificsXml(specifics) {
+  const lists = (specifics || []).filter(s => s && s.name).map(s => {
+    const vals = (Array.isArray(s.values) ? s.values : [s.value]).filter(v => v != null && String(v).trim());
+    if (!vals.length) return '';
+    return `<NameValueList><Name>${escapeXml(s.name)}</Name>${vals.map(v => `<Value>${escapeXml(v)}</Value>`).join('')}</NameValueList>`;
+  }).join('');
+  return lists ? `<ItemSpecifics>${lists}</ItemSpecifics>` : '';
+}
+
+async function reviseItem(itemId, { sku, title, price, description, itemSpecifics, pictureUrls } = {}, storeArg) {
   if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
   if (!itemId) throw new Error('missing_item_id');
-  if (sku == null && title == null && price == null) return { skipped: true };
+  if (sku == null && title == null && price == null && description == null
+      && !(itemSpecifics && itemSpecifics.length) && !(pictureUrls && pictureUrls.length)) {
+    return { skipped: true };
+  }
 
   const fields = [`<ItemID>${itemId}</ItemID>`];
   if (title) fields.push(`<Title>${escapeXml(title)}</Title>`);
@@ -577,6 +788,12 @@ async function reviseItem(itemId, { sku, title, price } = {}, storeArg) {
     const formatted = Number(price).toFixed(2);
     fields.push(`<StartPrice currencyID="GBP">${formatted}</StartPrice>`);
   }
+  // Description accepts HTML; CDATA-wrap so our markup isn't re-escaped by eBay.
+  if (description != null) fields.push(`<Description><![CDATA[${String(description)}]]></Description>`);
+  if (itemSpecifics && itemSpecifics.length) fields.push(buildItemSpecificsXml(itemSpecifics));
+  if (pictureUrls && pictureUrls.length) {
+    fields.push(`<PictureDetails>${pictureUrls.filter(Boolean).slice(0, 24).map(u => `<PictureURL>${escapeXml(u)}</PictureURL>`).join('')}</PictureDetails>`);
+  }
   const body = `<Item>${fields.join('')}</Item>`;
 
   const xml = await tradingCall('ReviseItem', body, storeArg);
@@ -585,6 +802,58 @@ async function reviseItem(itemId, { sku, title, price } = {}, storeArg) {
     throw new Error('eBay ReviseItem error: ' + decodeEntities(err));
   }
   return { ok: true, itemId, storeCode: resolveStore(storeArg)?.code };
+}
+
+// endItem — end (delete) a live fixed-price listing via EndFixedPriceItem. Used to
+// remove duplicate listings. EndingReason 'NotAvailable' is the neutral default;
+// an already-ended listing is treated as success (idempotent).
+async function endItem(itemId, { reason = 'NotAvailable' } = {}, storeArg) {
+  if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
+  if (!itemId) throw new Error('missing_item_id');
+  const body = `<ItemID>${escapeXml(String(itemId))}</ItemID><EndingReason>${escapeXml(reason)}</EndingReason>`;
+  const xml = await tradingCall('EndFixedPriceItem', body, storeArg);
+  if (xml.includes('<Ack>Failure</Ack>')) {
+    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+    // Already ended / can't be ended again → fine for our "remove duplicate" purpose.
+    if (/already.*end|cannot be ended|invalid.*item.*state|status/i.test(err)) {
+      return { ok: true, alreadyEnded: true, itemId };
+    }
+    throw new Error('eBay EndFixedPriceItem error: ' + decodeEntities(err));
+  }
+  return { ok: true, itemId, storeCode: resolveStore(storeArg)?.code };
+}
+
+// Read a listing's full current state (title, description, SKU, price, pictures,
+// and item specifics with their current values) — needed to edit/wrap before a
+// ReviseItem, and to pull specifics across to Shopify.
+async function getItemDetails(itemId, storeArg) {
+  if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
+  if (!itemId) throw new Error('missing_item_id');
+  const xml = await tradingCall('GetItem', `<ItemID>${itemId}</ItemID><DetailLevel>ReturnAll</DetailLevel>`, storeArg);
+  if (xml.includes('<Ack>Failure</Ack>')) {
+    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+    throw new Error('eBay GetItem error: ' + decodeEntities(err));
+  }
+  const specBlock = extractOne(xml, 'ItemSpecifics') || '';
+  const specifics = extractAll(specBlock, 'NameValueList').map(nv => ({
+    name: decodeEntities(extractOne(nv, 'Name') || '').trim(),
+    values: extractAll(nv, 'Value').map(v => decodeEntities(v).trim()).filter(Boolean),
+  })).filter(s => s.name);
+  const priceRaw = extractOne(xml, 'StartPrice') || extractOne(xml, 'CurrentPrice');
+  // GetItem returns Description entity-encoded (and sometimes CDATA-wrapped) —
+  // unwrap + decode so we get real HTML back to edit/wrap.
+  let desc = (extractOne(xml, 'Description') || '').replace(/^<!\[CDATA\[/, '').replace(/\]\]>$/, '');
+  desc = decodeEntities(desc);
+  return {
+    itemId: String(itemId),
+    title: decodeEntities(extractOne(xml, 'Title') || ''),
+    description: desc,
+    sku: decodeEntities(extractOne(xml, 'SKU') || ''),
+    price: priceRaw ? parseFloat(priceRaw) : null,
+    pictureUrls: extractAll(xml, 'PictureURL').map(decodeEntities),
+    specifics,
+    storeCode: resolveStore(storeArg)?.code,
+  };
 }
 
 function escapeXml(s) {
@@ -821,6 +1090,14 @@ async function addItem(storeArg, opts = {}) {
     price, quantity = 1, currency = 'GBP',
     imageUrls = [], businessPolicies = {}, location = {},
     itemSpecifics = [], brand, mpn,
+    // Optional extras — each only added to the XML when supplied, so existing
+    // listings (which pass none of these) build exactly as before.
+    storeCategoryId = null,   // eBay shop/store category (Storefront)
+    vatPercent = null,        // VAT percent charged on the item (e.g. 20)
+    // verify=true runs VerifyAddItem instead of AddItem: same validation +
+    // fee preview, but creates NO live listing. eBay's Trading API has no
+    // Seller-Hub "draft" concept, so this is the safe dry-run equivalent.
+    verify = false,
   } = opts;
 
   if (!sku)        throw new Error('sku required');
@@ -838,16 +1115,26 @@ async function addItem(storeArg, opts = {}) {
   }
 
   // Auto-add Brand and MPN to item specifics if supplied separately, dedupe
-  // by name so the user-provided list wins.
+  // by name so the user-provided list wins. A specific's value may be a single
+  // string OR an array of strings (multi-value aspects like "Placement on
+  // Vehicle" — e.g. ["Front","Left"]). Stored as arrays internally.
   const specsByName = new Map();
-  for (const s of itemSpecifics) if (s.name && s.value) specsByName.set(s.name, String(s.value));
-  if (brand && !specsByName.has('Brand')) specsByName.set('Brand', String(brand));
-  if (mpn   && !specsByName.has('Manufacturer Part Number')) specsByName.set('Manufacturer Part Number', String(mpn));
+  for (const s of itemSpecifics) {
+    if (!s.name || s.value == null) continue;
+    const vals = (Array.isArray(s.value) ? s.value : [s.value])
+      .map(v => String(v).trim()).filter(Boolean);
+    if (vals.length) specsByName.set(s.name, vals);
+  }
+  if (brand && !specsByName.has('Brand')) specsByName.set('Brand', [String(brand)]);
+  if (mpn   && !specsByName.has('Manufacturer Part Number')) specsByName.set('Manufacturer Part Number', [String(mpn)]);
 
   // Build ItemSpecifics XML — required for most parts/accessories categories.
+  // Multi-value aspects emit several <Value> elements under one <NameValueList>.
   const itemSpecificsXml = specsByName.size > 0
-    ? `<ItemSpecifics>${[...specsByName.entries()].map(([name, value]) =>
-        `<NameValueList><Name>${escapeXml(name)}</Name><Value>${escapeXml(value)}</Value></NameValueList>`
+    ? `<ItemSpecifics>${[...specsByName.entries()].map(([name, values]) =>
+        `<NameValueList><Name>${escapeXml(name)}</Name>${
+          values.map(v => `<Value>${escapeXml(v)}</Value>`).join('')
+        }</NameValueList>`
       ).join('')}</ItemSpecifics>`
     : '';
 
@@ -872,6 +1159,19 @@ async function addItem(storeArg, opts = {}) {
   const postalCode = location.postalCode || '';
   const city       = location.city || '';
 
+  // eBay shop/store category — places the listing into the seller's custom
+  // storefront category. Only emitted when a category was chosen.
+  const storefrontXml = storeCategoryId
+    ? `<Storefront><StoreCategoryID>${escapeXml(storeCategoryId)}</StoreCategoryID></Storefront>`
+    : '';
+
+  // VAT — charge a VAT percentage on the item (business sellers). Only emitted
+  // when a positive percent is supplied; eBay shows it as VAT-inclusive pricing.
+  const vatNum = vatPercent != null ? parseFloat(vatPercent) : NaN;
+  const vatXml = (!isNaN(vatNum) && vatNum > 0)
+    ? `<VATDetails><VATPercent>${vatNum.toFixed(1)}</VATPercent></VATDetails>`
+    : '';
+
   // AddItem XML body. ListingDuration GTC = Good Till Cancelled, the standard
   // for fixed-price listings. DispatchTimeMax=1 means we ship within 1 business day.
   const bodyInner = `
@@ -892,26 +1192,414 @@ async function addItem(storeArg, opts = {}) {
       <DispatchTimeMax>1</DispatchTimeMax>
       ${pictureXml}
       ${itemSpecificsXml}
+      ${storefrontXml}
+      ${vatXml}
       ${policiesXml}
     </Item>`;
 
+  const callName = verify ? 'VerifyAddItem' : 'AddItem';
   let xml;
   try {
-    xml = await tradingCall('AddItem', bodyInner, storeArg);
+    xml = await tradingCall(callName, bodyInner, storeArg);
   } catch (e) {
     const body = e.response?.data || '';
-    throw new Error(`AddItem HTTP error: ${e.message}${typeof body === 'string' && body.includes('<ShortMessage>') ? ' / ' + (body.match(/<ShortMessage>([^<]+)<\/ShortMessage>/)?.[1] || '') : ''}`);
+    throw new Error(`${callName} HTTP error: ${e.message}${typeof body === 'string' && body.includes('<ShortMessage>') ? ' / ' + (body.match(/<ShortMessage>([^<]+)<\/ShortMessage>/)?.[1] || '') : ''}`);
   }
 
   const ack = extractOne(xml, 'Ack') || '';
   if (ack === 'Success' || ack === 'Warning') {
     const itemId = extractOne(xml, 'ItemID');
-    return { ok: true, ack, itemId, fees: extractOne(xml, 'Fee') };
+    // VerifyAddItem returns no real ItemID (it's a validation), but does return fees.
+    return { ok: true, verified: verify, ack, itemId: verify ? null : itemId, fees: extractOne(xml, 'Fee') };
   }
   // Failure — return the most useful error code + message
   const errCode = extractOne(xml, 'ErrorCode') || 'unknown';
   const errMsg  = extractOne(xml, 'ShortMessage') || extractOne(xml, 'LongMessage') || 'eBay returned Failure';
-  throw new Error(`AddItem ${ack} [${errCode}]: ${errMsg}`);
+  throw new Error(`${callName} ${ack} [${errCode}]: ${errMsg}`);
+}
+
+// ---------- eBay shop/store categories ----------
+// Fetch the seller's custom storefront categories via the Trading API GetStore
+// call, so the listing UI can offer a "Shop category" dropdown. Returns a flat
+// list of { id, name } (top-level + nested categories), best-effort.
+async function getStoreCategories(storeArg) {
+  let xml;
+  try {
+    xml = await tradingCall('GetStore', `<CategoryStructureOnly>true</CategoryStructureOnly>`, storeArg);
+  } catch (e) {
+    throw new Error('GetStore failed: ' + e.message);
+  }
+  const ack = extractOne(xml, 'Ack') || '';
+  if (ack !== 'Success' && ack !== 'Warning') {
+    const msg = extractOne(xml, 'ShortMessage') || extractOne(xml, 'LongMessage') || 'GetStore returned Failure';
+    throw new Error(msg);
+  }
+  // CustomCategory blocks can be nested; rather than parse the tree, pull every
+  // (CategoryID, Name) pair regardless of element order. ID 0 is the store root
+  // ("Other") — keep it out of the picker.
+  const found = new Map();
+  const add = (id, name) => {
+    const cid = String(id).trim();
+    if (cid && cid !== '0' && !found.has(cid)) found.set(cid, decodeEntities(String(name).trim()));
+  };
+  let m;
+  const reA = /<CategoryID>(\d+)<\/CategoryID>\s*<Name>([^<]+)<\/Name>/g;
+  while ((m = reA.exec(xml)) !== null) add(m[1], m[2]);
+  const reB = /<Name>([^<]+)<\/Name>\s*<CategoryID>(\d+)<\/CategoryID>/g;
+  while ((m = reB.exec(xml)) !== null) add(m[2], m[1]);
+  return [...found.entries()].map(([id, name]) => ({ id, name }));
+}
+
+// ---------- Promoted Listings (General) ----------
+// Promoted Listings General (formerly "Standard") uses the Marketing API and a
+// separate OAuth scope (sell.marketing) that the SHARED token deliberately does
+// NOT request — adding it there could break every eBay call if the refresh
+// token isn't consented for it. So promotion uses its own isolated token: if
+// the scope isn't granted the promotion step fails on its own and listing
+// creation is unaffected.
+let _mktToken = null, _mktExpiresAt = 0;
+async function getMarketingToken() {
+  if (_mktToken && Date.now() < _mktExpiresAt - 60_000) return _mktToken;
+  const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
+  let r;
+  try {
+    r = await axios.post(
+      `${BASE}/identity/v1/oauth2/token`,
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: REFRESH_TOKEN,
+        scope: 'https://api.ebay.com/oauth/api_scope/sell.marketing',
+      }),
+      { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 }
+    );
+  } catch (e) {
+    // The token endpoint reports OAuth errors as { error, error_description } —
+    // NOT the errors[] array. The most common one here is invalid_scope: the
+    // stored eBay refresh token was never consented for sell.marketing.
+    const b = e.response?.data || {};
+    const code = b.error || `HTTP ${e.response?.status || '?'}`;
+    if (code === 'invalid_scope' || /scope/i.test(b.error_description || '')) {
+      throw new Error("eBay Promoted Listings needs the 'sell.marketing' permission, which this account's eBay connection hasn't granted. Re-authorise the eBay app with the Marketing scope (regenerate the refresh token), then try again. [" + code + ']');
+    }
+    throw new Error('eBay marketing token failed [' + code + ']: ' + (b.error_description || e.message));
+  }
+  _mktToken = r.data.access_token;
+  _mktExpiresAt = Date.now() + (r.data.expires_in * 1000);
+  return _mktToken;
+}
+
+// Turn an axios error from an eBay REST (Sell) call into a readable message,
+// pulling out eBay's structured error array (errorId / message / longMessage /
+// parameters) so callers surface the real reason instead of "status code 400".
+function ebayRestError(e, label) {
+  // If it's not an HTTP-response error (e.g. getMarketingToken already threw a
+  // clear, human-readable scope message), pass it through unchanged.
+  if (!e.response) return e instanceof Error ? e : new Error(`${label}: ${e}`);
+  const data = e.response?.data;
+  const errs = data?.errors || data?.warnings;
+  if (Array.isArray(errs) && errs.length) {
+    const parts = errs.map(x => {
+      const params = (x.parameters || []).map(p => `${p.name}=${p.value}`).join(', ');
+      return `[${x.errorId}] ${x.longMessage || x.message}${params ? ` (${params})` : ''}`;
+    });
+    return new Error(`${label}: ${parts.join(' | ')}`);
+  }
+  const status = e.response?.status;
+  return new Error(`${label}: ${status ? 'HTTP ' + status + ' — ' : ''}${e.message}`);
+}
+
+async function marketingApi(method, path, data) {
+  const token = await getMarketingToken();
+  return axios({
+    method, url: `${BASE}${path}`, data,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Content-Language': 'en-GB',
+      'X-EBAY-C-MARKETPLACE-ID': process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB',
+    },
+    timeout: 30000,
+  });
+}
+
+// Find (or create) a reusable "Promoted Listings General" campaign for this
+// marketplace, returning its campaignId. eBay General uses the COST_PER_SALE
+// funding model (you pay an ad fee only when the item sells).
+const GENERAL_CAMPAIGN_NAME = 'General Promotion';
+async function ensureGeneralCampaign() {
+  const mkt = process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
+  // Look for an existing COST_PER_SALE campaign we can reuse.
+  try {
+    const r = await marketingApi('get', `/sell/marketing/v1/ad_campaign?limit=100`);
+    const campaigns = r.data?.campaigns || [];
+    const usable = campaigns.filter(c =>
+      c.fundingStrategy?.fundingModel === 'COST_PER_SALE' && c.campaignStatus !== 'ENDED');
+    const match = usable.find(c => c.campaignName?.startsWith(GENERAL_CAMPAIGN_NAME)) || usable[0];
+    if (match) return match.campaignId;
+  } catch (e) {
+    throw ebayRestError(e, 'list campaigns failed');
+  }
+
+  // Create a new General campaign. eBay requires the startDate to be in the
+  // future, so we nudge it ~1 minute ahead to avoid "must be in the future".
+  const body = {
+    campaignName: `${GENERAL_CAMPAIGN_NAME} ${new Date().toISOString().slice(0, 10)}`,
+    fundingStrategy: { fundingModel: 'COST_PER_SALE' },
+    marketplaceId: mkt,
+    startDate: new Date(Date.now() + 60_000).toISOString(),
+  };
+  let cr;
+  try {
+    cr = await marketingApi('post', `/sell/marketing/v1/ad_campaign`, body);
+  } catch (e) {
+    throw ebayRestError(e, 'create campaign failed');
+  }
+  // 201 returns the new campaign URL in the Location header; the id is its tail.
+  const loc = cr.headers?.location || cr.headers?.Location || '';
+  const id = loc.split('/').pop();
+  if (id) return id;
+  // Fallback: re-list and grab the newest COST_PER_SALE campaign.
+  const r2 = await marketingApi('get', `/sell/marketing/v1/ad_campaign?limit=100`);
+  const c2 = (r2.data?.campaigns || []).find(c => c.fundingStrategy?.fundingModel === 'COST_PER_SALE');
+  if (!c2) throw new Error('campaign created but could not resolve campaignId');
+  return c2.campaignId;
+}
+
+// Promote a freshly-created listing with Promoted Listings General at the given
+// ad rate (%). Best-effort and fully isolated — callers should treat a thrown
+// error as "listing is live but not promoted" rather than a hard failure.
+//   bidPercent: e.g. 10 → "10.0" ad rate.
+async function promoteListing(storeArg, { itemId, bidPercent }) {
+  if (!itemId) throw new Error('itemId required');
+  const pct = parseFloat(bidPercent);
+  if (isNaN(pct) || pct < 2) throw new Error('ad rate must be at least 2%');
+  const campaignId = await ensureGeneralCampaign();
+  const body = { requests: [{ listingId: String(itemId), bidPercentage: pct.toFixed(1) }] };
+  let r;
+  try {
+    r = await marketingApi('post',
+      `/sell/marketing/v1/ad_campaign/${encodeURIComponent(campaignId)}/bulk_create_ads_by_listing_id`, body);
+  } catch (e) {
+    throw ebayRestError(e, 'create ad failed');
+  }
+  const resp = (r.data?.responses || [])[0] || {};
+  // Per-item failures come back in the 200 body with a statusCode + errors.
+  if (resp.statusCode && resp.statusCode >= 400) {
+    const msg = (resp.errors || []).map(e => `[${e.errorId}] ${e.message}`).join('; ') || `ad creation failed (${resp.statusCode})`;
+    throw new Error(msg);
+  }
+  return { ok: true, campaignId, adId: resp.adId || null, bidPercent: pct };
+}
+
+// List the seller's eBay business policies (payment / fulfillment[shipping] /
+// return) via the REST Account API, so the listing UI can offer dropdowns.
+// Uses the shared OAuth token (scope sell.account.readonly), so it returns the
+// OAuth-linked account's policies (the primary store). marketplace defaults to
+// EBAY_GB. Each list is best-effort — a failure on one returns [] for it.
+async function getBusinessPolicies(marketplaceId = "EBAY_GB", storeArg) {
+  // Primary: Trading API GetUserPreferences — works with the per-store
+  // Auth'n'Auth token (the REST Account API needs OAuth, which isn't set up
+  // for Calibre, so it returned nothing). Falls back to REST if a refresh token
+  // exists (Razoryn).
+  const payment = [], shipping = [], returns = [];
+  try {
+    const xml = await tradingCall("GetUserPreferences",
+      "<ShowSellerProfilePreferences>true</ShowSellerProfilePreferences>", storeArg);
+    for (const block of extractAll(xml, "SupportedSellerProfile")) {
+      const id = extractOne(block, "ProfileID");
+      const name = decodeEntities(extractOne(block, "ProfileName") || "");
+      const type = (extractOne(block, "ProfileType") || "").toUpperCase();
+      if (!id) continue;
+      const entry = { id, name: name || id };
+      if (type.includes("PAYMENT")) payment.push(entry);
+      else if (type.includes("RETURN")) returns.push(entry);
+      else if (type.includes("SHIPPING")) shipping.push(entry);
+    }
+    if (payment.length || shipping.length || returns.length) {
+      return { payment, shipping, return: returns };
+    }
+  } catch (e) {
+    console.warn("[ebay] GetUserPreferences profiles failed:", e.message);
+  }
+  // REST fallback (OAuth refresh token).
+  if (REFRESH_TOKEN && CLIENT_ID && CLIENT_SECRET) {
+    try {
+      const token = await getAccessToken();
+      const headers = { Authorization: `Bearer ${token}` };
+      const params = { marketplace_id: marketplaceId };
+      const base = `${BASE}/sell/account/v1`;
+      const fetchList = async (path, listKey, idKey) => {
+        const r = await axios.get(`${base}/${path}`, { headers, params, timeout: 20000 });
+        return (r.data?.[listKey] || []).map(p => ({ id: p[idKey], name: p.name }));
+      };
+      const [p2, s2, r2] = await Promise.all([
+        fetchList("payment_policy", "paymentPolicies", "paymentPolicyId").catch(() => []),
+        fetchList("fulfillment_policy", "fulfillmentPolicies", "fulfillmentPolicyId").catch(() => []),
+        fetchList("return_policy", "returnPolicies", "returnPolicyId").catch(() => []),
+      ]);
+      return { payment: p2, shipping: s2, return: r2 };
+    } catch (e) {
+      console.warn("[ebay] REST business policies failed:", e.message);
+    }
+  }
+  return { payment, shipping, return: returns };
+}
+
+// Diagnostic for the empty-policy-dropdown problem. Returns the raw eBay XML
+// (trimmed), the auth mode used, and the parsed profiles so the cause is
+// visible: Ack/Errors reveal auth issues; an empty SupportedSellerProfile list
+// means the account hasn't opted into Business Policies.
+async function debugBusinessPolicies(storeArg) {
+  const store = resolveStore(storeArg);
+  const out = {
+    store: store?.code || 'default',
+    hasStoreToken: !!tokenFor(storeArg),
+    hasOAuthRefresh: !!(REFRESH_TOKEN && CLIENT_ID && CLIENT_SECRET),
+    raw: null, ack: null, errors: [], parsed: null,
+  };
+  try {
+    const xml = await tradingCall('GetUserPreferences',
+      '<ShowSellerProfilePreferences>true</ShowSellerProfilePreferences>', storeArg);
+    out.raw = String(xml).slice(0, 4000);
+    out.ack = extractOne(xml, 'Ack');
+    for (const errBlock of extractAll(xml, 'Errors')) {
+      out.errors.push({
+        code: extractOne(errBlock, 'ErrorCode'),
+        shortMessage: decodeEntities(extractOne(errBlock, 'ShortMessage') || ''),
+        longMessage: decodeEntities(extractOne(errBlock, 'LongMessage') || ''),
+      });
+    }
+    out.parsed = await getBusinessPolicies('EBAY_GB', storeArg);
+  } catch (e) {
+    out.error = e.message;
+  }
+  return out;
+}
+
+// Auto-dispatch support: which recent orders have been shipped/fulfilled ON
+// eBay (so the warehouse app can auto-mark them dispatched). Returns a Set of
+// orderIds with orderFulfillmentStatus === FULFILLED. Needs the OAuth Sell
+// Fulfillment API; returns an empty Set if that isn't configured.
+async function getFulfilledOrderIds(sinceISO) {
+  const ids = new Set();
+  if (!(REFRESH_TOKEN && CLIENT_ID && CLIENT_SECRET)) return ids;
+  const filter = `creationdate:[${sinceISO}..]`;
+  const r = await http('GET', `/sell/fulfillment/v1/order?filter=${encodeURIComponent(filter)}&limit=200`);
+  for (const o of (r.data.orders || [])) {
+    if (o.orderFulfillmentStatus === 'FULFILLED') ids.add(o.orderId);
+  }
+  return ids;
+}
+
+// Best-effort tracking lookup for one eBay order (called only for orders we're
+// about to auto-dispatch, so the call volume stays small).
+async function getOrderTracking(orderId) {
+  try {
+    const r = await http('GET', `/sell/fulfillment/v1/order/${encodeURIComponent(orderId)}/shipping_fulfillment`);
+    const f = (r.data.fulfillments || [])[0];
+    if (!f) return { tracking: null, carrier: null };
+    return { tracking: f.shipmentTrackingNumber || null, carrier: f.shippingCarrierCode || null };
+  } catch (e) {
+    return { tracking: null, carrier: null };
+  }
+}
+
+// Trading-API fulfilment detection (#11). The OAuth-only getFulfilledOrderIds()
+// above returns nothing when the Sell Fulfillment API isn't configured — which is
+// the case for stores that only have the legacy Auth'n'Auth token (e.g. Razoryn).
+// That made auto-dispatch silently do nothing. This reads shipped status +
+// tracking from the Trading API GetOrders using the per-store token — the SAME
+// path order ingestion falls back to, so the OrderIDs line up with the stored
+// external_order_id. Returns [{ orderId, tracking, carrier }] for shipped orders.
+async function getShippedOrdersTrading(sinceISO, storeArg) {
+  const fromDate = new Date(sinceISO).toISOString();
+  const toDate = new Date().toISOString();
+  const bodyInner = `
+    <CreateTimeFrom>${fromDate}</CreateTimeFrom>
+    <CreateTimeTo>${toDate}</CreateTimeTo>
+    <OrderStatus>All</OrderStatus>
+    <Pagination><EntriesPerPage>100</EntriesPerPage><PageNumber>1</PageNumber></Pagination>
+    <DetailLevel>ReturnAll</DetailLevel>`;
+  const xml = await tradingCall('GetOrders', bodyInner, storeArg);
+  if (xml.includes('<Ack>Failure</Ack>')) {
+    const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+    throw new Error('eBay GetOrders error: ' + decodeEntities(err));
+  }
+  const orderBlocks = extractAll(extractOne(xml, 'OrderArray') || '', 'Order');
+  const out = [];
+  for (const oXml of orderBlocks) {
+    const orderId = extractOne(oXml, 'OrderID');
+    if (!orderId) continue;
+    const shippedTime = extractOne(oXml, 'ShippedTime');
+    // Tracking (when the seller added it) lives under ShipmentTrackingDetails.
+    const trackBlock = extractOne(oXml, 'ShipmentTrackingDetails') || '';
+    const tracking = decodeEntities(extractOne(trackBlock, 'ShipmentTrackingNumber') || '') || null;
+    const carrier = decodeEntities(extractOne(trackBlock, 'ShippingCarrierUsed') || '') || null;
+    // "Shipped" on eBay = a ShippedTime is set (or tracking was uploaded).
+    if (shippedTime || tracking) out.push({ orderId, tracking, carrier });
+  }
+  return out;
+}
+
+// Aggregate shipped orders across every configured store (per-store Trading token),
+// so multi-store brands are covered without the OAuth Sell Fulfillment API.
+async function getShippedOrdersAllStores(sinceISO) {
+  const stores = (brand.stores || []).filter(s => s.token && !s.disabled);
+  const list = stores.length ? stores : [undefined];
+  const out = [];
+  for (const store of list) {
+    try {
+      out.push(...await getShippedOrdersTrading(sinceISO, store));
+    } catch (e) {
+      console.warn('[ebay] getShippedOrdersTrading failed for', store?.code || 'primary', e.message);
+    }
+  }
+  return out;
+}
+
+// Search eBay categories by NAME (not numeric ID) using the Trading API
+// GetSuggestedCategories — this works with the per-store Auth'n'Auth token (the
+// same one used to list items), so it doesn't depend on an OAuth setup. Returns
+// the leaf name + the ancestor path so the UI can show context and flag vehicle
+// parts. e.g. "grille" -> Vehicle Parts & Accessories › Car Parts › … › Grilles.
+async function getSuggestedCategories(query) {
+  if (!query || query.trim().length < 2) return [];
+  const treeId = process.env.EBAY_CATEGORY_TREE_ID || '3'; // 3 = eBay UK
+  const r = await taxonomyGet(`/commerce/taxonomy/v1/category_tree/${treeId}/get_category_suggestions?q=${encodeURIComponent(query.trim())}`);
+  return (r.data?.categorySuggestions || []).map(s => {
+    const anc = (s.categoryTreeNodeAncestors || []).map(a => a.categoryName).reverse();
+    const leaf = s.category?.categoryName;
+    return {
+      id: s.category?.categoryId,
+      name: leaf,
+      path: [...anc, leaf].filter(Boolean).join(' › '),
+      automotive: /vehicle parts|car parts|parts & accessories|automotive|vehicle/i.test([...anc, leaf].join(' ')),
+    };
+  }).filter(c => c.id);
+}
+
+// GetCategorySpecifics — fetch the item-specific names eBay recommends/requires
+// for a category, so we can pre-validate an AddItem before submitting it (and
+// surface exactly which required specifics are missing). Returns:
+//   { categoryId, specifics: [{ name, required, values: [...] }] }
+// `required` = the specific has MinValues >= 1 in its validation rules.
+async function getCategorySpecifics(storeArg, categoryId) {
+  // storeArg kept for call-site compatibility; the Taxonomy API uses the app
+  // token (client_credentials), not a per-store token.
+  if (!categoryId) throw new Error('categoryId required');
+  const treeId = process.env.EBAY_CATEGORY_TREE_ID || '3';
+  const r = await taxonomyGet(`/commerce/taxonomy/v1/category_tree/${treeId}/get_item_aspects_for_category?category_id=${encodeURIComponent(String(categoryId))}`);
+  const specifics = [];
+  for (const a of (r.data?.aspects || [])) {
+    const name = a.localizedAspectName;
+    if (!name) continue;
+    specifics.push({
+      name,
+      required: !!a.aspectConstraint?.aspectRequired,
+      values: (a.aspectValues || []).map(v => v.localizedValue).filter(Boolean),
+    });
+  }
+  return { categoryId: String(categoryId), specifics };
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1078,8 +1766,45 @@ async function itemBelongsToStore(itemId, storeArg) {
   }
 }
 
+// Pull the seller's received feedback via the Trading API GetFeedback call and
+// normalise it to per-eBay-ItemID sentiment rows. eBay feedback is seller-level
+// and per-transaction (Positive/Neutral/Negative) — we map sentiment to a 1–5
+// score so it can be aggregated into star ratings per product.
+//   Positive → 5, Neutral → 3, Negative → 1
+// Only feedback where the subject role is "Seller" (i.e. left FOR us) counts.
+const FEEDBACK_SCORE = { Positive: 5, Neutral: 3, Negative: 1 };
+async function getSellerFeedback(storeArg) {
+  if (!isConfigured(storeArg)) return [];
+  const rows = [];
+  const perPage = 200;
+  for (let page = 1; page <= 25; page++) {
+    let xml;
+    try {
+      xml = await tradingCall('GetFeedback', `
+        <DetailLevel>ReturnAll</DetailLevel>
+        <Pagination><EntriesPerPage>${perPage}</EntriesPerPage><PageNumber>${page}</PageNumber></Pagination>`, storeArg);
+    } catch (e) {
+      console.warn('[ebay] GetFeedback failed:', e.message);
+      break;
+    }
+    const details = extractAll(xml, 'FeedbackDetail');
+    for (const d of details) {
+      const role = extractOne(d, 'Role');           // role of the feedback SUBJECT
+      if (role && role !== 'Seller') continue;       // keep feedback left for us as seller
+      const itemId = extractOne(d, 'ItemID');
+      const commentType = extractOne(d, 'CommentType');
+      const score = FEEDBACK_SCORE[commentType];
+      if (itemId && score) rows.push({ itemId, score });
+    }
+    const totalPages = parseInt(extractOne(xml, 'TotalNumberOfPages') || '1', 10) || 1;
+    if (page >= totalPages || details.length < perPage) break;
+  }
+  return rows;
+}
+
 module.exports = {
   isConfigured,
+  getSellerFeedback,
   getAccessToken,
   setInventoryQty,
   getRecentOrders,
@@ -1092,8 +1817,24 @@ module.exports = {
   getQuantityTradingAPI,
   getActiveListings,
   reviseItem,
+  endItem,
   completeSale,
   addItem,
+  getStoreCategories,
+  promoteListing,
+  getItemDescription,
+  getItemDetails,
+  getCategorySpecifics,
+  getSuggestedCategories,
+  getSellerActiveListings,
+  searchActiveListings,
+  countActiveListings,
+  getBusinessPolicies,
+  debugBusinessPolicies,
+  getFulfilledOrderIds,
+  getShippedOrdersTrading,
+  getShippedOrdersAllStores,
+  getOrderTracking,
   getRateLimits,
   itemBelongsToStore,
   getStoreUserId,

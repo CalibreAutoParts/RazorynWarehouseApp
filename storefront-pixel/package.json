@@ -1,0 +1,20 @@
+{
+  "name": "razoryn-storefront-pixel",
+  "private": true,
+  "version": "0.2.0",
+  "description": "Shopify Web Pixel for Razoryn e-Parts — relays consented storefront/checkout events to the warehouse app's /api/track (GA4 + Meta CAPI server-side). All other ops features now live in the warehouse app (razoryn-backend).",
+  "scripts": {
+    "deploy": "shopify app deploy",
+    "config:link": "shopify app config link",
+    "dev": "shopify app dev"
+  },
+  "devDependencies": {
+    "@shopify/cli": "^3.66.0"
+  },
+  "dependencies": {
+    "@shopify/web-pixels-extension": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=20.10"
+  }
+}

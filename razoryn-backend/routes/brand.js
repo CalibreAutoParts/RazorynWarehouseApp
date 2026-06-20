@@ -15,6 +15,7 @@ router.get('/', (req, res) => {
     logoUrl: brand.logoUrl,
     logoUrlDark: brand.logoUrlDark || brand.logoUrl,
     primaryColor: brand.primaryColor,
+    primaryColorDark: brand.primaryColorDark || brand.primaryColor,
     secondaryColor: brand.secondaryColor,
     supportColor: brand.supportColor,
     invoicePrefix: brand.invoicePrefix,

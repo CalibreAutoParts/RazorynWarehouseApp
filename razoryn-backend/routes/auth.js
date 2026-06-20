@@ -17,6 +17,19 @@ const authLimiter = rateLimit({
   message: { error: 'too_many_attempts' },
 });
 
+// Ensure the username column exists (case-insensitive unique). Users now log in
+// with a username (or email) + password; the PIN keypad has been retired.
+let _userAuthMigrated = false;
+async function ensureUserAuthColumns() {
+  if (_userAuthMigrated) return;
+  try {
+    await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT`);
+    await query(`CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_uniq ON users (LOWER(username)) WHERE username IS NOT NULL`);
+    _userAuthMigrated = true;
+  } catch (e) { console.warn('[auth] username migration warning:', e.message); }
+}
+ensureUserAuthColumns();
+
 // POST /api/auth/login-pin  { pin }
 // PIN-only login for warehouse staff. We have to compare against every active
 // user's pin_hash because PINs aren't unique IDs. With ~10 staff this is fine.
@@ -44,7 +57,7 @@ router.post('/login-pin', authLimiter, async (req, res) => {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
-    maxAge: 12 * 60 * 60 * 1000,
+    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days — stay signed in per device
   });
 
   await audit({ user: matched, ip: req.ip }, 'login_pin');
@@ -58,15 +71,22 @@ router.post('/login-pin', authLimiter, async (req, res) => {
   });
 });
 
-// POST /api/auth/login  { email, password }
+// POST /api/auth/login  { username, password }  (username may also be an email)
 router.post('/login', authLimiter, async (req, res) => {
-  const { email, password } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: 'email_and_password_required' });
+  const body = req.body || {};
+  // Accept `username` (preferred) or legacy `email`; either may match the
+  // username OR email column, case-insensitively.
+  const identifier = (body.username || body.email || '').trim();
+  const password = body.password;
+  if (!identifier || !password) return res.status(400).json({ error: 'username_and_password_required' });
 
+  await ensureUserAuthColumns();
   const { rows } = await query(
-    `SELECT id, email, name, role, permissions, password_hash, active
-     FROM users WHERE email = $1`,
-    [email]
+    `SELECT id, email, username, name, role, permissions, password_hash, active
+       FROM users
+      WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($1)
+      LIMIT 1`,
+    [identifier]
   );
   const u = rows[0];
   if (!u || !u.active || !u.password_hash) {
@@ -82,15 +102,15 @@ router.post('/login', authLimiter, async (req, res) => {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
-    maxAge: 12 * 60 * 60 * 1000,
+    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days — stay signed in per device
   });
 
-  await audit({ user: u, ip: req.ip }, 'login_email');
+  await audit({ user: u, ip: req.ip }, 'login_password');
 
   res.json({
     token,
     user: {
-      id: u.id, email: u.email, name: u.name, role: u.role,
+      id: u.id, email: u.email, username: u.username, name: u.name, role: u.role,
       permissions: u.permissions,
     },
   });

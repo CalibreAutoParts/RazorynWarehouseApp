@@ -57,8 +57,12 @@ function fileToDataUrl(file) {
 // GET /api/locations
 router.get('/', requirePermission('locations'), async (req, res) => {
   await ensureColumns();
+  // Note: photo_data_url is deliberately NOT selected here — it inlined ~4 MB of
+  // base64 across the list. We expose a has_photo boolean instead; the frontend
+  // lazy-loads each image from /api/locations/:id/photo.
   const { rows } = await query(`
-    SELECT l.id, l.code, l.name, l.description, l.photo_path, l.photo_data_url,
+    SELECT l.id, l.code, l.name, l.description, l.photo_path,
+           (l.photo_data_url IS NOT NULL) AS has_photo,
            l.created_at, l.updated_at,
            COUNT(p.id)::int AS product_count
     FROM locations l
@@ -67,6 +71,19 @@ router.get('/', requirePermission('locations'), async (req, res) => {
     ORDER BY l.code
   `);
   res.json({ locations: rows });
+});
+
+// GET /api/locations/:id/photo — stream the stored base64 photo as cached
+// binary. `private` cache because it's behind auth; callers cache-bust with
+// ?v=<updated_at>. 404 when there's no photo.
+router.get('/:id/photo', requirePermission('locations'), async (req, res) => {
+  const { rows } = await query('SELECT photo_data_url FROM locations WHERE id = $1', [req.params.id]);
+  const dataUrl = rows[0] && rows[0].photo_data_url;
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl || '');
+  if (!m) return res.status(404).end();
+  res.set('Content-Type', m[1]);
+  res.set('Cache-Control', 'private, max-age=3600');
+  return res.send(Buffer.from(m[2], 'base64'));
 });
 
 // GET /api/locations/:id  (with products)

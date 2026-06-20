@@ -64,18 +64,37 @@ async function getAccessToken() {
 // HTTP client — token added per-request so it can refresh
 async function shopifyRequest(method, path, opts = {}) {
   const token = await getAccessToken();
-  return axios({
-    method,
-    url: `https://${STORE}/admin/api/${VERSION}${path}`,
-    headers: {
-      'X-Shopify-Access-Token': token,
-      'Content-Type': 'application/json',
-      ...(opts.headers || {}),
-    },
-    params: opts.params,
-    data: opts.data,
-    timeout: opts.timeout || 60000,
-  });
+  const maxRetries = opts.retries != null ? opts.retries : 5;
+  let attempt = 0;
+  while (true) {
+    try {
+      return await axios({
+        method,
+        url: `https://${STORE}/admin/api/${VERSION}${path}`,
+        headers: {
+          'X-Shopify-Access-Token': token,
+          'Content-Type': 'application/json',
+          ...(opts.headers || {}),
+        },
+        params: opts.params,
+        data: opts.data,
+        timeout: opts.timeout || 60000,
+      });
+    } catch (e) {
+      // Shopify's REST bucket is shared across the app, so a burst (e.g. a stock
+      // push running at the same time) can throttle other calls with 429. Back
+      // off and retry, honouring Retry-After when present.
+      const status = e.response?.status;
+      if ((status === 429 || status === 503) && attempt < maxRetries) {
+        attempt++;
+        const ra = parseFloat(e.response?.headers?.['retry-after']);
+        const waitMs = (!isNaN(ra) && ra > 0) ? ra * 1000 : Math.min(500 * 2 ** attempt, 8000);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      throw e;
+    }
+  }
 }
 
 // ---------- Public API ----------
@@ -83,6 +102,16 @@ async function getLocations() {
   if (!isConfigured()) return [];
   const r = await shopifyRequest('get', '/locations.json');
   return r.data.locations;
+}
+
+// Read the live available quantity for one inventory item at our location.
+async function getInventoryLevel(inventoryItemId) {
+  if (!isConfigured() || !inventoryItemId) return null;
+  const params = { inventory_item_ids: inventoryItemId };
+  if (LOCATION_ID) params.location_ids = LOCATION_ID;
+  const r = await shopifyRequest('get', '/inventory_levels.json', { params });
+  const lvl = (r.data?.inventory_levels || [])[0];
+  return lvl ? parseInt(lvl.available) : null;
 }
 
 async function setInventoryLevel(inventoryItemId, qty) {
@@ -235,8 +264,31 @@ async function findProductBySku(sku) {
 
 // Create a new Shopify product with SKU, barcode (= sku), price, and image URLs.
 // imageUrls is an array of public image URLs Shopify will fetch and host.
-async function createProduct({ title, sku, price, imageUrls = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null }) {
+
+// Upgrade an eBay-hosted image URL to its largest standard rendition. eBay's
+// gallery/thumbnail URLs (s-l64 … s-l500) otherwise mirror to Shopify at low
+// quality — forcing s-l1600 fetches the full-size image (eBay scales down to the
+// original if it's smaller, so this is always safe).
+function maxResImageUrl(url) {
+  if (!url || typeof url !== 'string') return url;
+  if (/\.ebayimg\.com/i.test(url)) return url.replace(/\/s-l\d+(?=\.|\?|$)/i, '/s-l1600');
+  return url;
+}
+// Normalise + de-dupe a list of image URLs before sending to Shopify. After the
+// resolution upgrade the gallery thumbnail and full image often collapse to the
+// same URL, so de-duping avoids importing the same photo twice.
+function normaliseImageUrls(imageUrls = []) {
+  return [...new Set((imageUrls || []).map(maxResImageUrl).filter(Boolean))];
+}
+
+async function createProduct({ title, sku, price, imageUrls = [], imageData = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null, description = null, taxable = true }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
+  const imgs = normaliseImageUrls(imageUrls);
+  // imageData = base64 data URLs (uploaded files). Strip the data: prefix —
+  // Shopify wants raw base64 in `attachment`.
+  const attachments = (imageData || [])
+    .map(d => String(d || '').replace(/^data:[^;]+;base64,/, '').trim())
+    .filter(Boolean);
   const productPayload = {
     title,
     status,
@@ -245,9 +297,11 @@ async function createProduct({ title, sku, price, imageUrls = [], status = 'draf
       barcode: sku,
       price: price != null ? String(price) : undefined,
       inventory_management: 'shopify',
+      taxable: taxable !== false,
     }],
-    images: imageUrls.map(src => ({ src })),
+    images: [...imgs.map(src => ({ src })), ...attachments.map(attachment => ({ attachment }))],
   };
+  if (description != null) productPayload.body_html = description;
   if (tags) productPayload.tags = tags; // comma-separated string
   if (templateSuffix) productPayload.template_suffix = templateSuffix; // e.g. "large-parts"
 
@@ -255,7 +309,7 @@ async function createProduct({ title, sku, price, imageUrls = [], status = 'draf
   const product = r.data.product;
   await publishProductToAllChannels(product.id);
   if (qty != null) await setInitialInventory(product, qty);
-  if (metafields.length) await applyMetafields(product.id, metafields);
+  if (metafields.length) product.__metafieldResults = await applyMetafields(product.id, metafields);
   return product;
 }
 
@@ -286,11 +340,12 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
     });
   }
 
-  if (imageUrls && imageUrls.length) {
+  const imgs = normaliseImageUrls(imageUrls);
+  if (imgs.length) {
     for (const img of existing.images || []) {
       try { await shopifyRequest('delete', `/products/${productId}/images/${img.id}.json`); } catch (e) {}
     }
-    for (const src of imageUrls) {
+    for (const src of imgs) {
       try {
         await shopifyRequest('post', `/products/${productId}/images.json`, {
           data: { image: { src } },
@@ -301,30 +356,88 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
     }
   }
 
-  if (metafields.length) await applyMetafields(productId, metafields);
+  let metafieldResults = [];
+  if (metafields.length) metafieldResults = await applyMetafields(productId, metafields);
   await publishProductToAllChannels(productId);
   if (qty != null) await setInitialInventory(existing, qty);
 
-  return (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
+  const out = (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
+  out.__metafieldResults = metafieldResults;
+  return out;
+}
+
+// Images-only update — replaces a product's images with the given (full-res,
+// de-duped) set WITHOUT touching title, price, metafields or inventory. Used by
+// the one-click "re-push selected images" tool so an image refresh can't disturb
+// anything else. Returns { ok, count }.
+async function setProductImages(productId, imageUrls) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const imgs = normaliseImageUrls(imageUrls);
+  if (!imgs.length) return { ok: false, count: 0, skipped: 'no_images' };
+  const ex = await shopifyRequest('get', `/products/${productId}.json`);
+  const existing = ex.data.product;
+  for (const img of existing.images || []) {
+    try { await shopifyRequest('delete', `/products/${productId}/images/${img.id}.json`); } catch (e) {}
+  }
+  let count = 0;
+  for (const src of imgs) {
+    try {
+      await shopifyRequest('post', `/products/${productId}/images.json`, { data: { image: { src } } });
+      count++;
+    } catch (e) { console.warn('[shopify] image upload failed:', src, e.message); }
+  }
+  return { ok: count > 0, count };
+}
+
+// Lightweight SKU-only update — sets the first variant's SKU (and keeps barcode
+// in sync with it, so scanning works) without touching title, price, images or
+// inventory. Used by the cross-channel bulk-SKU tool.
+async function setVariantSku(shopifyProductId, sku) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const s = String(sku || '').trim();
+  if (!s) throw new Error('valid sku required');
+  const ex = await shopifyRequest('get', `/products/${encodeURIComponent(shopifyProductId)}.json`);
+  const variant = ex.data.product?.variants?.[0];
+  if (!variant) throw new Error('no_variant_for_product');
+  await shopifyRequest('put', `/variants/${variant.id}.json`, {
+    data: { variant: { id: variant.id, sku: s, barcode: s } },
+  });
+  return { ok: true, productId: String(shopifyProductId), sku: s };
+}
+
+// Lightweight price-only update — sets just the first variant's price without
+// touching title, images, or inventory. Used by the pricing-sync tool.
+async function setVariantPrice(shopifyProductId, price) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const p = parseFloat(price);
+  if (isNaN(p) || p < 0) throw new Error('valid price required');
+  const ex = await shopifyRequest('get', `/products/${encodeURIComponent(shopifyProductId)}.json`);
+  const variant = ex.data.product?.variants?.[0];
+  if (!variant) throw new Error('no_variant_for_product');
+  await shopifyRequest('put', `/variants/${variant.id}.json`, {
+    data: { variant: { id: variant.id, price: p.toFixed(2) } },
+  });
+  return { ok: true, productId: String(shopifyProductId), price: +p.toFixed(2) };
 }
 
 // List delivery (shipping) profiles. Returns [{id, name}].
 let cachedProfiles = null;
 async function getDeliveryProfiles() {
-  if (cachedProfiles) return cachedProfiles;
+  // Only the SUCCESSFUL, non-empty result is cached — otherwise an early failure
+  // (e.g. before read_shipping was granted) would stick as "[]" for the whole
+  // process lifetime, so the dropdown would stay empty even after the scope fix.
+  if (cachedProfiles && cachedProfiles.length) return cachedProfiles;
   try {
     const r = await shopifyRequest('post', '/graphql.json', {
       data: { query: `query { deliveryProfiles(first: 25) { edges { node { id name } } } }` },
     });
     if (r.data.errors) {
-      console.warn('[shopify] deliveryProfiles errors:', JSON.stringify(r.data.errors));
       // Common cause: missing read_shipping scope on the custom app.
-      // Surface the issue so the caller (debug endpoint) can show it.
-      cachedProfiles = [];
-      return cachedProfiles;
+      throw new Error(JSON.stringify(r.data.errors));
     }
-    cachedProfiles = (r.data.data?.deliveryProfiles?.edges || []).map(e => e.node);
-    return cachedProfiles;
+    const profiles = (r.data.data?.deliveryProfiles?.edges || []).map(e => e.node);
+    if (profiles.length) cachedProfiles = profiles;
+    return profiles;
   } catch (e) {
     console.warn('[shopify] getDeliveryProfiles failed:', e.response?.data || e.message);
     return [];
@@ -363,24 +476,52 @@ async function assignProductToDeliveryProfile(productId, profileId) {
 }
 
 // Apply a list of metafields to a product. Each metafield: { namespace, key, value, type }.
+// Returns a per-metafield result list [{ namespace, key, ok, error? }] so callers
+// can surface failures — previously these were swallowed, so a rejected metafield
+// (the usual cause of "my metafields didn't come through") was invisible.
+//
+// Two robustness measures that fix the common silent-rejection cases:
+//   • The TYPE is taken from the Shopify metafield DEFINITION when one exists —
+//     a mismatched client type (e.g. sending single_line to a list.* field) is
+//     the #1 reason Shopify returns 422 and the value never lands.
+//   • list.* definitions require a JSON-array value, so scalar / comma-separated
+//     input is coerced into a JSON array (this is what storefront filter fields
+//     like Position / Finish are usually defined as).
 async function applyMetafields(productId, metafields) {
+  const results = [];
+  let defByKey = {};
+  try {
+    const defs = await getMetafieldDefinitions();
+    for (const d of defs) defByKey[`${d.namespace}.${d.key}`] = d;
+  } catch (_) { /* fall back to client-provided types */ }
+
   for (const mf of metafields) {
-    if (!mf.key || !mf.value) continue;
+    if (!mf.key || mf.value == null || mf.value === '') continue;
+    const namespace = mf.namespace || 'custom';
+    const def = defByKey[`${namespace}.${mf.key}`];
+    const type = def?.type || mf.type || 'single_line_text_field';
+    let value = String(mf.value);
+    // list.* metafields must be a JSON array string. Accept an already-JSON array,
+    // otherwise split comma-separated values so multi-value filters work.
+    if (/^list\./.test(type)) {
+      let arr = null;
+      try { const p = JSON.parse(value); if (Array.isArray(p)) arr = p; } catch (_) {}
+      if (!arr) arr = value.split(',').map(s => s.trim()).filter(Boolean);
+      value = JSON.stringify(arr);
+    }
     try {
       await shopifyRequest('post', `/products/${productId}/metafields.json`, {
-        data: {
-          metafield: {
-            namespace: mf.namespace || 'custom',
-            key: mf.key,
-            value: String(mf.value),
-            type: mf.type || 'single_line_text_field',
-          },
-        },
+        data: { metafield: { namespace, key: mf.key, value, type } },
       });
+      results.push({ namespace, key: mf.key, ok: true });
     } catch (e) {
-      console.warn(`[shopify] metafield ${mf.namespace}.${mf.key} failed:`, e.message);
+      const detail = e.response?.data?.errors || e.response?.data || e.message;
+      const error = typeof detail === 'string' ? detail : JSON.stringify(detail);
+      console.warn(`[shopify] metafield ${namespace}.${mf.key} failed:`, error);
+      results.push({ namespace, key: mf.key, ok: false, error });
     }
   }
+  return results;
 }
 
 // List all sales channels (publications) on this Shopify store
@@ -498,6 +639,35 @@ async function getMetafieldDefinitions() {
     console.warn('[shopify] getMetafieldDefinitions failed:', e.response?.data || e.message);
     return [];
   }
+}
+
+// deleteProduct — permanently delete a Shopify product (used to remove duplicate
+// products). Idempotent: a 404 (already gone) is treated as success.
+async function deleteProduct(productId) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  if (!productId) throw new Error('missing_product_id');
+  try {
+    await shopifyRequest('delete', `/products/${productId}.json`);
+    return { ok: true, productId: String(productId) };
+  } catch (e) {
+    if (e.response?.status === 404) return { ok: true, alreadyDeleted: true, productId: String(productId) };
+    throw new Error('Shopify delete failed: ' + (e.response?.data?.errors || e.message));
+  }
+}
+
+// Write the part number into the store's "Part Number" product metafield (the
+// one shown on the Shopify product page). SKU + barcode are variant fields and
+// already set by setVariantSku, but the catalogue's Part Number metafield is
+// separate — without this it stays blank after a SKU push. Matches the definition
+// named exactly "Part Number" so it never clobbers "Part Number Purchased" etc.
+async function setPartNumberMetafield(productId, partNumber) {
+  if (!isConfigured() || !productId || !partNumber) return { skipped: 'no_input' };
+  const defs = await getMetafieldDefinitions();
+  const def = defs.find(d => String(d.name || '').trim().toLowerCase() === 'part number');
+  if (!def) return { skipped: 'no_definition' };
+  const results = await applyMetafields(productId, [{ namespace: def.namespace, key: def.key, value: String(partNumber), type: def.type }]);
+  const r = results[0] || {};
+  return r.ok ? { ok: true, namespace: def.namespace, key: def.key } : { error: r.error || 'failed' };
 }
 
 // Set the inventory quantity for a freshly-created product at the warehouse location.
@@ -670,14 +840,240 @@ async function getShopifyProductFull(shopifyProductId) {
     vendor: p.vendor,
     productType: p.product_type,
     tags: p.tags,
+    price: p.variants?.[0]?.price != null ? parseFloat(p.variants[0].price) : null,
     imageUrls: (p.images || []).map(img => img.src).filter(Boolean),
     primaryImage: p.image?.src || (p.images?.[0]?.src) || null,
   };
 }
 
+// Bulk-set every Shopify variant's barcode = its SKU. Many products had random
+// Shopify auto-generated barcodes (≠ SKU), which breaks scanning. dryRun=true
+// (the default) returns what WOULD change without writing anything. Writes are
+// throttled to ~4/sec to stay under Shopify's REST bucket.
+async function bulkSetBarcodeToSku({ dryRun = true } = {}) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  let pageInfo = null, pageCount = 0;
+  let totalVariants = 0, candidates = 0, updated = 0, skippedNoSku = 0;
+  const sample = [];
+  const errors = [];
+
+  while (true) {
+    if (++pageCount > 100) break;  // safety bound
+    const params = pageInfo ? { limit: 250, page_info: pageInfo } : { limit: 250 };
+    const r = await shopifyRequest('get', '/products.json', { params });
+    for (const p of r.data.products || []) {
+      for (const v of p.variants || []) {
+        totalVariants++;
+        const sku = (v.sku || '').trim();
+        const barcode = (v.barcode || '').trim();
+        if (!sku) { skippedNoSku++; continue; }   // never set an empty barcode
+        if (barcode === sku) continue;             // already correct
+        candidates++;
+        if (sample.length < 25) sample.push({ product: p.title, sku, currentBarcode: barcode || '(empty)' });
+        if (!dryRun) {
+          try {
+            await shopifyRequest('put', `/variants/${v.id}.json`, { data: { variant: { id: v.id, barcode: sku } } });
+            updated++;
+            await sleep(250);
+          } catch (e) {
+            if (errors.length < 50) errors.push({ sku, variantId: String(v.id), error: e.response?.data?.errors || e.message });
+          }
+        }
+      }
+    }
+    const link = r.headers['link'] || r.headers['Link'];
+    if (!link || !link.includes('rel="next"')) break;
+    const m = link.match(/<([^>]+)>;\s*rel="next"/);
+    if (!m) break;
+    pageInfo = new URL(m[1]).searchParams.get('page_info');
+    if (!pageInfo) break;
+    await sleep(300);  // gentle pacing between pages to avoid the 429 bucket
+  }
+  return { dryRun, totalVariants, candidates, updated, skippedNoSku, sample, errors, errorCount: errors.length };
+}
+
+// ---------- Custom collections (shop categories) ----------
+// Shopify has SMART collections (auto-populated by rules — can't add manually)
+// and CUSTOM collections (manual). The app manages CUSTOM ones via collects.
+async function getCustomCollections() {
+  if (!isConfigured()) return [];
+  const out = [];
+  let pageInfo = null, guard = 0;
+  while (guard++ < 20) {
+    const params = pageInfo ? { limit: 250, page_info: pageInfo } : { limit: 250 };
+    const r = await shopifyRequest('get', '/custom_collections.json', { params });
+    for (const c of (r.data.custom_collections || [])) out.push({ id: String(c.id), title: c.title, handle: c.handle });
+    const link = r.headers['link'] || r.headers['Link'];
+    const m = link && link.match(/<([^>]+)>;\s*rel="next"/);
+    if (!m) break;
+    pageInfo = new URL(m[1]).searchParams.get('page_info');
+    if (!pageInfo) break;
+  }
+  return out;
+}
+
+// Which custom collections a product belongs to. Returns collect rows
+// ({ collectId, collectionId }) so a membership can be removed by collectId.
+async function getProductCollects(productId) {
+  if (!isConfigured()) return [];
+  const r = await shopifyRequest('get', '/collects.json', { params: { product_id: productId, limit: 250 } });
+  return (r.data.collects || []).map(c => ({ collectId: String(c.id), collectionId: String(c.collection_id) }));
+}
+
+async function addProductToCollection(productId, collectionId) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const r = await shopifyRequest('post', '/collects.json', { data: { collect: { product_id: Number(productId), collection_id: Number(collectionId) } } });
+  return { collectId: String(r.data.collect.id) };
+}
+
+async function removeCollect(collectId) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  await shopifyRequest('delete', `/collects/${encodeURIComponent(collectId)}.json`);
+  return { ok: true };
+}
+
+// ---------- Search-engine listing (SEO) ----------
+// Read a product's current SEO fields + category, so the optimiser can show a
+// before/after preview. Uses GraphQL (REST doesn't expose seo/category cleanly).
+async function getProductSeo(productGid) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const id = String(productGid).startsWith('gid://') ? productGid : `gid://shopify/Product/${productGid}`;
+  const query = `query($id: ID!) {
+    product(id: $id) {
+      id title handle
+      seo { title description }
+      category { id fullName }
+    }
+  }`;
+  const r = await shopifyRequest('post', '/graphql.json', { data: { query, variables: { id } } });
+  if (r.data.errors) throw new Error('graphql: ' + JSON.stringify(r.data.errors));
+  const p = r.data.data?.product;
+  if (!p) return null;
+  return {
+    id: p.id,
+    handle: p.handle,
+    seoTitle: p.seo?.title || '',
+    seoDescription: p.seo?.description || '',
+    categoryId: p.category?.id || null,
+    categoryName: p.category?.fullName || null,
+  };
+}
+
+// Look up a Shopify standard taxonomy category by a search term (e.g. "Fog
+// Lights"), preferring matches under Vehicles & Parts. Returns { id, fullName }
+// or null. Cached per term for the process lifetime.
+const _categoryCache = new Map();
+async function findTaxonomyCategory(term) {
+  if (!term) return null;
+  const key = term.toLowerCase();
+  if (_categoryCache.has(key)) return _categoryCache.get(key);
+  const query = `query($q: String!) {
+    taxonomy { categories(search: $q, first: 25) { edges { node { id fullName } } } }
+  }`;
+  let result = null;
+  try {
+    const r = await shopifyRequest('post', '/graphql.json', { data: { query, variables: { q: term } } });
+    if (r.data.errors) throw new Error(JSON.stringify(r.data.errors));
+    const nodes = (r.data.data?.taxonomy?.categories?.edges || []).map(e => e.node);
+    // Prefer categories under the vehicle-parts branch; then an exact leaf-name
+    // match; otherwise the first result.
+    const vehicle = nodes.filter(n => /vehicle|automotive|motor/i.test(n.fullName));
+    const pool = vehicle.length ? vehicle : nodes;
+    const leaf = (n) => (n.fullName.split('>').pop() || '').trim().toLowerCase();
+    result = pool.find(n => leaf(n) === term.toLowerCase()) || pool[0] || null;
+  } catch (e) {
+    console.warn('[shopify] findTaxonomyCategory failed for', term, '-', e.message);
+  }
+  _categoryCache.set(key, result);
+  return result;
+}
+
+// Search Shopify's standard product taxonomy by name, returning a list of
+// { id, fullName } for a category picker (vehicle-parts matches first).
+async function searchTaxonomyCategories(term) {
+  if (!term || term.trim().length < 2) return [];
+  const query = `query($q: String!) {
+    taxonomy { categories(search: $q, first: 25) { edges { node { id fullName } } } }
+  }`;
+  try {
+    const r = await shopifyRequest('post', '/graphql.json', { data: { query, variables: { q: term.trim() } } });
+    if (r.data.errors) throw new Error(JSON.stringify(r.data.errors));
+    const nodes = (r.data.data?.taxonomy?.categories?.edges || []).map(e => e.node);
+    nodes.sort((a, b) => {
+      const va = /vehicle|automotive|motor/i.test(a.fullName) ? 0 : 1;
+      const vb = /vehicle|automotive|motor/i.test(b.fullName) ? 0 : 1;
+      return va - vb;
+    });
+    return nodes.slice(0, 20);
+  } catch (e) {
+    console.warn('[shopify] searchTaxonomyCategories failed:', e.message);
+    return [];
+  }
+}
+
+// Apply SEO fields to a product. Any field left undefined is not touched.
+//   { seoTitle, seoDescription, handle, categoryId }
+// Returns { ok, userErrors }.
+async function applyProductSeo(productGid, { seoTitle, seoDescription, handle, categoryId } = {}) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const id = String(productGid).startsWith('gid://') ? productGid : `gid://shopify/Product/${productGid}`;
+  const input = { id };
+  if (seoTitle !== undefined || seoDescription !== undefined) {
+    input.seo = {};
+    if (seoTitle !== undefined) input.seo.title = seoTitle;
+    if (seoDescription !== undefined) input.seo.description = seoDescription;
+  }
+  if (handle !== undefined && handle) input.handle = handle;
+  if (categoryId !== undefined && categoryId) input.category = categoryId;
+
+  const mutation = `mutation($input: ProductInput!) {
+    productUpdate(input: $input) {
+      product { id handle }
+      userErrors { field message }
+    }
+  }`;
+  const r = await shopifyRequest('post', '/graphql.json', { data: { query: mutation, variables: { input } } });
+  if (r.data.errors) throw new Error('graphql: ' + JSON.stringify(r.data.errors));
+  const ue = r.data.data?.productUpdate?.userErrors || [];
+  return { ok: ue.length === 0, userErrors: ue, product: r.data.data?.productUpdate?.product || null };
+}
+
+// Write a product's review rating + count metafields (reviews.rating /
+// reviews.rating_count). Storefront themes read exactly these for star displays
+// and aggregateRating JSON-LD. productId may be numeric or a GID.
+async function setProductRating(productId, rating, count) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const gid = String(productId).startsWith('gid://') ? productId : `gid://shopify/Product/${productId}`;
+  const mutation = `mutation SetReviews($metafields: [MetafieldsSetInput!]!) {
+    metafieldsSet(metafields: $metafields) { userErrors { field message } }
+  }`;
+  const variables = { metafields: [
+    { ownerId: gid, namespace: 'reviews', key: 'rating', type: 'rating',
+      value: JSON.stringify({ value: String(rating), scale_min: '1.0', scale_max: '5.0' }) },
+    { ownerId: gid, namespace: 'reviews', key: 'rating_count', type: 'number_integer',
+      value: String(count) },
+  ] };
+  const r = await shopifyRequest('post', '/graphql.json', { data: { query: mutation, variables } });
+  const errs = r.data?.data?.metafieldsSet?.userErrors || [];
+  if (errs.length) throw new Error(errs.map(e => `${(e.field || []).join('.')}: ${e.message}`).join('; '));
+  return true;
+}
+
 module.exports = {
   isConfigured,
+  setProductRating,
   getAccessToken,
+  getProductSeo,
+  findTaxonomyCategory,
+  searchTaxonomyCategories,
+  applyProductSeo,
+  getInventoryLevel,
+  getCustomCollections,
+  getProductCollects,
+  addProductToCollection,
+  removeCollect,
+  bulkSetBarcodeToSku,
   getLocations,
   setInventoryLevel,
   getRecentOrders,
@@ -687,6 +1083,11 @@ module.exports = {
   findProductsBySkus,
   createProduct,
   updateProduct,
+  deleteProduct,
+  setVariantPrice,
+  setVariantSku,
+  setPartNumberMetafield,
+  setProductImages,
   publishProductToAllChannels,
   getPublications,
   getMetafieldDefinitions,

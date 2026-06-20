@@ -17,6 +17,8 @@ const { audit } = require('../middleware/audit');
 
 const router = express.Router();
 router.use(requireAuth);
+// GDPR: customer records are PII — never let a browser or proxy cache them.
+router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
 // ──────────────────────────────────────────────────────────────────────────
 // Self-healing migration. Idempotent.
@@ -193,6 +195,7 @@ router.get('/:id/sales', async (req, res) => {
     ORDER BY s.occurred_at DESC
     LIMIT 100
   `, [req.params.id]);
+  await audit(req, 'view_customer_sales', 'customer', req.params.id);  // GDPR: log customer-data read
   res.json({ sales: r.rows });
 });
 

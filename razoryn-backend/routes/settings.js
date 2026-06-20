@@ -34,7 +34,13 @@ async function ensureSocialColumns() {
     // doesn't have to type them every time. Per-store columns let multi-store
     // brands (Calibre) have different defaults per eBay account.
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_category_id TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_description_template TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_markup_pct NUMERIC`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_condition_id TEXT DEFAULT '1000'`);
+    // Default eBay "Brand" item specific. For aftermarket parts this should be
+    // the seller's company name or "Unbranded" — NOT the vehicle make (which
+    // belongs in the "Make" specific). Overridable per-listing.
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_brand TEXT DEFAULT 'Unbranded'`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_location_country TEXT DEFAULT 'GB'`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_location_postcode TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_location_city TEXT`);
@@ -43,11 +49,27 @@ async function ensureSocialColumns() {
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_payment TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_shipping TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_policy_return TEXT`);
+    // Country of Origin item specific (default China), default shop category,
+    // VAT percent charged on listings (default 20), promoted-listings defaults,
+    // and named description templates (JSON array of { name, body }).
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_country_of_origin TEXT DEFAULT 'China'`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_default_store_category_id TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_vat_percent NUMERIC DEFAULT 20`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_promote_default BOOLEAN DEFAULT false`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_promote_percent NUMERIC DEFAULT 10`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_description_templates TEXT`);
+    // Fixed Shopify↔eBay price link: Shopify price is this % BELOW the eBay
+    // price (equivalently eBay is this % above Shopify). Default 0 = no gap.
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS price_link_pct NUMERIC DEFAULT 0`);
     // Logo — uploaded image stored as base64 data URL. Used on invoices + the
     // app's top-bar logo (overrides the static /logo.png fallback). Storing
     // inline avoids needing a file-host; size is capped client-side at ~500KB.
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS logo_data_url TEXT`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS logo_filename TEXT`);
+    // Separate dark-mode logo so a navy/dark wordmark can have a light variant
+    // that stays visible on the dark top bar.
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS logo_dark_data_url TEXT`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS logo_dark_filename TEXT`);
     // Stock-check reminder — fires once per month on the configured day of
     // month. Day stored 1-31; empty/null = disabled. The actual "did the user
     // dismiss it this month" tracking lives in localStorage per-device.
@@ -139,6 +161,20 @@ router.put('/sound-prefs', requireAdmin, async (req, res) => {
   res.json({ ok: true, soundPrefs: clean });
 });
 
+// PATCH /api/settings/tracking (admin) — merge GA4/Meta config into data JSONB
+// without clobbering other keys (the generic PATCH replaces the whole blob).
+router.patch('/tracking', requireAdmin, async (req, res) => {
+  const keys = ['ga4_measurement_id', 'ga4_api_secret', 'meta_pixel_id', 'meta_capi_token', 'meta_test_code', 'tracking_enabled'];
+  const incoming = {};
+  for (const k of keys) if (req.body[k] !== undefined) incoming[k] = req.body[k];
+  const cur = await query(`SELECT data FROM app_settings WHERE id = 1`);
+  const data = { ...(cur.rows[0]?.data || {}), ...incoming };
+  await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify(data)]);
+  try { require('./track').invalidateConfig(); } catch (_) {}
+  await audit(req, 'update_tracking_settings', null, null, { keys: Object.keys(incoming) });
+  res.json({ ok: true });
+});
+
 // PATCH /api/settings (admin)
 router.patch('/', requireAdmin, async (req, res) => {
   const b = req.body || {};
@@ -194,6 +230,55 @@ router.post('/sync-now', requireAdmin, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: 'sync_failed', message: e.message });
   }
+});
+
+// POST /api/settings/push-all-stock (admin) — force-push every product's current
+// warehouse quantity to Shopify AND eBay (full reconcile after a stock-take).
+// Runs in the BACKGROUND (a big catalogue is 1000+ API calls and would time out
+// the request) and posts a notification + push when finished.
+// In-memory status of the most recent push-all run, so the UI can poll for live
+// progress + the final result IN-APP (OS push notifications don't reliably fire
+// on the user's devices, so the page itself must show the outcome).
+let pushAllStatus = { state: 'idle', startedAt: null, finishedAt: null, result: null, error: null };
+
+router.post('/push-all-stock', requireAdmin, async (req, res) => {
+  if (pushAllStatus.state === 'running') {
+    return res.json({ ok: true, started: false, alreadyRunning: true });
+  }
+  const countedOnly = !!(req.body && req.body.countedOnly);
+  pushAllStatus = { state: 'running', startedAt: Date.now(), finishedAt: null, countedOnly, result: { total: 0, done: 0, countedOnly, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0 }, sampleEbayError: null }, error: null };
+  res.json({ ok: true, started: true, countedOnly });
+  setImmediate(async () => {
+    try {
+      const r = await sync.pushAllStockToBoth((p) => { pushAllStatus.result = { ...p }; }, { countedOnly });
+      pushAllStatus = { state: 'done', startedAt: pushAllStatus.startedAt, finishedAt: Date.now(), countedOnly, result: r, error: null };
+      const sev = (r.shopify.errors || r.ebay.errors) ? 'warn' : 'success';
+      const scope = countedOnly ? `Counted stock (${r.total} items) · ` : '';
+      const byStore = r.ebayFailuresByStore && Object.keys(r.ebayFailuresByStore).length
+        ? ' (' + Object.entries(r.ebayFailuresByStore).map(([s, n]) => `${s}: ${n}`).join(', ') + ')'
+        : '';
+      const body = scope
+        + `Shopify: ${r.shopify.pushed} updated${r.shopify.errors ? `, ${r.shopify.errors} failed` : ''} · `
+        + `eBay: ${r.ebay.pushed} updated${r.ebay.errors ? `, ${r.ebay.errors} failed${byStore}` : ''}${r.ebay.skipped ? `, ${r.ebay.skipped} skipped (not listed)` : ''}`
+        + (r.sampleEbayError ? ` · eBay error e.g. "${String(r.sampleEbayError).slice(0, 120)}"` : '');
+      await query(
+        `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+         VALUES ('sync', $1, $2, $3, NULL, NULL)`,
+        ['Stock push complete', body, sev]
+      ).catch(() => {});
+      try { require('../services/push').sendToAll({ title: 'Stock push complete', body, url: '/', category: 'sale' }); } catch (_) {}
+      console.log('[push-all-stock]', body);
+    } catch (e) {
+      pushAllStatus = { state: 'error', startedAt: pushAllStatus.startedAt, finishedAt: Date.now(), result: pushAllStatus.result, error: e.message };
+      await query(`INSERT INTO notifications (type, title, body, severity) VALUES ('sync','Stock push failed',$1,'error')`, [e.message]).catch(() => {});
+      console.error('[push-all-stock] failed:', e.message);
+    }
+  });
+});
+
+// GET /api/settings/push-all-stock/status — poll live progress + final result.
+router.get('/push-all-stock/status', requireAdmin, (req, res) => {
+  res.json(pushAllStatus);
 });
 
 // POST /api/settings/reset-sync-cursor (admin)
@@ -252,6 +337,9 @@ router.get('/pricing-config', async (req, res) => {
     // eBay listing defaults — used by the Shopify→eBay create-listing flow.
     // Defaults the modal pre-fills so users don't have to type them every time.
     ebayDefaultCategoryId:  r.ebay_default_category_id || '',
+    ebayDescriptionTemplate: r.ebay_description_template || '',
+    ebayMarkupPct: r.ebay_markup_pct != null ? parseFloat(r.ebay_markup_pct) : 15,
+    ebayDefaultBrand:       r.ebay_default_brand || 'Unbranded',
     ebayDefaultConditionId: r.ebay_default_condition_id || '1000',
     ebayLocationCountry:    r.ebay_location_country || 'GB',
     ebayLocationPostcode:   r.ebay_location_postcode || '',
@@ -259,10 +347,24 @@ router.get('/pricing-config', async (req, res) => {
     ebayPolicyPayment:      r.ebay_policy_payment || '',
     ebayPolicyShipping:     r.ebay_policy_shipping || '',
     ebayPolicyReturn:       r.ebay_policy_return || '',
+    // Country of origin (item specific), default shop category, VAT %, promote
+    // defaults, and named description templates.
+    ebayCountryOfOrigin:    r.ebay_country_of_origin || 'China',
+    ebayDefaultStoreCategoryId: r.ebay_default_store_category_id || '',
+    ebayVatPercent:         r.ebay_vat_percent != null ? parseFloat(r.ebay_vat_percent) : 20,
+    priceLinkPct:           r.price_link_pct != null ? parseFloat(r.price_link_pct) : 0,
+    ebayPromoteDefault:     !!r.ebay_promote_default,
+    ebayPromotePercent:     r.ebay_promote_percent != null ? parseFloat(r.ebay_promote_percent) : 10,
+    ebayDescriptionTemplates: (() => {
+      try { const a = JSON.parse(r.ebay_description_templates || '[]'); return Array.isArray(a) ? a : []; }
+      catch { return []; }
+    })(),
     // Logo — uploaded image data URL (base64). Front-end overrides
     // brand.logoUrl with this when present. Empty string when no upload.
-    logoDataUrl:    r.logo_data_url || '',
-    logoFilename:   r.logo_filename || '',
+    logoDataUrl:      r.logo_data_url || '',
+    logoFilename:     r.logo_filename || '',
+    logoDarkDataUrl:  r.logo_dark_data_url || '',
+    logoDarkFilename: r.logo_dark_filename || '',
     // Stock-check reminder — fires once per month on this day of month.
     // Disabled when stock_check_enabled is false OR day is null.
     stockCheckDay:     r.stock_check_day || null,
@@ -320,6 +422,9 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       defaultCountryCode: 'default_country_code',
       // eBay listing defaults
       ebayDefaultCategoryId:  'ebay_default_category_id',
+      ebayDescriptionTemplate: 'ebay_description_template',
+      ebayMarkupPct: 'ebay_markup_pct',
+      ebayDefaultBrand:       'ebay_default_brand',
       ebayDefaultConditionId: 'ebay_default_condition_id',
       ebayLocationCountry:    'ebay_location_country',
       ebayLocationPostcode:   'ebay_location_postcode',
@@ -327,6 +432,13 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       ebayPolicyPayment:      'ebay_policy_payment',
       ebayPolicyShipping:     'ebay_policy_shipping',
       ebayPolicyReturn:       'ebay_policy_return',
+      // eBay country of origin / shop category / VAT / promote defaults
+      ebayCountryOfOrigin:        'ebay_country_of_origin',
+      ebayDefaultStoreCategoryId: 'ebay_default_store_category_id',
+      ebayVatPercent:             'ebay_vat_percent',
+      priceLinkPct:               'price_link_pct',
+      ebayPromoteDefault:         'ebay_promote_default',
+      ebayPromotePercent:         'ebay_promote_percent',
       // Stock-check reminder
       stockCheckDay:          'stock_check_day',
       stockCheckEnabled:      'stock_check_enabled',
@@ -335,7 +447,7 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
       if (b[bodyKey] === undefined) continue;
       let val = b[bodyKey];
-      if (['cash_discount_pct','bank_transfer_pct','free_delivery_threshold','ebay_buyer_protection_markup','vat_rate'].includes(dbCol)) {
+      if (['cash_discount_pct','bank_transfer_pct','free_delivery_threshold','ebay_buyer_protection_markup','vat_rate','ebay_markup_pct','ebay_vat_percent','ebay_promote_percent','price_link_pct'].includes(dbCol)) {
         val = parseFloat(val);
       }
       // Stock-check day → INTEGER (or null if empty). Day stored 1-31.
@@ -343,12 +455,24 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
         const n = parseInt(val);
         val = (Number.isFinite(n) && n >= 1 && n <= 31) ? n : null;
       }
-      // Stock-check enabled → BOOLEAN
-      if (dbCol === 'stock_check_enabled') {
+      // Booleans
+      if (dbCol === 'stock_check_enabled' || dbCol === 'ebay_promote_default') {
         val = (val === true || val === 'true' || val === 1 || val === '1');
       }
       params.push(val);
       updates.push(`${dbCol} = $${params.length}`);
+    }
+    // Named description templates — JSON array of { name, body }. Stored as text.
+    if (b.ebayDescriptionTemplates !== undefined) {
+      let arr = b.ebayDescriptionTemplates;
+      if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch { arr = []; } }
+      if (!Array.isArray(arr)) arr = [];
+      const clean = arr
+        .filter(t => t && (t.name || t.body))
+        .map(t => ({ name: String(t.name || 'Untitled').slice(0, 60), body: String(t.body || '') }))
+        .slice(0, 30);
+      params.push(JSON.stringify(clean));
+      updates.push(`ebay_description_templates = $${params.length}`);
     }
     // Per-store policy overrides — shape: { storeCode: { payment, shipping, return } }
     // Sent under body.ebayPerStorePolicies. Column names are ebay_policy_{store}_{kind}
@@ -369,6 +493,83 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: 'update_failed', message: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// eBay description templates — dedicated, isolated endpoints.
+// Kept separate from /pricing-config so saving/viewing templates can never be
+// broken by an unrelated field in the big config save, and so each call
+// guarantees its own column exists. Shape: [{ name, body }].
+// ──────────────────────────────────────────────────────────────────────────
+async function ensureTemplatesColumn() {
+  await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+  await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS ebay_description_templates TEXT`);
+}
+function parseTemplates(raw) {
+  try { const a = JSON.parse(raw || '[]'); return Array.isArray(a) ? a : []; }
+  catch { return []; }
+}
+
+// GET — list saved templates.
+router.get('/ebay-templates', async (req, res) => {
+  try {
+    await ensureTemplatesColumn();
+    const { rows } = await query(`SELECT ebay_description_templates, ebay_description_template FROM app_settings WHERE id = 1`);
+    const r = rows[0] || {};
+    let templates = parseTemplates(r.ebay_description_templates);
+    // Migrate a legacy single template into the list on first read.
+    if (!templates.length && r.ebay_description_template) templates = [{ name: 'Default', body: r.ebay_description_template }];
+    res.json({ templates });
+  } catch (e) {
+    res.status(500).json({ error: 'load_failed', message: e.message });
+  }
+});
+
+// POST — replace the whole template list, OR append one ({ name, body }).
+router.post('/ebay-templates', requireAdmin, async (req, res) => {
+  try {
+    await ensureTemplatesColumn();
+    const b = req.body || {};
+    const clean = (arr) => (Array.isArray(arr) ? arr : [])
+      .filter(t => t && (t.name || t.body))
+      .map(t => ({ name: String(t.name || 'Untitled').slice(0, 80), body: String(t.body || '') }))
+      .slice(0, 50);
+
+    let templates;
+    if (b.template && (b.template.name || b.template.body)) {
+      // Append-one mode (the "paste & save" button).
+      const { rows } = await query(`SELECT ebay_description_templates FROM app_settings WHERE id = 1`);
+      const existing = parseTemplates(rows[0]?.ebay_description_templates);
+      templates = clean([...existing, b.template]);
+    } else {
+      // Replace-all mode.
+      templates = clean(b.templates);
+    }
+    await query(`UPDATE app_settings SET ebay_description_templates = $1, updated_at = now() WHERE id = 1`, [JSON.stringify(templates)]);
+    await audit(req, 'update_ebay_templates', null, null, { count: templates.length });
+    res.json({ ok: true, templates });
+  } catch (e) {
+    res.status(500).json({ error: 'save_failed', message: e.message });
+  }
+});
+
+
+// POST /api/settings/barcode-sku-sync (admin) — set every Shopify variant's
+// barcode = its SKU. Body { dryRun: true } previews the change without writing;
+// { dryRun: false } performs the push. Follow a real push with import-shopify to
+// pull the new barcodes back into the warehouse.
+router.post('/barcode-sku-sync', requireAdmin, async (req, res) => {
+  const shopify = require('../services/shopify');
+  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+  const dryRun = req.body?.dryRun !== false;  // default to dry-run for safety
+  try {
+    const result = await shopify.bulkSetBarcodeToSku({ dryRun });
+    if (!dryRun) await audit(req, 'barcode_sku_push', 'shopify', null, { updated: result.updated, errors: result.errorCount });
+    res.json(result);
+  } catch (e) {
+    console.error('[barcode-sku-sync] failed:', e.message);
+    res.status(500).json({ error: 'sync_failed', message: e.message });
   }
 });
 
@@ -477,14 +678,20 @@ router.post('/logo', requireAdmin, async (req, res) => {
     return res.status(413).json({ error: 'too_large', message: `Logo is ~${(decodedSize/1024).toFixed(0)} KB — please use an image under 500 KB. Consider resizing or compressing.` });
   }
   const safeFilename = (filename || 'logo.png').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 100);
-  await query(`UPDATE app_settings SET logo_data_url = $1, logo_filename = $2 WHERE id = 1`, [dataUrl, safeFilename]);
-  await audit(req, 'upload_logo', null, null, { filename: safeFilename, sizeKb: Math.round(decodedSize/1024) });
-  res.json({ ok: true, filename: safeFilename, sizeKb: Math.round(decodedSize/1024) });
+  const dark = req.body?.variant === 'dark';
+  const dataCol = dark ? 'logo_dark_data_url' : 'logo_data_url';
+  const nameCol = dark ? 'logo_dark_filename' : 'logo_filename';
+  await query(`UPDATE app_settings SET ${dataCol} = $1, ${nameCol} = $2 WHERE id = 1`, [dataUrl, safeFilename]);
+  await audit(req, 'upload_logo', null, null, { variant: dark ? 'dark' : 'light', filename: safeFilename, sizeKb: Math.round(decodedSize/1024) });
+  res.json({ ok: true, variant: dark ? 'dark' : 'light', filename: safeFilename, sizeKb: Math.round(decodedSize/1024) });
 });
 
 router.delete('/logo', requireAdmin, async (req, res) => {
-  await query(`UPDATE app_settings SET logo_data_url = NULL, logo_filename = NULL WHERE id = 1`);
-  await audit(req, 'delete_logo', null, null, {});
+  const dark = req.query?.variant === 'dark';
+  const dataCol = dark ? 'logo_dark_data_url' : 'logo_data_url';
+  const nameCol = dark ? 'logo_dark_filename' : 'logo_filename';
+  await query(`UPDATE app_settings SET ${dataCol} = NULL, ${nameCol} = NULL WHERE id = 1`);
+  await audit(req, 'delete_logo', null, null, { variant: dark ? 'dark' : 'light' });
   res.json({ ok: true });
 });
 
@@ -494,20 +701,21 @@ router.delete('/logo', requireAdmin, async (req, res) => {
 // uploaded — the front-end then falls back to the brand's static /logo.png
 // file in public/.
 const publicLogoRouter = express.Router();
-publicLogoRouter.get('/public-logo', async (req, res) => {
+async function serveLogo(col, res) {
   try {
-    const { rows } = await query(`SELECT logo_data_url FROM app_settings WHERE id = 1`);
-    const dataUrl = rows[0]?.logo_data_url;
+    const { rows } = await query(`SELECT ${col} AS d FROM app_settings WHERE id = 1`);
+    const dataUrl = rows[0]?.d;
     if (!dataUrl) return res.status(404).end();
     const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
     if (!m) return res.status(500).end();
-    const buf = Buffer.from(m[2], 'base64');
     res.setHeader('Content-Type', m[1]);
     res.setHeader('Cache-Control', 'public, max-age=300');  // short cache so updates show quickly
-    res.end(buf);
+    res.end(Buffer.from(m[2], 'base64'));
   } catch (e) {
     res.status(500).end();
   }
-});
+}
+publicLogoRouter.get('/public-logo', (req, res) => serveLogo('logo_data_url', res));
+publicLogoRouter.get('/public-logo-dark', (req, res) => serveLogo('logo_dark_data_url', res));
 module.exports = router;
 module.exports.publicLogoRouter = publicLogoRouter;

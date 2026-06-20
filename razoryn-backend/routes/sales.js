@@ -3,39 +3,120 @@ const express = require('express');
 const { query, withTx } = require('../db');
 const { requireAuth, requireAdmin, requirePermission } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
+const brand = require('../lib/brand');
 
 const router = express.Router();
 router.use(requireAuth);
 
-const CHANNELS = ['shopify', 'ebay_em', 'ebay_cl', 'direct_cash', 'direct_bank'];
+// #13 — track whether a direct invoice has actually been PAID. is_paid=false on
+// a non-estimate sale = "parts given, awaiting payment" (follow-up list).
+// is_paid defaults to TRUE so every existing invoice stays paid (restart-safe —
+// no backfill that could re-flip intentionally-unpaid rows). paid_at records
+// when payment was taken.
+let _paidColReady = false;
+async function ensurePaidColumn() {
+  if (_paidColReady) return;
+  try {
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_paid BOOLEAN NOT NULL DEFAULT true`);
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ`);
+    // Explicit ship-vs-collect choice per order. NULL = legacy rows; the worklist
+    // falls back to "cash = collect, everything else = ship" for those.
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS fulfillment_method TEXT`);
+    // Fitment workflow: needs_fitment = no vehicle reg captured (auto-parts must
+    // be confirmed against the customer's car); large_panel = order contains an
+    // LP item needing the special courier.
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS needs_fitment BOOLEAN NOT NULL DEFAULT false`);
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS large_panel BOOLEAN NOT NULL DEFAULT false`);
+    // Fitment is a storefront-only concern — clear it on staff-quoted direct
+    // sales (fitment was confirmed before quoting). Idempotent: only rewrites
+    // rows still flagged, so it's a no-op after the first boot.
+    await query(`UPDATE sales SET needs_fitment = false
+                  WHERE needs_fitment = true AND channel IN ('direct_cash','direct_bank','direct_card')`);
+    // Allow card/Stripe as a manual-entry channel alongside cash + bank. The
+    // channel CHECK is inline (auto-named sales_channel_check); widen it so
+    // 'direct_card' is accepted without losing the guard on bad values.
+    try {
+      await query(`ALTER TABLE sales DROP CONSTRAINT IF EXISTS sales_channel_check`);
+      await query(`ALTER TABLE sales ADD CONSTRAINT sales_channel_check CHECK (channel IN ('shopify','ebay_em','ebay_cl','direct_cash','direct_bank','direct_card'))`);
+    } catch (e) { console.warn('[sales] channel constraint widen:', e.message); }
+    _paidColReady = true;
+  } catch (e) { console.warn('[sales] ensurePaidColumn:', e.message); }
+}
+ensurePaidColumn();
+// GDPR: sales/invoices carry customer PII — never let a browser or proxy cache
+// these responses.
+router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+
+const CHANNELS = ['shopify', 'ebay_em', 'ebay_cl', 'direct_cash', 'direct_bank', 'direct_card'];
 
 // ----- helpers -----
-function genReference(paymentMethod) {
-  // REP-{8 alnum chars}-{suffix}
-  const suffix = ({ cash: 'C', bank: 'B', card: 'S', shopify: 'O', ebay: 'E' })[paymentMethod] || 'X';
-  const rand = Math.random().toString(36).slice(2, 6).toUpperCase()
-            + Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `REP-${rand.slice(0, 8)}-${suffix}`;
+// Build the single customer-facing reference for a sale. One unified value used
+// for BOTH invoice_number and payment_reference (replacing the old separate
+// RZN-<date>-<seq> and REP-<rand>-<suffix> pair). PREFIX is the brand's
+// invoicePrefix — CAP for Calibre, REP for Razoryn.
+//   eBay sale    → <PREFIX>-E-<eBay order #>
+//   Shopify sale → <PREFIX>-S-<Shopify order #>
+//   Direct sale  → <PREFIX>-#### (brand-shared sequence from 0700)
+async function buildSaleReference(client, { channel, orderNumber }) {
+  const prefix = brand.invoicePrefix || 'REP';
+  const isEbay = channel === 'ebay_em' || channel === 'ebay_cl';
+  const isShopify = channel === 'shopify';
+  if (isEbay && orderNumber) return `${prefix}-E-${orderNumber}`;
+  if (isShopify && orderNumber) return `${prefix}-S-${orderNumber}`;
+  const next = await nextDirectNumber(client, prefix);
+  return `${prefix}-${String(next).padStart(4, '0')}`;
 }
 
-async function nextInvoiceNumber(client) {
-  const today = new Date();
-  const datePart = today.toISOString().slice(0, 10).replace(/-/g, '');
+// Next number in the brand's direct-sale sequence. Floors at 700 so the first
+// direct sale is <PREFIX>-0700. Matches references of the form PREFIX-#### only
+// (4+ digits), so channel refs like CAP-E-123 never collide with it.
+async function nextDirectNumber(client, prefix) {
   const runQuery = client ? client.query.bind(client) : query;
-  const seq = await runQuery(
-    `SELECT COALESCE(MAX(SUBSTRING(invoice_number FROM '\\d+$')::int), 0) + 1 AS next
-     FROM sales WHERE invoice_number LIKE $1`,
-    [`RZN-${datePart}-%`]
+  const r = await runQuery(
+    `SELECT COALESCE(MAX(SUBSTRING(payment_reference FROM ('^' || $1 || '-([0-9]{4,})$'))::int), 699) + 1 AS next
+       FROM sales
+      WHERE payment_reference ~ ('^' || $1 || '-[0-9]{4,}$')`,
+    [prefix]
   );
-  const next = seq.rows[0].next;
-  return `RZN-${datePart}-${String(next).padStart(4, '0')}`;
+  return r.rows[0].next;
 }
+
+// One-time backfill: assign the new <PREFIX>-#### scheme to existing DIRECT
+// (cash/bank) sales, oldest first, continuing the shared sequence. eBay/Shopify
+// sales are intentionally NOT backfilled. Idempotent — rows already on the new
+// scheme are skipped, so it's safe to run on every boot.
+let _backfilledDirect = false;
+async function backfillDirectReferences() {
+  if (_backfilledDirect) return;
+  try {
+    const prefix = brand.invoicePrefix || 'REP';
+    const { rows } = await query(
+      `SELECT id FROM sales
+        WHERE channel IN ('direct_cash','direct_bank')
+          AND (payment_reference IS NULL OR payment_reference !~ ('^' || $1 || '-[0-9]{4,}$'))
+        ORDER BY occurred_at ASC, id ASC`,
+      [prefix]
+    );
+    if (!rows.length) { _backfilledDirect = true; return; }
+    let n = await nextDirectNumber(null, prefix);
+    for (const row of rows) {
+      const ref = `${prefix}-${String(n).padStart(4, '0')}`;
+      await query(`UPDATE sales SET payment_reference = $1, invoice_number = $2 WHERE id = $3`, [ref, ref, row.id]);
+      n++;
+    }
+    console.log(`[sales] backfilled ${rows.length} direct (cash/bank) references to ${prefix}-#### scheme`);
+    _backfilledDirect = true;
+  } catch (e) {
+    console.warn('[sales] direct-reference backfill warning:', e.message);
+  }
+}
+backfillDirectReferences();
 
 // GET /api/sales?channel=&from=&to=&page=
 router.get('/', requireAdmin, async (req, res) => {
   const { channel, from, to, status } = req.query;
   const page = Math.max(1, parseInt(req.query.page) || 1);
-  const pageSize = Math.min(200, parseInt(req.query.pageSize) || 50);
+  const pageSize = Math.min(2000, parseInt(req.query.pageSize) || 50);
   const where = [], params = [];
   if (channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
   if (from)    { params.push(from); where.push(`s.occurred_at >= $${params.length}`); }
@@ -56,7 +137,28 @@ router.get('/', requireAdmin, async (req, res) => {
   const summary = await query(`
     SELECT channel, COUNT(*)::int AS count, COALESCE(SUM(total),0) AS revenue
     FROM sales s ${w} GROUP BY channel`, params);
-  res.json({ sales: rows, total: tot.rows[0].n, summary: summary.rows });
+
+  // Refunds in the same window (so revenue can be shown net of returns, #1).
+  // Returns carry refund_amount once a return is processed/closed; grouped by
+  // the originating sale's channel (fall back to the return's own channel).
+  let refundsByChannel = {}, refundsTotal = 0;
+  try {
+    const rWhere = [`r.status IN ('processed','closed')`, `r.refund_amount IS NOT NULL`];
+    const rParams = [];
+    if (from) { rParams.push(from); rWhere.push(`r.created_at >= $${rParams.length}`); }
+    if (to)   { rParams.push(to);   rWhere.push(`r.created_at <= $${rParams.length}`); }
+    const rRows = (await query(`
+      SELECT COALESCE(s.channel, r.channel) AS channel, COALESCE(SUM(r.refund_amount),0)::numeric AS refunds
+      FROM returns r LEFT JOIN sales s ON s.id = r.sale_id
+      WHERE ${rWhere.join(' AND ')} GROUP BY COALESCE(s.channel, r.channel)`, rParams)).rows;
+    for (const row of rRows) {
+      const amt = parseFloat(row.refunds) || 0;
+      refundsByChannel[row.channel] = amt;
+      refundsTotal += amt;
+    }
+  } catch (e) { /* returns table not ready — ignore */ }
+
+  res.json({ sales: rows, total: tot.rows[0].n, summary: summary.rows, refundsByChannel, refundsTotal });
 });
 
 // GET /api/sales/export.csv?channel=&from=&to=
@@ -258,10 +360,14 @@ router.get('/export.xlsx', requireAdmin, async (req, res) => {
 });
 
 // GET /api/sales/:id
-router.get('/:id', requireAdmin, async (req, res) => {
+router.get('/:id', requireAdmin, async (req, res, next) => {
+  // Sale ids are numeric. Let non-numeric paths (e.g. /vat-report, /vat-report.csv)
+  // fall through to their dedicated handlers instead of being treated as an id.
+  if (!/^\d+$/.test(req.params.id)) return next();
   const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   const items = await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id]);
+  await audit(req, 'view_sale', 'sale', req.params.id);  // GDPR: log customer-data read
   res.json({ sale: s.rows[0], items: items.rows });
 });
 
@@ -272,11 +378,17 @@ router.post('/', requireAdmin, async (req, res) => {
   const b = req.body || {};
   if (!CHANNELS.includes(b.channel)) return res.status(400).json({ error: 'invalid_channel' });
   if (!Array.isArray(b.items) || !b.items.length) return res.status(400).json({ error: 'items_required' });
-  if (!['direct_cash', 'direct_bank'].includes(b.channel)) {
+  if (!['direct_cash', 'direct_bank', 'direct_card'].includes(b.channel)) {
     return res.status(400).json({ error: 'channel_not_manual_entry' });
   }
-  // Map UI payment method → channel where possible
-  const paymentMethod = b.paymentMethod || (b.channel === 'direct_cash' ? 'cash' : 'bank');
+  // Map UI payment method → channel where possible (cash / bank / card[=Stripe])
+  const paymentMethod = b.paymentMethod ||
+    (b.channel === 'direct_cash' ? 'cash' : b.channel === 'direct_card' ? 'card' : 'bank');
+  // Ship vs collect. Honour an explicit choice; otherwise cash defaults to
+  // collection, card/bank default to shipping (matches the old behaviour).
+  const fulfillmentMethod = (b.fulfillmentMethod === 'ship' || b.fulfillmentMethod === 'collect')
+    ? b.fulfillmentMethod
+    : (paymentMethod === 'cash' ? 'collect' : 'ship');
 
   const settings = await query('SELECT vat_rate, vat_registered FROM app_settings WHERE id = 1');
   const setRow = settings.rows[0] || {};
@@ -288,6 +400,9 @@ router.post('/', requireAdmin, async (req, res) => {
   const result = await withTx(async (c) => {
     let subtotal = 0;
     const itemsResolved = [];
+    // Collect ALL stock shortfalls in one pass so the UI can list every offending
+    // line at once, instead of the user fixing one and re-submitting to find the next.
+    const shortages = [];
     for (const it of b.items) {
       if (it.productId) {
         // Inventory-backed item
@@ -298,7 +413,9 @@ router.post('/', requireAdmin, async (req, res) => {
         if (!p.rows[0]) return { error: 'product_not_found', productId: it.productId };
         // For non-estimate paid sales, validate stock. Estimates don't touch stock at all.
         if (!isEstimate && p.rows[0].qty_on_hand < it.qty) {
-          return { error: 'insufficient_stock', productId: it.productId, sku: p.rows[0].sku, available: p.rows[0].qty_on_hand };
+          shortages.push({ productId: p.rows[0].id, sku: p.rows[0].sku, title: p.rows[0].title,
+                           requested: parseInt(it.qty), available: p.rows[0].qty_on_hand });
+          continue;
         }
         const lineTotal = +(parseFloat(it.unitPrice) * parseInt(it.qty)).toFixed(2);
         subtotal += lineTotal;
@@ -317,6 +434,13 @@ router.post('/', requireAdmin, async (req, res) => {
       }
     }
 
+    // Any inventory-backed line short on stock → abort with the full list. Keep
+    // sku/available at the top level for older clients that read just the first.
+    if (shortages.length) {
+      return { error: 'insufficient_stock', shortages,
+               productId: shortages[0].productId, sku: shortages[0].sku, available: shortages[0].available };
+    }
+
     // VAT model: prices in the system match Shopify/eBay listing prices, which
     // are gross (VAT-INCLUSIVE). subtotal therefore already contains VAT — we
     // must NOT add it on top. The `vat` column stores the VAT *portion* of the
@@ -333,9 +457,11 @@ router.post('/', requireAdmin, async (req, res) => {
     const shipping = parseFloat(b.shipping || 0);
     const total = +(subtotal + shipping).toFixed(2);  // subtotal IS gross — no VAT added
 
-    // Generate identifiers
-    const invoiceNumber = isEstimate ? null : await nextInvoiceNumber(c);
-    const paymentReference = genReference(paymentMethod);
+    // Generate identifiers — one unified reference for both columns. Estimates
+    // reserve a reference but keep invoice_number null until converted.
+    const reference = await buildSaleReference(c, { channel: b.channel, orderNumber: b.orderNumber });
+    const invoiceNumber = isEstimate ? null : reference;
+    const paymentReference = reference;
 
     // Resolve customer link — either an existing customer_id (picked from
     // autocomplete) or a freshly-created record via b.createCustomer payload.
@@ -365,20 +491,34 @@ router.post('/', requireAdmin, async (req, res) => {
       }
     }
 
+    // #13: an issued-but-unpaid invoice (b.paid === false) still gives the parts
+    // (stock decrements like any invoice) but is flagged for payment follow-up.
+    const isPaid = isEstimate ? true : (b.paid !== false);
+    await ensurePaidColumn();
+    // Fitment only applies to self-service Shopify storefront orders. Direct
+    // sales (cash/bank/card) are quoted by staff who confirm fitment first, so
+    // they're never flagged. large_panel still applies (courier routing).
+    const needsFitment = false;
+    let largePanel = false;
+    const pids = itemsResolved.map(i => i.productId).filter(Boolean);
+    if (pids.length) {
+      const lp = await c.query(`SELECT bool_or(COALESCE(large_panel,false)) AS lp FROM products WHERE id = ANY($1)`, [pids]);
+      largePanel = !!lp.rows[0]?.lp;
+    }
     const sale = await c.query(
       `INSERT INTO sales (channel, customer_name, customer_phone, customer_email,
                           subtotal, vat, shipping, total, status, invoice_number,
                           notes, recorded_by, payment_method, payment_reference,
                           is_estimate, order_number, vehicle_reg, vin_number, shipping_address,
-                          customer_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *`,
+                          customer_id, is_paid, paid_at, fulfillment_method, needs_fitment, large_panel)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING *`,
       [b.channel, b.customerName || null, b.customerPhone || null, b.customerEmail || null,
        subtotal, vat, shipping, total,
-       isEstimate ? 'pending' : 'paid',
+       isEstimate ? 'pending' : (isPaid ? 'paid' : 'pending'),
        invoiceNumber, b.notes || null, req.user.id,
        paymentMethod, paymentReference,
        isEstimate, b.orderNumber || null, b.vehicleReg || null, b.vinNumber || null, b.shippingAddress || null,
-       customerId]
+       customerId, isPaid, (!isEstimate && isPaid) ? new Date() : null, fulfillmentMethod, needsFitment, largePanel]
     );
 
     for (const it of itemsResolved) {
@@ -419,6 +559,177 @@ router.post('/', requireAdmin, async (req, res) => {
   res.status(201).json(result);
 });
 
+// POST /api/sales/:id/mark-paid — record payment for an already-issued invoice
+// (#13). Stock was already decremented when the invoice was issued, so this only
+// flips the payment state — no inventory change.
+router.post('/:id/mark-paid', requireAdmin, async (req, res) => {
+  await ensurePaidColumn();
+  const s = await query(`SELECT id, is_estimate, status FROM sales WHERE id = $1`, [req.params.id]);
+  if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
+  if (s.rows[0].is_estimate) return res.status(400).json({ error: 'is_estimate', message: 'Use “Mark paid” on the estimate to convert it to an invoice.' });
+  const newStatus = (s.rows[0].status === 'pending') ? 'paid' : s.rows[0].status;
+  // Optional explicit payment date so the figure lines up with the VAT period /
+  // bank statement it was actually received in (defaults to now()).
+  let paidAt = null;
+  if (req.body && req.body.paidAt) { const d = new Date(req.body.paidAt); if (!isNaN(d)) paidAt = d; }
+  const upd = await query(
+    `UPDATE sales SET is_paid = true, paid_at = COALESCE($3, now()), status = $2 WHERE id = $1 RETURNING *`,
+    [req.params.id, newStatus, paidAt]);
+  await audit(req, 'sale_mark_paid', 'sale', req.params.id, { paidAt: paidAt || 'now' });
+  res.json({ ok: true, sale: upd.rows[0] });
+});
+
+// Flip an invoice back to unpaid (correct a mistake / chase again). Estimates excluded.
+router.post('/:id/mark-unpaid', requireAdmin, async (req, res) => {
+  await ensurePaidColumn();
+  const s = await query(`SELECT id, is_estimate FROM sales WHERE id = $1`, [req.params.id]);
+  if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
+  if (s.rows[0].is_estimate) return res.status(400).json({ error: 'is_estimate' });
+  const upd = await query(`UPDATE sales SET is_paid = false, paid_at = NULL WHERE id = $1 RETURNING *`, [req.params.id]);
+  await audit(req, 'sale_mark_unpaid', 'sale', req.params.id, null);
+  res.json({ ok: true, sale: upd.rows[0] });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// VAT RETURNS
+// VAT quarters use HMRC stagger group 3 (quarters end Feb / May / Aug / Nov):
+//   Q1  Dec 1 – Feb (end)    Q2  Mar 1 – May 31
+//   Q3  Jun 1 – Aug 31       Q4  Sep 1 – Nov 30
+// Cash sales are NOT VATable (no VAT recorded). Bank + Card(=Stripe) ARE VATable
+// and their prices are gross/VAT-inclusive, so VAT = the stored `vat` column.
+// ──────────────────────────────────────────────────────────────────────────
+const VAT_QUARTERS = [
+  { q: 1, label: 'Q1 (Dec–Feb)', startMonth: 12, endMonth: 2 },
+  { q: 2, label: 'Q2 (Mar–May)', startMonth: 3,  endMonth: 5 },
+  { q: 3, label: 'Q3 (Jun–Aug)', startMonth: 6,  endMonth: 8 },
+  { q: 4, label: 'Q4 (Sep–Nov)', startMonth: 9,  endMonth: 11 },
+];
+// For a given "VAT year" (the calendar year the quarter ENDS in) + quarter number,
+// return the [from, toExclusive] date range. Q1 starts in the PRIOR December.
+function vatQuarterRange(year, q) {
+  const def = VAT_QUARTERS.find(x => x.q === q) || VAT_QUARTERS[0];
+  const startYear = def.q === 1 ? year - 1 : year;
+  const from = new Date(Date.UTC(startYear, def.startMonth - 1, 1, 0, 0, 0));
+  const toExclusive = new Date(Date.UTC(year, def.endMonth, 1, 0, 0, 0)); // first day after the end month
+  return { from, toExclusive, label: def.label };
+}
+function currentVatPeriod(d = new Date()) {
+  const m = d.getUTCMonth() + 1, y = d.getUTCFullYear();
+  // The quarter ends in this calendar year except December, which belongs to
+  // next year's Q1 (Dec–Feb).
+  if (m === 12) return { year: y + 1, q: 1 };
+  if (m <= 2) return { year: y, q: 1 };
+  if (m <= 5) return { year: y, q: 2 };
+  if (m <= 8) return { year: y, q: 3 };
+  return { year: y, q: 4 };
+}
+
+// Resolve the report window from query params: either ?year=&quarter= or
+// ?month=YYYY-MM. Defaults to the current VAT quarter.
+function resolveVatWindow(q) {
+  if (q.month && /^\d{4}-\d{2}$/.test(q.month)) {
+    const [y, m] = q.month.split('-').map(Number);
+    const from = new Date(Date.UTC(y, m - 1, 1));
+    const toExclusive = new Date(Date.UTC(y, m, 1));
+    return { from, toExclusive, label: from.toLocaleString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' }), kind: 'month' };
+  }
+  const cur = currentVatPeriod();
+  const year = parseInt(q.year, 10) || cur.year;
+  const quarter = parseInt(q.quarter, 10) || cur.q;
+  const r = vatQuarterRange(year, quarter);
+  return { ...r, label: `${r.label} ${year}`, kind: 'quarter', year, quarter };
+}
+
+// Core query: VATable (bank+card) sales in the window, plus the non-VAT cash
+// total for context. `basis=paid` counts only invoices marked paid (cash
+// accounting) using paid_at; otherwise uses occurred_at (accrual).
+async function vatReportData(win, basis) {
+  await ensurePaidColumn();
+  const dateCol = basis === 'paid' ? 'paid_at' : 'occurred_at';
+  const paidClause = basis === 'paid' ? 'AND s.is_paid = true' : '';
+  const rows = await query(`
+    SELECT s.id, s.${dateCol} AS date, s.invoice_number, s.payment_reference, s.payment_method,
+           s.customer_name, s.subtotal, s.vat, s.shipping, s.total, s.is_paid, s.paid_at, s.occurred_at
+      FROM sales s
+     WHERE s.is_estimate = false
+       AND s.status NOT IN ('refunded','cancelled')
+       AND s.payment_method IN ('bank','card')
+       AND s.${dateCol} >= $1 AND s.${dateCol} < $2
+       ${paidClause}
+     ORDER BY s.${dateCol} ASC
+  `, [win.from, win.toExclusive]);
+  const cash = await query(`
+    SELECT COALESCE(SUM(total),0)::numeric AS total, COUNT(*)::int AS n
+      FROM sales s
+     WHERE s.is_estimate = false AND s.status NOT IN ('refunded','cancelled')
+       AND s.payment_method = 'cash'
+       AND s.${dateCol} >= $1 AND s.${dateCol} < $2 ${paidClause}
+  `, [win.from, win.toExclusive]);
+  const sum = rows.rows.reduce((a, r) => {
+    a.gross += parseFloat(r.total || 0);
+    a.vat += parseFloat(r.vat || 0);
+    a.net += parseFloat(r.total || 0) - parseFloat(r.vat || 0);
+    a[r.payment_method] = (a[r.payment_method] || 0) + parseFloat(r.total || 0);
+    return a;
+  }, { gross: 0, vat: 0, net: 0 });
+  return {
+    window: { label: win.label, from: win.from, to: win.toExclusive, kind: win.kind, basis: basis === 'paid' ? 'paid' : 'accrual' },
+    vatable: { count: rows.rows.length, gross: +sum.gross.toFixed(2), net: +sum.net.toFixed(2), vat: +sum.vat.toFixed(2),
+               byMethod: { bank: +(sum.bank || 0).toFixed(2), card: +(sum.card || 0).toFixed(2) } },
+    cash: { count: cash.rows[0].n, total: +parseFloat(cash.rows[0].total).toFixed(2) },
+    rows: rows.rows,
+  };
+}
+
+// GET /api/sales/vat-report — JSON summary for the on-screen VAT panel.
+router.get('/vat-report', requireAdmin, async (req, res) => {
+  try {
+    const win = resolveVatWindow(req.query);
+    const data = await vatReportData(win, req.query.basis);
+    res.json({ ...data, quarters: VAT_QUARTERS });
+  } catch (e) {
+    console.error('[sales.vat-report]', e);
+    res.status(500).json({ error: 'report_failed', message: e.message });
+  }
+});
+
+// GET /api/sales/vat-report.csv — the downloadable file for the VAT return.
+router.get('/vat-report.csv', requireAdmin, async (req, res) => {
+  try {
+    const win = resolveVatWindow(req.query);
+    const data = await vatReportData(win, req.query.basis);
+    const esc = (v) => {
+      const s = v == null ? '' : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [];
+    lines.push(`VAT report — ${data.window.label} (${data.window.basis} basis)`);
+    lines.push('');
+    lines.push(['Date', 'Invoice/Ref', 'Customer', 'Payment', 'Gross (incl VAT)', 'Net', 'VAT', 'Paid', 'Paid date'].join(','));
+    for (const r of data.rows) {
+      const gross = parseFloat(r.total || 0), vat = parseFloat(r.vat || 0);
+      lines.push([
+        esc(new Date(r.date).toLocaleDateString('en-GB')),
+        esc(r.invoice_number || r.payment_reference || ''),
+        esc(r.customer_name || ''),
+        esc((r.payment_method || '').toUpperCase()),
+        gross.toFixed(2), (gross - vat).toFixed(2), vat.toFixed(2),
+        r.is_paid ? 'Yes' : 'No',
+        esc(r.paid_at ? new Date(r.paid_at).toLocaleDateString('en-GB') : ''),
+      ].join(','));
+    }
+    lines.push('');
+    lines.push(['TOTALS (VATable: bank + card)', '', '', '', data.vatable.gross.toFixed(2), data.vatable.net.toFixed(2), data.vatable.vat.toFixed(2), '', ''].join(','));
+    lines.push([`Cash (non-VAT) ${data.cash.count} sale(s)`, '', '', '', data.cash.total.toFixed(2), '', '0.00', '', ''].join(','));
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="vat-${(data.window.label).replace(/[^\w-]+/g, '_')}.csv"`);
+    res.send('﻿' + lines.join('\n'));
+  } catch (e) {
+    console.error('[sales.vat-report.csv]', e);
+    res.status(500).json({ error: 'report_failed', message: e.message });
+  }
+});
+
 // POST /api/sales/:id/convert-to-invoice — turn an estimate into a paid invoice
 router.post('/:id/convert-to-invoice', requireAdmin, async (req, res) => {
   const paymentMethod = req.body.paymentMethod || 'cash';
@@ -427,8 +738,12 @@ router.post('/:id/convert-to-invoice', requireAdmin, async (req, res) => {
     if (!s.rows[0]) return { error: 'not_found' };
     if (!s.rows[0].is_estimate) return { error: 'not_an_estimate' };
 
-    const invoiceNumber = await nextInvoiceNumber(c);
-    const paymentReference = genReference(paymentMethod);
+    // Promote the estimate's existing reserved reference to its invoice number —
+    // keep the number it was quoted under rather than issuing a new one.
+    const reference = s.rows[0].payment_reference
+      || await buildSaleReference(c, { channel: s.rows[0].channel, orderNumber: s.rows[0].order_number });
+    const invoiceNumber = reference;
+    const paymentReference = reference;
 
     // Decrement stock now that it's paid
     const items = await c.query(`SELECT * FROM sale_items WHERE sale_id = $1`, [req.params.id]);
@@ -547,7 +862,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     billedToName = 'Online customer';
   }
 
-  const isCashReceipt = mode === 'receipt' || (sale.payment_method === 'cash' && !isVatRegistered);
+  const isCashReceipt = mode === 'receipt' || sale.payment_method === 'cash';
   // Pro-forma uses the FULL invoice template (1:1 with a real invoice) — just a different
   // document title and a "not yet paid" notice. Customer needs to recognise it as a
   // normal invoice they can pay against, not a casual estimate.
@@ -1085,10 +1400,39 @@ router.get('/:id/invoice.html', requireAdmin, async (req, res) => {
   const isProforma = forceProforma || (sale.is_estimate && !!sale.payment_method);
   const mode = isProforma ? 'proforma'
              : sale.is_estimate ? 'estimate'
-             : (sale.payment_method === 'cash' && !company.vat_registered) ? 'receipt'
+             : (sale.payment_method === 'cash') ? 'receipt'
              : 'invoice';
   const baseUrl = `${req.protocol}://${req.get('host')}`;
+  await audit(req, 'view_invoice', 'sale', req.params.id, { mode });  // GDPR: log customer-data read
   res.set('Content-Type', 'text/html').send(renderInvoiceHtml({ sale, items, company, mode, baseUrl }));
+});
+
+// GET /api/sales/email-templates — list the covering-message templates for the
+// send dialog's picker.
+router.get('/email-templates', requireAdmin, async (req, res) => {
+  const { getEmailTemplates } = require('../lib/email-templates');
+  res.json({ templates: await getEmailTemplates(query) });
+});
+
+// PUT /api/sales/email-templates { templates:[{key,name,body}] } — save edits.
+router.put('/email-templates', requireAdmin, async (req, res) => {
+  try {
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS invoice_email_templates TEXT`);
+    await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+    const arr = (Array.isArray(req.body?.templates) ? req.body.templates : [])
+      .filter(t => t && (t.name || t.body))
+      .map(t => ({
+        key: String(t.key || t.name || 'tpl').toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 32) || 'tpl',
+        name: String(t.name || 'Untitled').slice(0, 80),
+        body: String(t.body || ''),
+      }))
+      .slice(0, 30);
+    await query(`UPDATE app_settings SET invoice_email_templates = $1, updated_at = now() WHERE id = 1`, [JSON.stringify(arr)]);
+    await audit(req, 'update_email_templates', null, null, { count: arr.length });
+    res.json({ ok: true, templates: arr });
+  } catch (e) {
+    res.status(500).json({ error: 'save_failed', message: e.message });
+  }
 });
 
 // POST /api/sales/:id/email — email the invoice to the customer
@@ -1106,7 +1450,7 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
   const isProforma = sale.is_estimate && !!sale.payment_method;
   const mode = isProforma ? 'proforma'
              : sale.is_estimate ? 'estimate'
-             : (sale.payment_method === 'cash' && !company.vat_registered) ? 'receipt'
+             : (sale.payment_method === 'cash') ? 'receipt'
              : 'invoice';
   const html = renderInvoiceHtml({ sale, items, company, mode, baseUrl: `${req.protocol}://${req.get('host')}` });
   const docLabel = mode === 'estimate' ? 'Estimate'
@@ -1114,6 +1458,40 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
                  : mode === 'receipt' ? 'Receipt'
                  : 'Invoice';
   const subject = `${docLabel} ${sale.invoice_number || sale.payment_reference || ''} — ${brand.name}`;
+
+  // Covering message + brand signature prepended above the invoice (#6/#email
+  // templates). The admin picks a template at send time (private/retail, trade,
+  // local DropFleet delivery, eBay buy-direct, or none) — defaulting by channel.
+  const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const site = company.company_website || (brand.domain ? `https://${brand.domain}` : '');
+  const siteLabel = (company.company_website || brand.domain || '').replace(/^https?:\/\//, '');
+  const sigBits = [company.company_phone, company.company_email, siteLabel].filter(Boolean).join(' · ');
+
+  const { getEmailTemplates, defaultKeyForSale } = require('../lib/email-templates');
+  const templates = await getEmailTemplates(query);
+  // includeMessage:false (legacy) forces no message; else use the chosen key.
+  const chosenKey = req.body?.includeMessage === false ? 'none'
+                  : (req.body?.templateKey || defaultKeyForSale(sale));
+  const tpl = templates.find(t => t.key === chosenKey) || templates.find(t => t.key === 'standard');
+  const rawBody = tpl ? (tpl.body || '') : '';
+  // Substitute placeholders, escape, and convert newlines/blank-lines to HTML.
+  const subst = rawBody
+    .replace(/\{customer\}/g, sale.customer_name || 'there')
+    .replace(/\{brand\}/g, brand.name || '')
+    .replace(/\{doc\}/g, docLabel.toLowerCase())
+    .replace(/\{ref\}/g, sale.invoice_number ? ` (ref ${sale.invoice_number})` : '')
+    .replace(/\{website\}/g, siteLabel || (brand.name || 'our website'));
+  const bodyHtml = esc(subst).trim()
+    .split(/\n{2,}/).map(p => `<p style="margin:0 0 10px">${p.replace(/\n/g, '<br>')}</p>`).join('');
+  const cover = !bodyHtml ? '' : `
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:660px;margin:0 auto 16px;padding:18px 20px;background:#f6f7f8;border-radius:10px;color:#222;line-height:1.5">
+      ${bodyHtml}
+      <p style="margin:14px 0 0;font-weight:700">${esc(brand.name)}</p>
+      ${sigBits ? `<p style="margin:3px 0 0;font-size:12px;color:#666">${esc(sigBits)}</p>` : ''}
+    </div>`;
+  const htmlWithCover = cover ? html.replace(/(<body[^>]*>)/i, `$1${cover}`) : html;
+  // If there was no <body> tag to inject into, fall back to prepending.
+  const finalHtml = (cover && htmlWithCover === html) ? cover + html : htmlWithCover;
 
   if (!process.env.RESEND_API_KEY) {
     return res.status(503).json({
@@ -1128,7 +1506,7 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
       from: `${brand.name} <${fromEmail}>`,
       to: [to],
       subject,
-      html,
+      html: finalHtml,
     }, {
       headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
       timeout: 15000,
@@ -1416,4 +1794,49 @@ router.post('/backfill-vat', requireAdmin, async (req, res) => {
   res.json({ ok: true, fixed, alreadyOk, total: all.rows.length });
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// Daily follow-up for UNPAID direct invoices (cash / bank / card). eBay &
+// Shopify orders settle on-platform; direct cash/card/bank sales are the ones
+// that get forgotten. Once a day we raise ONE digest notification + push so
+// staff chase payment. Idempotent within the day: skips if a 'payment_followup'
+// notification was already created in the last 20 hours.
+// ──────────────────────────────────────────────────────────────────────────
+async function runPaymentFollowups() {
+  await ensurePaidColumn();
+  // Don't double-fire if today's digest already went out.
+  const recent = await query(
+    `SELECT 1 FROM notifications WHERE type = 'payment_followup' AND created_at > now() - INTERVAL '20 hours' LIMIT 1`
+  );
+  if (recent.rows.length) return { skipped: 'already_sent_today' };
+
+  const r = await query(`
+    SELECT COUNT(*)::int AS n,
+           COALESCE(SUM(total),0)::numeric AS total,
+           MIN(occurred_at) AS oldest
+      FROM sales
+     WHERE is_estimate = false AND is_paid = false
+       AND status NOT IN ('refunded','cancelled')
+       AND payment_method IN ('cash','bank','card')
+       AND occurred_at >= now() - INTERVAL '120 days'
+  `);
+  const n = r.rows[0].n;
+  if (!n) return { count: 0 };
+
+  const total = parseFloat(r.rows[0].total || 0);
+  const oldestDays = r.rows[0].oldest
+    ? Math.floor((Date.now() - new Date(r.rows[0].oldest).getTime()) / 86400000) : 0;
+  const title = `${n} unpaid order${n === 1 ? '' : 's'} to chase`;
+  const body = `£${total.toFixed(2)} outstanding across ${n} cash/bank/card sale${n === 1 ? '' : 's'}`
+    + (oldestDays ? ` — oldest is ${oldestDays} day${oldestDays === 1 ? '' : 's'} old.` : '.');
+  try {
+    await query(
+      `INSERT INTO notifications (type, title, body, severity) VALUES ('payment_followup', $1, $2, 'warn')`,
+      [title, body]
+    );
+  } catch (e) { console.warn('[followups] notification insert:', e.message); }
+  try { require('../services/push').sendToAll({ title, body, url: '/', tag: 'payment-followup', category: 'payment_followup' }); } catch (_) {}
+  return { count: n, total };
+}
+
 module.exports = router;
+module.exports.runPaymentFollowups = runPaymentFollowups;

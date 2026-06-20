@@ -16,11 +16,13 @@ const BRANDS = {
     logoUrl: '/logo.png',
     logoUrlDark: '/logo-dark.png',  // shown when dark theme is active
     primaryColor: '#c8202d',        // brand red — sidebar, primary buttons, accents
+    primaryColorDark: '#e2545f',    // lifted red for dark mode (legible on dark bg)
     secondaryColor: '#1a1a1a',       // ink colour for headers
     supportColor: '#ffffff',
     invoicePrefix: 'REP',
     appTitle: 'Razoryn Warehouse Hub',
     tagline: 'Quality aftermarket vehicle parts',
+    collectionArea: 'Watford, London & Hertfordshire',
     stores: [
       {
         code: 'razoryn',
@@ -36,14 +38,16 @@ const BRANDS = {
     name: 'Calibre Auto Parts',
     fullName: 'Calibre Auto Parts Ltd',
     domain: 'calibreautoparts.co.uk',
-    logoUrl: '/logo-calibre.jpeg',
-    logoUrlDark: '/logo-calibre-dark.jpeg',  // shown when dark theme is active
+    logoUrl: '/logo-calibre.png',           // transparent PNG — clean on the light UI
+    logoUrlDark: '/logo-calibre-dark.jpeg',  // white-bg version stays visible on the dark top bar
     primaryColor: '#0D1B2A',         // navy — sidebar, headings
+    primaryColorDark: '#4a7fc0',     // legible blue for dark mode (navy is invisible on dark bg)
     secondaryColor: '#E30613',        // red accent — primary buttons, links
     supportColor: '#ffffff',
     invoicePrefix: 'CAP',
     appTitle: 'Calibre Warehouse Hub',
     tagline: 'EV and modern vehicle body parts',
+    collectionArea: 'Watford, London & Hertfordshire',
     stores: [
       {
         code: 'evbodyparts',

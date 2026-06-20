@@ -21,18 +21,20 @@ async function run() {
   if (existing[0].n === 0) {
     const email = process.env.INITIAL_ADMIN_EMAIL;
     const password = process.env.INITIAL_ADMIN_PASSWORD;
+    const username = process.env.INITIAL_ADMIN_USERNAME || null;
     const pin = process.env.INITIAL_ADMIN_PIN;
-    if (!email || !password) {
-      console.warn('[migrate] no INITIAL_ADMIN_EMAIL/PASSWORD set; skipping admin creation');
+    // Need email OR username, plus a password. (Login accepts either.)
+    if ((!email && !username) || !password) {
+      console.warn('[migrate] set INITIAL_ADMIN_PASSWORD and at least one of INITIAL_ADMIN_USERNAME / INITIAL_ADMIN_EMAIL; skipping admin creation');
     } else {
       const passwordHash = await bcrypt.hash(password, 10);
       const pinHash = pin ? await bcrypt.hash(pin, 10) : null;
       await query(
-        `INSERT INTO users (email, password_hash, pin_hash, name, role, permissions)
-         VALUES ($1, $2, $3, $4, 'admin', $5::jsonb)`,
-        [email, passwordHash, pinHash, 'Admin', JSON.stringify({})]
+        `INSERT INTO users (email, username, password_hash, pin_hash, name, role, permissions)
+         VALUES ($1, $2, $3, $4, $5, 'admin', $6::jsonb)`,
+        [email || null, username, passwordHash, pinHash, 'Admin', JSON.stringify({})]
       );
-      console.log(`[migrate] created initial admin: ${email}`);
+      console.log(`[migrate] created initial admin: ${username || email}`);
     }
   }
 

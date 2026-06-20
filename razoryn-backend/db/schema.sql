@@ -16,14 +16,17 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE TABLE IF NOT EXISTS users (
   id              SERIAL PRIMARY KEY,
   email           CITEXT UNIQUE,
-  -- bcrypt hash of the email password (admin only required to have one)
+  -- login username (case-insensitive unique). Everyone logs in with username
+  -- (or email) + password; the PIN keypad has been retired.
+  username        TEXT,
+  -- bcrypt hash of the password
   password_hash   TEXT,
-  -- bcrypt hash of the 4-digit PIN (warehouse staff)
+  -- bcrypt hash of the 4-digit PIN (legacy, dormant — kept for re-enablement)
   pin_hash        TEXT,
   name            TEXT NOT NULL,
   role            TEXT NOT NULL CHECK (role IN ('admin','warehouse')),
   -- JSON map of granular permissions for warehouse role.
-  -- Keys: inventory, scan, locations, returns, sales, pricing, kb, kbSensitive, schedule, videos
+  -- Keys: inventory, scan, locations, returns, sales, pricing, kb, kbSensitive, schedule, videos, competitors
   permissions     JSONB NOT NULL DEFAULT '{}'::jsonb,
   active          BOOLEAN NOT NULL DEFAULT true,
   last_login_at   TIMESTAMPTZ,
@@ -31,6 +34,7 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS users_role_idx ON users (role) WHERE active = true;
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_uniq ON users (LOWER(username)) WHERE username IS NOT NULL;
 
 -- ---------- Storage locations (feature 3) ----------
 CREATE TABLE IF NOT EXISTS locations (
@@ -78,6 +82,22 @@ CREATE TABLE IF NOT EXISTS products (
 CREATE INDEX IF NOT EXISTS products_barcode_idx ON products (barcode) WHERE barcode IS NOT NULL;
 CREATE INDEX IF NOT EXISTS products_sku_idx ON products (sku);
 CREATE INDEX IF NOT EXISTS products_low_stock_idx ON products (qty_on_hand) WHERE active = true;
+
+-- ---------- Sub part numbers (alternate factory/country codes) ----------
+-- A product has ONE master SKU (the printed code) but may carry several
+-- alternate part numbers — e.g. the same item produced in different factories
+-- or countries. Staff can search by any of these and the master SKU surfaces.
+CREATE TABLE IF NOT EXISTS product_part_numbers (
+  id          SERIAL PRIMARY KEY,
+  product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  code        TEXT NOT NULL,
+  note        TEXT,                          -- e.g. "Korea factory", "OEM equiv"
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ppn_product_idx ON product_part_numbers (product_id);
+CREATE INDEX IF NOT EXISTS ppn_code_idx ON product_part_numbers (upper(code));
+-- One product can't list the same code twice.
+CREATE UNIQUE INDEX IF NOT EXISTS ppn_product_code_uq ON product_part_numbers (product_id, upper(code));
 
 -- ---------- Stock movements (audit trail of every change) ----------
 -- Replaces ad-hoc stock adjustments. Every change goes through here.
@@ -433,6 +453,121 @@ CREATE TABLE IF NOT EXISTS mirror_links (
 );
 CREATE INDEX IF NOT EXISTS idx_mirror_links_shopify_id ON mirror_links(shopify_product_id);
 
+-- ============================================================
+-- Competitor price & listing monitoring
+-- A self-contained subsystem (mirrors the sync subsystem). Each brand
+-- deployment has its own DB, so the competitor list below is per-brand —
+-- shared competitors like BCP/Prasco are simply seeded in each DB.
+-- Alerts deliberately reuse the notifications table (types
+-- competitor_undercut / competitor_price_drop / competitor_new_item) rather
+-- than a parallel table, so they inherit the read/dedup/push machinery.
+-- ============================================================
+
+-- Configured competitors to watch (eBay sellers and/or websites).
+CREATE TABLE IF NOT EXISTS competitors (
+  id              SERIAL PRIMARY KEY,
+  name            TEXT NOT NULL,                 -- "BCP", "Prasco UK"
+  code            TEXT UNIQUE NOT NULL,          -- slug, also selects a web adapter ('bcp','prasco')
+  source_type     TEXT NOT NULL CHECK (source_type IN ('ebay','website')),
+  ebay_username   TEXT,                          -- for source_type='ebay'
+  website_url     TEXT,                          -- base/listings URL for scraping adapters
+  active          BOOLEAN NOT NULL DEFAULT true,
+  config          JSONB NOT NULL DEFAULT '{}'::jsonb,  -- adapter-specific (selectors, marketplaceId, delayMs)
+  last_scanned_at TIMESTAMPTZ,
+  last_status     TEXT,                          -- 'ok' | 'error' | 'partial'
+  last_error      TEXT,
+  notes           TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS competitors_active_idx ON competitors (active) WHERE active = true;
+
+-- Current snapshot of each competitor item (upserted every scan).
+CREATE TABLE IF NOT EXISTS competitor_listings (
+  id                  SERIAL PRIMARY KEY,
+  competitor_id       INTEGER NOT NULL REFERENCES competitors(id) ON DELETE CASCADE,
+  external_id         TEXT NOT NULL,             -- eBay itemId, or sha1(url) for web
+  url                 TEXT,
+  title               TEXT NOT NULL,
+  price               NUMERIC(10,2),
+  currency            TEXT NOT NULL DEFAULT 'GBP',
+  -- Shipping so prices can be compared DELIVERED, not just item price.
+  shipping_cost       NUMERIC(10,2),                  -- NULL = unknown
+  shipping_type       TEXT,                           -- 'free','flat','calculated','collection','unknown'
+  shipping_free       BOOLEAN NOT NULL DEFAULT false,
+  -- Condition — we only TRACK new parts as competitors (trade sellers). Used /
+  -- salvage / private listings are captured for awareness but not alerted on.
+  condition           TEXT,                           -- 'New', 'Used', ...
+  condition_id        TEXT,                           -- eBay conditionId (1000 = New)
+  seller_username     TEXT,                           -- the actual eBay seller (for cross-seller ranking)
+  image_url           TEXT,
+  -- parsed/derived fields cached for fast UI + matching
+  parsed_make         TEXT,
+  parsed_model        TEXT,
+  parsed_part_type    TEXT,
+  parsed_part_number  TEXT,
+  available           BOOLEAN NOT NULL DEFAULT true,  -- false once it drops out of a scan
+  first_seen_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_price_change_at TIMESTAMPTZ,
+  raw                 JSONB,                     -- full source payload (debugging)
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (competitor_id, external_id)
+);
+CREATE INDEX IF NOT EXISTS comp_listings_competitor_idx ON competitor_listings (competitor_id, available);
+CREATE INDEX IF NOT EXISTS comp_listings_make_model_idx ON competitor_listings (parsed_make, parsed_model);
+CREATE INDEX IF NOT EXISTS comp_listings_pn_idx ON competitor_listings (parsed_part_number) WHERE parsed_part_number IS NOT NULL;
+
+-- Append-on-change price log (one row per observed price change) — this is what
+-- answers "when do they update their pricing" and powers the timeline UI.
+CREATE TABLE IF NOT EXISTS competitor_price_history (
+  id           SERIAL PRIMARY KEY,
+  listing_id   INTEGER NOT NULL REFERENCES competitor_listings(id) ON DELETE CASCADE,
+  price        NUMERIC(10,2) NOT NULL,
+  currency     TEXT NOT NULL DEFAULT 'GBP',
+  observed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS comp_price_hist_listing_idx ON competitor_price_history (listing_id, observed_at DESC);
+
+-- Best match of a competitor listing to one of our products (recomputed per scan).
+-- product_id NULL + is_opportunity = a part/model they sell that we don't stock.
+CREATE TABLE IF NOT EXISTS competitor_match (
+  id             SERIAL PRIMARY KEY,
+  listing_id     INTEGER NOT NULL REFERENCES competitor_listings(id) ON DELETE CASCADE,
+  product_id     INTEGER REFERENCES products(id) ON DELETE CASCADE,
+  match_type     TEXT NOT NULL CHECK (match_type IN ('exact_part_number','make_model_parttype','fuzzy','none')),
+  confidence     NUMERIC(4,3) NOT NULL DEFAULT 0,
+  is_opportunity BOOLEAN NOT NULL DEFAULT false,
+  reviewed_at    TIMESTAMPTZ,
+  reviewed_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  dismissed      BOOLEAN NOT NULL DEFAULT false,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (listing_id)
+);
+CREATE INDEX IF NOT EXISTS comp_match_product_idx ON competitor_match (product_id) WHERE product_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS comp_match_opportunity_idx ON competitor_match (is_opportunity) WHERE is_opportunity = true;
+
+-- Per-product market snapshot — saturation + our ranking over time, captured when
+-- a product's whole-eBay market is analysed (on demand and periodically). The
+-- ranked seller list itself is computed live (not stored) to keep growth bounded.
+CREATE TABLE IF NOT EXISTS product_market_snapshot (
+  id              SERIAL PRIMARY KEY,
+  product_id      INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  query           TEXT,                       -- the search used (part no. or make/model/part)
+  saturation_new  INTEGER,                    -- active NEW listings competing
+  saturation_used INTEGER,                    -- used/salvage listings (awareness only)
+  seller_count    INTEGER,                    -- distinct NEW sellers in the ranked sample
+  min_delivered   NUMERIC(10,2),              -- cheapest NEW delivered price seen
+  median_delivered NUMERIC(10,2),
+  our_delivered   NUMERIC(10,2),              -- our delivered price at capture
+  our_rank        INTEGER,                    -- 1 = cheapest; NULL if we don't appear
+  suggested_ad_rate NUMERIC(5,2),             -- our own computed rate (not eBay's)
+  captured_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS product_market_snapshot_idx ON product_market_snapshot (product_id, captured_at DESC);
+
 -- Triggers — auto-update updated_at
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
 BEGIN NEW.updated_at = now(); RETURN NEW; END;
@@ -455,7 +590,21 @@ DO $$ BEGIN
     CREATE TRIGGER kb_set_updated BEFORE UPDATE ON kb_entries
       FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'competitors_set_updated') THEN
+    CREATE TRIGGER competitors_set_updated BEFORE UPDATE ON competitors
+      FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'comp_listings_set_updated') THEN
+    CREATE TRIGGER comp_listings_set_updated BEFORE UPDATE ON competitor_listings
+      FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'comp_match_set_updated') THEN
+    CREATE TRIGGER comp_match_set_updated BEFORE UPDATE ON competitor_match
+      FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
 END $$;
 
 -- citext extension for case-insensitive emails
 CREATE EXTENSION IF NOT EXISTS citext;
+-- pg_trgm powers fuzzy title matching (similarity()) in the competitor matcher.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;

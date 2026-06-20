@@ -20,10 +20,54 @@ async function ensureProductLocationColumns() {
   try {
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS location_note TEXT`);
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS location_photo_data_url TEXT`);
+    // Phase 3A: 1 item photo + 2 location photos, plus which one is the thumbnail.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS item_photo_data_url TEXT`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS location_photo_data_url_2 TEXT`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS primary_photo TEXT`);
+    // updated_at lets the frontend cache-bust photo URLs (?v=updated_at) when an
+    // image changes — without it, edited photos could serve stale from cache.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()`);
+    // Large-panel flag: marks bulky parts (bumpers, bonnets, doors) that need the
+    // dedicated courier. Orders containing one are flagged for routing at ingest.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS large_panel BOOLEAN NOT NULL DEFAULT false`);
+    // Price lock: when true, automated price derivation (eBay→Shopify link, bulk
+    // price tools) won't overwrite this product's prices — staff keep it manual.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS price_locked BOOLEAN NOT NULL DEFAULT false`);
     _prodLocMigrated = true;
   } catch (e) { console.warn('[products] location-columns migration warning:', e.message); }
 }
 ensureProductLocationColumns();
+
+// Self-healing migration for the sub part-numbers table (alternate factory codes
+// that all resolve to one master SKU). Idempotent; safe on every cold boot.
+let _ppnMigrated = false;
+async function ensurePartNumbersTable() {
+  if (_ppnMigrated) return;
+  try {
+    await query(`CREATE TABLE IF NOT EXISTS product_part_numbers (
+      id SERIAL PRIMARY KEY,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      code TEXT NOT NULL,
+      note TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
+    await query(`CREATE INDEX IF NOT EXISTS ppn_product_idx ON product_part_numbers (product_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS ppn_code_idx ON product_part_numbers (upper(code))`);
+    await query(`CREATE UNIQUE INDEX IF NOT EXISTS ppn_product_code_uq ON product_part_numbers (product_id, upper(code))`);
+    _ppnMigrated = true;
+  } catch (e) { console.warn('[products] part-numbers migration warning:', e.message); }
+}
+ensurePartNumbersTable();
+
+// Decode a base64 data URL stored in the DB and stream it as a cached binary
+// image, so list payloads don't have to inline megabytes of base64.
+function sendPhoto(res, dataUrl) {
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl || '');
+  if (!m) return res.status(404).end();
+  res.set('Content-Type', m[1]);
+  res.set('Cache-Control', 'private, max-age=3600');
+  return res.send(Buffer.from(m[2], 'base64'));
+}
 
 // GET /api/products?search=&brand=&lowStock=1&page=1&pageSize=50
 router.get('/', requirePermission('inventory'), async (req, res) => {
@@ -36,15 +80,17 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   // frontend also paginates as a safety net for catalogues beyond 1000.
   const pageSize = Math.min(1000, Math.max(1, parseInt(req.query.pageSize) || 50));
 
+  await ensurePartNumbersTable();
   const where = ['active = true'];
   const params = [];
   if (search) {
     params.push(`%${search}%`);
     const i = params.length;
-    // All four columns use ILIKE for consistent partial matching. The barcode
-    // clause previously used exact `= $i` against a wildcard-wrapped param, so
-    // it never matched anything — now it's ILIKE like the others.
-    where.push(`(title ILIKE $${i} OR sku ILIKE $${i} OR part_number ILIKE $${i} OR barcode ILIKE $${i})`);
+    // All columns use ILIKE for consistent partial matching. Also match any of
+    // the product's sub part-numbers so searching an alternate factory/country
+    // code surfaces the master SKU.
+    where.push(`(title ILIKE $${i} OR sku ILIKE $${i} OR part_number ILIKE $${i} OR barcode ILIKE $${i}
+      OR EXISTS (SELECT 1 FROM product_part_numbers ppn WHERE ppn.product_id = p.id AND ppn.code ILIKE $${i}))`);
   }
   if (brand) { params.push(brand); where.push(`brand = $${params.length}`); }
   if (lowStock === '1') where.push('qty_on_hand <= low_stock_threshold');
@@ -58,8 +104,100 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
     LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}
   `;
   const { rows } = await query(sql, params);
-  const count = await query(`SELECT COUNT(*)::int AS n FROM products WHERE ${where.join(' AND ')}`, params);
+  const count = await query(`SELECT COUNT(*)::int AS n FROM products p WHERE ${where.join(' AND ')}`, params);
+  // Don't ship base64 photos in the list — they ballooned the payload (every
+  // product carried full data URLs). Replace with booleans; the frontend
+  // lazy-loads each image from its photo endpoint.
+  for (const r of rows) {
+    r.has_item_photo = !!r.item_photo_data_url;
+    r.has_location_photo = !!r.location_photo_data_url;
+    r.has_location_photo_2 = !!r.location_photo_data_url_2;
+    delete r.item_photo_data_url;
+    delete r.location_photo_data_url;
+    delete r.location_photo_data_url_2;
+  }
+  // Attach incoming/pre-order info per product (units on the way + earliest ETA).
+  // Lets the inventory list flag items as pre-order with an arrival date. Done
+  // as a separate, guarded query so a cold-boot before the incoming table exists
+  // never breaks the products list.
+  try {
+    const ids = rows.map(r => r.id);
+    if (ids.length) {
+      const inc = await query(`
+        SELECT product_id,
+               COALESCE(SUM(GREATEST(qty_ordered - qty_received, 0)), 0)::int AS incoming_qty,
+               MIN(expected_date) AS incoming_eta
+        FROM incoming_stock
+        WHERE product_id = ANY($1) AND status NOT IN ('received','cancelled')
+        GROUP BY product_id`, [ids]);
+      const map = new Map(inc.rows.map(x => [x.product_id, x]));
+      for (const r of rows) {
+        const x = map.get(r.id);
+        r.incoming_qty = x ? x.incoming_qty : 0;
+        r.incoming_eta = x ? x.incoming_eta : null;
+      }
+    }
+  } catch (e) { /* incoming table not ready yet — non-critical */ }
+  // Attach sub part-numbers so the client-side search can match them and the UI
+  // can show them. Done as one batched query, guarded.
+  try {
+    const ids = rows.map(r => r.id);
+    if (ids.length) {
+      const pn = await query(`SELECT id, product_id, code, note FROM product_part_numbers WHERE product_id = ANY($1) ORDER BY id`, [ids]);
+      const byProd = new Map();
+      for (const x of pn.rows) { if (!byProd.has(x.product_id)) byProd.set(x.product_id, []); byProd.get(x.product_id).push(x); }
+      for (const r of rows) r.part_numbers = byProd.get(r.id) || [];
+    }
+  } catch (e) { for (const r of rows) r.part_numbers = r.part_numbers || []; }
   res.json({ products: rows, total: count.rows[0].n, page, pageSize });
+});
+
+// ── Sub part-numbers (alternate factory/country codes) for a product ─────────
+router.get('/:id/part-numbers', requirePermission('inventory'), async (req, res) => {
+  await ensurePartNumbersTable();
+  const { rows } = await query(`SELECT id, code, note, created_at FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [req.params.id]);
+  res.json({ partNumbers: rows });
+});
+router.post('/:id/part-numbers', requirePermission('inventory'), async (req, res) => {
+  await ensurePartNumbersTable();
+  const code = String(req.body?.code || '').trim();
+  const note = req.body?.note != null ? String(req.body.note).trim() || null : null;
+  if (!code) return res.status(400).json({ error: 'code_required' });
+  const p = await query(`SELECT id FROM products WHERE id = $1`, [req.params.id]);
+  if (!p.rows[0]) return res.status(404).json({ error: 'product_not_found' });
+  try {
+    const { rows } = await query(
+      `INSERT INTO product_part_numbers (product_id, code, note) VALUES ($1, $2, $3)
+       ON CONFLICT (product_id, upper(code)) DO UPDATE SET note = EXCLUDED.note
+       RETURNING id, code, note, created_at`,
+      [req.params.id, code, note]
+    );
+    await audit(req, 'add_part_number', 'product', Number(req.params.id), { code, note });
+    res.json({ ok: true, partNumber: rows[0] });
+  } catch (e) { res.status(500).json({ error: 'insert_failed', message: e.message }); }
+});
+router.delete('/:id/part-numbers/:pnId', requirePermission('inventory'), async (req, res) => {
+  await ensurePartNumbersTable();
+  await query(`DELETE FROM product_part_numbers WHERE id = $1 AND product_id = $2`, [req.params.pnId, req.params.id]);
+  await audit(req, 'remove_part_number', 'product', Number(req.params.id), { pnId: req.params.pnId });
+  res.json({ ok: true });
+});
+
+// Per-product photo endpoints — stream the stored base64 as cached binary
+// instead of inlining it. `private` cache because they're behind auth (must not
+// be stored by shared proxies); callers cache-bust with ?v=<updated_at>.
+// 404 when the slot is empty.
+router.get('/:id/item-photo', requirePermission('locations'), async (req, res) => {
+  const { rows } = await query('SELECT item_photo_data_url FROM products WHERE id = $1', [req.params.id]);
+  return sendPhoto(res, rows[0] && rows[0].item_photo_data_url);
+});
+router.get('/:id/location-photo', requirePermission('locations'), async (req, res) => {
+  const { rows } = await query('SELECT location_photo_data_url FROM products WHERE id = $1', [req.params.id]);
+  return sendPhoto(res, rows[0] && rows[0].location_photo_data_url);
+});
+router.get('/:id/location-photo-2', requirePermission('locations'), async (req, res) => {
+  const { rows } = await query('SELECT location_photo_data_url_2 FROM products WHERE id = $1', [req.params.id]);
+  return sendPhoto(res, rows[0] && rows[0].location_photo_data_url_2);
 });
 
 // GET /api/products/barcode/:code  — quick scan lookup
@@ -166,6 +304,13 @@ router.post('/:id/reactivate', requireAdmin, async (req, res) => {
   res.json({ ok: true, product: rows[0] });
 });
 
+// GET /api/products/shopify-collections — all Shopify custom collections (for
+// the picker). Declared BEFORE /:id so the literal path isn't caught by :id.
+router.get('/shopify-collections', requireAdmin, async (req, res) => {
+  try { res.json({ collections: await require('../services/shopify').getCustomCollections() }); }
+  catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
+});
+
 // GET /api/products/:id
 router.get('/:id', requirePermission('inventory'), async (req, res) => {
   const { rows } = await query(
@@ -206,22 +351,27 @@ router.post('/', requireAdmin, async (req, res) => {
 router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
                    'low_stock_threshold', 'price_shopify', 'price_ebay', 'cost_price',
-                   'location_id', 'active', 'location_note', 'location_photo_data_url'];
+                   'location_id', 'active', 'location_note', 'location_photo_data_url',
+                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
                 costPrice: 'cost_price', locationId: 'location_id',
-                locationNote: 'location_note', locationPhotoDataUrl: 'location_photo_data_url' };
+                locationNote: 'location_note', locationPhotoDataUrl: 'location_photo_data_url',
+                itemPhotoDataUrl: 'item_photo_data_url',
+                locationPhotoDataUrl2: 'location_photo_data_url_2',
+                primaryPhoto: 'primary_photo', largePanel: 'large_panel', priceLocked: 'price_locked' };
   const sets = [], params = [];
-  // Make sure the per-product location columns exist before we try to set them
-  if (req.body && (req.body.locationNote !== undefined || req.body.locationPhotoDataUrl !== undefined)) {
-    await ensureProductLocationColumns();
-  }
-  // Guard: location photo data URL must be a reasonable size. The data URL is
-  // base64-encoded, so it's ~33% larger than the raw image — 7 MB string ≈ 5 MB
-  // image. The frontend auto-downscales to ~400 KB, so this cap is a safety net.
-  if (typeof req.body?.locationPhotoDataUrl === 'string' && req.body.locationPhotoDataUrl.length > 7_000_000) {
-    return res.status(413).json({ error: 'photo_too_large', message: 'Location photo is too large — please use an image under 5 MB.' });
+  // Always ensure the per-product location/photo columns (incl. updated_at)
+  // exist before we touch them — cheap (cached after first run).
+  await ensureProductLocationColumns();
+  // Guard: photo data URLs must be a reasonable size. The data URL is base64,
+  // so ~33% larger than the raw image — 7 MB string ≈ 5 MB image. The frontend
+  // auto-downscales to ~400 KB, so this cap is just a safety net.
+  for (const f of ['itemPhotoDataUrl', 'locationPhotoDataUrl', 'locationPhotoDataUrl2']) {
+    if (typeof req.body?.[f] === 'string' && req.body[f].length > 7_000_000) {
+      return res.status(413).json({ error: 'photo_too_large', message: 'Photo is too large — please use an image under 5 MB.' });
+    }
   }
   for (const [k, v] of Object.entries(req.body || {})) {
     const col = map[k] || k;
@@ -232,15 +382,57 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   }
   if (!sets.length) return res.status(400).json({ error: 'no_updatable_fields' });
   params.push(req.params.id);
+  // Bump updated_at so the frontend's ?v= cache-buster sees changed photos.
   const { rows } = await query(
-    `UPDATE products SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`,
+    `UPDATE products SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length} RETURNING *`,
     params
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
-  // Audit without the huge base64 blob
+  // Audit without the huge base64 blobs
   const auditBody = { ...req.body };
-  if (auditBody.locationPhotoDataUrl) auditBody.locationPhotoDataUrl = '[photo]';
+  for (const f of ['itemPhotoDataUrl', 'locationPhotoDataUrl', 'locationPhotoDataUrl2']) {
+    if (auditBody[f]) auditBody[f] = '[photo]';
+  }
   await audit(req, 'update_product', 'product', rows[0].id, auditBody);
+  res.json({ product: rows[0] });
+});
+
+// PATCH /api/products/:id/location — warehouse-staff-safe subset of the product
+// PATCH. Lets anyone with the 'locations' permission set a product's storage
+// area, note and photos (the full PATCH above is admin-only because it can also
+// change prices/title/etc). This is what the Locations page actually saves, so
+// warehouse staff can now add location photos without being an admin.
+router.patch('/:id/location', requirePermission('locations'), async (req, res) => {
+  await ensureProductLocationColumns();
+  const allowed = ['location_id', 'location_note', 'location_photo_data_url',
+                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo'];
+  const map = { locationId: 'location_id', locationNote: 'location_note',
+                locationPhotoDataUrl: 'location_photo_data_url',
+                itemPhotoDataUrl: 'item_photo_data_url',
+                locationPhotoDataUrl2: 'location_photo_data_url_2',
+                primaryPhoto: 'primary_photo' };
+  for (const f of ['itemPhotoDataUrl', 'locationPhotoDataUrl', 'locationPhotoDataUrl2']) {
+    if (typeof req.body?.[f] === 'string' && req.body[f].length > 7_000_000) {
+      return res.status(413).json({ error: 'photo_too_large', message: 'Photo is too large — please use an image under 5 MB.' });
+    }
+  }
+  const sets = [], params = [];
+  for (const [k, v] of Object.entries(req.body || {})) {
+    const col = map[k] || k;
+    if (allowed.includes(col)) { params.push(v); sets.push(`${col} = $${params.length}`); }
+  }
+  if (!sets.length) return res.status(400).json({ error: 'no_updatable_fields' });
+  params.push(req.params.id);
+  const { rows } = await query(
+    `UPDATE products SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length} RETURNING *`,
+    params
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+  const auditBody = { ...req.body };
+  for (const f of ['itemPhotoDataUrl', 'locationPhotoDataUrl', 'locationPhotoDataUrl2']) {
+    if (auditBody[f]) auditBody[f] = '[photo]';
+  }
+  await audit(req, 'update_product_location', 'product', rows[0].id, auditBody);
   res.json({ product: rows[0] });
 });
 
@@ -304,6 +496,13 @@ async function pushProductStockToChannels(productId) {
   } catch (e) {
     result.ebay.push({ error: e.message });
   }
+
+  // This product's stock just changed — refresh any bundle that uses it as a
+  // component so the bundle's eBay quantity tracks the scarcest part.
+  try {
+    const res = await require('../services/bundles').recomputeBundlesForProduct(productId);
+    if (res && res.length) result.bundles = res;
+  } catch (e) { /* best-effort — never fail the stock push over a bundle */ }
 
   return result;
 }
@@ -503,4 +702,150 @@ router.delete('/:id', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- Shopify collections (shop categories) + live stock ----------
+const _shopify = () => require('../services/shopify');
+
+// GET /api/products/:id/shopify-stock — live Shopify available qty (Match button).
+router.get('/:id/shopify-stock', requireAdmin, async (req, res) => {
+  const pr = await query('SELECT shopify_inventory_id, qty_on_hand FROM products WHERE id = $1', [req.params.id]);
+  if (!pr.rows[0]) return res.status(404).json({ error: 'not_found' });
+  const invId = pr.rows[0].shopify_inventory_id;
+  if (!invId) return res.json({ stock: null, warehouse: pr.rows[0].qty_on_hand, notLinked: true });
+  try { res.json({ stock: await _shopify().getInventoryLevel(invId), warehouse: pr.rows[0].qty_on_hand }); }
+  catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
+});
+
+// GET /api/products/:id/shopify-price — live Shopify variant price. Used by the
+// eBay listing form's "From Shopify +%" button when the cached price is absent.
+// Falls back to the stored price_shopify column if the live fetch isn't possible.
+router.get('/:id/shopify-price', requireAdmin, async (req, res) => {
+  const pr = await query('SELECT shopify_product_id, price_shopify FROM products WHERE id = $1', [req.params.id]);
+  const row = pr.rows[0];
+  if (!row) return res.status(404).json({ error: 'not_found' });
+  if (!row.shopify_product_id) {
+    return res.json({ price: row.price_shopify != null ? parseFloat(row.price_shopify) : null, source: 'warehouse', notLinked: true });
+  }
+  try {
+    const full = await _shopify().getShopifyProductFull(row.shopify_product_id);
+    const price = full.price != null ? full.price : (row.price_shopify != null ? parseFloat(row.price_shopify) : null);
+    res.json({ price, source: full.price != null ? 'shopify' : 'warehouse' });
+  } catch (e) {
+    // Live fetch failed — fall back to the stored price rather than erroring.
+    res.json({ price: row.price_shopify != null ? parseFloat(row.price_shopify) : null, source: 'warehouse', error: e.message });
+  }
+});
+
+// GET /api/products/:id/collections — which collections this product is in.
+router.get('/:id/collections', requireAdmin, async (req, res) => {
+  const pr = await query('SELECT shopify_product_id FROM products WHERE id = $1', [req.params.id]);
+  const spid = pr.rows[0] && pr.rows[0].shopify_product_id;
+  if (!spid) return res.json({ collects: [], notLinked: true });
+  try { res.json({ collects: await _shopify().getProductCollects(spid) }); }
+  catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
+});
+
+// POST /api/products/:id/collections { collectionId } — add to a collection.
+router.post('/:id/collections', requireAdmin, async (req, res) => {
+  const pr = await query('SELECT shopify_product_id FROM products WHERE id = $1', [req.params.id]);
+  const spid = pr.rows[0] && pr.rows[0].shopify_product_id;
+  if (!spid) return res.status(400).json({ error: 'not_linked_to_shopify' });
+  if (!(req.body && req.body.collectionId)) return res.status(400).json({ error: 'collectionId required' });
+  try {
+    const r = await _shopify().addProductToCollection(spid, req.body.collectionId);
+    await audit(req, 'add_to_collection', 'product', req.params.id, { collectionId: req.body.collectionId });
+    res.json(r);
+  } catch (e) { res.status(502).json({ error: 'shopify_error', message: (e.response && e.response.data && e.response.data.errors) || e.message }); }
+});
+
+// DELETE /api/products/:id/collections/:collectId — remove from a collection.
+router.delete('/:id/collections/:collectId', requireAdmin, async (req, res) => {
+  try {
+    await _shopify().removeCollect(req.params.collectId);
+    await audit(req, 'remove_from_collection', 'product', req.params.id, { collectId: req.params.collectId });
+    res.json({ ok: true });
+  } catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
+});
+
+// ---------- SEO optimiser (search-engine listing) ----------
+const _brand = () => require('../lib/brand');
+const _seo = () => require('../lib/seo');
+
+// POST /api/products/seo/preview  { ids?: [productId,...] }
+// Generates proposed SEO (title/meta/handle/category) for the given products
+// (or all Shopify-linked active products if ids omitted) and pairs it with each
+// product's CURRENT Shopify values, so the UI can show a before/after table.
+// Read-only — writes nothing.
+router.post('/seo/preview', requireAdmin, async (req, res) => {
+  const brandCfg = _brand();
+  const seo = _seo();
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
+  const params = [];
+  let where = 'active = true AND shopify_product_id IS NOT NULL';
+  if (ids && ids.length) { params.push(ids); where += ` AND id = ANY($1)`; }
+  const { rows } = await query(
+    `SELECT id, sku, title, brand, model, part_number, shopify_product_id
+       FROM products WHERE ${where} ORDER BY title LIMIT 500`, params);
+
+  const shopify = require('../services/shopify');
+  const out = [];
+  for (const p of rows) {
+    const proposed = seo.buildSeo(p, brandCfg);
+    let current = null, category = null;
+    try { current = await shopify.getProductSeo(p.shopify_product_id); } catch (e) { /* surfaced as null */ }
+    if (proposed.categoryQuery) {
+      try { category = await shopify.findTaxonomyCategory(proposed.categoryQuery); } catch (e) {}
+    }
+    out.push({
+      id: p.id, sku: p.sku, title: p.title, shopifyProductId: p.shopify_product_id,
+      proposed: {
+        pageTitle: proposed.pageTitle,
+        metaDescription: proposed.metaDescription,
+        handle: proposed.handle,
+        partType: proposed.partType,
+        categoryId: category?.id || null,
+        categoryName: category?.fullName || null,
+        categoryQuery: proposed.categoryQuery,
+      },
+      current: current ? {
+        handle: current.handle,
+        pageTitle: current.seoTitle,
+        metaDescription: current.seoDescription,
+        categoryName: current.categoryName,
+      } : null,
+      unrecognisedPartType: !proposed.partType,
+    });
+  }
+  res.json({ items: out, count: out.length });
+});
+
+// POST /api/products/seo/apply  { items: [{ shopifyProductId, pageTitle, metaDescription, handle, categoryId }] }
+// Writes the (user-reviewed) SEO fields to Shopify. Each item is applied
+// independently so one failure doesn't abort the batch.
+router.post('/seo/apply', requireAdmin, async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) return res.status(400).json({ error: 'no_items' });
+  const shopify = require('../services/shopify');
+  const results = [];
+  for (const it of items) {
+    if (!it.shopifyProductId) { results.push({ id: it.id, ok: false, error: 'missing shopifyProductId' }); continue; }
+    try {
+      const r = await shopify.applyProductSeo(it.shopifyProductId, {
+        seoTitle: it.pageTitle,
+        seoDescription: it.metaDescription,
+        handle: it.handle || undefined,
+        categoryId: it.categoryId || undefined,
+      });
+      results.push({ id: it.id, ok: r.ok, userErrors: r.userErrors, newHandle: r.product?.handle });
+    } catch (e) {
+      results.push({ id: it.id, ok: false, error: e.message });
+    }
+  }
+  const okCount = results.filter(r => r.ok).length;
+  await audit(req, 'seo_bulk_apply', 'product', null, { applied: okCount, total: items.length });
+  res.json({ applied: okCount, total: items.length, results });
+});
+
 module.exports = router;
+// Reusable by other routers (e.g. Listing Mirror set-stock) so a quantity edit
+// propagates to Shopify + every linked eBay store consistently.
+module.exports.pushProductStockToChannels = pushProductStockToChannels;

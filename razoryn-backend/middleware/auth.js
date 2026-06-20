@@ -3,7 +3,9 @@ const jwt = require('jsonwebtoken');
 const { query } = require('../db');
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
-const TOKEN_TTL = '12h';
+// 30 days — matches the rzn_token cookie maxAge so a trusted device (phone /
+// tablet) stays signed in without re-authenticating daily (#6 "remember device").
+const TOKEN_TTL = '30d';
 
 function sign(user) {
   return jwt.sign(

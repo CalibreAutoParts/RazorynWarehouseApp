@@ -103,7 +103,8 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
       FROM sales s
       WHERE s.is_estimate = false
         AND s.dispatched_at IS NULL
-        AND (s.payment_method IS NULL OR s.payment_method != 'cash')
+        AND COALESCE(s.fulfillment_method,
+              CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
         AND s.status NOT IN ('refunded', 'cancelled', 'dispatched')
         AND s.occurred_at >= now() - ($1 || ' days')::interval
       ORDER BY s.occurred_at ASC
@@ -118,7 +119,8 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
         EXTRACT(EPOCH FROM (now() - s.occurred_at)) / 3600 AS age_hours
       FROM sales s
       WHERE s.is_estimate = false
-        AND s.payment_method = 'cash'
+        AND COALESCE(s.fulfillment_method,
+              CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'collect'
         AND s.collected_at IS NULL
         AND s.status NOT IN ('refunded', 'cancelled', 'dispatched')
         AND s.occurred_at >= now() - ($1 || ' days')::interval
@@ -308,7 +310,10 @@ router.post('/:saleId/mark-collected', requireAdmin, async (req, res) => {
     if (!s.rows[0]) return { error: 'not_found' };
     if (s.rows[0].is_estimate) return { error: 'is_estimate' };
     if (s.rows[0].collected_at) return { error: 'already_collected', collectedAt: s.rows[0].collected_at };
-    if (s.rows[0].payment_method !== 'cash') return { error: 'not_a_cash_order', message: 'Only cash-on-collection orders can be marked as collected.' };
+    // Collection is allowed for any order whose fulfilment is 'collect' — that's
+    // every cash order plus any bank/card order explicitly set to collection.
+    const fulfil = s.rows[0].fulfillment_method || (s.rows[0].payment_method === 'cash' ? 'collect' : 'ship');
+    if (fulfil !== 'collect') return { error: 'not_a_collection_order', message: 'This order is set for shipping — use Mark dispatched (with tracking) instead.' };
 
     const updated = await c.query(`
       UPDATE sales SET
@@ -463,6 +468,88 @@ router.post('/:saleId/retry-push', requireAdmin, async (req, res) => {
   res.json({ ok: true, message: 'Retry queued — check back in a few seconds.' });
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// eBay dispatch sync (#11)
+// Orders marked dispatched ON EBAY (tracking uploaded there) should drop off the
+// warehouse worklist automatically. This polls eBay's fulfillment API for
+// FULFILLED orders and marks the matching warehouse sales dispatched, pulling
+// across the tracking number/carrier. channel_push_state is set to 'na' because
+// the tracking already lives on eBay (we must NOT push it back). Runs on a
+// 30-min cron (server.js) and via the manual button below.
+// ──────────────────────────────────────────────────────────────────────────
+async function syncEbayDispatchCore({ days = 14 } = {}) {
+  const ebay = require('../services/ebay');
+  if (!ebay.isConfigured()) return { checked: 0, dispatched: 0, skipped: 'ebay_not_configured' };
+  const sinceISO = new Date(Date.now() - days * 86400000).toISOString();
+
+  // Build the set of orders shipped on eBay, plus any tracking/carrier we can
+  // read up-front. Two sources so it works regardless of how the order was
+  // ingested and which eBay API is set up:
+  //   • OAuth Sell Fulfillment API (shared refresh token), when configured.
+  //   • Trading API GetOrders per store (per-store Auth'n'Auth token) — the path
+  //     order ingestion itself falls back to, so the OrderIDs match. Without this
+  //     the sync silently did nothing for token-only stores like Razoryn.
+  const fulfilledIds = new Set();
+  const trackingByOrder = {}; // orderId -> { tracking, carrier }
+  try {
+    const ids = await ebay.getFulfilledOrderIds(sinceISO);
+    for (const id of (ids || [])) fulfilledIds.add(id);
+  } catch (e) { console.warn('[dispatch] getFulfilledOrderIds failed:', e.message); }
+  try {
+    for (const o of await ebay.getShippedOrdersAllStores(sinceISO)) {
+      fulfilledIds.add(o.orderId);
+      if (o.tracking || o.carrier) trackingByOrder[o.orderId] = { tracking: o.tracking, carrier: o.carrier };
+    }
+  } catch (e) { console.warn('[dispatch] getShippedOrdersAllStores failed:', e.message); }
+
+  if (!fulfilledIds.size) return { checked: 0, dispatched: 0, shippedReported: 0 };
+
+  // Undispatched eBay sales whose order is now fulfilled on eBay.
+  const { rows } = await query(
+    `SELECT id, external_order_id FROM sales
+      WHERE channel IN ('ebay_em','ebay_cl') AND is_estimate = false
+        AND dispatched_at IS NULL AND collected_at IS NULL
+        AND external_order_id = ANY($1)`,
+    [[...fulfilledIds]]
+  );
+
+  let dispatched = 0;
+  for (const sale of rows) {
+    let tracking = trackingByOrder[sale.external_order_id]?.tracking || null;
+    let carrier = trackingByOrder[sale.external_order_id]?.carrier || null;
+    // Fall back to the per-order OAuth lookup only if we didn't already have it.
+    if (!tracking && !carrier) {
+      try { const t = await ebay.getOrderTracking(sale.external_order_id); tracking = t.tracking; carrier = t.carrier; } catch (e) { /* best-effort */ }
+    }
+    await query(
+      `UPDATE sales SET dispatched_at = now(), status = 'dispatched', channel_push_state = 'na',
+         carrier = COALESCE($2, carrier),
+         tracking_number = COALESCE($3, tracking_number),
+         dispatch_notes = COALESCE(dispatch_notes, 'Auto-dispatched from eBay')
+       WHERE id = $1`,
+      [sale.id, carrier, tracking]
+    );
+    dispatched++;
+  }
+  // shippedReported = how many shipped orders eBay returned for the window;
+  // matched = how many of those line up with an open (undispatched) sale here.
+  // These let the UI explain "nothing happened" instead of failing silently.
+  return { checked: rows.length, dispatched, shippedReported: fulfilledIds.size, matched: rows.length };
+}
+
+// POST /api/dispatch/sync-ebay — manual trigger for the auto-dispatch sync.
+router.post('/sync-ebay', requireAdmin, async (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, parseInt(req.body?.days) || 14));
+    const result = await syncEbayDispatchCore({ days });
+    if (result.dispatched) await audit(req, 'ebay_dispatch_sync', null, null, result);
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(500).json({ error: 'sync_failed', message: e.message });
+  }
+});
+
 module.exports = router;
 module.exports.trackingUrlFor = trackingUrlFor;
 module.exports.CARRIERS = CARRIERS;
+module.exports.syncEbayDispatchCore = syncEbayDispatchCore;

@@ -1,0 +1,26 @@
+# Custom Web Pixel — runs in Shopify's sandboxed pixel runtime, survives the
+# checkout, and is gated by customer consent automatically. It forwards events
+# to the app's /api/track endpoint, which fans them out to GA4 + Meta CAPI
+# server-side (resilient to ad-blockers and third-party-cookie loss).
+
+api_version = "2025-01"
+
+[[extensions]]
+name = "razoryn-tracking-pixel"
+handle = "tracking-pixel"
+type = "web_pixel_extension"
+runtime_context = "strict"
+
+  [extensions.customer_privacy]
+  analytics = true
+  marketing = true
+  preferences = false
+  sale_of_data = "enabled"
+
+  [extensions.settings]
+  type = "object"
+
+    [extensions.settings.fields.trackEndpoint]
+    name = "Track endpoint"
+    description = "Absolute URL of the app's /api/track route"
+    type = "single_line_text_field"

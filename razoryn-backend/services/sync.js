@@ -10,6 +10,7 @@
 const { query, withTx } = require('../db');
 const shopify = require('./shopify');
 const ebay = require('./ebay');
+const bundles = require('./bundles');
 
 // Try to find a warehouse product for an order's SKU.
 // Many sales channels send SKUs in slightly different formats. This helper
@@ -90,6 +91,9 @@ async function recordLowStockIfNeeded(productId) {
         pr.id,
       ]
     );
+    require('./push').sendToAll({
+      title: 'Low stock', body: `${pr.title} — ${pr.qty_on_hand} left`, url: '/', tag: 'lowstock-' + pr.id, category: 'low_stock',
+    }).catch(() => {});
   }
 }
 
@@ -129,15 +133,18 @@ async function pullShopify() {
         ship.city, ship.province, ship.zip, ship.country,
       ].filter(Boolean).join('\n') : null;
 
-      // Generate REP reference (Shopify orders are card or shopify-pay; mark as S)
-      const paymentRef = 'REP-' + Math.random().toString(36).slice(2,6).toUpperCase()
-                        + Math.random().toString(36).slice(2,6).toUpperCase() + '-S';
+      // Unified reference: <PREFIX>-S-<Shopify order #> (CAP for Calibre, REP for
+      // Razoryn). Same value in invoice_number and payment_reference.
+      const brand = require('../lib/brand');
+      const prefix = brand.invoicePrefix || 'REP';
+      const orderNum = order.order_number || order.name || order.id;
+      const paymentRef = `${prefix}-S-${orderNum}`;
 
       const sale = await c.query(
         `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
                             subtotal, vat, shipping, total, status, occurred_at, shipping_address,
-                            payment_method, payment_reference, order_number)
-         VALUES ('shopify',$1,$2,$3,$4,$5,$6,$7,$8,'paid',$9,$10,$11,$12,$13) RETURNING id`,
+                            payment_method, payment_reference, order_number, invoice_number)
+         VALUES ('shopify',$1,$2,$3,$4,$5,$6,$7,$8,'paid',$9,$10,$11,$12,$13,$14) RETURNING id`,
         [
           String(order.id),
           [order.customer?.first_name, order.customer?.last_name].filter(Boolean).join(' ') || ship?.first_name + ' ' + ship?.last_name || null,
@@ -146,7 +153,7 @@ async function pullShopify() {
           subtotal, vat, shipping, total,
           order.created_at,
           shipAddr,
-          'shopify', paymentRef, order.name || String(order.order_number || order.id),
+          'shopify', paymentRef, order.name || String(order.order_number || order.id), paymentRef,
         ]
       );
 
@@ -171,6 +178,20 @@ async function pullShopify() {
           );
         }
       }
+
+      // Fitment + large-panel flags. The theme saves the customer's reg as a
+      // cart attribute → order note attribute; no reg means we must confirm
+      // fitment before dispatch. large_panel = any line item is flagged LP.
+      const regAttr = (order.note_attributes || []).find(a => /vehicle\s*reg|reg(istration)?/i.test(a.name || ''));
+      const reg = (regAttr?.value || '').trim() || null;
+      const lp = await c.query(
+        `SELECT bool_or(COALESCE(p.large_panel,false)) AS lp
+           FROM sale_items si JOIN products p ON p.id = si.product_id
+          WHERE si.sale_id = $1`, [sale.rows[0].id]);
+      await c.query(
+        `UPDATE sales SET vehicle_reg = COALESCE($2, vehicle_reg),
+                          needs_fitment = $3, large_panel = $4 WHERE id = $1`,
+        [sale.rows[0].id, reg, !reg, !!lp.rows[0]?.lp]);
 
       // Fire low-stock notifs after the sale
       for (const li of order.line_items || []) {
@@ -236,10 +257,10 @@ async function pullEbay() {
         const shipping = parseFloat(order.pricingSummary?.deliveryCost?.value || 0);
         const total = parseFloat(order.pricingSummary?.total?.value || 0);
 
-        // Use the brand's invoice prefix instead of hard-coded REP-.
+        // Unified reference: <PREFIX>-E-<eBay order #>. Same value in
+        // invoice_number and payment_reference.
         const prefix = brand.invoicePrefix || 'REP';
-        const paymentRef = prefix + '-' + Math.random().toString(36).slice(2,6).toUpperCase()
-                          + Math.random().toString(36).slice(2,6).toUpperCase() + '-E';
+        const paymentRef = `${prefix}-E-${order.orderId}`;
 
         // Channel = the store's channelCode (ebay_em / ebay_cl / etc.).
         const channelCode = store.channelCode || 'ebay_em';
@@ -247,8 +268,8 @@ async function pullEbay() {
         const sale = await c.query(
           `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
                               subtotal, vat, shipping, total, status, occurred_at, shipping_address,
-                              payment_method, payment_reference, order_number)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'paid',$10,$11,$12,$13,$14) RETURNING id`,
+                              payment_method, payment_reference, order_number, invoice_number)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'paid',$10,$11,$12,$13,$14,$15) RETURNING id`,
           [
             channelCode,
             order.orderId,
@@ -258,7 +279,7 @@ async function pullEbay() {
             subtotal, vat, shipping, total,
             order.creationDate,
             order.shippingAddress || null,
-            'ebay', paymentRef, order.orderId,
+            'ebay', paymentRef, order.orderId, paymentRef,
           ]
         );
 
@@ -281,6 +302,14 @@ async function pullEbay() {
                VALUES ($1,$2,$3,$4)`,
               [productId, -qty, `sale_${channelCode}`, sale.rows[0].id]
             );
+          } else {
+            // No singular product matched — this may be a BUNDLE listing. If so,
+            // deduct each component (e.g. selling the Left+Right set reduces both)
+            // so the individual listings can't oversell.
+            try {
+              const bundle = await bundles.findBundleBySku(li.sku, c);
+              if (bundle) await bundles.deductBundleComponents(c, bundle.id, qty, sale.rows[0].id, `sale_bundle_${channelCode}`);
+            } catch (e) { console.warn('[sync.pullEbay] bundle deduct failed:', e.message); }
           }
         }
         for (const li of order.lineItems || []) {
@@ -357,20 +386,18 @@ async function runFullSync() {
     await setCursor('ebay', { lastSyncedAt: new Date(), status: 'error', error: e.message });
   }
 
-  // MASTER-STOCK PROPAGATION: incoming eBay/Shopify orders decrement the
-  // warehouse qty_on_hand (done in the pull loops above). The warehouse is the
-  // master, so after ingesting orders we re-push the NEW quantity to every
-  // channel — this keeps Shopify and eBay in sync with each other. Example: an
-  // eBay sale drops stock 3→2 in the app; without this, Shopify would still
-  // show 3. We push the freshest qty for every product touched by a sale in
-  // this run.
+  // MASTER-STOCK PROPAGATION: the warehouse is the master. Re-push the latest
+  // qty to BOTH channels for every product whose stock changed recently — from
+  // ANY source (orders, stock-checks, returns, manual edits, incoming receipts),
+  // not just sales. This is the backstop that keeps eBay in sync (Shopify also
+  // gets a full push below); the window (40 min) comfortably covers the 30-min
+  // sync cron so nothing is missed between runs.
   try {
     const touched = await query(`
       SELECT DISTINCT p.id, p.sku, p.qty_on_hand, p.shopify_inventory_id, p.shopify_product_id
       FROM products p
       JOIN stock_movements sm ON sm.product_id = p.id
-      WHERE sm.reason LIKE 'sale_%'
-        AND sm.created_at > now() - interval '10 minutes'
+      WHERE sm.created_at > now() - interval '40 minutes'
         AND p.active = true
     `);
     let pushed = 0;
@@ -394,7 +421,188 @@ async function runFullSync() {
     console.error('[sync] stock push failed:', e.message);
     results.shopifyStock = { error: e.message };
   }
+
+  try { results.autoDispatch = await autoMarkDispatched(); }
+  catch (e) {
+    console.error('[sync] auto-dispatch failed:', e.message);
+    results.autoDispatch = { error: e.message };
+  }
+
+  // Backstop: after all stock changes (sales, propagation), recompute every
+  // bundle's availability and push it to eBay — catches component sales that
+  // came in through this sync without an immediate per-product recompute.
+  try { results.bundles = await bundles.recomputeAllBundles(); }
+  catch (e) { console.error('[sync] bundle recompute failed:', e.message); results.bundles = { error: e.message }; }
+
   return results;
+}
+
+// --------- AUTO-DISPATCH: mark orders shipped ON the platform ---------
+// If an outstanding order has been fulfilled/shipped (with tracking) directly on
+// Shopify or eBay, mark it dispatched in the warehouse so it drops off the
+// dispatch worklist. We pull the tracking IN but never push it back out (the
+// platform already has it). dispatched_by stays NULL = system/auto.
+async function autoMarkDispatched() {
+  const result = { shopify: 0, ebay: 0, errors: [] };
+  const { rows: outstanding } = await query(`
+    SELECT id, channel, external_order_id FROM sales
+    WHERE is_estimate = false AND dispatched_at IS NULL AND collected_at IS NULL
+      AND status NOT IN ('refunded','cancelled','dispatched')
+      AND external_order_id IS NOT NULL
+  `);
+  if (!outstanding.length) return result;
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+  // ----- Shopify -----
+  const shopifyOut = outstanding.filter(s => s.channel === 'shopify');
+  if (shopifyOut.length && shopify.isConfigured()) {
+    try {
+      const { orders } = await shopify.getRecentOrders(since);
+      const fulfilled = {};
+      for (const o of orders) {
+        if (o.fulfillment_status === 'fulfilled' || o.fulfillment_status === 'partial') {
+          const f = (o.fulfillments || []).find(x => x.tracking_number) || (o.fulfillments || [])[0] || {};
+          fulfilled[String(o.id)] = { tracking: f.tracking_number || null, carrier: f.tracking_company || null };
+        }
+      }
+      for (const s of shopifyOut) {
+        const hit = fulfilled[String(s.external_order_id)];
+        if (hit) { await markAutoDispatched(s.id, 'Shopify', hit.tracking, hit.carrier); result.shopify++; }
+      }
+    } catch (e) { result.errors.push('shopify: ' + e.message); }
+  }
+
+  // ----- eBay -----
+  const ebayOut = outstanding.filter(s => (s.channel || '').startsWith('ebay'));
+  if (ebayOut.length && ebay.isConfigured()) {
+    try {
+      const fulfilledIds = await ebay.getFulfilledOrderIds(since);
+      for (const s of ebayOut) {
+        if (!fulfilledIds.has(s.external_order_id)) continue;
+        const { tracking, carrier } = await ebay.getOrderTracking(s.external_order_id);
+        await markAutoDispatched(s.id, 'eBay', tracking, carrier);
+        result.ebay++;
+      }
+    } catch (e) { result.errors.push('ebay: ' + e.message); }
+  }
+
+  if (result.shopify || result.ebay) {
+    console.log(`[sync] auto-dispatched ${result.shopify} Shopify + ${result.ebay} eBay order(s) from platform fulfillment`);
+  }
+  return result;
+}
+
+async function markAutoDispatched(saleId, platform, tracking, carrier) {
+  await query(`
+    UPDATE sales
+       SET dispatched_at = now(), status = 'dispatched',
+           tracking_number = COALESCE($2, tracking_number),
+           carrier = COALESCE($3, carrier),
+           dispatch_notes = $4
+     WHERE id = $1 AND dispatched_at IS NULL
+  `, [saleId, tracking, carrier, `Auto-detected from ${platform}`]);
+}
+
+// Push EVERY linked product's current warehouse qty to eBay (manual full
+// reconcile — e.g. after a monthly stock-take). One ReviseInventoryStatus per
+// linked listing; best-effort per product.
+async function pushAllStockToEbay() {
+  if (!ebay.isConfigured()) return { skipped: 'not_configured' };
+  const { rows } = await query(`
+    SELECT DISTINCT p.id, p.sku, p.qty_on_hand, p.shopify_product_id
+    FROM products p
+    JOIN mirror_links ml ON ml.shopify_product_id::text = p.shopify_product_id
+    WHERE p.active = true`);
+  let pushed = 0, errors = 0;
+  for (const p of rows) {
+    try { await ebay.pushStockForProduct(p); pushed++; }
+    catch (e) { errors++; console.warn('[sync] ebay push-all fail', p.sku, e.message); }
+  }
+  return { channel: 'ebay_stock', pushed, errors, total: rows.length };
+}
+
+// Push EVERY linked product's current warehouse qty to Shopify AND eBay in a
+// single pass (interleaved, so eBay isn't starved if the run is long). Returns
+// accurate per-channel counts INCLUDING per-eBay-listing failures + a sample
+// error, so the caller can tell a real failure from a timeout. Meant to run in
+// the background (it can take minutes for a big catalogue).
+async function pushAllStockToBoth(onProgress, opts = {}) {
+  // countedOnly → restrict to products counted in THIS calendar month's
+  // stock-take. Far fewer API calls than the whole catalogue (saves eBay/Shopify
+  // credits) while still reconciling everything that was just re-counted.
+  const countedOnly = !!opts.countedOnly;
+  const sql = countedOnly
+    ? `SELECT p.id, p.sku, p.title, p.qty_on_hand, p.shopify_inventory_id, p.shopify_product_id
+         FROM products p
+         WHERE p.active = true
+           AND (p.shopify_inventory_id IS NOT NULL OR p.shopify_product_id IS NOT NULL)
+           AND EXISTS (
+             SELECT 1 FROM stock_checks sc
+             WHERE sc.product_id = p.id
+               AND sc.created_at >= date_trunc('month', now()))`
+    : `SELECT id, sku, title, qty_on_hand, shopify_inventory_id, shopify_product_id
+         FROM products
+         WHERE active = true AND (shopify_inventory_id IS NOT NULL OR shopify_product_id IS NOT NULL)`;
+  const { rows } = await query(sql);
+  // ebayFailures: the actual listings that failed (itemId + store + sku + error),
+  // capped so a big run can't bloat the status payload. Lets the UI show exactly
+  // WHICH listings failed (e.g. all on one store) instead of just a sample.
+  // ebaySkipped: products not pushed to eBay (no listing / no SKU) so the user
+  // can see WHAT was skipped and why, not just a count.
+  const out = { total: rows.length, done: 0, countedOnly, shopify: { pushed: 0, errors: 0 }, ebay: { pushed: 0, errors: 0, skipped: 0 }, sampleEbayError: null, ebayFailures: [], ebayFailuresByStore: {}, ebaySkipped: [] };
+  const FAIL_CAP = 200;
+  const SKIP_CAP = 500;
+  const recordFail = (info) => {
+    out.ebay.errors++;
+    const store = info.store || 'unknown';
+    out.ebayFailuresByStore[store] = (out.ebayFailuresByStore[store] || 0) + 1;
+    if (!out.sampleEbayError) out.sampleEbayError = info.error || 'unknown';
+    if (out.ebayFailures.length < FAIL_CAP) {
+      out.ebayFailures.push({ itemId: info.itemId || null, store, sku: info.sku || null, error: info.error || 'unknown' });
+    }
+  };
+  const recordSkip = (p, reason) => {
+    out.ebay.skipped++;
+    if (out.ebaySkipped.length < SKIP_CAP) {
+      out.ebaySkipped.push({ sku: p.sku || null, title: p.title || null, reason });
+    }
+  };
+  const shopOk = shopify.isConfigured();
+  const ebayOk = ebay.isConfigured();
+  let i = 0;
+  for (const p of rows) {
+    if (shopOk && p.shopify_inventory_id) {
+      try { await shopify.pushStockForProduct(p); out.shopify.pushed++; }
+      catch (e) { out.shopify.errors++; }
+    }
+    if (ebayOk && p.shopify_product_id) {
+      try {
+        const r = await ebay.pushStockForProduct(p);
+        // pushStockForProduct catches per-link errors internally and returns
+        // { results:[{ok|error}] } — so inspect them for the true count.
+        if (r && Array.isArray(r.results)) {
+          for (const x of r.results) {
+            if (x.ok) out.ebay.pushed++;
+            else recordFail({ itemId: x.itemId, store: x.store, sku: p.sku, error: x.error });
+          }
+        } else if (r && r.ok) out.ebay.pushed++;
+        else if (r && r.skipped) recordSkip(p, r.skipped);
+        else recordFail({ sku: p.sku, error: r && r.error });
+      } catch (e) {
+        recordFail({ sku: p.sku, error: e.message });
+      }
+    } else if (ebayOk && !p.shopify_product_id) {
+      // No Shopify product id → can't resolve an eBay link for it.
+      recordSkip(p, 'no_link');
+    }
+    out.done = ++i;
+    // Report progress every 25 items (and on the last one) so a polling UI can
+    // show live progress without hammering the callback on every iteration.
+    if (typeof onProgress === 'function' && (i % 25 === 0 || i === rows.length)) {
+      try { onProgress(out); } catch (_) {}
+    }
+  }
+  return out;
 }
 
 module.exports = {
@@ -403,6 +611,9 @@ module.exports = {
   pullEbay,
   pushStockForSaleItems,
   pushAllStockToShopify,
+  pushAllStockToEbay,
+  pushAllStockToBoth,
   recordLowStockIfNeeded,
   resolveProductBySku,
+  autoMarkDispatched,
 };

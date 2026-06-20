@@ -60,6 +60,7 @@ app.get('/health', async (req, res) => {
 // ---------- API routes ----------
 app.use('/api/auth',         require('./routes/auth'));
 app.use('/api/products',     require('./routes/products'));
+app.use('/api/incoming',     require('./routes/incoming'));
 app.use('/api/stock-checks', require('./routes/stock-checks'));
 app.use('/api/sales',        require('./routes/sales'));
 app.use('/api/returns',      require('./routes/returns'));
@@ -69,14 +70,23 @@ app.use('/api/kb',           require('./routes/knowledge'));
 app.use('/api/videos',       require('./routes/videos'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/staff',        require('./routes/staff'));
+app.use('/api/audit',        require('./routes/audit'));
 app.use('/api/pricing',      require('./routes/pricing'));
 app.use('/api/settings',     require('./routes/settings'));
 app.use('/api/listings',     require('./routes/listings'));
+app.use('/api/bundles',      require('./routes/bundles'));
 app.use('/api/notes',        require('./routes/notes'));
 app.use('/api/brand',        require('./routes/brand'));
 app.use('/api/dispatch',     require('./routes/dispatch'));
 app.use('/api/messages',     require('./routes/messages'));
 app.use('/api/customers',    require('./routes/customers'));
+app.use('/api/desktop',      require('./routes/desktop'));
+app.use('/api/competitors',  require('./routes/competitors'));
+app.use('/api/reviews',      require('./routes/reviews'));
+// PUBLIC storefront endpoints (no login, CORS open) — server-side tracking relay
+// + back-in-stock signups. Their routers set their own CORS headers per request.
+app.use('/api/track',        require('./routes/track'));
+app.use('/api/notify',       require('./routes/notify'));
 // Public logo serving — mounted at /public-logo (NOT /api/settings) so it
 // completely bypasses the auth middleware that the settings router applies
 // to its whole namespace. Used by <img src="/public-logo"> in invoice HTML
@@ -86,11 +96,66 @@ if (settingsModule.publicLogoRouter) {
   app.use('/', settingsModule.publicLogoRouter);
 }
 
+// ---------- PWA: brand-aware manifest + app icon ----------
+// Defined BEFORE the static/SPA fallback so they aren't swallowed by index.html.
+app.get('/manifest.webmanifest', (req, res) => {
+  const b = require('./lib/brand');
+  const code = b.code || 'razoryn';
+  res.type('application/manifest+json').json({
+    name: b.appTitle || 'Warehouse Hub',
+    short_name: b.name || 'Warehouse',
+    description: b.tagline || '',
+    start_url: '/',
+    scope: '/',
+    display: 'standalone',
+    orientation: 'portrait-primary',
+    background_color: '#ffffff',
+    theme_color: b.primaryColor || '#111111',
+    icons: [
+      { src: `/icons/${code}-192.png`, sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
+      { src: `/icons/${code}-512.png`, sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+      { src: '/app-icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+    ],
+  });
+});
+
+// iOS home-screen icon — served per-brand so "Add to Home Screen" uses the
+// proper PNG (iOS doesn't render SVG apple-touch icons).
+app.get('/apple-touch-icon.png', (req, res) => {
+  const code = require('./lib/brand').code || 'razoryn';
+  res.sendFile(path.join(__dirname, 'public', 'icons', `${code}-180.png`));
+});
+app.get('/apple-touch-icon-precomposed.png', (req, res) => {
+  const code = require('./lib/brand').code || 'razoryn';
+  res.sendFile(path.join(__dirname, 'public', 'icons', `${code}-180.png`));
+});
+
+// Brand-aware app icon — a clean monogram (brand colour + white initial). SVG so
+// it renders crisply at any size without needing pre-rendered raster icons.
+app.get('/app-icon.svg', (req, res) => {
+  const b = require('./lib/brand');
+  const safe = (c, fb) => (/^#[0-9a-fA-F]{3,8}$/.test(c || '') ? c : fb);
+  const bg = safe(b.primaryColor, '#111111');
+  const accent = safe(b.secondaryColor, '#ffffff');
+  const initial = (b.name || 'W').trim().charAt(0).toUpperCase().replace(/[^A-Z0-9]/g, '') || 'W';
+  // Monogram on the brand colour with an accent bar echoing the wordmark's
+  // accent (Calibre's red dashes / Razoryn's ink). Kept inside the maskable
+  // safe zone so it survives circular/rounded OS masks.
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="${bg}"/>
+  <text x="256" y="246" font-family="Arial, Helvetica, sans-serif" font-size="290" font-weight="800" fill="#ffffff" text-anchor="middle" dominant-baseline="central">${initial}</text>
+  <rect x="176" y="372" width="160" height="22" rx="11" fill="${accent}"/>
+</svg>`;
+  res.type('image/svg+xml').set('Cache-Control', 'public, max-age=3600').send(svg);
+});
+
 // ---------- Static: PWA ----------
 app.use(express.static(path.join(__dirname, 'public'), {
   // index.html should not be aggressively cached — it changes on every deploy
   setHeaders: (res, filePath) => {
-    if (filePath.endsWith('index.html')) {
+    // index.html changes every deploy; sw.js must update promptly so the cache
+    // strategy can't get stuck on an old worker.
+    if (filePath.endsWith('index.html') || filePath.endsWith('sw.js')) {
       res.setHeader('Cache-Control', 'no-cache');
     }
   },
@@ -145,6 +210,32 @@ if (cron.validate(cronExpr)) {
   console.error(`[boot] ⚠️  invalid SYNC_CRON expression "${cronExpr}" — AUTOMATIC SYNC IS DISABLED. Fix SYNC_CRON or unset it to use the default (${DEFAULT_SYNC_CRON}).`);
 }
 
+// Cron: auto-import Shopify products into the warehouse so newly-created Shopify
+// products appear in Inventory + the stock-take and get their eBay link, without
+// anyone clicking "Import Shopify into warehouse". This pulls the full catalogue
+// (heavier than the order sync), so it runs less often by default.
+const importCronExpr = (process.env.WAREHOUSE_IMPORT_CRON || '0 */6 * * *').trim(); // every 6h
+if (cron.validate(importCronExpr)) {
+  cron.schedule(importCronExpr, async () => {
+    console.log(`[cron warehouse-import] tick @ ${new Date().toISOString()} (${importCronExpr})`);
+    try {
+      const listings = require('./routes/listings');
+      const r = await listings.runWarehouseImport('cron');
+      if (r && r.skipped) console.log('[cron warehouse-import] skipped — a run is already in progress');
+      else if (r && r.error) console.warn('[cron warehouse-import] not run:', r.error);
+      else console.log('[cron warehouse-import] complete', JSON.stringify({
+        created: r.created, enriched: r.enriched, ebayLinked: r.ebayLinked,
+        skuFixed: r.skuFixed, pricesBackfilled: r.pricesBackfilled, skippedNoSku: r.skippedNoSku,
+      }));
+    } catch (e) {
+      console.error('[cron warehouse-import] failed:', e.message);
+    }
+  });
+  console.log(`[boot] warehouse-import cron scheduled: ${importCronExpr}`);
+} else {
+  console.error(`[boot] ⚠️  invalid WAREHOUSE_IMPORT_CRON "${importCronExpr}" — automatic warehouse import disabled.`);
+}
+
 // Auto-pull eBay returns every 15 minutes (or per RETURNS_SYNC_CRON env var).
 // Creates notifications for new return cases and state changes — so staff don't have
 // to manually click "Pull from eBay" to discover new returns or status updates.
@@ -168,6 +259,110 @@ if (cron.validate(returnsCronExpr)) {
   console.log(`[boot] returns auto-pull scheduled: ${returnsCronExpr}`);
 }
 
+// Auto-mark eBay-fulfilled orders as dispatched every 30 min (or per
+// DISPATCH_SYNC_CRON). If tracking was uploaded on eBay and the order shows as
+// FULFILLED, the warehouse worklist drops it automatically (#11). Deliberately
+// infrequent to stay well within eBay API limits.
+const dispatchCronExpr = (process.env.DISPATCH_SYNC_CRON || '*/30 * * * *').trim();
+if (cron.validate(dispatchCronExpr)) {
+  cron.schedule(dispatchCronExpr, async () => {
+    try {
+      const { syncEbayDispatchCore } = require('./routes/dispatch');
+      if (typeof syncEbayDispatchCore !== 'function') return;
+      const result = await syncEbayDispatchCore({ days: 14 });
+      if (result.dispatched) console.log(`[cron dispatch] auto-dispatched ${result.dispatched} eBay order(s)`);
+    } catch (e) {
+      if (!/ebay_not_configured/.test(e.message)) console.error('[cron dispatch] failed:', e.message);
+    }
+  });
+  console.log(`[boot] eBay dispatch auto-sync scheduled: ${dispatchCronExpr}`);
+}
+
+// Competitor monitoring — scan configured competitors (eBay sellers, and later
+// their websites), record price history, match against our catalogue and raise
+// undercut / price-drop / new-item alerts. Deliberately infrequent (every 6h by
+// default) to respect eBay Browse API limits and scraping etiquette.
+const competitorCronExpr = (process.env.COMPETITOR_SYNC_CRON || '0 */6 * * *').trim();
+if (cron.validate(competitorCronExpr)) {
+  cron.schedule(competitorCronExpr, async () => {
+    console.log(`[cron competitors] tick @ ${new Date().toISOString()} (${competitorCronExpr})`);
+    try {
+      const result = await require('./services/competitor-monitor').scanAll();
+      if (result.competitors) console.log('[cron competitors] complete', JSON.stringify(result));
+    } catch (e) {
+      console.error('[cron competitors] failed:', e.message);
+    }
+  });
+  console.log(`[boot] competitor monitor scheduled: ${competitorCronExpr}`);
+} else {
+  console.error(`[boot] ⚠️  invalid COMPETITOR_SYNC_CRON "${competitorCronExpr}" — competitor monitoring disabled.`);
+}
+
+// Market analysis — periodically snapshot whole-eBay saturation + our ranking for
+// products that have competitor matches. Daily by default (heavier API use).
+const marketCronExpr = (process.env.COMPETITOR_MARKET_CRON || '30 4 * * *').trim();
+if (cron.validate(marketCronExpr)) {
+  cron.schedule(marketCronExpr, async () => {
+    try {
+      const r = await require('./services/market-analysis').refreshMarkets(
+        parseInt(process.env.COMPETITOR_MARKET_BATCH || '25', 10) || 25);
+      if (r.products) console.log('[cron market] snapshots', JSON.stringify(r));
+    } catch (e) {
+      console.error('[cron market] failed:', e.message);
+    }
+  });
+  console.log(`[boot] market analysis scheduled: ${marketCronExpr}`);
+}
+
+// Daily payment follow-up — chase UNPAID direct cash/bank/card invoices (#15).
+// eBay/Shopify settle on-platform; direct sales are the easy-to-forget ones.
+// Default 9am daily; override with PAYMENT_FOLLOWUP_CRON. Self-throttles to one
+// digest per day inside runPaymentFollowups().
+const followupCronExpr = (process.env.PAYMENT_FOLLOWUP_CRON || '0 9 * * *').trim();
+if (cron.validate(followupCronExpr)) {
+  cron.schedule(followupCronExpr, async () => {
+    try {
+      const { runPaymentFollowups } = require('./routes/sales');
+      if (typeof runPaymentFollowups !== 'function') return;
+      const r = await runPaymentFollowups();
+      if (r && r.count) console.log(`[cron followups] ${r.count} unpaid order(s) flagged (£${(r.total || 0).toFixed(2)})`);
+    } catch (e) {
+      console.error('[cron followups] failed:', e.message);
+    }
+  });
+  console.log(`[boot] payment follow-up scheduled: ${followupCronExpr}`);
+} else {
+  console.error(`[boot] ⚠️  invalid PAYMENT_FOLLOWUP_CRON "${followupCronExpr}" — daily payment reminders disabled.`);
+}
+
+// Back-in-stock sweep — email customers waiting on a product once its stock
+// returns (qty_on_hand > 0). Every 20 min by default (BACK_IN_STOCK_CRON).
+const bisCronExpr = (process.env.BACK_IN_STOCK_CRON || '*/20 * * * *').trim();
+if (cron.validate(bisCronExpr)) {
+  cron.schedule(bisCronExpr, async () => {
+    try {
+      const { runBackInStockSweep } = require('./routes/notify');
+      if (typeof runBackInStockSweep === 'function') await runBackInStockSweep();
+    } catch (e) { console.error('[cron back-in-stock] failed:', e.message); }
+  });
+  console.log(`[boot] back-in-stock sweep scheduled: ${bisCronExpr}`);
+}
+
+// eBay feedback → Shopify review metafields. Nightly by default (REVIEWS_SYNC_CRON).
+const reviewsCronExpr = (process.env.REVIEWS_SYNC_CRON || '0 4 * * *').trim();
+if (cron.validate(reviewsCronExpr)) {
+  cron.schedule(reviewsCronExpr, async () => {
+    try {
+      const { syncEbayReviews } = require('./services/reviews-sync');
+      const r = await syncEbayReviews();
+      if (r && r.updated) console.log(`[cron reviews] updated ${r.updated} product rating(s)`);
+    } catch (e) {
+      if (!/ebay_not_configured|shopify_not_configured/.test(e.message)) console.error('[cron reviews] failed:', e.message);
+    }
+  });
+  console.log(`[boot] eBay reviews sync scheduled: ${reviewsCronExpr}`);
+}
+
 // Nightly cleanup: permanently delete staff_notes older than 31 days.
 // Notes are already filtered out of the GET response after 31 days, but this
 // keeps the table from growing unbounded.
@@ -183,8 +378,43 @@ cron.schedule('15 3 * * *', async () => {
 
 // ---------- Start ----------
 const brand = require('./lib/brand');
+
+// ──────────────────────────────────────────────────────────────────────────
+// Brand-aware boot diagnostics. With two deployments (Calibre + Razoryn)
+// sharing one codebase, config mistakes are the common failure mode. We surface
+// them LOUDLY in the logs but never refuse to start: the app has safe fallbacks
+// (e.g. a default JWT secret, brand fallback) and a healthy process that serves
+// /health is far better than a crash loop. Operators read the warnings and fix
+// the env vars at their own pace.
+// ──────────────────────────────────────────────────────────────────────────
+(function bootDiagnostics() {
+  const warnings = [];
+  const requested = (process.env.APP_BRAND || '').toLowerCase().trim();
+  if (requested && !brand.all[requested]) {
+    warnings.push(`APP_BRAND="${process.env.APP_BRAND}" is not a known brand (using "${brand.code}"). Known: ${Object.keys(brand.all).join(', ')}.`);
+  }
+  if (!process.env.JWT_SECRET) warnings.push('JWT_SECRET is not set — using an insecure default. Set a unique JWT_SECRET in production.');
+  if (!process.env.DATABASE_URL) warnings.push('DATABASE_URL is not set — database features will fail until it is provided.');
+  if (!brand.stores.some(s => s.token)) {
+    warnings.push(`brand "${brand.code}" has no eBay store token — eBay features stay inert until its token env var is set.`);
+  }
+  if (warnings.length) {
+    console.warn('[boot] Configuration warnings (app will still start):\n  - ' + warnings.join('\n  - '));
+  }
+})();
+
 app.listen(PORT, () => {
   console.log(`[boot] ${brand.appTitle} (${brand.code}) listening on :${PORT}`);
   console.log(`[boot] env=${process.env.NODE_ENV || 'development'} upload_dir=${UPLOAD_DIR}`);
   console.log(`[boot] eBay stores: ${brand.stores.map(s => s.code + (s.token ? '✓' : '✗')).join(', ')}`);
+  // Initialise Web Push (generates/loads VAPID keys + ensures tables) so device
+  // notifications are ready without manual key setup.
+  require('./services/push').ensureSetup()
+    .then(() => console.log('[boot] web push ready'))
+    .catch(e => console.warn('[boot] web push setup failed:', e.message));
+  // Auto-publish built-in How-To guides into Key Information (insert-if-missing).
+  try {
+    const { query } = require('./db');
+    require('./lib/howto-guides').seedHowtoGuides(query);
+  } catch (e) { console.warn('[boot] howto seed failed:', e.message); }
 });
