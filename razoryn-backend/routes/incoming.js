@@ -198,12 +198,18 @@ router.post('/receive-container', requirePermission('inventory'), async (req, re
   const { rows } = await query(
     `SELECT * FROM incoming_stock WHERE container_ref = $1 AND status NOT IN ('received','cancelled')`, [ref]);
   let receivedLines = 0, receivedUnits = 0, pushed = 0;
+  const receivedItems = [];
   const { pushProductStockToChannels } = require('./products');
   for (const row of rows) {
     const remaining = Math.max(0, row.qty_ordered - row.qty_received);
     if (remaining <= 0) continue;
     await query(`UPDATE incoming_stock SET qty_received = qty_ordered, status = 'received', received_at = COALESCE(received_at, now()), updated_at = now() WHERE id = $1`, [row.id]);
     receivedLines++; receivedUnits += remaining;
+    // Capture what was received so the UI can save it for label printing.
+    receivedItems.push({
+      sku: row.sku || '', title: row.title || '',
+      partNumber: row.part_number || row.sku || '', barcode: row.sku || '', qty: remaining,
+    });
     if (row.product_id) {
       await query(`UPDATE products SET qty_on_hand = qty_on_hand + $1, updated_at = now() WHERE id = $2`, [remaining, row.product_id]);
       await query(`INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by) VALUES ($1,$2,'incoming_received',$3,$4)`, [row.product_id, remaining, row.id, req.user.id]).catch(() => {});
@@ -211,7 +217,7 @@ router.post('/receive-container', requirePermission('inventory'), async (req, re
     }
   }
   await audit(req, 'incoming_receive_container', 'incoming', null, { container: ref, receivedLines, receivedUnits });
-  res.json({ ok: true, receivedLines, receivedUnits, pushed });
+  res.json({ ok: true, receivedLines, receivedUnits, pushed, receivedItems });
 });
 
 // PATCH /api/incoming/:id — edit fields (qty, container, supplier, expected, status, notes, product link).

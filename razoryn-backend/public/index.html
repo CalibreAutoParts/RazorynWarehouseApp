@@ -3248,7 +3248,8 @@ async function receiveContainer(ref) {
   try {
     const r = await Api.post('/api/incoming/receive-container', { containerRef: ref, push: true });
     Task.done(taskId, 'Received');
-    toast(`Received ${r.receivedLines} line(s) · ${r.receivedUnits} units · pushed ${r.pushed}`, 'success', 6000);
+    recordReceivedForLabels(r.receivedItems || []);
+    toast(`Received ${r.receivedLines} line(s) · ${r.receivedUnits} units · pushed ${r.pushed} · saved for labels`, 'success', 7000);
     loadIncoming();
     Store.refresh('products').catch(() => {});
   } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
@@ -3529,6 +3530,7 @@ async function submitReceiveIncoming(id) {
     else { const cp = r.channelPush || {}; const ebayOk = (cp.ebay || []).filter(x => x.ok).length; msg += ` · stock updated${push ? `, Shopify ${cp.shopify?.ok ? '✓' : '—'}, eBay ${ebayOk}` : ''}`; }
     toast(msg, 'success', 5000);
     closeModal();
+    if (itForLabels) recordReceivedForLabels(incomingLabelItems(itForLabels, qty));
     if (wantLabels && itForLabels) labelsPrint(incomingLabelItems(itForLabels, qty));
     loadIncoming();
     Store.refresh('products').catch(() => {});
@@ -4941,6 +4943,7 @@ function renderLabels() {
         <div><h1>Barcode Labels</h1><div class="desc">Generate thermal-printer labels for selected products. Pick a size, add products, then Print.</div></div>
         <div class="actions">
           <button class="btn btn-outline" onclick="labelsAddFromStockCheck()" title="Add all products that were touched in your last stock-check session">+ From last stock-check</button>
+          <button class="btn btn-outline" onclick="labelsAddFromReceived()" title="Add one label per unit for all goods received from your last incoming receive">+ From last goods-in</button>
           <button class="btn btn-outline" onclick="labelsClear()">Clear all</button>
           <button class="btn btn-primary" onclick="labelsPrint()">🖨 Print preview</button>
         </div>
@@ -5043,6 +5046,37 @@ function labelsAddFromStockCheck() {
   }
   recent.forEach(pid => labelsAdd(pid));
   toast(`Added ${recent.length} item${recent.length === 1 ? '' : 's'} from stock-check`, 'success');
+}
+
+// Goods-in → labels. When incoming stock is received, we stash the received
+// items (sku/title/qty) here so labels for the whole order can be printed later
+// from the Labels page ("+ From last goods-in"), with one label per unit received.
+function recordReceivedForLabels(items) {
+  if (!Array.isArray(items) || !items.length) return;
+  State.recentReceived = State.recentReceived || [];
+  for (const it of items) {
+    if (!it || !(it.sku || it.title)) continue;
+    const key = (it.sku || it.title);
+    const ex = State.recentReceived.find(x => (x.sku || x.title) === key);
+    if (ex) ex.qty = (ex.qty || 0) + (it.qty || 1);
+    else State.recentReceived.push({ sku: it.sku || '', title: it.title || '', partNumber: it.partNumber || it.sku || '', barcode: it.barcode || it.sku || '', qty: it.qty || 1 });
+  }
+}
+function labelsAddFromReceived() {
+  const recent = State.recentReceived || [];
+  if (!recent.length) {
+    toast('No recently-received goods found. Receive a container/line first.', 'warn', 5000);
+    return;
+  }
+  State.labels = State.labels || [];
+  for (const it of recent) {
+    const ex = State.labels.find(l => (l.sku || l.title) === (it.sku || it.title));
+    if (ex) ex.qty += (it.qty || 1);
+    else State.labels.push({ productId: null, sku: it.sku, title: it.title, barcode: it.barcode || it.sku, partNumber: it.partNumber || it.sku, qty: it.qty || 1 });
+  }
+  paintLabelsList();
+  const units = recent.reduce((n, it) => n + (it.qty || 1), 0);
+  toast(`Added ${recent.length} received item${recent.length === 1 ? '' : 's'} (${units} label${units === 1 ? '' : 's'}) to the queue`, 'success');
 }
 
 function promptPrintLabels(product, reason, qtyHint) {
