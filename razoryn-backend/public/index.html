@@ -1007,6 +1007,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
           Bundles
         </button>
+        <button class="nav-item admin-only" data-page="sharedstock">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          Shared parts
+        </button>
         <button class="nav-item admin-only" data-page="pricing">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><polyline points="9 14 11 16 15 12"/></svg>
           Quote Builder
@@ -1278,6 +1282,8 @@ function adaptProduct(p) {
     shopifyHandle: p.shopify_handle || '',
     incomingQty: p.incoming_qty || 0,
     incomingEta: p.incoming_eta || null,
+    stockGroupId: p.stock_group_id || null,
+    stockGroupCode: p.stock_group_code || null,
   };
 }
 function adaptSale(s) {
@@ -2537,7 +2543,8 @@ function routeTo(page) {
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror, bulk: renderBulkEditor,
     activity: renderActivity, pricingrules: renderPricingRules,
     labels: renderLabels, notes: renderNotes, dispatch: renderDispatch,
-    competitors: renderCompetitors, bundles: renderBundles, createlisting: renderCreateListing
+    competitors: renderCompetitors, bundles: renderBundles, createlisting: renderCreateListing,
+    sharedstock: renderSharedStock
   };
   try {
     (pages[page] || renderDashboard)();
@@ -2699,8 +2706,12 @@ function stRowHtml(p) {
         ? `<img src="${escapeAttr(p.itemPhoto || p.imageUrl)}" alt="" loading="lazy" style="width:42px;height:42px;object-fit:cover;border-radius:6px;background:var(--line-2);flex-shrink:0">`
         : `<div style="width:42px;height:42px;border-radius:6px;background:var(--line-2);flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--ink-soft)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>`}
       <div style="flex:1;min-width:0">
-        <div style="font-weight:600;font-size:13px">${escapeHtml(p.title)}</div>
-        <div style="color:var(--ink-soft);font-size:12px">${escapeHtml(p.sku)} · ${escapeHtml(p.location || 'No location')}</div>
+        ${p.stockGroupCode
+          ? `<div style="font-weight:700;font-size:14px;font-family:ui-monospace,monospace">PN ${escapeHtml(p.stockGroupCode)}</div>
+             <div style="color:var(--ink-soft);font-size:11px;margin-top:1px">🔗 Shared stock — count this part number once</div>
+             <div style="color:var(--ink-soft);font-size:11px">${escapeHtml(p.sku)} · ${escapeHtml(p.location || 'No location')}</div>`
+          : `<div style="font-weight:600;font-size:13px">${escapeHtml(p.title)}</div>
+             <div style="color:var(--ink-soft);font-size:12px">${escapeHtml(p.sku)} · ${escapeHtml(p.location || 'No location')}</div>`}
       </div>
       <div style="text-align:right;font-size:11px;color:var(--ink-soft)">System<br><strong style="font-size:15px;color:var(--ink)">${totalQty(p)}</strong></div>
       <button class="btn btn-ghost btn-sm" data-act="adjust" data-pid="${p.id}">Adjust</button>
@@ -4253,8 +4264,11 @@ function showProductScanCard(p) {
   const out = el('scan-result');
   if (!out) return;
   out.innerHTML = `
-    <div style="font-weight:600;font-size:15px;margin-bottom:4px">${p.title}</div>
-    <div style="color:var(--ink-soft);font-size:12px;margin-bottom:14px">${p.sku} · ${p.partNumber||''}</div>
+    ${p.stockGroupCode ? `<div style="background:var(--amber-light, #fff4e0);border:1px solid var(--amber, #e0a000);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:12px">
+      🔗 <strong>Shared stock — Part № ${escapeHtml(p.stockGroupCode)}</strong><br>
+      This quantity is shared across several model listings. Adjusting it here updates them all — count the part number, not the make/model.</div>` : ''}
+    <div style="font-weight:600;font-size:15px;margin-bottom:4px">${p.stockGroupCode ? 'PN ' + escapeHtml(p.stockGroupCode) : escapeHtml(p.title)}</div>
+    <div style="color:var(--ink-soft);font-size:12px;margin-bottom:14px">${escapeHtml(p.sku)}${p.stockGroupCode ? ' · ' + escapeHtml(p.title) : ' · ' + escapeHtml(p.partNumber||'')}</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
       <div style="padding:10px;background:var(--line-2);border-radius:8px"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;font-weight:600">Stock</div><div style="font-size:22px;font-weight:700">${totalQty(p)}</div></div>
       <div style="padding:10px;background:var(--line-2);border-radius:8px"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;font-weight:600">Location</div><div style="font-size:13px;font-weight:600;margin-top:2px">${p.location||'—'}</div></div>
@@ -5360,20 +5374,25 @@ function labelsPrint(itemsArg) {
   }
 
   /* ============ SMALL 50×25 mm thermal ============ */
+  /* The SKU + barcode are pinned to the bottom and never shrink (flex-shrink:0)
+     so a long title can only eat its own clamped space — it can never push the
+     barcode off the label. The title shrinks/clips first. */
   .label.small { padding: 2mm; justify-content: space-between; }
-  .label.small .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.15;
-    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  .label.small .sku { font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace; color: #444; margin-top: 0.5mm; }
-  .label.small .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 0.5mm; }
+  .label.small .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.1;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    flex: 0 1 auto; min-height: 0; }
+  .label.small .sku { font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace; color: #444; margin-top: 0.5mm; flex-shrink: 0; }
+  .label.small .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 0.5mm; flex-shrink: 0; }
   /* Secondary identifier (SKU shown under the part number) — smaller + muted. */
-  .label .sku-sub { font-size: ${Math.max(6, (s.fontSku || 9) - 2)}pt; font-family: ui-monospace, Menlo, monospace; color: #777; }
+  .label .sku-sub { font-size: ${Math.max(6, (s.fontSku || 9) - 2)}pt; font-family: ui-monospace, Menlo, monospace; color: #777; flex-shrink: 0; }
 
   /* ============ TALL 25×50 mm thermal ============ */
   .label.tall { padding: 2mm; justify-content: space-between; text-align: center; }
-  .label.tall .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.15;
-    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; }
-  .label.tall .sku { font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace; color: #444; margin-top: 1mm; }
-  .label.tall .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 1mm; }
+  .label.tall .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.1;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+    flex: 0 1 auto; min-height: 0; }
+  .label.tall .sku { font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace; color: #444; margin-top: 1mm; flex-shrink: 0; }
+  .label.tall .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 1mm; flex-shrink: 0; }
 
   /* ============ LARGE 4×6 landscape — logo top, title middle, barcode bottom ============ */
   .label.large-landscape { padding: 8mm 10mm; }
@@ -5388,7 +5407,8 @@ function labelsPrint(itemsArg) {
     letter-spacing: 0.04em; text-transform: uppercase;
   }
   .label.large-landscape .body {
-    flex: 1; padding: 6mm 0 4mm; display: flex; flex-direction: column; justify-content: center;
+    flex: 1 1 auto; min-height: 0; overflow: hidden;
+    padding: 6mm 0 4mm; display: flex; flex-direction: column; justify-content: center;
   }
   .label.large-landscape .title {
     font-size: ${s.fontTitle}pt; font-weight: 700; line-height: 1.15; color: #111;
@@ -5401,7 +5421,7 @@ function labelsPrint(itemsArg) {
     align-self: flex-start;
   }
   .label.large-landscape .barcode-wrap {
-    border-top: 1px solid #ddd; padding-top: 4mm; margin-top: auto;
+    border-top: 1px solid #ddd; padding-top: 4mm; margin-top: auto; flex-shrink: 0;
   }
   .label.large-landscape .bc { width: 100%; height: ${s.barH}px; display: block; }
 
@@ -5412,7 +5432,7 @@ function labelsPrint(itemsArg) {
   }
   .label.large-portrait .logo { height: 16mm; max-width: 70mm; object-fit: contain; }
   .label.large-portrait .logo-text { font-size: 20pt; font-weight: 800; letter-spacing: -0.02em; }
-  .label.large-portrait .body { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 4mm 0; }
+  .label.large-portrait .body { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: center; padding: 4mm 0; }
   .label.large-portrait .title {
     font-size: ${s.fontTitle}pt; font-weight: 700; line-height: 1.15;
     overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
@@ -5422,10 +5442,10 @@ function labelsPrint(itemsArg) {
     font-weight: 600; color: ${brandColor}; margin-top: 4mm;
     padding: 2mm 4mm; background: ${brandColor}14; border-radius: 2mm; display: inline-block;
   }
-  .label.large-portrait .barcode-wrap { padding-top: 4mm; }
+  .label.large-portrait .barcode-wrap { padding-top: 4mm; flex-shrink: 0; }
   .label.large-portrait .bc { width: 100%; height: ${s.barH}px; display: block; }
   .label.large-portrait .footer {
-    font-size: 8pt; color: #888; padding-top: 3mm;
+    font-size: 8pt; color: #888; padding-top: 3mm; flex-shrink: 0;
     border-top: 1px solid #ddd; margin-top: 4mm; letter-spacing: 0.05em;
   }
 </style></head><body>
@@ -10131,6 +10151,9 @@ function bulkSource(tab) {
 
 // ── WAREHOUSE-FIRST: Create listing (warehouse master → Shopify, then eBay) ──
 const CL = { categoryId: '', categoryName: '', defs: [], _catResults: [], images: [] };
+// Holds a snapshot of the just-created listing so "Repeat listing" can re-open
+// the Create page pre-filled. Consumed (and cleared) once by renderCreateListing.
+let CL_REPEAT = null;
 function clPct() {
   const c = State.pricingConfig || {};
   return c.priceLinkPct != null ? c.priceLinkPct : (c.bankTransferPct != null ? c.bankTransferPct : 10);
@@ -10172,6 +10195,8 @@ async function renderCreateListing() {
   openCreateEbayListing(null, { draft: true, container: 'cl-ebay-panel', draftProduct: { id: null, title: '', sku: '', qty_on_hand: 1, brand: '', model: '', part_number: '', shopify_product_id: null } });
   // Keep the derived Shopify price in sync with the eBay price field.
   setTimeout(() => { const p = el('ce-price'); if (p) p.addEventListener('input', clUpdateDerivedFromEbay); clUpdateDerivedFromEbay(); }, 120);
+  // "Repeat listing": if a snapshot is pending, re-fill the whole form from it.
+  if (CL_REPEAT) { const snap = CL_REPEAT; CL_REPEAT = null; clApplySnapshot(snap); }
 }
 function clCoreHtml() {
   const pct = clPct();
@@ -10263,9 +10288,108 @@ async function submitUnifiedCreate(btn) {
   State._ceCtx.product = { id: created.productId, title: shopTitle, sku, shopify_product_id: created.shopifyProductId };
   await submitCreateEbayListing(created.productId, {
     imageUrls: created.imageUrls || [],
-    onSuccess: (r) => { toast(`✓ Listed everywhere — eBay ItemID ${r.itemId}`, 'success', 8000); routeTo('mirror'); },
+    onSuccess: (r) => { toast(`✓ Listed everywhere — eBay ItemID ${r.itemId}`, 'success', 8000); clOfferRepeat(r); },
   });
   if (btn) btn.disabled = false;
+}
+
+// After a successful create, offer to make another listing from the same info
+// instead of bouncing straight back to the mirror. Keeps the form data so the
+// user can tweak a few fields (SKU, Left/Right, make/model) and submit again.
+function clOfferRepeat(r) {
+  const snap = clCaptureSnapshot();
+  modal({
+    title: 'Listing created ✓',
+    body: `<p style="margin:0 0 8px">Listed everywhere${r && r.itemId ? ` — eBay ItemID <strong>${escapeHtml(String(r.itemId))}</strong>` : ''}.</p>
+      <p style="margin:0;color:var(--ink-soft);font-size:13px">Create another listing using the same info? The form stays filled so you can tweak a few fields (e.g. SKU for Left/Right, or the make/model) before submitting. <strong>Set a new unique SKU</strong> for each item.</p>`,
+    actions: [
+      { label: 'Done', onClick: () => { closeModal(); routeTo('mirror'); } },
+      { label: '🔁 Repeat listing', primary: true, onClick: async () => { closeModal(); CL_REPEAT = snap; await renderCreateListing(); } },
+    ],
+  });
+}
+
+// Snapshot every fillable field on the Create-listing page (both panels + the
+// dynamic eBay item-specifics + custom Shopify metafields + the photo set).
+function clCaptureSnapshot() {
+  const snap = {
+    fields: {}, checks: {}, specs: {}, metafields: [],
+    clCategoryId: CL.categoryId, clCategoryName: CL.categoryName, images: (CL.images || []).slice(),
+    ebayCategoryId: (el('ce-category')?.value || '').trim(),
+  };
+  // These are either transient (search boxes) or re-derived on submit.
+  const skip = new Set(['cl-cat-search', 'ce-cat-search', 'ce-product-number', 'cl-shop']);
+  ['cl-core', 'cl-ebay-panel'].forEach(pid => {
+    const root = el(pid); if (!root) return;
+    root.querySelectorAll('input,select,textarea').forEach(node => {
+      if (node.type === 'file') return;
+      if (node.hasAttribute('data-spec')) return;            // captured below
+      if (node.classList.contains('cl-mf-def') || node.classList.contains('cl-mf-val')) return; // below
+      if (!node.id || skip.has(node.id)) return;
+      if (node.type === 'checkbox') snap.checks[node.id] = node.checked;
+      else snap.fields[node.id] = node.value;
+    });
+  });
+  document.querySelectorAll('#ce-specifics [data-spec]').forEach(inp => {
+    snap.specs[inp.getAttribute('data-spec')] = inp.value;
+  });
+  document.querySelectorAll('#cl-mf-list .cl-mf-row').forEach(row => {
+    snap.metafields.push({ def: row.querySelector('.cl-mf-def')?.value || '', val: row.querySelector('.cl-mf-val')?.value || '' });
+  });
+  return snap;
+}
+
+// Poll for an element id to appear (the eBay panel renders asynchronously).
+function clWaitFor(id, timeout = 5000) {
+  return new Promise(resolve => {
+    const t0 = Date.now();
+    (function poll() {
+      const e = el(id);
+      if (e) return resolve(e);
+      if (Date.now() - t0 > timeout) return resolve(null);
+      setTimeout(poll, 60);
+    })();
+  });
+}
+
+// Restore a snapshot onto a freshly-rendered Create-listing page.
+async function clApplySnapshot(snap) {
+  if (!snap) return;
+  // Shopify category + photos live in CL state, not in DOM fields.
+  CL.categoryId = snap.clCategoryId || '';
+  CL.categoryName = snap.clCategoryName || '';
+  CL.images = (snap.images || []).slice();
+  clRenderPhotos();
+  const cur = el('cl-cat-current');
+  if (cur) cur.innerHTML = CL.categoryName ? '✓ ' + escapeHtml(CL.categoryName) : '<span style="color:var(--ink-soft)">None selected</span>';
+  const applyAll = () => {
+    Object.entries(snap.fields).forEach(([id, v]) => { const e = el(id); if (e && e.type !== 'file') e.value = v; });
+    Object.entries(snap.checks).forEach(([id, v]) => { const e = el(id); if (e) e.checked = v; });
+  };
+  applyAll(); // fills the Warehouse/Shopify panel immediately
+  // Restore custom Shopify metafield rows.
+  (snap.metafields || []).forEach(mf => {
+    clAddMf();
+    const rows = document.querySelectorAll('#cl-mf-list .cl-mf-row');
+    const row = rows[rows.length - 1];
+    if (row) { const d = row.querySelector('.cl-mf-def'); const val = row.querySelector('.cl-mf-val'); if (d) d.value = mf.def; if (val) val.value = mf.val; }
+  });
+  // Wait for the eBay panel, then fill it. Give openCreateEbayListing's own
+  // async loads (specifics auto-load, policies) a beat to settle so our values win.
+  const ceTitle = await clWaitFor('ce-title');
+  if (!ceTitle) return;
+  await new Promise(r => setTimeout(r, 500));
+  applyAll();
+  // Restore the eBay category + its dynamic item specifics last.
+  if (snap.ebayCategoryId) {
+    if (el('ce-category')) el('ce-category').value = snap.ebayCategoryId;
+    await ceLoadSpecifics(snap.ebayCategoryId);
+    document.querySelectorAll('#ce-specifics [data-spec]').forEach(inp => {
+      const name = inp.getAttribute('data-spec');
+      if (snap.specs[name] != null) inp.value = snap.specs[name];
+    });
+  }
+  clUpdateDerivedFromEbay();
 }
 function clRenderPhotos() {
   const wrap = el('cl-photos'); if (!wrap) return;
@@ -11090,6 +11214,188 @@ async function loadBundlesPage() {
   } catch (e) { State.bundles = State.bundles || []; }
   const wrap = el('bundles-content'); if (wrap) wrap.innerHTML = bundlesPanelHtml();
 }
+
+/* ==================== SHARED STOCK POOLS (one part №, many model listings) ==================== */
+// Some parts fit several vehicles. We keep separate, clean listings per make/model
+// but they must share ONE stock pool so selling on any one decrements them all.
+function renderSharedStock() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Shared parts</h1><div class="desc">One part number, several model listings — all drawing from a single shared stock pool. A sale on any listing reduces them all, and stock checks count the part number once.</div></div>
+        <div class="actions">
+          <button class="btn btn-outline" onclick="loadSharedStock()">⟳ Refresh</button>
+          <button class="btn btn-primary" onclick="sgOpenCreateModal()">+ New shared pool</button>
+        </div>
+      </div>
+      <div id="sharedstock-content"><div class="empty"><div class="t">Loading…</div></div></div>
+    </div>`;
+  loadSharedStock();
+}
+async function loadSharedStock() {
+  await Store.refreshIfStale('products').catch(() => {});
+  const wrap = el('sharedstock-content'); if (wrap) wrap.innerHTML = '<div class="empty"><div class="t">Loading…</div></div>';
+  let groups = [], suggestions = [];
+  try { groups = (await Api.get('/api/products/stock-groups')).groups || []; } catch (e) { /* show below */ }
+  try { suggestions = (await Api.get('/api/products/stock-groups/suggestions')).suggestions || []; } catch (e) {}
+  State.sharedStock = { groups, suggestions };
+  if (wrap) wrap.innerHTML = sharedStockHtml(groups, suggestions);
+}
+function sgMemberRow(gid, m) {
+  return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line-2)">
+    ${m.image_url ? `<img src="${escapeAttr(m.image_url)}" alt="" loading="lazy" style="width:34px;height:34px;object-fit:cover;border-radius:5px;background:var(--line-2)">` : `<div style="width:34px;height:34px;border-radius:5px;background:var(--line-2);flex-shrink:0"></div>`}
+    <div style="flex:1;min-width:0">
+      <div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(m.title || '')}</div>
+      <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(m.sku || '')}${m.brand || m.model ? ' · ' + escapeHtml([m.brand, m.model].filter(Boolean).join(' ')) : ''}</div>
+    </div>
+    <button class="btn btn-ghost btn-sm" style="color:var(--red)" title="Remove this listing from the pool" onclick="sgRemoveMember(${gid}, ${m.id})">Remove</button>
+  </div>`;
+}
+function sharedStockHtml(groups, suggestions) {
+  const sugHtml = (suggestions || []).length ? `
+    <div class="card" style="margin-bottom:16px;border-left:3px solid var(--amber)">
+      <div class="card-head"><h3>⚠ Listings that share a part number (need fixing)</h3></div>
+      <div class="card-body">
+        <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">These separate listings already use the same part number but aren't pooled yet, so their stock can drift apart. Link each set into one shared pool.</div>
+        ${suggestions.map(s => `
+          <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line-2)">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:ui-monospace,monospace;font-weight:700;font-size:13px">${escapeHtml(s.code)}</div>
+              <div style="font-size:11px;color:var(--ink-soft)">${s.products.map(p => escapeHtml([p.brand, p.model].filter(Boolean).join(' ') || p.sku)).join(' · ')} <span style="color:var(--ink-soft)">(${s.products.length} listings)</span></div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick='sgCreateFromSuggestion(${JSON.stringify(s.code)}, ${JSON.stringify(s.products.map(p => p.id))})'>🔗 Link as shared stock</button>
+          </div>`).join('')}
+      </div>
+    </div>` : '';
+
+  const groupsHtml = (groups || []).length ? groups.map(g => `
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-body">
+        <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap">
+          <div style="flex:1;min-width:200px">
+            <div style="font-family:ui-monospace,monospace;font-weight:700;font-size:15px">PN ${escapeHtml(g.code)}</div>
+            ${g.note ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:2px">${escapeHtml(g.note)}</div>` : ''}
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">${(g.members || []).length} listing${(g.members || []).length === 1 ? '' : 's'} sharing this pool</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:11px;color:var(--ink-soft)">Shared qty</label>
+            <input id="sg-qty-${g.id}" type="number" min="0" value="${Number(g.qty_on_hand) || 0}" style="width:80px">
+            <button class="btn btn-primary btn-sm" onclick="sgSetQty(${g.id})">Set</button>
+            <button class="btn btn-outline btn-sm" onclick="sgAddMembers(${g.id})" title="Add another listing to this pool">+ Add</button>
+            <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="sgDissolve(${g.id})" title="Stop sharing — unlink all listings">Dissolve</button>
+          </div>
+        </div>
+        <div style="margin-top:8px">${(g.members || []).map(m => sgMemberRow(g.id, m)).join('')}</div>
+      </div>
+    </div>`).join('') : `<div class="empty" style="padding:24px;text-align:center"><div class="t">No shared pools yet</div>Link the listings above, or create a pool with “+ New shared pool”.</div>`;
+
+  return sugHtml + groupsHtml;
+}
+async function sgCreateFromSuggestion(code, productIds) {
+  try {
+    await Api.post('/api/products/stock-groups', { code, productIds });
+    toast('Shared pool created — stock is now linked', 'success');
+    await Store.refresh('products').catch(() => {});
+    loadSharedStock();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function sgSetQty(gid) {
+  const v = parseInt(el('sg-qty-' + gid)?.value);
+  if (isNaN(v) || v < 0) { toast('Enter a valid quantity', 'warn'); return; }
+  try {
+    await Api.patch('/api/products/stock-groups/' + gid, { qty: v });
+    toast('Shared stock updated & pushed to channels', 'success');
+    await Store.refresh('products').catch(() => {});
+    loadSharedStock();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function sgRemoveMember(gid, pid) {
+  if (!confirm('Remove this listing from the shared pool? Its stock will no longer track the others.')) return;
+  try {
+    const r = await Api.delete('/api/products/stock-groups/' + gid + '/members/' + pid);
+    toast(r.dissolved ? 'Listing removed — pool dissolved (only one left)' : 'Listing removed from pool', 'success');
+    await Store.refresh('products').catch(() => {});
+    loadSharedStock();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function sgDissolve(gid) {
+  if (!confirm('Dissolve this shared pool? All listings keep their current stock but will no longer be linked.')) return;
+  try {
+    await Api.delete('/api/products/stock-groups/' + gid);
+    toast('Pool dissolved', 'success');
+    await Store.refresh('products').catch(() => {});
+    loadSharedStock();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+// Shared picker used by both "new pool" and "add members". onConfirm gets the
+// chosen product id array; mode 'create' also collects a part number.
+function sgOpenPicker({ title, mode, gid }) {
+  const chosen = new Set();
+  const codeField = mode === 'create'
+    ? `<div class="field"><label>Shared part number *</label><input id="sg-code" placeholder="e.g. 92102-AT000" style="font-family:ui-monospace,monospace"></div>` : '';
+  modal({
+    title,
+    body: `${codeField}
+      <div class="field"><label>${mode === 'create' ? 'Pick at least 2 listings' : 'Pick listings to add'}</label>
+        <input id="sg-pick-search" placeholder="Search by title, SKU, part #…" autocomplete="off" oninput="sgPickSearch()">
+      </div>
+      <div id="sg-pick-chosen" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+      <div id="sg-pick-results" style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px"></div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: mode === 'create' ? 'Create pool' : 'Add to pool', primary: true, onClick: async () => {
+        const ids = [...chosen];
+        if (mode === 'create') {
+          const code = (el('sg-code')?.value || '').trim();
+          if (!code) { toast('Enter the shared part number', 'warn'); return; }
+          if (ids.length < 2) { toast('Pick at least 2 listings', 'warn'); return; }
+          try { await Api.post('/api/products/stock-groups', { code, productIds: ids });
+            toast('Shared pool created', 'success'); closeModal(); await Store.refresh('products').catch(() => {}); loadSharedStock();
+          } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+        } else {
+          if (!ids.length) { toast('Pick at least one listing', 'warn'); return; }
+          try { await Api.post('/api/products/stock-groups/' + gid + '/members', { productIds: ids });
+            toast('Listings added to pool', 'success'); closeModal(); await Store.refresh('products').catch(() => {}); loadSharedStock();
+          } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+        }
+      }},
+    ],
+  });
+  // Wire the live search against the in-memory catalogue.
+  window._sgPicker = { chosen, paintChosen: () => {
+    const wrap = el('sg-pick-chosen'); if (!wrap) return;
+    wrap.innerHTML = [...chosen].map(id => {
+      const p = (State.products || []).find(x => x.id == id);
+      return p ? `<span class="pill" style="background:var(--bg-soft)">${escapeHtml(p.sku || '')} <button onclick="sgPickToggle(${id})" style="border:none;background:none;cursor:pointer;color:var(--red)">×</button></span>` : '';
+    }).join('');
+  }};
+  sgPickSearch();
+}
+function sgPickSearch() {
+  const wrap = el('sg-pick-results'); if (!wrap) return;
+  const q = (el('sg-pick-search')?.value || '').trim();
+  const chosen = window._sgPicker?.chosen || new Set();
+  // Only ungrouped products are eligible (a product belongs to one pool at a time).
+  let list = (State.products || []).filter(p => !p.stockGroupId);
+  if (q) list = list.filter(p => matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model));
+  list = list.slice(0, 40);
+  wrap.innerHTML = list.length ? list.map(p => `
+    <div onclick="sgPickToggle(${p.id})" style="display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line-2);${chosen.has(p.id) ? 'background:var(--bg-soft)' : ''}">
+      <input type="checkbox" ${chosen.has(p.id) ? 'checked' : ''} style="pointer-events:none">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(p.title || '')}</div>
+        <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(p.sku || '')}${p.partNumber ? ' · ' + escapeHtml(p.partNumber) : ''}${p.brand || p.model ? ' · ' + escapeHtml([p.brand, p.model].filter(Boolean).join(' ')) : ''}</div>
+      </div>
+    </div>`).join('') : `<div style="padding:12px;color:var(--ink-soft);font-size:12px">${q ? 'No matches' : 'No eligible listings'}</div>`;
+}
+function sgPickToggle(id) {
+  const c = window._sgPicker?.chosen; if (!c) return;
+  if (c.has(id)) c.delete(id); else c.add(id);
+  window._sgPicker.paintChosen();
+  sgPickSearch();
+}
+function sgOpenCreateModal() { sgOpenPicker({ title: 'New shared stock pool', mode: 'create' }); }
+function sgAddMembers(gid) { sgOpenPicker({ title: 'Add listings to pool', mode: 'add', gid }); }
 
 function reconcileRow(g) {
   const dupBadge = (n, label) => `<div style="font-size:10px;color:var(--red);font-weight:700;margin-bottom:3px">⚠ ${n} ${label} — possible duplicate</div>`;

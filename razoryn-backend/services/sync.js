@@ -67,6 +67,26 @@ async function setCursor(channel, { lastSyncedAt, status, error }) {
   `, [channel, lastSyncedAt, status, error || null]);
 }
 
+// Shared stock pool: when a sold product belongs to a pool (one part number
+// shared across several model listings), decrement every sibling listing by the
+// same amount and log a movement for each. The master-stock propagation loop in
+// runFullSync then re-pushes those siblings to the channels (it picks up any
+// product with a recent stock_movement). Keeps every listing's stock in lockstep
+// so a sale on one can't leave the others overselling.
+async function mirrorSaleToStockGroup(c, productId, qty, reason, refId) {
+  const g = await c.query(`SELECT stock_group_id FROM products WHERE id = $1`, [productId]);
+  const gid = g.rows[0]?.stock_group_id;
+  if (!gid) return;
+  const sibs = await c.query(`SELECT id FROM products WHERE stock_group_id = $1 AND id <> $2`, [gid, productId]);
+  for (const s of sibs.rows) {
+    await c.query(`UPDATE products SET qty_on_hand = qty_on_hand - $1 WHERE id = $2`, [qty, s.id]);
+    await c.query(`INSERT INTO stock_movements (product_id, delta, reason, reference_id) VALUES ($1,$2,$3,$4)`,
+      [s.id, -qty, reason, refId || null]);
+  }
+  await c.query(`UPDATE stock_groups SET qty_on_hand = (SELECT qty_on_hand FROM products WHERE id = $1), updated_at = now() WHERE id = $2`,
+    [productId, gid]);
+}
+
 async function recordLowStockIfNeeded(productId) {
   const p = await query(
     `SELECT id, sku, title, qty_on_hand, low_stock_threshold
@@ -176,6 +196,7 @@ async function pullShopify() {
              VALUES ($1,$2,'sale_shopify',$3)`,
             [productId, -li.quantity, sale.rows[0].id]
           );
+          await mirrorSaleToStockGroup(c, productId, li.quantity, 'sale_shopify', sale.rows[0].id);
         }
       }
 
@@ -302,6 +323,7 @@ async function pullEbay() {
                VALUES ($1,$2,$3,$4)`,
               [productId, -qty, `sale_${channelCode}`, sale.rows[0].id]
             );
+            await mirrorSaleToStockGroup(c, productId, qty, `sale_${channelCode}`, sale.rows[0].id);
           } else {
             // No singular product matched — this may be a BUNDLE listing. If so,
             // deduct each component (e.g. selling the Left+Right set reduces both)

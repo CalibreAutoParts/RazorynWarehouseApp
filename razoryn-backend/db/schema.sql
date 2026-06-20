@@ -99,6 +99,29 @@ CREATE INDEX IF NOT EXISTS ppn_code_idx ON product_part_numbers (upper(code));
 -- One product can't list the same code twice.
 CREATE UNIQUE INDEX IF NOT EXISTS ppn_product_code_uq ON product_part_numbers (product_id, upper(code));
 
+-- ---------- Shared stock pools (one part number → many model listings) ----------
+-- Some physical parts fit several vehicles, so we keep SEPARATE listings (one per
+-- make/model, cleaner on the storefronts) but they must draw stock from ONE pool.
+-- A stock group is that shared pool, keyed by the common part number. Every member
+-- product's qty_on_hand is kept equal to the group's qty_on_hand, so a sale on any
+-- one listing decrements all of them.
+CREATE TABLE IF NOT EXISTS stock_groups (
+  id          SERIAL PRIMARY KEY,
+  code        TEXT NOT NULL,                 -- the shared part number
+  note        TEXT,
+  qty_on_hand INTEGER NOT NULL DEFAULT 0,    -- the single source-of-truth pool qty
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Link products to their pool. ON DELETE SET NULL so dissolving a group just
+-- un-links its members (their stock stays where it last settled).
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'products' AND column_name = 'stock_group_id') THEN
+    ALTER TABLE products ADD COLUMN stock_group_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS products_stock_group_idx ON products (stock_group_id) WHERE stock_group_id IS NOT NULL;
+
 -- ---------- Stock movements (audit trail of every change) ----------
 -- Replaces ad-hoc stock adjustments. Every change goes through here.
 CREATE TABLE IF NOT EXISTS stock_movements (

@@ -59,6 +59,30 @@ async function ensurePartNumbersTable() {
 }
 ensurePartNumbersTable();
 
+// Self-healing migration for shared stock pools (one part number shared across
+// multiple model listings). Idempotent; safe on every cold boot.
+let _sgMigrated = false;
+async function ensureStockGroupsSchema() {
+  if (_sgMigrated) return;
+  try {
+    await query(`CREATE TABLE IF NOT EXISTS stock_groups (
+      id SERIAL PRIMARY KEY,
+      code TEXT NOT NULL,
+      note TEXT,
+      qty_on_hand INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_group_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL`);
+    await query(`CREATE INDEX IF NOT EXISTS products_stock_group_idx ON products (stock_group_id) WHERE stock_group_id IS NOT NULL`);
+    _sgMigrated = true;
+  } catch (e) { console.warn('[products] stock-groups migration warning:', e.message); }
+}
+ensureStockGroupsSchema();
+
+// Normalise a part number for matching (ignore spaces, dashes, case).
+const sgNorm = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
 // Decode a base64 data URL stored in the DB and stream it as a cached binary
 // image, so list payloads don't have to inline megabytes of base64.
 function sendPhoto(res, dataUrl) {
@@ -81,6 +105,7 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   const pageSize = Math.min(1000, Math.max(1, parseInt(req.query.pageSize) || 50));
 
   await ensurePartNumbersTable();
+  await ensureStockGroupsSchema();
   const where = ['active = true'];
   const params = [];
   if (search) {
@@ -96,9 +121,11 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   if (lowStock === '1') where.push('qty_on_hand <= low_stock_threshold');
 
   const sql = `
-    SELECT p.*, l.code AS location_code, l.name AS location_name
+    SELECT p.*, l.code AS location_code, l.name AS location_name,
+           sg.code AS stock_group_code, sg.note AS stock_group_note
     FROM products p
     LEFT JOIN locations l ON l.id = p.location_id
+    LEFT JOIN stock_groups sg ON sg.id = p.stock_group_id
     WHERE ${where.join(' AND ')}
     ORDER BY p.title
     LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}
@@ -223,6 +250,140 @@ router.get('/low-stock', requirePermission('inventory'), async (req, res) => {
      ORDER BY qty_on_hand ASC, title`
   );
   res.json({ products: rows });
+});
+
+// ─────────────── Shared stock pools (one part number, many model listings) ───────────────
+// NOTE: every literal route here MUST be defined before GET /:id, otherwise
+// "stock-groups" is captured as an :id.
+
+// Set a group's shared qty and mirror it to every member, pushing each to its
+// channels. Used by create + PATCH. Returns the ids that were pushed.
+async function setStockGroupQty(groupId, qty) {
+  await query(`UPDATE stock_groups SET qty_on_hand = $1, updated_at = now() WHERE id = $2`, [qty, groupId]);
+  const members = await query(`SELECT id FROM products WHERE stock_group_id = $1`, [groupId]);
+  const pushed = [];
+  for (const m of members.rows) {
+    await query(`UPDATE products SET qty_on_hand = $1, updated_at = now() WHERE id = $2`, [qty, m.id]);
+    try { await pushProductStockToChannels(m.id, { skipGroup: true }); pushed.push(m.id); } catch (_) {}
+  }
+  return pushed;
+}
+
+// GET /api/products/stock-groups — every pool with its member listings.
+router.get('/stock-groups', requirePermission('inventory'), async (req, res) => {
+  await ensureStockGroupsSchema();
+  const groups = await query(`SELECT id, code, note, qty_on_hand, created_at, updated_at FROM stock_groups ORDER BY code`);
+  const members = await query(
+    `SELECT p.id, p.sku, p.title, p.brand, p.model, p.part_number, p.qty_on_hand, p.image_url, p.stock_group_id
+     FROM products p WHERE p.stock_group_id IS NOT NULL AND p.active = true
+     ORDER BY p.brand NULLS LAST, p.model NULLS LAST, p.title`);
+  const byGroup = new Map();
+  for (const m of members.rows) { if (!byGroup.has(m.stock_group_id)) byGroup.set(m.stock_group_id, []); byGroup.get(m.stock_group_id).push(m); }
+  res.json({ groups: groups.rows.map(g => ({ ...g, members: byGroup.get(g.id) || [] })) });
+});
+
+// GET /api/products/stock-groups/suggestions — ungrouped products that already
+// share a part number across DIFFERENT make/model listings (the "needs fixing"
+// cases the user described). One-click to turn each set into a shared pool.
+router.get('/stock-groups/suggestions', requirePermission('inventory'), async (req, res) => {
+  await ensureStockGroupsSchema();
+  const { rows } = await query(
+    `SELECT id, sku, title, brand, model, part_number, qty_on_hand
+     FROM products
+     WHERE active = true AND stock_group_id IS NULL AND part_number IS NOT NULL AND part_number <> ''`);
+  const byCode = new Map();
+  for (const p of rows) {
+    const k = sgNorm(p.part_number);
+    if (!k) continue;
+    if (!byCode.has(k)) byCode.set(k, { code: p.part_number, products: [] });
+    byCode.get(k).products.push(p);
+  }
+  // Only surface part numbers that actually span more than one listing.
+  const suggestions = [...byCode.values()].filter(g => g.products.length > 1)
+    .sort((a, b) => b.products.length - a.products.length);
+  res.json({ suggestions });
+});
+
+// POST /api/products/stock-groups — create a pool from a code + 2+ products.
+router.post('/stock-groups', requireAdmin, async (req, res) => {
+  await ensureStockGroupsSchema();
+  const code = String(req.body?.code || '').trim();
+  const note = req.body?.note ? String(req.body.note).trim() : null;
+  const productIds = Array.isArray(req.body?.productIds) ? req.body.productIds.map(Number).filter(Boolean) : [];
+  if (!code) return res.status(400).json({ error: 'code_required' });
+  if (productIds.length < 2) return res.status(400).json({ error: 'need_two_products' });
+  const out = await withTx(async (c) => {
+    const g = await c.query(`INSERT INTO stock_groups (code, note) VALUES ($1, $2) RETURNING id`, [code, note]);
+    const gid = g.rows[0].id;
+    await c.query(`UPDATE products SET stock_group_id = $1 WHERE id = ANY($2)`, [gid, productIds]);
+    // Seed the pool from the highest current member qty (safest assumption), unless
+    // an explicit starting qty was supplied.
+    const mx = await c.query(`SELECT COALESCE(MAX(qty_on_hand), 0)::int AS q FROM products WHERE id = ANY($1)`, [productIds]);
+    const qty = req.body?.qty != null ? Math.max(0, parseInt(req.body.qty) || 0) : mx.rows[0].q;
+    await c.query(`UPDATE stock_groups SET qty_on_hand = $1 WHERE id = $2`, [qty, gid]);
+    await c.query(`UPDATE products SET qty_on_hand = $1 WHERE stock_group_id = $2`, [qty, gid]);
+    return { gid, qty };
+  });
+  // Push the now-synced qty to each member's channels (outside the tx).
+  const members = await query(`SELECT id FROM products WHERE stock_group_id = $1`, [out.gid]);
+  for (const m of members.rows) { try { await pushProductStockToChannels(m.id, { skipGroup: true }); } catch (_) {} }
+  await audit(req, 'create_stock_group', 'stock_group', out.gid, { code, productIds, qty: out.qty });
+  res.json({ ok: true, groupId: out.gid, qty: out.qty });
+});
+
+// PATCH /api/products/stock-groups/:gid — update the shared qty and/or note.
+router.patch('/stock-groups/:gid', requireAdmin, async (req, res) => {
+  await ensureStockGroupsSchema();
+  const gid = Number(req.params.gid);
+  const g = await query(`SELECT id FROM stock_groups WHERE id = $1`, [gid]);
+  if (!g.rows[0]) return res.status(404).json({ error: 'not_found' });
+  if (req.body?.note !== undefined) {
+    await query(`UPDATE stock_groups SET note = $1, updated_at = now() WHERE id = $2`, [req.body.note ? String(req.body.note).trim() : null, gid]);
+  }
+  let pushed = [];
+  if (req.body?.qty !== undefined) pushed = await setStockGroupQty(gid, Math.max(0, parseInt(req.body.qty) || 0));
+  await audit(req, 'update_stock_group', 'stock_group', gid, { qty: req.body?.qty, note: req.body?.note });
+  res.json({ ok: true, pushed });
+});
+
+// POST /api/products/stock-groups/:gid/members — add products to a pool.
+router.post('/stock-groups/:gid/members', requireAdmin, async (req, res) => {
+  await ensureStockGroupsSchema();
+  const gid = Number(req.params.gid);
+  const g = await query(`SELECT id, qty_on_hand FROM stock_groups WHERE id = $1`, [gid]);
+  if (!g.rows[0]) return res.status(404).json({ error: 'not_found' });
+  const productIds = Array.isArray(req.body?.productIds) ? req.body.productIds.map(Number).filter(Boolean) : [];
+  if (!productIds.length) return res.status(400).json({ error: 'no_products' });
+  await query(`UPDATE products SET stock_group_id = $1, qty_on_hand = $2 WHERE id = ANY($3)`, [gid, g.rows[0].qty_on_hand, productIds]);
+  for (const id of productIds) { try { await pushProductStockToChannels(id, { skipGroup: true }); } catch (_) {} }
+  await audit(req, 'add_stock_group_members', 'stock_group', gid, { productIds });
+  res.json({ ok: true });
+});
+
+// DELETE /api/products/stock-groups/:gid/members/:pid — remove one listing from
+// the pool. If fewer than 2 members remain, the pool is dissolved automatically.
+router.delete('/stock-groups/:gid/members/:pid', requireAdmin, async (req, res) => {
+  await ensureStockGroupsSchema();
+  const gid = Number(req.params.gid);
+  await query(`UPDATE products SET stock_group_id = NULL WHERE id = $1 AND stock_group_id = $2`, [Number(req.params.pid), gid]);
+  const cnt = await query(`SELECT COUNT(*)::int AS n FROM products WHERE stock_group_id = $1`, [gid]);
+  const dissolved = cnt.rows[0].n < 2;
+  if (dissolved) {
+    await query(`UPDATE products SET stock_group_id = NULL WHERE stock_group_id = $1`, [gid]);
+    await query(`DELETE FROM stock_groups WHERE id = $1`, [gid]);
+  }
+  await audit(req, 'remove_stock_group_member', 'stock_group', gid, { pid: req.params.pid, dissolved });
+  res.json({ ok: true, dissolved });
+});
+
+// DELETE /api/products/stock-groups/:gid — dissolve the pool entirely.
+router.delete('/stock-groups/:gid', requireAdmin, async (req, res) => {
+  await ensureStockGroupsSchema();
+  const gid = Number(req.params.gid);
+  await query(`UPDATE products SET stock_group_id = NULL WHERE stock_group_id = $1`, [gid]);
+  await query(`DELETE FROM stock_groups WHERE id = $1`, [gid]);
+  await audit(req, 'delete_stock_group', 'stock_group', gid, {});
+  res.json({ ok: true });
 });
 
 // GET /api/products/diagnose/:sku — trace a SKU across products + mirror_links
@@ -442,11 +603,11 @@ router.patch('/:id/location', requirePermission('locations'), async (req, res) =
 //
 // Returns { shopify, ebay: [...] } describing what happened, with errors
 // captured per-channel so one failure doesn't block the others.
-async function pushProductStockToChannels(productId) {
+async function pushProductStockToChannels(productId, _opts = {}) {
   const result = { shopify: null, ebay: [] };
   // Load the product + its eBay links
   const pr = await query(
-    `SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id FROM products WHERE id = $1`,
+    `SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id, stock_group_id FROM products WHERE id = $1`,
     [productId]
   );
   const product = pr.rows[0];
@@ -503,6 +664,24 @@ async function pushProductStockToChannels(productId) {
     const res = await require('../services/bundles').recomputeBundlesForProduct(productId);
     if (res && res.length) result.bundles = res;
   } catch (e) { /* best-effort — never fail the stock push over a bundle */ }
+
+  // Shared stock pool: this product belongs to a pool keyed by a common part
+  // number, so mirror its new qty to every sibling listing and push each one.
+  // skipGroup stops the sibling pushes from recursing back into the group.
+  if (!_opts.skipGroup && product.stock_group_id) {
+    try {
+      const qty = product.qty_on_hand;
+      await query(`UPDATE stock_groups SET qty_on_hand = $1, updated_at = now() WHERE id = $2`, [qty, product.stock_group_id]);
+      const sibs = await query(`SELECT id FROM products WHERE stock_group_id = $1 AND id <> $2`, [product.stock_group_id, productId]);
+      const siblings = [];
+      for (const s of sibs.rows) {
+        await query(`UPDATE products SET qty_on_hand = $1, updated_at = now() WHERE id = $2`, [qty, s.id]);
+        try { await pushProductStockToChannels(s.id, { skipGroup: true }); siblings.push({ id: s.id, ok: true }); }
+        catch (e) { siblings.push({ id: s.id, error: e.message }); }
+      }
+      result.group = { groupId: product.stock_group_id, qty, siblings };
+    } catch (e) { /* best-effort — never fail a stock push over pool mirroring */ }
+  }
 
   return result;
 }
