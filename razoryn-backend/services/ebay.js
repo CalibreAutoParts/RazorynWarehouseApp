@@ -844,12 +844,15 @@ async function getItemDetails(itemId, storeArg) {
   // unwrap + decode so we get real HTML back to edit/wrap.
   let desc = (extractOne(xml, 'Description') || '').replace(/^<!\[CDATA\[/, '').replace(/\]\]>$/, '');
   desc = decodeEntities(desc);
+  const primaryCat = extractOne(xml, 'PrimaryCategory') || '';
   return {
     itemId: String(itemId),
     title: decodeEntities(extractOne(xml, 'Title') || ''),
     description: desc,
     sku: decodeEntities(extractOne(xml, 'SKU') || ''),
     price: priceRaw ? parseFloat(priceRaw) : null,
+    categoryId: extractOne(primaryCat, 'CategoryID') || null,
+    categoryName: decodeEntities(extractOne(primaryCat, 'CategoryName') || '') || null,
     pictureUrls: extractAll(xml, 'PictureURL').map(decodeEntities),
     specifics,
     storeCode: resolveStore(storeArg)?.code,

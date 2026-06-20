@@ -314,7 +314,7 @@ async function createProduct({ title, sku, price, imageUrls = [], imageData = []
 }
 
 // Update an existing product's title, price, and replace images.
-async function updateProduct(productId, { title, sku, price, imageUrls = [], status, metafields = [], qty = null, tags = null, templateSuffix = null }) {
+async function updateProduct(productId, { title, sku, price, imageUrls = [], status, metafields = [], qty = null, tags = null, templateSuffix = null, description = null }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const ex = await shopifyRequest('get', `/products/${productId}.json`);
   const existing = ex.data.product;
@@ -325,6 +325,7 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
   if (status) patchData.product.status = status;
   if (tags != null) patchData.product.tags = tags;
   if (templateSuffix != null) patchData.product.template_suffix = templateSuffix;
+  if (description != null) patchData.product.body_html = description;
   await shopifyRequest('put', `/products/${productId}.json`, { data: patchData });
 
   if (variant && (sku || price != null)) {

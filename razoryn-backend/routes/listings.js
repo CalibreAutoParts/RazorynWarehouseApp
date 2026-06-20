@@ -1841,6 +1841,174 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   res.status(201).json({ ...result, productId, partNumber, shopifyProductId: shopifyProduct ? String(shopifyProduct.id) : null });
 });
 
+// GET /api/listings/listing-detail/:productId — gather EVERYTHING needed to
+// pre-fill the Edit-listing page: the warehouse master fields, the live Shopify
+// product (title/desc/price/tags/images), and the live eBay listing (title/
+// price/qty/description/item specifics). Best-effort per channel.
+router.get('/listing-detail/:productId', requireAdmin, async (req, res) => {
+  const pr = await query(
+    `SELECT p.*, sg.code AS stock_group_code, l.name AS location_name
+     FROM products p
+     LEFT JOIN stock_groups sg ON sg.id = p.stock_group_id
+     LEFT JOIN locations l ON l.id = p.location_id
+     WHERE p.id = $1`, [req.params.productId]);
+  const product = pr.rows[0];
+  if (!product) return res.status(404).json({ error: 'not_found' });
+
+  const out = { product };
+  try {
+    const spn = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [product.id]);
+    out.subPartNumbers = spn.rows.map(r => r.code);
+  } catch (_) { out.subPartNumbers = []; }
+
+  if (product.shopify_product_id && shopify.isConfigured()) {
+    try { out.shopify = await shopify.getShopifyProductFull(product.shopify_product_id); }
+    catch (e) { out.shopifyError = e.message; }
+  }
+
+  // Find the linked eBay listing(s); pull the first one's full detail to pre-fill.
+  try {
+    const links = await query(
+      `SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`,
+      [product.shopify_product_id]);
+    out.ebayLinks = links.rows.map(r => ({ itemId: r.ebay_item_id, storeCode: r.store_code }));
+    if (links.rows[0]) {
+      try {
+        out.ebay = await ebay.getItemDetails(links.rows[0].ebay_item_id, links.rows[0].store_code);
+        out.ebay.itemId = links.rows[0].ebay_item_id;
+        out.ebay.storeCode = links.rows[0].store_code;
+        // Live quantity (GetItem's price block doesn't carry it reliably).
+        try { out.ebay.quantity = await ebay.getQuantityTradingAPI(links.rows[0].ebay_item_id, links.rows[0].store_code); } catch (_) {}
+      } catch (e) { out.ebayError = e.message; }
+    }
+  } catch (e) { out.ebayLinks = []; }
+
+  res.json(out);
+});
+
+// POST /api/listings/update-listing — EDIT a live listing and push the changes
+// to the warehouse (master), Shopify, and eBay in one go. Mirrors create-listing
+// but for an existing product. Each channel is best-effort so one failure is
+// reported without blocking the others.
+router.post('/update-listing', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const productId = parseInt(b.productId);
+  if (!productId) return res.status(400).json({ error: 'productId_required' });
+  const cur = await query(`SELECT * FROM products WHERE id = $1`, [productId]);
+  const product = cur.rows[0];
+  if (!product) return res.status(404).json({ error: 'not_found' });
+
+  const sku = String(b.sku || '').trim() || product.sku;
+  const shopTitle = String(b.title || '').trim() || product.title;
+  const ebayTitle = String(b.ebayTitle || '').trim() || shopTitle;
+  const partNumber = String(b.partNumber || '').trim() || product.part_number || sku;
+  const ebayPrice = b.ebayPrice != null && b.ebayPrice !== '' ? parseFloat(b.ebayPrice) : (product.price_ebay != null ? parseFloat(product.price_ebay) : null);
+  const qty = b.qty != null && b.qty !== '' ? (parseInt(b.qty) || 0) : product.qty_on_hand;
+
+  // SKU change must not collide with another product.
+  if (sku.toLowerCase() !== String(product.sku || '').toLowerCase()) {
+    const dup = await query(`SELECT id FROM products WHERE TRIM(LOWER(sku)) = TRIM(LOWER($1)) AND id <> $2`, [sku, productId]);
+    if (dup.rows[0]) return res.status(409).json({ error: 'sku_exists', productId: dup.rows[0].id });
+  }
+
+  // Shopify price derived from the eBay (master) price using the configured %.
+  const sr = await query(`SELECT price_link_pct, bank_transfer_pct FROM app_settings WHERE id = 1`);
+  const s = sr.rows[0] || {};
+  const shopPct = s.price_link_pct != null ? parseFloat(s.price_link_pct)
+    : (s.bank_transfer_pct != null ? parseFloat(s.bank_transfer_pct) : 10);
+  const shopifyPrice = ebayPrice != null ? +(ebayPrice * (1 - shopPct / 100)).toFixed(2) : (product.price_shopify != null ? parseFloat(product.price_shopify) : null);
+
+  const result = { ok: true, productId };
+
+  // 1) Warehouse master.
+  await query(
+    `UPDATE products SET sku = $1, title = $2, part_number = $3, price_ebay = $4, price_shopify = $5, qty_on_hand = $6, updated_at = now() WHERE id = $7`,
+    [sku, shopTitle, partNumber, ebayPrice, shopifyPrice, qty, productId]);
+  result.warehouse = { ok: true };
+
+  // Keep sub / alternate part numbers in sync (replace the set if provided).
+  if (Array.isArray(b.subPartNumbers)) {
+    const codes = b.subPartNumbers.map(x => String(x || '').trim()).filter(Boolean);
+    try {
+      await query(`DELETE FROM product_part_numbers WHERE product_id = $1`, [productId]);
+      for (const code of codes) {
+        try { await query(`INSERT INTO product_part_numbers (product_id, code) VALUES ($1, $2)`, [productId, code]); } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  // 2) Shopify.
+  const metafields = Array.isArray(b.metafields) ? b.metafields.slice() : [];
+  if (Array.isArray(b.subPartNumbers) && b.subPartNumbers.length) {
+    metafields.push({ namespace: 'custom', key: 'alternate_part_numbers', type: 'single_line_text_field', value: b.subPartNumbers.join(', ') });
+  }
+  if (product.shopify_product_id && shopify.isConfigured()) {
+    try {
+      await shopify.updateProduct(product.shopify_product_id, {
+        title: shopTitle, sku, price: shopifyPrice,
+        status: ['active', 'draft'].includes(b.status) ? b.status : undefined,
+        tags: b.tags != null ? b.tags : null,
+        templateSuffix: b.templateSuffix != null ? b.templateSuffix : null,
+        description: b.description != null ? b.description : null,
+        metafields,
+        imageUrls: Array.isArray(b.imageUrls) ? b.imageUrls.filter(Boolean) : [],
+      });
+      if (b.categoryId) {
+        try { await shopify.applyProductSeo(product.shopify_product_id, { categoryId: b.categoryId }); }
+        catch (e) { result.categoryError = e.message; }
+      }
+      if (b.shippingProfileId && shopify.assignProductToDeliveryProfile) {
+        try { await shopify.assignProductToDeliveryProfile(product.shopify_product_id, b.shippingProfileId); }
+        catch (e) { result.shippingProfileError = e.message; }
+      }
+      result.shopify = { ok: true };
+    } catch (e) { result.shopify = { error: e.message }; }
+  } else {
+    result.shopify = { skipped: product.shopify_product_id ? 'not_configured' : 'no_shopify_product' };
+  }
+
+  // 3) eBay — revise every linked listing (title/price/description/specifics/
+  // images) and set quantity. Category isn't changed (eBay restricts that on
+  // live listings).
+  const itemSpecifics = Array.isArray(b.itemSpecifics)
+    ? b.itemSpecifics.filter(it => it && it.name && it.value != null && String(it.value).trim() !== '')
+        .map(it => ({ name: String(it.name), value: String(it.value) }))
+    : null;
+  result.ebay = [];
+  try {
+    const links = await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [product.shopify_product_id]);
+    const stores = ebay.listStores().filter(st => st.hasToken && !st.disabled);
+    for (const link of links.rows) {
+      const store = stores.find(st => st.code === link.store_code) || (link.store_code ? null : (stores.find(st => st.primary) || stores[0]));
+      if (!store) { result.ebay.push({ itemId: link.ebay_item_id, skipped: 'store_unavailable' }); continue; }
+      try {
+        await ebay.reviseItem(link.ebay_item_id, {
+          sku,
+          title: ebayTitle ? ebayTitle.slice(0, 80) : undefined,
+          price: ebayPrice != null ? ebayPrice : undefined,
+          description: b.ebayDescription != null && String(b.ebayDescription).trim() !== '' ? b.ebayDescription : undefined,
+          itemSpecifics: itemSpecifics && itemSpecifics.length ? itemSpecifics : undefined,
+          pictureUrls: Array.isArray(b.imageUrls) && b.imageUrls.length ? b.imageUrls.filter(Boolean) : undefined,
+        }, store.code);
+        try { await ebay.setQuantityTradingAPI(link.ebay_item_id, qty, store.code); } catch (e) { /* qty push best-effort */ }
+        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true });
+      } catch (e) {
+        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, error: e.message });
+      }
+    }
+    if (!links.rows.length) result.ebay.push({ skipped: 'no_ebay_link' });
+  } catch (e) { result.ebay.push({ error: e.message }); }
+
+  // 4) Make sure the shared stock pool (if any) stays in lockstep with the new qty.
+  try {
+    const { pushProductStockToChannels } = require('./products');
+    result.stockSync = await pushProductStockToChannels(productId);
+  } catch (e) { /* best-effort */ }
+
+  await audit(req, 'update_listing', 'product', productId, { sku, ebayPrice, shopifyPrice, qty });
+  res.json(result);
+});
+
 // POST /api/listings/repush-ebay-images { productId }
 // Re-send a product's Shopify photos to its linked eBay listing(s) — fixes
 // listings that ended up with no images.

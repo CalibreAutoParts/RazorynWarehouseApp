@@ -2544,7 +2544,7 @@ function routeTo(page) {
     activity: renderActivity, pricingrules: renderPricingRules,
     labels: renderLabels, notes: renderNotes, dispatch: renderDispatch,
     competitors: renderCompetitors, bundles: renderBundles, createlisting: renderCreateListing,
-    sharedstock: renderSharedStock
+    sharedstock: renderSharedStock, editlisting: renderEditListing
   };
   try {
     (pages[page] || renderDashboard)();
@@ -4018,6 +4018,7 @@ function openProductModal(id) {
           toast('Save failed: ' + e.message, 'error');
         }
       }},
+      ...(id ? [{ label: '✏️ Edit full listing', onClick: () => { closeModal(); openEditListing(id); } }] : []),
       { label: 'Cancel', onClick: closeModal }
     ]
   });
@@ -10182,6 +10183,7 @@ async function renderCreateListing() {
     </div>`;
   try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (_) {}
   CL.categoryId = ''; CL.categoryName = ''; CL._catResults = []; CL.images = [];
+  CL.editProductId = null; CL.imagesReadonly = false;   // create mode (not edit)
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
   if (el('cl-core')) { el('cl-core').innerHTML = clCoreHtml(); clRenderPhotos(); }
   // Populate the Shopify delivery (shipping) profile dropdown.
@@ -10198,8 +10200,173 @@ async function renderCreateListing() {
   // "Repeat listing": if a snapshot is pending, re-fill the whole form from it.
   if (CL_REPEAT) { const snap = CL_REPEAT; CL_REPEAT = null; clApplySnapshot(snap); }
 }
+
+// ============ EDIT LISTING — same layout as Create, pre-filled from the live ============
+// listing, and saving pushes the changes to the warehouse, Shopify and eBay.
+function openEditListing(productId) { State._editProductId = productId; routeTo('editlisting'); }
+async function renderEditListing() {
+  const productId = State._editProductId;
+  if (!productId) { toast('No product selected to edit', 'warn'); routeTo('inventory'); return; }
+  CL.editProductId = productId;
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Edit listing</h1><div class="desc">Edit a live listing and push the changes to the Warehouse (master), Shopify &amp; eBay in one go. Fields are pre-filled from the current listing.</div></div>
+        <div class="actions">
+          <button class="btn btn-outline" onclick="routeTo('inventory')">Cancel</button>
+          <button class="btn btn-primary" onclick="submitUnifiedUpdate(this)">Save &amp; push everywhere</button>
+        </div>
+      </div>
+      <div id="el-banner"></div>
+      <div class="grid-2" style="align-items:start;gap:16px">
+        <div class="card"><div class="card-head"><h3>Warehouse &amp; Shopify</h3></div><div class="card-body" id="cl-core"><div class="empty" style="padding:18px"><div class="t">Loading…</div></div></div></div>
+        <div class="card"><div class="card-head"><h3>eBay listing</h3></div><div class="card-body" id="cl-ebay-panel"><div class="empty" style="padding:18px"><div class="t">Loading eBay listing…</div></div></div></div>
+      </div>
+    </div>`;
+  try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (_) {}
+  CL.categoryId = ''; CL.categoryName = ''; CL._catResults = []; CL.images = []; CL.imagesReadonly = true;
+  try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
+
+  let detail;
+  try { detail = await Api.get('/api/listings/listing-detail/' + productId); }
+  catch (e) { el('cl-core').innerHTML = `<div class="empty" style="padding:18px"><div class="t">Couldn't load the listing</div>${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  CL._editDetail = detail;
+  const p = detail.product || {};
+  const sh = detail.shopify || {};
+  const eb = detail.ebay || {};
+
+  // Warnings about partial data (a channel that couldn't be read).
+  const warn = [];
+  if (detail.shopifyError) warn.push('Shopify: ' + detail.shopifyError);
+  if (detail.ebayError) warn.push('eBay: ' + detail.ebayError);
+  if (!detail.ebayLinks || !detail.ebayLinks.length) warn.push('This product has no linked eBay listing — eBay fields below won’t be pushed.');
+  if (warn.length) el('el-banner').innerHTML = `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--amber)"><div class="card-body" style="padding:10px 14px;font-size:12px;color:var(--ink-soft)">⚠ ${warn.map(escapeHtml).join(' · ')}</div></div>`;
+
+  // Existing photos shown read-only (use the Re-push images tool to change them).
+  CL.images = Array.isArray(sh.imageUrls) ? sh.imageUrls.slice() : (p.image_url ? [p.image_url] : []);
+
+  // Left panel.
+  el('cl-core').innerHTML = clCoreHtml();
+  clRenderPhotos();
+  const set = (id, v) => { const e = el(id); if (e != null && v != null) e.value = v; };
+  set('cl-sku', p.sku);
+  set('cl-partnumber', p.part_number);
+  set('cl-tags', sh.tags || '');
+  set('cl-title', sh.title || p.title || '');
+  set('cl-desc', sh.description || '');
+  set('cl-subpn', (detail.subPartNumbers || []).join('\n'));
+  // Shopify price is derived display only.
+  Api.get('/api/listings/delivery-profiles').then(r => {
+    const sel = el('cl-shipprofile'); if (!sel) return;
+    sel.innerHTML = '<option value="">No override (Shopify default)</option>' +
+      (r.profiles || []).map(x => `<option value="${escapeAttr(x.id)}">${escapeHtml(x.name)}</option>`).join('');
+  }).catch(() => {});
+
+  // Right panel — reuse the eBay form in edit mode, pre-filled from the live listing.
+  const draftProduct = {
+    id: productId, title: eb.title || sh.title || p.title || '', sku: p.sku || '',
+    qty_on_hand: (eb.quantity != null ? eb.quantity : p.qty_on_hand) ?? 1,
+    brand: p.brand || '', model: p.model || '', part_number: p.part_number || '',
+    shopify_product_id: p.shopify_product_id || null,
+    shopify_price: p.price_shopify, price_shopify: p.price_shopify,
+  };
+  await openCreateEbayListing(productId, { draft: true, edit: true, container: 'cl-ebay-panel', draftProduct, editSpecifics: eb.specifics || [] });
+  // Pre-fill eBay fields from the live listing (specifics already rendered above).
+  set('ce-title', eb.title || draftProduct.title);
+  if (el('ce-title-count') && el('ce-title')) el('ce-title-count').textContent = el('ce-title').value.length + '/80';
+  if (eb.price != null) set('ce-price', eb.price); else if (p.price_ebay != null) set('ce-price', p.price_ebay);
+  set('ce-qty', (eb.quantity != null ? eb.quantity : p.qty_on_hand) ?? 1);
+  if (eb.categoryId) { set('ce-category', eb.categoryId); const path = el('ce-cat-path'); if (path && eb.categoryName) path.textContent = eb.categoryName; }
+  if (eb.description) set('ce-desc', eb.description);
+  // Keep the derived Shopify price label in sync with the eBay price.
+  setTimeout(() => { const pr = el('ce-price'); if (pr) pr.addEventListener('input', clUpdateDerivedFromEbay); clUpdateDerivedFromEbay(); }, 150);
+}
+
+// Render the eBay item specifics from the listing's actual values (edit mode) —
+// each as an editable text input carrying data-spec so the update collector finds
+// it. Multi-value specifics are shown comma-joined.
+function ceRenderSpecificsFromList(specifics) {
+  const wrap = el('ce-specifics');
+  if (!wrap) return;
+  wrap.innerHTML = '<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">' + specifics.length + ' specifics from the live listing — edit any value.</div>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
+    + specifics.map(s => {
+        const val = Array.isArray(s.values) ? s.values.join(', ') : (s.value || '');
+        return `<div class="field"><label>${escapeHtml(s.name)}</label>
+          <input data-spec="${escapeAttr(s.name)}" value="${escapeAttr(val)}"></div>`;
+      }).join('')
+    + '</div>';
+}
+
+async function submitUnifiedUpdate(btn) {
+  const productId = CL.editProductId;
+  if (!productId) { toast('No product to update', 'warn'); return; }
+  const sku = (el('cl-sku')?.value || '').trim();
+  const ebayTitle = (el('ce-title')?.value || '').trim();
+  const shopTitle = (el('cl-title')?.value || '').trim() || ebayTitle;
+  const ebayPrice = parseFloat(el('ce-price')?.value);
+  if (!sku) { toast('SKU is required', 'warn'); return; }
+  if (isNaN(ebayPrice) || ebayPrice < 0) { toast('Set the eBay price', 'warn'); return; }
+  const metafields = [...document.querySelectorAll('#cl-mf-list .cl-mf-row')].map(r => {
+    const parts = (r.querySelector('.cl-mf-def')?.value || '').split('|');
+    const value = (r.querySelector('.cl-mf-val')?.value || '').trim();
+    return (parts[0] && parts[1] && value) ? { namespace: parts[0], key: parts[1], type: parts[2] || 'single_line_text_field', value } : null;
+  }).filter(Boolean);
+  const itemSpecifics = [...document.querySelectorAll('#ce-specifics [data-spec]')].map(inp => ({
+    name: inp.getAttribute('data-spec'), value: (inp.value || '').trim(),
+  })).filter(s => s.name && s.value);
+  // Include any free-form custom specifics added via "+ Add custom specific".
+  document.querySelectorAll('#ce-custom-list > div').forEach(row => {
+    const name = (row.querySelector('.ce-cust-name')?.value || '').trim();
+    const value = (row.querySelector('.ce-cust-val')?.value || '').trim();
+    if (name && value) itemSpecifics.push({ name, value });
+  });
+
+  if (btn) btn.disabled = true;
+  const taskId = Task.start('Saving & pushing everywhere…');
+  let r;
+  try {
+    r = await Api.post('/api/listings/update-listing', {
+      productId,
+      sku,
+      title: shopTitle,
+      ebayTitle,
+      partNumber: (el('cl-partnumber')?.value || '').trim() || null,
+      ebayPrice,
+      qty: parseInt(el('ce-qty')?.value) || 0,
+      description: (el('cl-desc')?.value || '').trim(),
+      ebayDescription: (el('ce-desc')?.value || '').trim() || null,
+      tags: (el('cl-tags')?.value || '').trim(),
+      status: el('cl-status')?.value || undefined,
+      taxable: el('cl-taxable') ? el('cl-taxable').checked : undefined,
+      templateSuffix: el('cl-template')?.value || null,
+      shippingProfileId: el('cl-shipprofile')?.value || null,
+      categoryId: CL.categoryId || null,
+      subPartNumbers: (el('cl-subpn')?.value || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean),
+      metafields,
+      itemSpecifics,
+    });
+    Task.done(taskId, 'Saved');
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    const m = e.data?.error === 'sku_exists' ? 'Another product already uses that SKU.' : (e.data?.message || e.message);
+    toast('Save failed: ' + m, 'error', 9000);
+    if (btn) btn.disabled = false;
+    return;
+  }
+  // Summarise per-channel outcome.
+  const bits = [];
+  if (r.shopify?.ok) bits.push('Shopify ✓'); else if (r.shopify?.error) bits.push('Shopify ✗');
+  const ebOk = (r.ebay || []).filter(x => x.ok).length, ebErr = (r.ebay || []).filter(x => x.error).length;
+  if (ebOk) bits.push(`eBay ✓${ebOk > 1 ? ' ×' + ebOk : ''}`);
+  if (ebErr) bits.push('eBay ✗');
+  toast(`Saved & pushed — Warehouse ✓${bits.length ? ' · ' + bits.join(' · ') : ''}`, ebErr || r.shopify?.error ? 'warn' : 'success', 8000);
+  await Store.refresh('products').catch(() => {});
+  routeTo('inventory');
+}
 function clCoreHtml() {
   const pct = clPct();
+  const editing = !!CL.editProductId;
   return `
     <div class="field"><label>SKU *</label><input id="cl-sku" style="font-family:ui-monospace,monospace" placeholder="e.g. 7450B289" autocomplete="off">
       <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Must be unique per listing (Shopify & eBay require it). For a part that fits several models, give each listing its own SKU.</div></div>
@@ -10207,15 +10374,17 @@ function clCoreHtml() {
       <input id="cl-partnumber" style="font-family:ui-monospace,monospace" placeholder="e.g. 602001929AA" autocomplete="off">
       <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">🔗 Listings that fit multiple models should share <strong>the same part number</strong> — they'll be auto-linked into one shared stock pool (a sale on any one reduces them all).</div></div>
     <div class="field"><label>Photos</label>
-      <input type="file" id="cl-photo-file" accept="image/*" multiple onchange="clAddPhotos(this)" style="font-size:12px">
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Uploaded to Shopify; the same photos are reused on the eBay listing.</div>
+      ${editing
+        ? `<div style="font-size:11px;color:var(--ink-soft)">Current photos (read-only here). To change them use <strong>Re-push images</strong> on the listing.</div>`
+        : `<input type="file" id="cl-photo-file" accept="image/*" multiple onchange="clAddPhotos(this)" style="font-size:12px">
+           <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Uploaded to Shopify; the same photos are reused on the eBay listing.</div>`}
       <div id="cl-photos" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"></div>
     </div>
     <div class="field"><label>Shopify price <span style="color:var(--ink-soft);font-weight:400">— auto eBay − ${pct}%</span></label>
       <input id="cl-shop" disabled style="background:var(--bg-soft)" placeholder="set the eBay price in the eBay panel →"></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Tags (comma-separated)</label><input id="cl-tags" placeholder="MO18, grille"></div>
-      <div class="field"><label>Shopify status</label><select id="cl-status"><option value="draft">Draft</option><option value="active">Active</option></select></div>
+      <div class="field"><label>Shopify status</label><select id="cl-status">${editing ? '<option value="">— Keep current —</option>' : ''}<option value="draft">Draft</option><option value="active">Active</option></select></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Product page template</label>
@@ -10451,17 +10620,18 @@ async function clApplySnapshot(snap) {
 function clRenderPhotos() {
   const wrap = el('cl-photos'); if (!wrap) return;
   const n = (CL.images || []).length;
+  const ro = !!CL.imagesReadonly;
   wrap.innerHTML = (CL.images || []).map((d, i) => `
     <div style="width:64px">
       <div style="position:relative;width:64px;height:64px">
         <img src="${d}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--line);${i === 0 ? 'outline:2px solid var(--brand-primary);outline-offset:1px' : ''}">
-        <button type="button" onclick="clRemovePhoto(${i})" title="Remove" style="position:absolute;top:-6px;right:-6px;background:var(--red);color:#fff;border:none;border-radius:50%;width:18px;height:18px;cursor:pointer;font-size:11px;line-height:1">×</button>
+        ${ro ? '' : `<button type="button" onclick="clRemovePhoto(${i})" title="Remove" style="position:absolute;top:-6px;right:-6px;background:var(--red);color:#fff;border:none;border-radius:50%;width:18px;height:18px;cursor:pointer;font-size:11px;line-height:1">×</button>`}
       </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:2px">
+      ${ro ? `<div style="text-align:center;font-size:9px;color:${i === 0 ? 'var(--brand-primary)' : 'var(--ink-soft)'};margin-top:2px">${i === 0 ? 'main' : (i + 1)}</div>` : `<div style="display:flex;align-items:center;justify-content:space-between;margin-top:2px">
         <button type="button" onclick="clMovePhoto(${i},-1)" ${i === 0 ? 'disabled' : ''} title="Move earlier" style="border:none;background:none;cursor:pointer;color:var(--ink-soft);font-size:12px;padding:0 2px">◀</button>
         <span style="font-size:9px;color:${i === 0 ? 'var(--brand-primary)' : 'var(--ink-soft)'}">${i === 0 ? 'main' : (i + 1)}</span>
         <button type="button" onclick="clMovePhoto(${i},1)" ${i === n - 1 ? 'disabled' : ''} title="Move later" style="border:none;background:none;cursor:pointer;color:var(--ink-soft);font-size:12px;padding:0 2px">▶</button>
-      </div>
+      </div>`}
     </div>`).join('');
 }
 function clMovePhoto(i, dir) {
@@ -11929,6 +12099,10 @@ async function openCreateEbayListing(productId, opts = {}) {
         <label>Description <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— leave blank to use the Shopify description</span></label>
         <textarea id="ce-desc" rows="5" placeholder="Type or paste a description (HTML allowed). Leave blank and the Shopify product description is used."></textarea>
       </div>
+      ${opts.edit ? `
+        <div style="font-size:12px;padding:10px;background:var(--bg-soft);border:1px solid var(--line);border-radius:6px;color:var(--ink-soft);margin-top:8px">
+          Saving updates the <strong>title, price, quantity, description, item specifics &amp; SKU</strong> on the live eBay listing${' '}(${' '}via ReviseItem ). eBay <strong>category, condition &amp; business policies</strong> can't be changed on a live listing here — end &amp; relist for those.
+        </div>` : `
       ${policiesConfigured ? '' : `
         <div style="font-size:12px;padding:10px;background:var(--amber-light);border:1px solid var(--amber);border-radius:6px;color:var(--amber);margin-top:8px">
           <strong>⚠ No business policies set</strong> for ${escapeHtml(stores.length > 1 ? 'this store' : 'eBay')}. The listing will likely fail because eBay requires payment / shipping / return policies. Set them in Settings → eBay listing defaults first.
@@ -11961,7 +12135,7 @@ async function openCreateEbayListing(productId, opts = {}) {
         <input type="checkbox" id="ce-preview">
         Preview only — validate &amp; show fees without creating a live listing
       </label>
-    `;
+    `}`;
   // Render into the unified page's container, or as a standalone modal.
   if (opts.container) {
     const c = el(opts.container);
@@ -12003,8 +12177,13 @@ async function openCreateEbayListing(productId, opts = {}) {
     payment:  policies.payment  || cfg.ebayPolicyPayment,
     return:   policies.return   || cfg.ebayPolicyReturn,
   });
-  // Load the item-specific fields for the (default) category.
-  ceLoadSpecifics(el('ce-category')?.value || '');
+  // Load the item-specific fields. In edit mode, render the live listing's own
+  // specifics (passed in) so the async category load can't overwrite them.
+  if (opts.edit && Array.isArray(opts.editSpecifics) && opts.editSpecifics.length) {
+    ceRenderSpecificsFromList(opts.editSpecifics);
+  } else {
+    ceLoadSpecifics(el('ce-category')?.value || '');
+  }
 }
 
 // Load the seller's eBay shop categories into the picker (best-effort).
