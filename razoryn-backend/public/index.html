@@ -10403,7 +10403,7 @@ function renderMirror() {
       <div class="page-head">
         <div>
           <h1>Listing Links</h1>
-          <div class="desc">Every eBay listing, Shopify product &amp; warehouse item in one place — see what's linked, connect what isn't, and catch duplicates. Creating &amp; pushing listings lives in the <a href="#" onclick="routeTo('bulk');return false" style="color:var(--brand-primary);font-weight:600">Bulk Editor</a>.</div>
+          <div class="desc">Every eBay listing, Shopify product &amp; warehouse item in one place — see what's linked, connect what isn't, and catch duplicates. Creating &amp; pushing listings lives in <a href="#" onclick="MirrorState.sourceTab='ebay';routeTo('bulk');return false" style="color:var(--brand-primary);font-weight:600">eBay → Shopify</a> / <a href="#" onclick="MirrorState.sourceTab='shopify';routeTo('bulk');return false" style="color:var(--brand-primary);font-weight:600">Shopify → eBay</a> (the Bulk Editor).</div>
         </div>
         <div class="actions" id="mirror-page-actions">
           <button class="btn btn-outline" onclick="scanShopifyDuplicates()">🔍 Scan Shopify for duplicates</button>
