@@ -1060,6 +1060,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
           Competitors
         </button>
+        <button class="nav-item admin-only" data-action="create-listing">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Create listing
+        </button>
         <button class="nav-item admin-only" data-page="mirror">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
           Listing Mirror
@@ -2355,6 +2359,8 @@ function bindHeader() {
 function bindNav() {
   document.querySelectorAll('.nav-item').forEach(n => {
     n.addEventListener('click', () => {
+      // Action items (e.g. Create listing) open a flow instead of routing to a page.
+      if (n.dataset.action === 'create-listing') { if (typeof openCreateListing === 'function') openCreateListing(); return; }
       // Direction-specific nav items deep-link into the Bulk Editor's source tab.
       if (n.dataset.source) MirrorState.sourceTab = n.dataset.source;
       routeTo(n.dataset.page);
@@ -8929,17 +8935,17 @@ function renderKB() {
    ========================================================== */
 const FEATURE_NOTES = [
   {
-    id: 'fn-create-list-workflow',
-    title: 'Listing a new part — the full workflow',
-    desc: 'Shopify first, copy to eBay, import to warehouse, then set the eBay price. The recommended order.',
+    id: 'fn-listings-overview',
+    title: 'Listings — how the three tools fit together',
+    desc: 'Create listing (new products), eBay → Shopify and Shopify → eBay (sync existing). The warehouse is always master.',
     body: `
-      <ol style="line-height:1.8;font-size:14px;padding-left:18px">
-        <li><strong>Create the product on Shopify</strong> — optimise the title, set the category and all metafields there (Shopify is best for this).</li>
-        <li><strong>Copy it to eBay</strong> via <strong>Bulk Editor</strong> → tick the listing → <em>Push selected → Shopify</em> / push to eBay. This also links the listing.</li>
-        <li><strong>Import into the warehouse</strong> — go to <strong>Listing Links → ⇩ Import Shopify into warehouse</strong> (this also runs automatically every few hours). It creates the warehouse record, pulls the photo, links eBay, and adopts the real SKU.</li>
-        <li><strong>Stock-take</strong> the item so quantities are correct (it appears in the take automatically once imported).</li>
-        <li><strong>Set the eBay price</strong> — see “Setting prices” below. eBay is the master; Shopify, bank and cash follow.</li>
-      </ol>`,
+      <p style="font-size:14px;line-height:1.7">There are three listing tools in the sidebar. The <strong>warehouse is always the master</strong> for SKU, price and stock — every path ends in a warehouse entry.</p>
+      <ul style="line-height:1.8;font-size:14px;padding-left:18px">
+        <li><strong>Create listing</strong> — make a <strong>brand-new product in the warehouse</strong> and push it out. You set the eBay price; Shopify is auto-set to eBay − [Shopify %]. Creates the Shopify product, then opens the eBay create step. Use this for items that don't exist anywhere yet.</li>
+        <li><strong>eBay → Shopify</strong> — for listings that <strong>already exist on eBay</strong> and need pushing to Shopify (or linking to an existing Shopify product).</li>
+        <li><strong>Shopify → eBay</strong> — for products that <strong>already exist on Shopify</strong> and need creating on eBay (or linking to an existing eBay listing).</li>
+      </ul>
+      <p style="font-size:13px;color:var(--ink-soft)">In every case, once a listing is linked or created, a <strong>warehouse entry is made and becomes the master</strong>. After it's listed, set the eBay price (see “Setting prices”) so Shopify / bank / cash follow automatically.</p>`,
   },
   {
     id: 'fn-pricing',
@@ -10050,26 +10056,22 @@ function renderBulkEditor() {
     <div class="page">
       <div class="page-head">
         <div><h1>Bulk Editor</h1><div class="desc">Edit &amp; sync many listings at once — each action shows exactly what pushes where.</div></div>
-        <div class="actions">
-          <button class="btn btn-primary" onclick="openCreateListing()" title="Create a brand-new listing in the warehouse and push it to Shopify + eBay">✚ Create listing</button>
-          ${src === 'ebay'
-          ? '<button class="btn btn-outline" onclick="bulkPull(this)">⟳ Pull eBay listings</button>'
-          : '<button class="btn btn-outline" onclick="loadBulkShopify(true)">⟳ Refresh Shopify products</button>'}</div>
+        <div class="actions">${src === 'ebay'
+          ? '<button class="btn btn-primary" onclick="bulkPull(this)">⟳ Pull eBay listings</button>'
+          : '<button class="btn btn-primary" onclick="loadBulkShopify(true)">⟳ Refresh Shopify products</button>'}</div>
       </div>
-
-      <div class="card" style="margin-bottom:14px"><div class="card-body" style="font-size:12.5px;line-height:1.8">
-        <strong>Two separate channels</strong>, both driven by the <strong>Warehouse</strong> (master for SKU / price / stock):<br>
-        <span style="color:var(--ink-soft)"><strong>eBay</strong> — your live eBay listings; the source for titles, specifics, images &amp; descriptions. &nbsp;·&nbsp; <strong>Shopify</strong> — a separate storefront the warehouse keeps in step.</span><br>
-        <span style="display:inline-block;margin-top:6px"><strong>Actions —</strong>
-        ${chip('var(--blue-light)', 'var(--blue)', '⟳ Pull eBay')} read your live eBay listings ·
-        ${chip('var(--green-light)', 'var(--green)', '→ Shopify')} create / update the matching Shopify product ·
-        ${chip('var(--amber-light)', 'var(--amber)', '→ eBay')} push changes back to the live eBay listing.</span>
-      </div></div>
 
       <div class="seg" style="margin-bottom:14px">
-        <button class="${src === 'ebay' ? 'active' : ''}" onclick="bulkSource('ebay')">⬅ Export FROM eBay → Shopify</button>
-        <button class="${src === 'shopify' ? 'active' : ''}" onclick="bulkSource('shopify')">Export FROM Shopify → eBay ➡</button>
+        <button class="${src === 'ebay' ? 'active' : ''}" onclick="bulkSource('ebay')">eBay → Shopify</button>
+        <button class="${src === 'shopify' ? 'active' : ''}" onclick="bulkSource('shopify')">Shopify → eBay</button>
       </div>
+
+      <div class="card" style="margin-bottom:14px"><div class="card-body" style="font-size:12.5px;line-height:1.7">
+        ${src === 'ebay'
+          ? `<strong>eBay → Shopify.</strong> Your live <strong>eBay</strong> listings — push them to <strong>Shopify</strong> (or link to an existing Shopify product).`
+          : `<strong>Shopify → eBay.</strong> Your <strong>Shopify</strong> products not yet on eBay — <strong>create them on eBay</strong> (or link an existing eBay listing).`}
+        <span style="color:var(--ink-soft)"> Once linked or created, a <strong>warehouse entry</strong> is made and becomes the master (SKU / price / stock). To build a brand-new product, use <a href="#" onclick="openCreateListing();return false" style="color:var(--brand-primary);font-weight:600">Create listing</a>.</span>
+      </div></div>
 
       ${src === 'shopify' ? `<div id="bulk-shopify"></div>` : `
       <div id="bulk-empty"></div>
