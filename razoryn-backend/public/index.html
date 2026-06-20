@@ -1060,7 +1060,7 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
           Competitors
         </button>
-        <button class="nav-item admin-only" data-action="create-listing">
+        <button class="nav-item admin-only" data-page="createlisting">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           Create listing
         </button>
@@ -2489,6 +2489,7 @@ function hasPerm(page) {
     labels:       false,
     mirror:       false,
     bundles:      false,
+    createlisting: false,
     staff:        false,
     settings:     false,
   };
@@ -2536,7 +2537,7 @@ function routeTo(page) {
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror, bulk: renderBulkEditor,
     activity: renderActivity, pricingrules: renderPricingRules,
     labels: renderLabels, notes: renderNotes, dispatch: renderDispatch,
-    competitors: renderCompetitors, bundles: renderBundles
+    competitors: renderCompetitors, bundles: renderBundles, createlisting: renderCreateListing
   };
   try {
     (pages[page] || renderDashboard)();
@@ -10134,51 +10135,54 @@ function clPct() {
   const c = State.pricingConfig || {};
   return c.priceLinkPct != null ? c.priceLinkPct : (c.bankTransferPct != null ? c.bankTransferPct : 10);
 }
-async function openCreateListing() {
-  CL.categoryId = ''; CL.categoryName = ''; CL.defs = []; CL._catResults = []; CL.images = [];
-  try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) {}
-  modal({
-    title: 'Create listing', wide: true, body: clBody(),
-    actions: [
-      { label: 'Cancel', onClick: closeModal },
-      { label: 'Create & continue to eBay', primary: true, onClick: submitCreateListing },
-    ],
-  });
-  setTimeout(() => { const i = el('cl-sku'); if (i) i.focus(); }, 60);
+// Entry point (nav item / links) → the full unified Create-listing PAGE.
+function openCreateListing() { routeTo('createlisting'); }
+
+// Unified page: Warehouse + Shopify panel on the left, the FULL eBay listing form
+// (reused from openCreateEbayListing in draft mode) on the right. One submit
+// creates the warehouse product, pushes it to Shopify, then creates the eBay
+// listing using the eBay panel's fields.
+async function renderCreateListing() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Create listing</h1><div class="desc">Build a new product in the Warehouse (master) and push it to Shopify + eBay in one go. eBay price is the master; Shopify = eBay − [%].</div></div>
+        <div class="actions">
+          <button class="btn btn-outline" onclick="routeTo('mirror')">Cancel</button>
+          <button class="btn btn-primary" onclick="submitUnifiedCreate(this)">Create &amp; push everywhere</button>
+        </div>
+      </div>
+      <div class="grid-2" style="align-items:start;gap:16px">
+        <div class="card"><div class="card-head"><h3>Warehouse &amp; Shopify</h3></div><div class="card-body" id="cl-core"></div></div>
+        <div class="card"><div class="card-head"><h3>eBay listing</h3></div><div class="card-body" id="cl-ebay-panel"><div class="empty" style="padding:18px"><div class="t">Loading eBay form…</div></div></div></div>
+      </div>
+    </div>`;
+  try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (_) {}
+  CL.categoryId = ''; CL.categoryName = ''; CL._catResults = []; CL.images = [];
+  try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
+  if (el('cl-core')) { el('cl-core').innerHTML = clCoreHtml(); clRenderPhotos(); }
+  // Render the full eBay form (draft mode) into the right panel.
+  openCreateEbayListing(null, { draft: true, container: 'cl-ebay-panel', draftProduct: { id: null, title: '', sku: '', qty_on_hand: 1, brand: '', model: '', part_number: '', shopify_product_id: null } });
+  // Keep the derived Shopify price in sync with the eBay price field.
+  setTimeout(() => { const p = el('ce-price'); if (p) p.addEventListener('input', clUpdateDerivedFromEbay); clUpdateDerivedFromEbay(); }, 120);
 }
-function clSection(color, label) {
-  return `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:${color};margin:4px 0 8px">${label}</div>`;
-}
-function clBody() {
+function clCoreHtml() {
   const pct = clPct();
   return `
-    <div style="font-size:12px;color:var(--ink-soft);margin-bottom:12px">The <strong>Warehouse is the master</strong>. Set the <strong>eBay price</strong>; Shopify is auto-set to eBay − ${pct}%. On <em>Create</em>, the warehouse + Shopify product are made, then the full <strong>eBay listing form</strong> opens pre-filled to finish the eBay side.</div>
-
-    ${clSection('var(--blue)', '1 · eBay & core (price is the master)')}
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-      <div class="field"><label>SKU *</label><input id="cl-sku" style="font-family:ui-monospace,monospace" placeholder="e.g. 7450B289" autocomplete="off"></div>
-      <div class="field"><label>Title *</label><input id="cl-title" placeholder="e.g. Mitsubishi Outlander 2018-2024 Front Grille"></div>
-    </div>
-    <div class="field"><label>Description</label><textarea id="cl-desc" rows="3" placeholder="Used on Shopify; the eBay step can reuse it or apply a template"></textarea></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
-      <div class="field"><label>eBay price (£) *</label><input id="cl-ebay" type="number" min="0" step="0.01" oninput="clUpdateDerived()"></div>
-      <div class="field"><label>Shopify price (auto −${pct}%)</label><input id="cl-shop" disabled style="background:var(--bg-soft)"></div>
-      <div class="field"><label>Initial stock</label><input id="cl-qty" type="number" min="0" step="1" value="0"></div>
-    </div>
+    <div class="field"><label>SKU *</label><input id="cl-sku" style="font-family:ui-monospace,monospace" placeholder="e.g. 7450B289" autocomplete="off"></div>
     <div class="field"><label>Photos</label>
       <input type="file" id="cl-photo-file" accept="image/*" multiple onchange="clAddPhotos(this)" style="font-size:12px">
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Uploaded to Shopify and reused on the eBay listing.</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Uploaded to Shopify; the same photos are reused on the eBay listing.</div>
       <div id="cl-photos" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"></div>
-      <details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px;color:var(--brand-primary)">…or paste image URLs</summary>
-        <textarea id="cl-images" rows="2" placeholder="https://… (one per line)" style="margin-top:6px"></textarea></details>
     </div>
-
-    <div style="border-top:1px solid var(--line);margin:16px 0 12px"></div>
-    ${clSection('var(--green)', '2 · Shopify')}
+    <div class="field"><label>Shopify price <span style="color:var(--ink-soft);font-weight:400">— auto eBay − ${pct}%</span></label>
+      <input id="cl-shop" disabled style="background:var(--bg-soft)" placeholder="set the eBay price in the eBay panel →"></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Tags (comma-separated)</label><input id="cl-tags" placeholder="MO18, grille"></div>
       <div class="field"><label>Shopify status</label><select id="cl-status"><option value="draft">Draft</option><option value="active">Active</option></select></div>
     </div>
+    <div class="field"><label>Shopify title <span style="color:var(--ink-soft);font-weight:400">— blank = same as eBay title</span></label><input id="cl-title" placeholder="(optional)"></div>
+    <div class="field"><label>Shopify description <span style="color:var(--ink-soft);font-weight:400">— blank = same as eBay</span></label><textarea id="cl-desc" rows="3"></textarea></div>
     <div class="field"><label>Shopify category</label>
       <div id="cl-cat-current" style="font-size:12px;margin-bottom:4px">${CL.categoryName ? '✓ ' + escapeHtml(CL.categoryName) : '<span style="color:var(--ink-soft)">None selected</span>'}</div>
       <input id="cl-cat-search" placeholder="Search categories (e.g. grille, headlight)…" autocomplete="off" oninput="clSearchCats(this.value)">
@@ -10188,6 +10192,56 @@ function clBody() {
       <div id="cl-mf-list"></div>
       ${CL.defs.length ? '<button type="button" class="btn btn-outline btn-sm" onclick="clAddMf()" style="margin-top:6px">+ Add metafield</button>' : ''}
     </div>`;
+}
+function clUpdateDerivedFromEbay() {
+  const eb = parseFloat(el('ce-price')?.value) || 0;
+  const o = el('cl-shop'); if (o) o.value = eb ? '£' + (eb * (1 - clPct() / 100)).toFixed(2) : '';
+}
+async function submitUnifiedCreate(btn) {
+  const sku = (el('cl-sku')?.value || '').trim();
+  const ebayTitle = (el('ce-title')?.value || '').trim();
+  const shopTitle = (el('cl-title')?.value || '').trim() || ebayTitle;
+  const ebayPrice = parseFloat(el('ce-price')?.value);
+  if (!sku) { toast('SKU is required', 'warn'); return; }
+  if (!ebayTitle) { toast('Enter the eBay title (it also becomes the Shopify title unless you set one)', 'warn'); return; }
+  if (isNaN(ebayPrice) || ebayPrice < 0) { toast('Set the eBay price in the eBay panel', 'warn'); return; }
+  const metafields = [...document.querySelectorAll('#cl-mf-list .cl-mf-row')].map(r => {
+    const parts = (r.querySelector('.cl-mf-def')?.value || '').split('|');
+    const value = (r.querySelector('.cl-mf-val')?.value || '').trim();
+    return (parts[0] && parts[1] && value) ? { namespace: parts[0], key: parts[1], type: parts[2] || 'single_line_text_field', value } : null;
+  }).filter(Boolean);
+
+  if (btn) btn.disabled = true;
+  const taskId = Task.start('Creating warehouse + Shopify…');
+  let created;
+  try {
+    created = await Api.post('/api/listings/create-listing', {
+      sku, title: shopTitle,
+      description: (el('cl-desc')?.value || '').trim() || null,
+      ebayPrice, qty: parseInt(el('ce-qty')?.value) || 0,
+      tags: (el('cl-tags')?.value || '').trim() || null,
+      status: el('cl-status')?.value || 'draft',
+      imagesBase64: CL.images || [],
+      categoryId: CL.categoryId || null,
+      metafields,
+    });
+    Task.done(taskId, 'Shopify created');
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    const m = e.data?.error === 'sku_exists' ? 'A product with that SKU already exists.' : (e.data?.message || e.message);
+    toast('Create failed: ' + m, 'error', 8000);
+    if (btn) btn.disabled = false;
+    return;
+  }
+  await Store.refresh('products').catch(() => {});
+  // Now create the eBay listing from the eBay panel's fields, linked to the new product.
+  if (el('ce-product-number')) el('ce-product-number').value = created.shopifyProductId || '';
+  State._ceCtx = State._ceCtx || {};
+  State._ceCtx.product = { id: created.productId, title: shopTitle, sku, shopify_product_id: created.shopifyProductId };
+  await submitCreateEbayListing(created.productId, {
+    onSuccess: (r) => { toast(`✓ Listed everywhere — eBay ItemID ${r.itemId}`, 'success', 8000); routeTo('mirror'); },
+  });
+  if (btn) btn.disabled = false;
 }
 function clRenderPhotos() {
   const wrap = el('cl-photos'); if (!wrap) return;
@@ -10252,49 +10306,6 @@ function clAddMf() {
     <button type="button" class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="this.closest('.cl-mf-row').remove()">×</button>`;
   wrap.appendChild(row);
 }
-async function submitCreateListing() {
-  const sku = (el('cl-sku')?.value || '').trim();
-  const title = (el('cl-title')?.value || '').trim();
-  const ebayPrice = parseFloat(el('cl-ebay')?.value);
-  if (!sku || !title) { toast('SKU and title are required', 'warn'); return; }
-  if (isNaN(ebayPrice) || ebayPrice < 0) { toast('Enter a valid eBay price', 'warn'); return; }
-  const metafields = [...document.querySelectorAll('#cl-mf-list .cl-mf-row')].map(r => {
-    const parts = (r.querySelector('.cl-mf-def')?.value || '').split('|');
-    const value = (r.querySelector('.cl-mf-val')?.value || '').trim();
-    return (parts[0] && parts[1] && value) ? { namespace: parts[0], key: parts[1], type: parts[2] || 'single_line_text_field', value } : null;
-  }).filter(Boolean);
-  const payload = {
-    sku, title,
-    description: (el('cl-desc')?.value || '').trim() || null,
-    ebayPrice,
-    qty: parseInt(el('cl-qty')?.value) || 0,
-    tags: (el('cl-tags')?.value || '').trim() || null,
-    status: el('cl-status')?.value || 'draft',
-    imageUrls: (el('cl-images')?.value || '').split(/\n+/).map(s => s.trim()).filter(Boolean),
-    imagesBase64: CL.images || [],
-    categoryId: CL.categoryId || null,
-    metafields,
-  };
-  const taskId = Task.start('Creating listing…');
-  try {
-    const r = await Api.post('/api/listings/create-listing', payload);
-    Task.done(taskId, 'Created');
-    closeModal();
-    await Store.refresh('products').catch(() => {});
-    let msg = `Created ${sku} — Shopify ${gbp(r.shopifyPrice)}${r.shopifyProductId ? ' ✓' : ' (Shopify skipped)'}`;
-    if (r.metafieldIssues && r.metafieldIssues.length) msg += ` · ${r.metafieldIssues.length} metafield issue(s)`;
-    toast(msg, (r.metafieldIssues && r.metafieldIssues.length) ? 'warn' : 'success', 7000);
-    // Continue straight into the proven eBay-create flow, pre-filled from the new product.
-    if (confirm('Shopify listing created. Create the eBay listing now?')) openCreateEbayListing(r.productId);
-  } catch (e) {
-    Task.fail(taskId, 'Failed');
-    const msg = e.data?.error === 'sku_exists' ? 'A product with that SKU already exists.'
-      : e.data?.error === 'shopify_create_failed' ? ('Shopify rejected it: ' + (e.data?.message || ''))
-      : (e.data?.message || e.message);
-    toast('Create failed: ' + msg, 'error');
-  }
-}
-
 // "From Shopify → eBay" tab: lists products that are on Shopify but NOT yet on
 // eBay (ready to export), each with the existing "+ Create on eBay" / "Link
 // existing" actions. Reuses the link-status data.
@@ -11400,16 +11411,19 @@ function renderOrphanMirrors(orphans) {
 // Business policies + location come from settings — the modal shows a hint
 // pointing the user to Settings if any are missing.
 // ──────────────────────────────────────────────────────────────────────────
-async function openCreateEbayListing(productId) {
-  // Find the product in the "By warehouse product" cache, else fetch it directly
-  // so this works from the "All listings" reconcile view too.
-  let product = State.linkStatus?.products?.find(p => p.id === productId);
-  if (!product) {
-    try { const r = await Api.get('/api/products/' + productId); product = r.product || r; }
-    catch (e) { /* fall through to the error below */ }
+async function openCreateEbayListing(productId, opts = {}) {
+  // Draft mode (unified Create-listing page): no product yet — render the same
+  // form with a synthetic product so all eBay fields are available up-front.
+  let product = opts.draftProduct || null;
+  if (!product && productId != null) {
+    product = State.linkStatus?.products?.find(p => p.id === productId);
+    if (!product) {
+      try { const r = await Api.get('/api/products/' + productId); product = r.product || r; }
+      catch (e) { /* fall through to the error below */ }
+    }
   }
   if (!product) { toast('Product not found', 'error'); return; }
-  if (!product.shopify_product_id) { toast('This product isn’t linked to Shopify yet — link it first, then create the eBay listing.', 'warn', 8000); return; }
+  if (!opts.draft && !product.shopify_product_id) { toast('This product isn’t linked to Shopify yet — link it first, then create the eBay listing.', 'warn', 8000); return; }
 
   // Always pull the latest pricing config so the modal reflects saved templates
   // and defaults — a cached copy can predate the user's most recent Settings
@@ -11435,13 +11449,11 @@ async function openCreateEbayListing(productId) {
   // Strip currency symbols if the row already has gbp-formatted text.
   const suggestedPrice = (product.shopify_price || product.price_shopify || 0).toString().replace(/[^\d.]/g, '') || '';
 
-  modal({
-    title: 'Create eBay listing',
-    body: `
-      <div style="font-size:13px;background:var(--bg-soft);padding:10px 12px;border-radius:6px;margin-bottom:12px">
+  const ceBodyHtml = `
+      ${opts.draft ? '' : `<div style="font-size:13px;background:var(--bg-soft);padding:10px 12px;border-radius:6px;margin-bottom:12px">
         <div><strong>${escapeHtml(product.title || product.sku)}</strong></div>
         <div style="font-size:11px;color:var(--ink-soft);margin-top:2px;font-family:ui-monospace,monospace">${escapeHtml(product.sku)}</div>
-      </div>
+      </div>`}
       ${storeSelector}
       <div class="field">
         <label>Title (max 80 chars) <span id="ce-title-count" style="font-size:11px;color:var(--ink-soft);float:right">0/80</span></label>
@@ -11547,12 +11559,21 @@ async function openCreateEbayListing(productId) {
         <input type="checkbox" id="ce-preview">
         Preview only — validate &amp; show fees without creating a live listing
       </label>
-    `,
-    actions: [
-      { label: 'Cancel', onClick: closeModal },
-      { label: 'Create listing', primary: true, onClick: () => submitCreateEbayListing(productId) },
-    ],
-  });
+    `;
+  // Render into the unified page's container, or as a standalone modal.
+  if (opts.container) {
+    const c = el(opts.container);
+    if (c) c.innerHTML = ceBodyHtml;
+  } else {
+    modal({
+      title: 'Create eBay listing',
+      body: ceBodyHtml,
+      actions: [
+        { label: 'Cancel', onClick: closeModal },
+        { label: 'Create listing', primary: true, onClick: () => submitCreateEbayListing(productId) },
+      ],
+    });
+  }
   // Context for the dynamic specifics loader (used by global handlers).
   State._ceCtx = { product, cfg };
   ceApplyTemplate(product, cfg);
@@ -11863,7 +11884,7 @@ async function ceCalcEbayPrice(btn) {
   toast(`eBay price = £${shopifyPrice.toFixed(2)} + ${pct}% = £${ebayPrice.toFixed(2)}`, 'success', 2500);
 }
 
-async function submitCreateEbayListing(productId) {
+async function submitCreateEbayListing(productId, opts = {}) {
   const storeCode = el('ce-store')?.value;
   const title     = (el('ce-title')?.value || '').trim();
   const categoryId = (el('ce-category')?.value || '').trim();
@@ -11933,14 +11954,14 @@ async function submitCreateEbayListing(productId) {
       return;
     }
     Task.done(taskId, 'Listed');
-    closeModal();
     toast(`✓ Created on eBay — ItemID ${r.itemId}`, 'success', 8000);
     // Surface promoted-listing outcome (best-effort on the server).
     if (r.promotion) {
       if (r.promotion.ok) toast(`✓ Promoted at ${r.promotion.bidPercent}% ad rate`, 'success', 6000);
       else toast(`Listing is live, but promotion didn’t apply: ${r.promotion.message}`, 'warn', 11000);
     }
-    // Reload listing mirror to reflect the new link
+    if (opts.onSuccess) { opts.onSuccess(r); return; }
+    closeModal();
     // Refresh whichever Listing Links view is open so the new eBay link shows.
     if ((State.linkView || 'all') === 'all') loadReconcile(true);
     else if (typeof refreshLinkStatus === 'function') await refreshLinkStatus();
