@@ -144,6 +144,16 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
     return { created, restocked, totalRefund: +totalRefund.toFixed(2) };
   });
   await audit(req, 'return_from_sale', 'sale', b.saleId, result);
+  // Forward refunds of our own direct bank/cash sales to the Invoice Hub so its
+  // books and VAT stay correct (cash refunds, like cash sales, stay internal /
+  // owner-only on the Hub side). Out-of-scope sales (eBay/Shopify/card) are a
+  // no-op inside pushRefund. Best-effort, idempotent.
+  if (b.markSaleRefunded || result.totalRefund > 0) {
+    const invoiceHub = require('../services/invoiceHub');
+    if (invoiceHub.isInScope(sale.channel)) {
+      setImmediate(() => invoiceHub.pushRefund(sale.id).catch(e => console.warn('[invoiceHub] refund push failed:', e.message)));
+    }
+  }
   res.json({ ok: true, ...result });
 });
 
