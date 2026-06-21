@@ -183,6 +183,83 @@ async function pushRefund(saleId) {
   }
 }
 
+// Config/status for the UI: is the integration wired, and which company does
+// this deployment post as.
+function status() {
+  return { configured: hub.isConfigured(), company: hub.companyName() };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Backfill a month of historical direct cash/bank sales. Shared by the CLI
+// script and the admin "Backfill to Invoice Hub" button. Returns a plain
+// summary object (no throwing) so the route can hand it straight to the client.
+//   month: "YYYY-MM"; dryRun: list only; withRefunds: also push REFUND events.
+// ──────────────────────────────────────────────────────────────────────────
+async function backfillMonth({ month, dryRun = false, withRefunds = false } = {}) {
+  if (!hub.isConfigured()) {
+    return { ok: false, error: 'not_configured',
+             message: 'Invoice Hub not configured (INVOICE_HUB_URL / INVOICE_HUB_SECRET unset on this service).' };
+  }
+  const m = /^(\d{4})-(\d{2})$/.exec(String(month || '').trim());
+  if (!m) return { ok: false, error: 'bad_month', message: 'Month must be in YYYY-MM format (e.g. 2026-06).' };
+  const year = +m[1], mon = +m[2];
+  if (mon < 1 || mon > 12) return { ok: false, error: 'bad_month', message: 'Month must be 01–12.' };
+
+  await ensureInvoiceHubColumns();
+  // paid_at is added by the sales route at runtime; ensure it exists for the filter.
+  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ`).catch(() => {});
+
+  const start = new Date(Date.UTC(year, mon - 1, 1));
+  const end = new Date(Date.UTC(year, mon, 1)); // exclusive
+
+  const { rows } = await query(
+    `SELECT id, channel, status, total, customer_name,
+            COALESCE(paid_at, occurred_at) AS pay_date
+       FROM sales
+      WHERE channel = ANY($1)
+        AND is_estimate = false
+        AND status NOT IN ('pending','cancelled')
+        AND COALESCE(paid_at, occurred_at) >= $2
+        AND COALESCE(paid_at, occurred_at) <  $3
+      ORDER BY COALESCE(paid_at, occurred_at)`,
+    [IN_SCOPE_CHANNELS, start, end]
+  );
+
+  const summary = {
+    ok: true, month, company: hub.companyName(), dryRun, withRefunds,
+    found: rows.length,
+    bank: rows.filter(r => r.channel === 'direct_bank').length,
+    cash: rows.filter(r => r.channel === 'direct_cash').length,
+    saleOk: 0, saleErr: 0, refundOk: 0, refundErr: 0, errors: [],
+  };
+
+  if (dryRun || !rows.length) {
+    summary.preview = rows.map(r => ({
+      id: r.id, channel: r.channel, total: Number(r.total),
+      date: r.pay_date.toISOString().slice(0, 10),
+      customer: r.customer_name || null, refunded: r.status === 'refunded',
+    }));
+    return summary;
+  }
+
+  for (const r of rows) {
+    await pushSale(r.id);
+    const st = await query(
+      `SELECT invoice_hub_push_state AS s, invoice_hub_push_error AS e FROM sales WHERE id = $1`, [r.id]);
+    if (st.rows[0]?.s === 'ok') summary.saleOk++;
+    else { summary.saleErr++; summary.errors.push({ id: r.id, type: 'sale', error: st.rows[0]?.e || st.rows[0]?.s || 'unknown' }); }
+
+    if (withRefunds && r.status === 'refunded') {
+      await pushRefund(r.id);
+      const rst = await query(
+        `SELECT invoice_hub_refund_state AS s, invoice_hub_refund_error AS e FROM sales WHERE id = $1`, [r.id]);
+      if (rst.rows[0]?.s === 'ok') summary.refundOk++;
+      else { summary.refundErr++; summary.errors.push({ id: r.id, type: 'refund', error: rst.rows[0]?.e || rst.rows[0]?.s || 'unknown' }); }
+    }
+  }
+  return summary;
+}
+
 module.exports = {
   IN_SCOPE_CHANNELS,
   isInScope,
@@ -190,4 +267,6 @@ module.exports = {
   ensureInvoiceHubColumns,
   pushSale,
   pushRefund,
+  status,
+  backfillMonth,
 };

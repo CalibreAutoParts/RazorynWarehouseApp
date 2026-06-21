@@ -15145,6 +15145,23 @@ function renderSettings() {
       </div>
 
       <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>Invoice Hub</h3>
+          <div class="card-desc">Send this company's direct <strong>cash</strong> and <strong>bank transfer</strong> sales to the Invoice &amp; VAT Hub. eBay, Shopify and card (Stripe) are excluded — those are reconciled from their own statements.</div>
+        </div>
+        <div class="card-body">
+          <div id="invoicehub-status" style="font-size:12px;color:var(--ink-soft);margin-bottom:12px">Checking connection…</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <label style="font-size:13px">Month <input type="month" id="invoicehub-month" style="width:auto;display:inline-block"></label>
+            <button class="btn btn-outline" onclick="invoiceHubBackfill(true)">👁 Preview</button>
+            <button class="btn btn-primary" onclick="invoiceHubBackfill(false)">⇪ Backfill to Invoice Hub</button>
+            <button class="btn btn-outline" onclick="invoiceHubTest()">🔌 Test connection</button>
+          </div>
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:10px">Safe to re-run — the Hub updates existing records instead of duplicating. Use <strong>Preview</strong> first to see exactly what will be sent. Cash sales stay internal (out of the VAT return).</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>Knowledge base visibility</h3></div>
         <div class="card-body">
           <div class="perm-row">
@@ -15161,6 +15178,7 @@ function renderSettings() {
   loadTrackingSettings();
   loadBackInStockCount();
   loadEbayTemplate();
+  loadInvoiceHubStatus();
 }
 
 let _ebayTplDefaults = null;
@@ -16638,6 +16656,60 @@ async function backfillVat() {
   } catch (e) {
     Task.fail(taskId, 'Recompute failed');
     toast('Failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
+
+// ---- Invoice Hub (Settings card) ----
+async function loadInvoiceHubStatus() {
+  const node = el('invoicehub-status');
+  if (!node) return;
+  // Default the month picker to the current month.
+  const mInput = el('invoicehub-month');
+  if (mInput && !mInput.value) mInput.value = new Date().toISOString().slice(0, 7);
+  try {
+    const s = await Api.get('/api/sales/invoice-hub/status');
+    node.innerHTML = s.configured
+      ? `✓ Connected — posting as <strong>${s.company || '(company unset)'}</strong>.`
+      : '⚠ Not configured — set INVOICE_HUB_URL and INVOICE_HUB_SECRET on this Railway service.';
+  } catch (e) {
+    node.textContent = 'Could not check Invoice Hub status.';
+  }
+}
+
+async function invoiceHubBackfill(dryRun) {
+  const month = (el('invoicehub-month') && el('invoicehub-month').value) || '';
+  if (!month) { toast('Pick a month first.', 'error'); return; }
+  if (!dryRun && !confirm(`Send all direct cash & bank transfer sales from ${month} to the Invoice Hub?\n\nSafe to re-run — existing records are updated, not duplicated.`)) return;
+  const taskId = Task.start(dryRun ? `Previewing ${month}` : `Backfilling ${month} to Invoice Hub`);
+  try {
+    const r = await Api.post('/api/sales/invoice-hub/backfill', { month, dryRun });
+    if (!r.ok) { Task.fail(taskId, 'Failed'); toast(r.message || 'Backfill failed.', 'error', 7000); return; }
+    if (dryRun) {
+      Task.done(taskId, `${r.found} found`);
+      toast(`${month}: ${r.found} sale(s) would be sent — ${r.bank} bank, ${r.cash} cash. Click “Backfill to Invoice Hub” to send them.`, 'success', 8000);
+    } else {
+      Task.done(taskId, `${r.saleOk} sent`);
+      let msg = `${month}: sent ${r.saleOk} of ${r.found} sale(s) to ${r.company}.`;
+      if (r.saleErr) msg += `\n⚠ ${r.saleErr} failed — check the Railway logs.`;
+      toast(msg, r.saleErr ? 'error' : 'success', 8000);
+    }
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Failed: ' + (e.data?.message || e.message), 'error', 7000);
+  }
+}
+
+async function invoiceHubTest() {
+  const taskId = Task.start('Testing Invoice Hub connection');
+  try {
+    const s = await Api.get('/api/sales/invoice-hub/status');
+    Task.done(taskId, s.configured ? 'Connected' : 'Not configured');
+    if (s.configured) toast(`Connected to the Invoice Hub — posting as ${s.company || '(company unset)'}.`, 'success', 5000);
+    else toast('Not configured — set INVOICE_HUB_URL and INVOICE_HUB_SECRET on this Railway service.', 'error', 7000);
+    loadInvoiceHubStatus();
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Test failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 

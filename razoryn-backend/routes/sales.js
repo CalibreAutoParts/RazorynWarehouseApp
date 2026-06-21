@@ -359,6 +359,31 @@ router.get('/export.xlsx', requireAdmin, async (req, res) => {
   res.send(buf);
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// Invoice Hub — admin tools (registered before /:id so the literal paths win).
+// GET  /api/sales/invoice-hub/status   — is it configured + which company.
+// POST /api/sales/invoice-hub/backfill — { month:"YYYY-MM", dryRun?, withRefunds? }
+//   Backfills past direct cash/bank sales. Powers the Settings button so a
+//   one-off catch-up needs no terminal. Idempotent on the Hub side.
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/invoice-hub/status', requireAdmin, async (req, res) => {
+  res.json(require('../services/invoiceHub').status());
+});
+
+router.post('/invoice-hub/backfill', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const result = await require('../services/invoiceHub').backfillMonth({
+    month: b.month,
+    dryRun: !!b.dryRun,
+    withRefunds: !!b.withRefunds,
+  });
+  if (!result.dryRun && result.ok) {
+    await audit(req, 'invoice_hub_backfill', 'sale', null,
+      { month: result.month, found: result.found, saleOk: result.saleOk, saleErr: result.saleErr });
+  }
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
 // GET /api/sales/:id
 router.get('/:id', requireAdmin, async (req, res, next) => {
   // Sale ids are numeric. Let non-numeric paths (e.g. /vat-report, /vat-report.csv)
