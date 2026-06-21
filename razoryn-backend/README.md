@@ -275,6 +275,65 @@ The breakdown:
 
 ---
 
+## Invoice Hub integration & backdating
+
+This deployment forwards its **own direct sales** into the Razoryn Invoice &
+VAT Hub so they land in the right company's books with VAT worked out. One
+warehouse Railway service runs per company, so the target company comes from a
+per-deployment env var — not a per-order field.
+
+**Scope (deliberately narrow):**
+- `direct_bank` → `BANK_TRANSFER` (normal VAT)
+- `direct_cash` → `CASH` (Hub keeps these internal / owner-only, out of the VAT return)
+- eBay, Shopify and card/Stripe are **not** pushed — those are reconciled by
+  uploading the platforms' own statements (which already net off their fees), so
+  auto-posting here would double-count them.
+
+**Env vars (per Railway service):**
+
+| Var | Value |
+|-----|-------|
+| `INVOICE_HUB_URL` | `https://razoryninvoice-production.up.railway.app` |
+| `INVOICE_HUB_SECRET` | same as the Hub's `INTEGRATION_WEBHOOK_SECRET` |
+| `INVOICE_HUB_COMPANY` | `"Razoryn EParts"` or `"Calibre Auto Parts"` (per service) |
+
+Leave URL/secret blank to disable (pushes become a no-op). Outcomes are recorded
+on the sale row (`invoice_hub_push_state` / `_error`) and are retryable via
+`POST /api/sales/:id/retry-invoice-push`. The Hub is idempotent on
+`(company + externalId)`, so retries never duplicate.
+
+**Verify a deploy without a real order:**
+
+```bash
+railway run node scripts/test-invoice-hub.js          # posts one "SELF-TEST" row (delete it after)
+```
+
+**Backdating past sales (the integration does NOT backfill on its own):**
+
+```bash
+railway run node scripts/backfill-invoice-hub.js --dry-run         # list June 2026, send nothing
+railway run node scripts/backfill-invoice-hub.js                   # push June 2026 cash + bank sales
+railway run node scripts/backfill-invoice-hub.js --month 2026-07   # a different month
+railway run node scripts/backfill-invoice-hub.js --with-refunds    # also push refunds
+```
+
+Run it once per company (each service posts under its own `INVOICE_HUB_COMPANY`).
+It selects paid, non-estimate `direct_cash` / `direct_bank` sales by payment
+date and pushes each through the same idempotent path as live events, so it's
+safe to re-run.
+
+**VAT-quarter tip:** these businesses are on the HMRC **March stagger**
+(Mar–May, Jun–Aug, Sep–Nov, Dec–Feb). To backfill a whole quarter, run the
+script for each of its three months — e.g. the Jun–Aug quarter:
+
+```bash
+railway run node scripts/backfill-invoice-hub.js --month 2026-06
+railway run node scripts/backfill-invoice-hub.js --month 2026-07
+railway run node scripts/backfill-invoice-hub.js --month 2026-08
+```
+
+---
+
 ## API surface (cheat sheet)
 
 All endpoints are JSON. Auth is JWT — sent as a `rzn_token` cookie or as

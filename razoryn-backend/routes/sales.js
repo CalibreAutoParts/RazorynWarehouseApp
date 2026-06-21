@@ -556,6 +556,16 @@ router.post('/', requireAdmin, async (req, res) => {
       sync.pushStockForSaleItems(result.items).catch(e => console.warn('[sync] push failed:', e.message));
     });
   }
+  // Forward our own direct bank/cash sales to the Invoice Hub (best-effort).
+  // Only paid, non-estimate, in-scope sales — eBay/Shopify/card are excluded
+  // (reconciled via platform statement uploads). A pending invoice is pushed
+  // later when it's marked paid.
+  if (!isEstimate && isPaid) {
+    const invoiceHub = require('../services/invoiceHub');
+    if (invoiceHub.isInScope(result.sale.channel)) {
+      setImmediate(() => invoiceHub.pushSale(result.sale.id).catch(e => console.warn('[invoiceHub] push failed:', e.message)));
+    }
+  }
   res.status(201).json(result);
 });
 
@@ -564,7 +574,7 @@ router.post('/', requireAdmin, async (req, res) => {
 // flips the payment state — no inventory change.
 router.post('/:id/mark-paid', requireAdmin, async (req, res) => {
   await ensurePaidColumn();
-  const s = await query(`SELECT id, is_estimate, status FROM sales WHERE id = $1`, [req.params.id]);
+  const s = await query(`SELECT id, is_estimate, status, channel FROM sales WHERE id = $1`, [req.params.id]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   if (s.rows[0].is_estimate) return res.status(400).json({ error: 'is_estimate', message: 'Use “Mark paid” on the estimate to convert it to an invoice.' });
   const newStatus = (s.rows[0].status === 'pending') ? 'paid' : s.rows[0].status;
@@ -576,6 +586,14 @@ router.post('/:id/mark-paid', requireAdmin, async (req, res) => {
     `UPDATE sales SET is_paid = true, paid_at = COALESCE($3, now()), status = $2 WHERE id = $1 RETURNING *`,
     [req.params.id, newStatus, paidAt]);
   await audit(req, 'sale_mark_paid', 'sale', req.params.id, { paidAt: paidAt || 'now' });
+  // A pending direct bank/cash invoice has now been paid → forward it to the
+  // Invoice Hub (best-effort; idempotent on the Hub side).
+  {
+    const invoiceHub = require('../services/invoiceHub');
+    if (invoiceHub.isInScope(s.rows[0].channel)) {
+      setImmediate(() => invoiceHub.pushSale(req.params.id).catch(e => console.warn('[invoiceHub] push failed:', e.message)));
+    }
+  }
   res.json({ ok: true, sale: upd.rows[0] });
 });
 
@@ -588,6 +606,24 @@ router.post('/:id/mark-unpaid', requireAdmin, async (req, res) => {
   const upd = await query(`UPDATE sales SET is_paid = false, paid_at = NULL WHERE id = $1 RETURNING *`, [req.params.id]);
   await audit(req, 'sale_mark_unpaid', 'sale', req.params.id, null);
   res.json({ ok: true, sale: upd.rows[0] });
+});
+
+// POST /api/sales/:id/retry-invoice-push — manually re-send a direct bank/cash
+// sale (and any refund against it) to the Invoice Hub after a failed push.
+// Mirrors the dispatch "retry-push" button. Idempotent on the Hub side.
+router.post('/:id/retry-invoice-push', requireAdmin, async (req, res) => {
+  const invoiceHub = require('../services/invoiceHub');
+  const s = await query(`SELECT id, channel, status FROM sales WHERE id = $1`, [req.params.id]);
+  if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
+  if (!invoiceHub.isInScope(s.rows[0].channel)) {
+    return res.status(409).json({ error: 'out_of_scope', message: 'Only direct bank/cash sales are pushed to the Invoice Hub.' });
+  }
+  setImmediate(() => invoiceHub.pushSale(req.params.id).catch(e => console.warn('[invoiceHub.retry]', e.message)));
+  if (s.rows[0].status === 'refunded') {
+    setImmediate(() => invoiceHub.pushRefund(req.params.id).catch(e => console.warn('[invoiceHub.retry]', e.message)));
+  }
+  await audit(req, 'sale_retry_invoice_push', 'sale', req.params.id, null);
+  res.json({ ok: true, message: 'Retry queued — check back in a few seconds.' });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
