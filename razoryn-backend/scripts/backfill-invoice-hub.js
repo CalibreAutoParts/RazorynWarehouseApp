@@ -21,7 +21,7 @@
 //   railway run node scripts/backfill-invoice-hub.js --with-refunds  # also push refunds for refunded sales
 
 require('dotenv').config();
-const { pool, query } = require('../db');
+const { pool } = require('../db');
 const hub = require('../lib/pushToInvoiceHub');
 const invoiceHub = require('../services/invoiceHub');
 
@@ -33,87 +33,35 @@ const month = arg('month', '2026-06');           // YYYY-MM
 const dryRun = process.argv.includes('--dry-run');
 const withRefunds = process.argv.includes('--with-refunds');
 
-function monthBounds(m) {
-  const match = /^(\d{4})-(\d{2})$/.exec(m);
-  if (!match) throw new Error(`--month must be YYYY-MM (got "${m}")`);
-  const year = +match[1], mon = +match[2];
-  const start = new Date(Date.UTC(year, mon - 1, 1));
-  const end = new Date(Date.UTC(year, mon, 1));   // first day of next month (exclusive)
-  return { start, end };
-}
-
 async function run() {
-  if (!hub.isConfigured()) {
-    console.error('✗ Invoice Hub not configured (INVOICE_HUB_URL / INVOICE_HUB_SECRET unset).');
-    process.exit(1);
-  }
-  const { start, end } = monthBounds(month);
   console.log(`Backfill → Invoice Hub`);
   console.log(`  Company:  ${hub.companyName()}`);
-  console.log(`  Month:    ${month}  (payment date ${start.toISOString().slice(0,10)} .. ${end.toISOString().slice(0,10)} exclusive)`);
+  console.log(`  Month:    ${month}`);
   console.log(`  Mode:     ${dryRun ? 'DRY RUN (nothing sent)' : 'LIVE'}${withRefunds ? ' + refunds' : ''}`);
 
-  // Defensive: ensure the payment-date columns exist (added at runtime by the
-  // sales route in normal operation; harmless if already present).
-  await invoiceHub.ensureInvoiceHubColumns();
-  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ`).catch(() => {});
-  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_paid BOOLEAN`).catch(() => {});
-
-  // Qualifying sales: in-scope channel, real (not estimate/cancelled), paid, and
-  // whose payment date (paid_at, else occurred_at) falls in the month.
-  const { rows } = await query(
-    `SELECT id, channel, status, total, customer_name,
-            COALESCE(paid_at, occurred_at) AS pay_date
-       FROM sales
-      WHERE channel = ANY($1)
-        AND is_estimate = false
-        AND status NOT IN ('pending','cancelled')
-        AND COALESCE(paid_at, occurred_at) >= $2
-        AND COALESCE(paid_at, occurred_at) <  $3
-      ORDER BY COALESCE(paid_at, occurred_at)`,
-    [invoiceHub.IN_SCOPE_CHANNELS, start, end]
-  );
-
-  if (!rows.length) {
-    console.log('\nNo qualifying direct cash/bank sales found for that month. Nothing to do.');
+  // Single source of truth: the same routine the Settings "Backfill" button uses.
+  const r = await invoiceHub.backfillMonth({ month, dryRun, withRefunds });
+  if (!r.ok) {
+    console.error(`\n✗ ${r.message || r.error}`);
+    process.exitCode = 1;
     return;
   }
 
-  const cash = rows.filter(r => r.channel === 'direct_cash');
-  const bank = rows.filter(r => r.channel === 'direct_bank');
-  const refundedRows = rows.filter(r => r.status === 'refunded');
-  console.log(`\nFound ${rows.length} sale(s): ${bank.length} bank transfer, ${cash.length} cash` +
-              (refundedRows.length ? `  (${refundedRows.length} refunded)` : ''));
+  console.log(`\nFound ${r.found} sale(s): ${r.bank} bank transfer, ${r.cash} cash.`);
 
   if (dryRun) {
-    for (const r of rows) {
-      console.log(`  [dry] #${r.id} ${r.channel} £${r.total} ${r.pay_date.toISOString().slice(0,10)} ${r.customer_name || ''}` +
-                  (r.status === 'refunded' ? ' (refunded)' : ''));
+    for (const p of r.preview || []) {
+      console.log(`  [dry] #${p.id} ${p.channel} £${p.total} ${p.date} ${p.customer || ''}` +
+                  (p.refunded ? ' (refunded)' : ''));
     }
     console.log(`\nDry run complete — re-run without --dry-run to push.`);
     return;
   }
 
-  let saleOk = 0, saleErr = 0, refundOk = 0, refundErr = 0;
-  for (const r of rows) {
-    await invoiceHub.pushSale(r.id);
-    const st = await query(`SELECT invoice_hub_push_state AS s, invoice_hub_push_error AS e FROM sales WHERE id = $1`, [r.id]);
-    const s = st.rows[0] || {};
-    if (s.s === 'ok') { saleOk++; }
-    else { saleErr++; console.warn(`  ✗ sale #${r.id}: ${s.e || s.s || 'unknown error'}`); }
-
-    if (withRefunds && r.status === 'refunded') {
-      await invoiceHub.pushRefund(r.id);
-      const rst = await query(`SELECT invoice_hub_refund_state AS s, invoice_hub_refund_error AS e FROM sales WHERE id = $1`, [r.id]);
-      const rs = rst.rows[0] || {};
-      if (rs.s === 'ok') { refundOk++; }
-      else { refundErr++; console.warn(`  ✗ refund #${r.id}: ${rs.e || rs.s || 'unknown error'}`); }
-    }
-  }
-
-  console.log(`\nDone. Sales pushed: ${saleOk} ok, ${saleErr} failed.` +
-              (withRefunds ? `  Refunds: ${refundOk} ok, ${refundErr} failed.` : ''));
-  if (saleErr || refundErr) {
+  for (const err of r.errors || []) console.warn(`  ✗ ${err.type} #${err.id}: ${err.error}`);
+  console.log(`\nDone. Sales pushed: ${r.saleOk} ok, ${r.saleErr} failed.` +
+              (withRefunds ? `  Refunds: ${r.refundOk} ok, ${r.refundErr} failed.` : ''));
+  if (r.saleErr || r.refundErr) {
     console.log('Failed rows keep their error in invoice_hub_push_error / invoice_hub_refund_error and can be retried.');
     process.exitCode = 1;
   }
