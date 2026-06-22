@@ -299,7 +299,12 @@ async function createProduct({ title, sku, price, imageUrls = [], imageData = []
       inventory_management: 'shopify',
       taxable: taxable !== false,
     }],
-    images: [...imgs.map(src => ({ src })), ...attachments.map(attachment => ({ attachment }))],
+    // Pin an explicit position on every image so the FIRST one we send stays the
+    // main image. Without this Shopify can return base64 uploads in a different
+    // order (whichever finishes processing first), making a random photo the hero
+    // — which then propagates to eBay too (it mirrors Shopify's order).
+    images: [...imgs.map(src => ({ src })), ...attachments.map(attachment => ({ attachment }))]
+      .map((img, i) => ({ ...img, position: i + 1 })),
   };
   if (description != null) productPayload.body_html = description;
   if (tags) productPayload.tags = tags; // comma-separated string
@@ -412,7 +417,7 @@ async function replaceProductImagesOrdered(productId, items = []) {
     catch (e) { console.warn('[shopify] ordered image set failed:', isData ? '(upload)' : item, e.message); }
   }
   const out = (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
-  return (out.images || []).map(im => im.src).filter(Boolean);
+  return (out.images || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0)).map(im => im.src).filter(Boolean);
 }
 
 // Lightweight SKU-only update — sets the first variant's SKU (and keeps barcode
@@ -867,8 +872,8 @@ async function getShopifyProductFull(shopifyProductId) {
     productType: p.product_type,
     tags: p.tags,
     price: p.variants?.[0]?.price != null ? parseFloat(p.variants[0].price) : null,
-    imageUrls: (p.images || []).map(img => img.src).filter(Boolean),
-    primaryImage: p.image?.src || (p.images?.[0]?.src) || null,
+    imageUrls: (p.images || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0)).map(img => img.src).filter(Boolean),
+    primaryImage: p.image?.src || (p.images || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0))[0]?.src || null,
   };
 }
 
