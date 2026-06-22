@@ -1811,7 +1811,10 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   // The Shopify create response already carries the hosted image URLs — capture
   // them so the eBay create can use the exact same photos (the live Shopify
   // product can lag for a moment after an attachment upload).
-  const imgSrcs = (shopifyProduct?.images || []).map(im => im.src).filter(Boolean);
+  // Sort by position so imgSrcs[0] is the real main image (Shopify can return
+  // base64 uploads out of order) — this is what becomes the warehouse thumbnail
+  // and the eBay gallery order.
+  const imgSrcs = (shopifyProduct?.images || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0)).map(im => im.src).filter(Boolean);
   result.imageUrls = imgSrcs;
   const ins = await query(`
     INSERT INTO products (sku, title, barcode, part_number, qty_on_hand, price_ebay, price_shopify, image_url,
