@@ -421,6 +421,10 @@ router.post('/', requireAdmin, async (req, res) => {
   const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
 
   const isEstimate = !!b.isEstimate;
+  // Whether this sale is paid now (vs an issued-but-unpaid invoice). Needed both
+  // inside the transaction (sale status/stock) AND after it (Invoice Hub push),
+  // so it lives in the outer scope.
+  const isPaid = isEstimate ? true : (b.paid !== false);
 
   const result = await withTx(async (c) => {
     let subtotal = 0;
@@ -518,7 +522,7 @@ router.post('/', requireAdmin, async (req, res) => {
 
     // #13: an issued-but-unpaid invoice (b.paid === false) still gives the parts
     // (stock decrements like any invoice) but is flagged for payment follow-up.
-    const isPaid = isEstimate ? true : (b.paid !== false);
+    // isPaid is computed in the outer scope (used again for the Invoice Hub push).
     await ensurePaidColumn();
     // Fitment only applies to self-service Shopify storefront orders. Direct
     // sales (cash/bank/card) are quoted by staff who confirm fitment first, so
