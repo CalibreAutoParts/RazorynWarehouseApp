@@ -1671,13 +1671,43 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   res.json({ ok: true, sale: r.rows[0] });
 });
 
+// Recompute a sale's subtotal/vat/total from its current line items. Same VAT
+// model as creation: subtotal is gross (VAT-inclusive); total = subtotal + shipping;
+// vat stores the portion (0 for cash / when not VAT-registered).
+async function recomputeSaleTotals(c, saleId) {
+  const tot = await c.query(`SELECT COALESCE(SUM(line_total),0) AS subtotal FROM sale_items WHERE sale_id = $1`, [saleId]);
+  const subtotal = parseFloat(tot.rows[0].subtotal);
+  const saleRow = await c.query(`SELECT payment_method, shipping FROM sales WHERE id = $1`, [saleId]);
+  const settings = await c.query('SELECT vat_rate, vat_registered FROM app_settings WHERE id = 1');
+  const setRow = settings.rows[0] || {};
+  const vatRegistered = !!setRow.vat_registered;
+  const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
+  const isCashSale = saleRow.rows[0]?.payment_method === 'cash';
+  const vat = (!isCashSale && vatRegistered) ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2) : 0;
+  const shipping = parseFloat(saleRow.rows[0]?.shipping || 0);
+  const total = +(subtotal + shipping).toFixed(2);
+  await c.query(`UPDATE sales SET subtotal = $1, vat = $2, total = $3 WHERE id = $4`, [subtotal, vat, total, saleId]);
+  return { subtotal, vat, total };
+}
+
+// Only DIRECT (cash/bank/card) paid sales own their warehouse stock locally —
+// eBay/Shopify stock is reconciled by the channel sync, so we never restock those
+// from a manual line edit (it would double-count).
+function saleStockManaged(row) {
+  return ['direct_cash', 'direct_bank', 'direct_card'].includes(row.sale_channel)
+    && !row.sale_is_estimate && row.sale_status === 'paid';
+}
+
 // PATCH /api/sales/:id/items/:itemId — edit a line item (title, qty, unit_price)
-// Recalculates sale totals afterwards. Logs an audit entry capturing the old + new values.
+// Recalculates sale totals afterwards. For direct cash/bank/card paid sales,
+// changing the quantity also adjusts warehouse stock (reduce qty → stock back).
+// Logs an audit entry capturing the old + new values.
 router.patch('/:id/items/:itemId', requireAdmin, async (req, res) => {
   const b = req.body || {};
   const result = await withTx(async (c) => {
     const existing = await c.query(
-      `SELECT si.*, s.vat AS sale_vat, s.subtotal AS sale_subtotal, s.shipping AS sale_shipping
+      `SELECT si.*, s.shipping AS sale_shipping, s.status AS sale_status,
+              s.is_estimate AS sale_is_estimate, s.channel AS sale_channel
        FROM sale_items si JOIN sales s ON s.id = si.sale_id
        WHERE si.id = $1 AND si.sale_id = $2 FOR UPDATE`,
       [req.params.itemId, req.params.id]
@@ -1690,35 +1720,70 @@ router.patch('/:id/items/:itemId', requireAdmin, async (req, res) => {
     const newUnitPrice = b.unitPrice !== undefined ? parseFloat(b.unitPrice) : parseFloat(old.unit_price);
     const newLineTotal = +(newQty * newUnitPrice).toFixed(2);
 
+    // Stock follows the quantity change for direct paid sales.
+    let affectedProductId = null;
+    if (saleStockManaged(old) && old.product_id && newQty !== old.qty) {
+      const delta = old.qty - newQty;   // >0 → return units to stock; <0 → consume more
+      if (delta < 0) {
+        const pr = await c.query(`SELECT qty_on_hand FROM products WHERE id = $1 FOR UPDATE`, [old.product_id]);
+        const have = pr.rows[0]?.qty_on_hand || 0;
+        if (have < -delta) return { error: 'insufficient_stock', available: have, sku: old.sku, title: old.title, productId: old.product_id };
+      }
+      await c.query(`UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2`, [delta, old.product_id]);
+      await c.query(
+        `INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by) VALUES ($1,$2,'sale_item_edit',$3,$4)`,
+        [old.product_id, delta, req.params.id, req.user.id]);
+      affectedProductId = old.product_id;
+    }
+
     await c.query(
       `UPDATE sale_items SET title = $1, qty = $2, unit_price = $3, line_total = $4 WHERE id = $5`,
       [newTitle, newQty, newUnitPrice, newLineTotal, req.params.itemId]
     );
+    const totals = await recomputeSaleTotals(c, req.params.id);
+    return { ok: true, oldItem: old, totals, affectedProductId,
+             newItem: { title: newTitle, qty: newQty, unit_price: newUnitPrice, line_total: newLineTotal } };
+  });
+  if (result.error) return res.status(result.error === 'item_not_found' ? 404 : 409).json(result);
+  await audit(req, 'edit_sale_item', 'sale_item', req.params.itemId, { saleId: req.params.id, ...result.newItem });
+  if (result.affectedProductId) {
+    setImmediate(() => { try { require('./products').pushProductStockToChannels(result.affectedProductId); } catch (_) {} });
+  }
+  res.json(result);
+});
 
-    // Recompute sale totals from all line items.
-    // Same VAT model as sale creation: subtotal is gross (VAT-inclusive),
-    // total = subtotal + shipping. VAT column stores the portion, not an addition.
-    const tot = await c.query(`SELECT COALESCE(SUM(line_total),0) AS subtotal FROM sale_items WHERE sale_id = $1`, [req.params.id]);
-    const newSubtotal = parseFloat(tot.rows[0].subtotal);
-    const saleRow = await c.query(`SELECT payment_method FROM sales WHERE id = $1`, [req.params.id]);
-    const settings = await c.query('SELECT vat_rate, vat_registered FROM app_settings WHERE id = 1');
-    const setRow = settings.rows[0] || {};
-    const vatRegistered = !!setRow.vat_registered;
-    const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
-    const isCashSale = saleRow.rows[0]?.payment_method === 'cash';
-    const vatChargeable = !isCashSale && vatRegistered;
-    const newVat = vatChargeable
-      ? +(newSubtotal - newSubtotal / (1 + vatRate)).toFixed(2)
-      : 0;
-    const newTotal = +(newSubtotal + parseFloat(old.sale_shipping || 0)).toFixed(2);
-    await c.query(
-      `UPDATE sales SET subtotal = $1, vat = $2, total = $3 WHERE id = $4`,
-      [newSubtotal, newVat, newTotal, req.params.id]
+// DELETE /api/sales/:id/items/:itemId — remove a single line from an invoice
+// (e.g. it was added by mistake, or the whole line is being returned). For direct
+// cash/bank/card paid sales the line's stock is restored (?restock=false to skip).
+// Recomputes the sale totals. Won't touch eBay/Shopify-channel stock.
+router.delete('/:id/items/:itemId', requireAdmin, async (req, res) => {
+  const restock = req.query.restock !== 'false';
+  const result = await withTx(async (c) => {
+    const ex = await c.query(
+      `SELECT si.*, s.status AS sale_status, s.is_estimate AS sale_is_estimate, s.channel AS sale_channel
+       FROM sale_items si JOIN sales s ON s.id = si.sale_id
+       WHERE si.id = $1 AND si.sale_id = $2 FOR UPDATE`,
+      [req.params.itemId, req.params.id]
     );
-    return { ok: true, oldItem: old, newItem: { title: newTitle, qty: newQty, unit_price: newUnitPrice, line_total: newLineTotal } };
+    if (!ex.rows[0]) return { error: 'item_not_found' };
+    const it = ex.rows[0];
+    const doRestock = restock && saleStockManaged(it) && !!it.product_id;
+    if (doRestock) {
+      await c.query(`UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2`, [it.qty, it.product_id]);
+      await c.query(
+        `INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by) VALUES ($1,$2,'sale_item_removed',$3,$4)`,
+        [it.product_id, it.qty, req.params.id, req.user.id]);
+    }
+    await c.query(`DELETE FROM sale_items WHERE id = $1`, [req.params.itemId]);
+    const totals = await recomputeSaleTotals(c, req.params.id);
+    const remaining = await c.query(`SELECT COUNT(*)::int AS n FROM sale_items WHERE sale_id = $1`, [req.params.id]);
+    return { ok: true, restocked: doRestock ? it.qty : 0, totals, remaining: remaining.rows[0].n, affectedProductId: doRestock ? it.product_id : null };
   });
   if (result.error) return res.status(404).json(result);
-  await audit(req, 'edit_sale_item', 'sale_item', req.params.itemId, { saleId: req.params.id, ...result.newItem });
+  await audit(req, 'remove_sale_item', 'sale_item', req.params.itemId, { saleId: req.params.id, restocked: result.restocked });
+  if (result.affectedProductId) {
+    setImmediate(() => { try { require('./products').pushProductStockToChannels(result.affectedProductId); } catch (_) {} });
+  }
   res.json(result);
 });
 

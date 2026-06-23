@@ -16351,6 +16351,7 @@ async function openEditSale(id) {
   catch (e) { toast('Failed to load: ' + e.message, 'error'); return; }
   const s = data.sale;
   const items = data.items || [];
+  State._editSaleId = id;
   const escape = (v) => v == null ? '' : String(v).replace(/"/g, '&quot;');
   modal({
     title: 'Edit ' + (s.is_estimate ? 'estimate' : 'order') + ' ' + (s.invoice_number || s.payment_reference || ''),
@@ -16366,7 +16367,7 @@ async function openEditSale(id) {
         <div class="field" style="grid-column:1/-1"><label>Notes</label><textarea id="es-notes" rows="2">${escape(s.notes)}</textarea></div>
       </div>
       <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
-        <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);margin-bottom:8px">Line items — click any field to edit price, qty or title (for discounts / partial refunds)</div>
+        <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);margin-bottom:8px">Line items — edit price, qty or title; 🗑 removes a line. Cash/bank stock is restored automatically.</div>
         <div id="es-items">
           ${items.map(i => `
             <div style="display:grid;grid-template-columns:1fr 70px 90px 90px 30px;gap:6px;margin-bottom:6px;align-items:center" data-itemid="${i.id}">
@@ -16374,11 +16375,11 @@ async function openEditSale(id) {
               <input class="es-it-qty" type="number" min="0" step="1" value="${i.qty}">
               <input class="es-it-price" type="number" min="0" step="0.01" value="${parseFloat(i.unit_price).toFixed(2)}">
               <div class="es-it-total" style="text-align:right;font-weight:600;font-size:13px">£${parseFloat(i.line_total).toFixed(2)}</div>
-              <div></div>
+              <button class="btn btn-ghost btn-sm" title="Remove this line${i.product_id ? ' (restores stock for cash/bank)' : ''}" onclick="esRemoveItem('${i.id}', this)" style="color:var(--red);padding:0 4px">🗑</button>
             </div>
           `).join('')}
         </div>
-        <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Editing line items recalculates the order total. VAT proportion is preserved.</div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Editing line items recalculates the order total. VAT proportion is preserved. For a customer return (with a refund record), use “↩ Log return” instead.</div>
       </div>
     `,
     actions: [
@@ -16396,6 +16397,26 @@ async function openEditSale(id) {
     row.querySelector('.es-it-qty').addEventListener('input', recalc);
     row.querySelector('.es-it-price').addEventListener('input', recalc);
   });
+}
+
+async function esRemoveItem(itemId, btn) {
+  const id = State._editSaleId;
+  if (!id) return;
+  const rows = document.querySelectorAll('#es-items > div');
+  if (rows.length <= 1) {
+    toast('That’s the only line — delete the whole invoice instead (🗑 on the sales row).', 'warn', 6000);
+    return;
+  }
+  if (!confirm('Remove this line from the invoice? Stock is restored for cash/bank sales.')) return;
+  try {
+    const r = await Api.delete(`/api/sales/${id}/items/${itemId}`);
+    toast(`Line removed${r.restocked ? ` · ${r.restocked} back in stock` : ''} · new total £${r.totals.total.toFixed(2)}`, 'success', 5000);
+    btn.closest('[data-itemid]')?.remove();
+    await Store.refresh('sales'); await Store.refresh('products');
+    if (typeof renderSales === 'function' && State.page === 'sales') renderSales();
+  } catch (e) {
+    toast('Remove failed: ' + (e.data?.message || e.message), 'error');
+  }
 }
 
 async function submitEditSale(id) {
@@ -16424,10 +16445,14 @@ async function submitEditSale(id) {
     }
     closeModal();
     toast('Saved', 'success');
-    await Store.refresh('sales');
+    await Store.refresh('sales'); await Store.refresh('products');
     if (typeof renderSales === 'function' && State.page === 'sales') renderSales();
   } catch (e) {
-    toast('Save failed: ' + (e.data?.message || e.message), 'error');
+    if (e.data?.error === 'insufficient_stock') {
+      toast(`Not enough stock for ${e.data.title || e.data.sku || 'a line'} — only ${e.data.available} available. Lower the quantity.`, 'error', 8000);
+    } else {
+      toast('Save failed: ' + (e.data?.message || e.message), 'error');
+    }
   }
 }
 
