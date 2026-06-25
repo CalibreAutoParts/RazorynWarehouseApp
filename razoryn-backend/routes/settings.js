@@ -373,7 +373,11 @@ router.get('/pricing-config', async (req, res) => {
     // Defaults ON — only ever fires when Resend is configured + there's an email.
     autoEmailDocuments: (r.data?.autoEmailDocuments !== false),
     resendConfigured: !!process.env.RESEND_API_KEY,
-    fromEmail: process.env.WAREHOUSE_FROM_EMAIL || `noreply@${require('../lib/brand').domain}`,
+    fromEmail: (() => {
+      const dom = (require('../lib/brand').domain || '').toLowerCase();
+      const onBrand = r.company_email && r.company_email.toLowerCase().endsWith('@' + dom);
+      return process.env.WAREHOUSE_FROM_EMAIL || (onBrand ? r.company_email : `invoices@${dom}`);
+    })(),
     // Per-store policy overrides (multi-store brands only).
     // Shape: { storeCode: { payment, shipping, return } }
     ebayPerStorePolicies:   (() => {

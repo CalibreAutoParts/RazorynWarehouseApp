@@ -1537,6 +1537,15 @@ async function sendSaleDocumentEmail(saleId, { to, templateKey, includeMessage, 
   const items = (await query('SELECT * FROM sale_items WHERE sale_id = $1', [saleId])).rows;
   const company = await getCompanySettings();
   const brand = require('../lib/brand');
+  return composeAndSendInvoiceEmail({ sale, items, company, brand, to: recipient, templateKey, includeMessage, baseUrl });
+}
+
+// The actual compose + Resend send, taking the sale/items directly (so the test
+// endpoint can use synthetic data without touching the DB).
+async function composeAndSendInvoiceEmail({ sale, items = [], company = {}, brand, to, templateKey, includeMessage, baseUrl }) {
+  brand = brand || require('../lib/brand');
+  const recipient = String(to || sale.customer_email || '').trim();
+  if (!recipient) return { ok: false, error: 'no_email_address' };
   // Same document-mode detection as the invoice.html route.
   const isProforma = sale.is_estimate && !!sale.payment_method;
   const mode = isProforma ? 'proforma'
@@ -1591,7 +1600,12 @@ async function sendSaleDocumentEmail(saleId, { to, templateKey, includeMessage, 
     emailHtml = (cover && htmlWithCover === html) ? cover + html : htmlWithCover;
   }
 
-  const fromEmail = process.env.WAREHOUSE_FROM_EMAIL || `noreply@${brand.domain}`;
+  // Avoid "no-reply" senders (hurts deliverability + Resend flags it). Use the
+  // company email when it's on the verified brand domain, else invoices@domain.
+  // Override per-deployment with WAREHOUSE_FROM_EMAIL.
+  const dom = (brand.domain || '').toLowerCase();
+  const onBrandDomain = company.company_email && company.company_email.toLowerCase().endsWith('@' + dom);
+  const fromEmail = process.env.WAREHOUSE_FROM_EMAIL || (onBrandDomain ? company.company_email : `invoices@${brand.domain}`);
   try {
     const axios = require('axios');
     const r = await axios.post('https://api.resend.com/emails', {
@@ -1665,6 +1679,40 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
   if (!out.ok) return res.status(out.error === 'no_email_address' ? 400 : 500).json({ error: 'email_failed', message: out.error });
   await audit(req, 'email_invoice', 'sale', Number(req.params.id), { to: out.to, resend_id: out.id });
   res.json({ ok: true, id: out.id });
+});
+
+// POST /api/sales/test-email { to } — send a SAMPLE invoice email (with the PDF
+// attached) to verify the whole pipeline end-to-end: Resend connection, from-
+// address, template and the PDF attachment. Uses synthetic data — no DB sale.
+router.post('/test-email', requireAdmin, async (req, res) => {
+  const to = String(req.body?.to || req.user?.email || '').trim();
+  if (!to) return res.status(400).json({ error: 'no_email_address', message: 'Enter an email address to send the test to.' });
+  if (!process.env.RESEND_API_KEY) {
+    return res.status(503).json({ error: 'email_not_configured', message: 'Connect Resend first: set RESEND_API_KEY in Railway and verify your domain at resend.com/domains.' });
+  }
+  const company = await getCompanySettings();
+  const brand = require('../lib/brand');
+  const vatReg = !!company.vat_registered;
+  const rate = parseFloat(company.vat_rate || 20) / 100;
+  const subtotal = 120, shipping = 10, gross = subtotal + shipping;
+  const sale = {
+    id: 0, invoice_number: `${brand.invoicePrefix || 'INV'}-TEST-1001`,
+    payment_reference: `${brand.invoicePrefix || 'INV'}-TEST-1001`,
+    occurred_at: new Date().toISOString(),
+    customer_name: 'Test Customer', customer_email: to,
+    payment_method: 'bank', channel: 'direct_bank',
+    is_estimate: false, is_paid: true, status: 'paid',
+    subtotal, shipping, vat: vatReg ? +(gross - gross / (1 + rate)).toFixed(2) : 0, total: gross,
+    shipping_address: '123 Test Street\nLondon\nSW1A 1AA',
+  };
+  const items = [{ title: 'Sample part — front bumper (TEST)', sku: 'TEST-001', qty: 1, unit_price: 120, line_total: 120 }];
+  const out = await composeAndSendInvoiceEmail({
+    sale, items, company, brand, to, templateKey: 'paid_thanks',
+    baseUrl: `${req.protocol}://${req.get('host')}`,
+  });
+  if (!out.ok) return res.status(500).json({ error: 'email_failed', message: out.error });
+  await audit(req, 'test_email', null, null, { to });
+  res.json({ ok: true, id: out.id, to });
 });
 
 // POST /api/sales/:id/items/:itemId/link-product

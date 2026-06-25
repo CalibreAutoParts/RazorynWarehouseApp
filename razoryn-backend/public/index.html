@@ -14810,6 +14810,13 @@ function renderSettings() {
               When on, recording a sale (or marking an issued invoice paid) emails the document to the customer automatically — no need to click ✉. Only fires when the customer has an email and Resend is connected. <span id="set-resend-status"></span>
             </div>
             <div style="margin-top:8px"><button type="button" class="btn btn-primary btn-sm" onclick="saveAutoEmailSetting()">Save</button></div>
+            <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
+              <div style="font-size:12px;color:var(--ink-soft);margin-bottom:6px">Send yourself a <strong>test email</strong> — a sample invoice with the PDF attached — to check everything works end-to-end.</div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <input id="set-test-email" type="email" placeholder="you@example.com" style="flex:1;min-width:220px">
+                <button type="button" class="btn btn-outline btn-sm" onclick="sendTestEmail(this)">✉ Send test</button>
+              </div>
+            </div>
           </div>
           <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px">
             <button type="button" class="btn btn-outline btn-sm" onclick="emailTplAdd()">+ Add message</button>
@@ -15430,6 +15437,7 @@ async function loadPricingConfig() {
     if (rs) rs.innerHTML = r.resendConfigured
       ? `<span style="color:var(--green);font-weight:600">✓ Resend connected</span> — sending from <code>${escapeHtml(r.fromEmail || '')}</code>`
       : `<span style="color:var(--amber);font-weight:600">⚠ Resend not connected</span> — set <code>RESEND_API_KEY</code> in Railway to enable sending.`;
+    const te = el('set-test-email'); if (te && !te.value) te.value = State.user?.email || '';
     setVal('set-address', r.companyAddress);
     setVal('set-phone', r.companyPhone);
     setVal('set-email', r.companyEmail);
@@ -16241,6 +16249,20 @@ async function saveAutoEmailSetting() {
     if (State.pricingConfig) State.pricingConfig.autoEmailDocuments = enabled;
     toast(enabled ? 'Auto-email turned on — customers will get proformas/invoices automatically' : 'Auto-email turned off', 'success', 5000);
   } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function sendTestEmail(btn) {
+  const to = (el('set-test-email')?.value || '').trim();
+  if (!to) { toast('Enter an email address to send the test to', 'warn'); return; }
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const r = await Api.post('/api/sales/test-email', { to });
+    toast(`✓ Test email sent to ${r.to} — check your inbox for the PDF attachment (it won’t show in Resend’s preview).`, 'success', 9000);
+  } catch (e) {
+    toast('Test failed: ' + (e.data?.message || e.message), 'error', 9000);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
 }
 
 async function savePricingConfig() {
