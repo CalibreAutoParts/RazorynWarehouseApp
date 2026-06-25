@@ -369,6 +369,11 @@ router.get('/pricing-config', async (req, res) => {
     // Disabled when stock_check_enabled is false OR day is null.
     stockCheckDay:     r.stock_check_day || null,
     stockCheckEnabled: !!r.stock_check_enabled,
+    // Auto-email proformas / paid invoices to the customer (lives in data JSONB).
+    // Defaults ON — only ever fires when Resend is configured + there's an email.
+    autoEmailDocuments: (r.data?.autoEmailDocuments !== false),
+    resendConfigured: !!process.env.RESEND_API_KEY,
+    fromEmail: process.env.WAREHOUSE_FROM_EMAIL || `noreply@${require('../lib/brand').domain}`,
     // Per-store policy overrides (multi-store brands only).
     // Shape: { storeCode: { payment, shipping, return } }
     ebayPerStorePolicies:   (() => {
@@ -487,7 +492,14 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
         }
       }
     }
-    if (!updates.length) return res.json({ ok: true, message: 'no_changes' });
+    // Auto-email toggle lives in the data JSONB, not a column — save it separately.
+    if (b.autoEmailDocuments !== undefined) {
+      const enabled = (b.autoEmailDocuments === true || b.autoEmailDocuments === 'true' || b.autoEmailDocuments === 1 || b.autoEmailDocuments === '1');
+      const cur = await query(`SELECT data FROM app_settings WHERE id = 1`);
+      const data = { ...(cur.rows[0]?.data || {}), autoEmailDocuments: enabled };
+      await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify(data)]);
+    }
+    if (!updates.length) return res.json({ ok: true });
     await query(`UPDATE app_settings SET ${updates.join(', ')}, updated_at = now() WHERE id = 1`, params);
     await audit(req, 'update_pricing_config', null, null, Object.keys(b));
     res.json({ ok: true });

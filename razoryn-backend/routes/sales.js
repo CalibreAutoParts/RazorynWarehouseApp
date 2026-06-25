@@ -598,6 +598,11 @@ router.post('/', requireAdmin, async (req, res) => {
       setImmediate(() => invoiceHub.pushSale(result.sale.id).catch(e => console.warn('[invoiceHub] push failed:', e.message)));
     }
   }
+  // Auto-email the document (proforma / estimate / paid invoice / receipt) to the
+  // customer — best-effort, only when Resend is configured, auto-send is on, and a
+  // customer email is present.
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  setImmediate(() => maybeAutoEmailSale(result.sale.id, baseUrl));
   res.status(201).json(result);
 });
 
@@ -625,6 +630,11 @@ router.post('/:id/mark-paid', requireAdmin, async (req, res) => {
     if (invoiceHub.isInScope(s.rows[0].channel)) {
       setImmediate(() => invoiceHub.pushSale(req.params.id).catch(e => console.warn('[invoiceHub] push failed:', e.message)));
     }
+  }
+  // Was an unpaid (pending) invoice → now paid: email the paid invoice/receipt.
+  if (s.rows[0].status === 'pending') {
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    setImmediate(() => maybeAutoEmailSale(req.params.id, baseUrl));
   }
   res.json({ ok: true, sale: upd.rows[0] });
 });
@@ -862,6 +872,9 @@ router.post('/:id/convert-to-invoice', requireAdmin, async (req, res) => {
     sync.pushStockForSaleItems(result.items.map(i => ({ productId: i.product_id })))
       .catch(e => console.warn('[sync] push failed:', e.message));
   });
+  // Estimate → invoice: email the finalised invoice to the customer.
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  setImmediate(() => maybeAutoEmailSale(result.sale.id, baseUrl));
   res.json(result);
 });
 
@@ -1509,46 +1522,43 @@ router.put('/email-templates', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/sales/:id/email — email the invoice to the customer
-router.post('/:id/email', requireAdmin, async (req, res) => {
-  const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
-  if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
-  const sale = s.rows[0];
-  const to = req.body.to || sale.customer_email;
-  if (!to) return res.status(400).json({ error: 'no_email_address' });
+// Build the invoice/proforma/estimate/receipt email for a sale and send it via
+// Resend. Reusable by the manual "✉ Email" button AND the auto-send hooks
+// (after a proforma or paid invoice is recorded). Returns {ok,id,...} — never
+// throws, so callers (incl. fire-and-forget setImmediate) stay safe.
+async function sendSaleDocumentEmail(saleId, { to, templateKey, includeMessage, baseUrl } = {}) {
+  if (!process.env.RESEND_API_KEY) return { ok: false, error: 'email_not_configured' };
+  const sr = await query('SELECT * FROM sales WHERE id = $1', [saleId]);
+  const sale = sr.rows[0];
+  if (!sale) return { ok: false, error: 'sale_not_found' };
+  const recipient = String(to || sale.customer_email || '').trim();
+  if (!recipient) return { ok: false, error: 'no_email_address' };
 
-  const items = (await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id])).rows;
+  const items = (await query('SELECT * FROM sale_items WHERE sale_id = $1', [saleId])).rows;
   const company = await getCompanySettings();
   const brand = require('../lib/brand');
-  // Same proforma detection as the invoice.html route.
+  // Same document-mode detection as the invoice.html route.
   const isProforma = sale.is_estimate && !!sale.payment_method;
   const mode = isProforma ? 'proforma'
              : sale.is_estimate ? 'estimate'
              : (sale.payment_method === 'cash') ? 'receipt'
              : 'invoice';
-  const html = renderInvoiceHtml({ sale, items, company, mode, baseUrl: `${req.protocol}://${req.get('host')}` });
+  const html = renderInvoiceHtml({ sale, items, company, mode, baseUrl: baseUrl || (brand.domain ? `https://${brand.domain}` : '') });
   const docLabel = mode === 'estimate' ? 'Estimate'
                  : mode === 'proforma' ? 'Pro-forma invoice'
                  : mode === 'receipt' ? 'Receipt'
                  : 'Invoice';
   const subject = `${docLabel} ${sale.invoice_number || sale.payment_reference || ''} — ${brand.name}`;
 
-  // Covering message + brand signature prepended above the invoice (#6/#email
-  // templates). The admin picks a template at send time (private/retail, trade,
-  // local DropFleet delivery, eBay buy-direct, or none) — defaulting by channel.
+  // Covering message + brand signature, from the chosen (or default) template.
   const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const site = company.company_website || (brand.domain ? `https://${brand.domain}` : '');
   const siteLabel = (company.company_website || brand.domain || '').replace(/^https?:\/\//, '');
   const sigBits = [company.company_phone, company.company_email, siteLabel].filter(Boolean).join(' · ');
-
   const { getEmailTemplates, defaultKeyForSale } = require('../lib/email-templates');
   const templates = await getEmailTemplates(query);
-  // includeMessage:false (legacy) forces no message; else use the chosen key.
-  const chosenKey = req.body?.includeMessage === false ? 'none'
-                  : (req.body?.templateKey || defaultKeyForSale(sale));
+  const chosenKey = includeMessage === false ? 'none' : (templateKey || defaultKeyForSale(sale));
   const tpl = templates.find(t => t.key === chosenKey) || templates.find(t => t.key === 'standard');
   const rawBody = tpl ? (tpl.body || '') : '';
-  // Substitute placeholders, escape, and convert newlines/blank-lines to HTML.
   const subst = rawBody
     .replace(/\{customer\}/g, sale.customer_name || 'there')
     .replace(/\{brand\}/g, brand.name || '')
@@ -1564,33 +1574,81 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
       ${sigBits ? `<p style="margin:3px 0 0;font-size:12px;color:#666">${esc(sigBits)}</p>` : ''}
     </div>`;
   const htmlWithCover = cover ? html.replace(/(<body[^>]*>)/i, `$1${cover}`) : html;
-  // If there was no <body> tag to inject into, fall back to prepending.
   const finalHtml = (cover && htmlWithCover === html) ? cover + html : htmlWithCover;
 
+  const fromEmail = process.env.WAREHOUSE_FROM_EMAIL || `noreply@${brand.domain}`;
+  try {
+    const axios = require('axios');
+    const r = await axios.post('https://api.resend.com/emails', {
+      from: `${brand.name} <${fromEmail}>`,
+      to: [recipient],
+      subject,
+      html: finalHtml,
+      // Replies go to the business inbox, not the no-reply send address.
+      ...(company.company_email ? { reply_to: company.company_email } : {}),
+    }, {
+      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      timeout: 15000,
+    });
+    return { ok: true, id: r.data?.id, to: recipient, mode, docLabel };
+  } catch (e) {
+    console.error('[sendSaleDocumentEmail]', e.response?.data || e.message);
+    return { ok: false, error: e.response?.data?.message || e.message };
+  }
+}
+
+// Is auto-emailing of documents (proforma / invoice) enabled? Stored in the
+// app_settings.data JSONB; defaults ON (only ever fires when Resend is
+// configured AND the sale has a customer email, so it's a safe default).
+async function autoEmailEnabled() {
+  try {
+    const r = await query(`SELECT data FROM app_settings WHERE id = 1`);
+    return r.rows[0]?.data?.autoEmailDocuments !== false;
+  } catch (_) { return false; }
+}
+
+// Fire-and-forget auto-send for a freshly-finalised sale (creation / mark-paid /
+// convert). No-ops unless Resend is configured, auto-send is on, and there's a
+// customer email. Logged for the audit trail.
+async function maybeAutoEmailSale(saleId, baseUrl) {
+  try {
+    if (!process.env.RESEND_API_KEY) return;
+    if (!(await autoEmailEnabled())) return;
+    const sr = await query('SELECT customer_email, invoice_number, payment_reference FROM sales WHERE id = $1', [saleId]);
+    if (!sr.rows[0]?.customer_email) return;
+    const out = await sendSaleDocumentEmail(saleId, { baseUrl });
+    if (out.ok) {
+      await query(
+        `INSERT INTO audit_log (user_id, action, target_type, target_id, metadata) VALUES (NULL,'auto_email_document','sale',$1,$2)`,
+        [saleId, JSON.stringify({ to: out.to, mode: out.mode, resend_id: out.id })]
+      ).catch(() => {});
+    } else if (out.error !== 'no_email_address' && out.error !== 'email_not_configured') {
+      console.warn(`[auto-email] sale ${saleId}:`, out.error);
+    }
+  } catch (e) { console.warn('[auto-email] failed:', e.message); }
+}
+
+// POST /api/sales/:id/email — email the invoice to the customer (manual button)
+router.post('/:id/email', requireAdmin, async (req, res) => {
+  const s = await query('SELECT id, customer_email FROM sales WHERE id = $1', [req.params.id]);
+  if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
+  const to = req.body.to || s.rows[0].customer_email;
+  if (!to) return res.status(400).json({ error: 'no_email_address' });
   if (!process.env.RESEND_API_KEY) {
     return res.status(503).json({
       error: 'email_not_configured',
       message: 'Set RESEND_API_KEY env var in Railway. Sign up at resend.com (free tier: 3000 emails/month).'
     });
   }
-  const fromEmail = process.env.WAREHOUSE_FROM_EMAIL || `noreply@${brand.domain}`;
-  try {
-    const axios = require('axios');
-    const r = await axios.post('https://api.resend.com/emails', {
-      from: `${brand.name} <${fromEmail}>`,
-      to: [to],
-      subject,
-      html: finalHtml,
-    }, {
-      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      timeout: 15000,
-    });
-    await audit(req, 'email_invoice', 'sale', sale.id, { to, resend_id: r.data?.id });
-    res.json({ ok: true, id: r.data?.id });
-  } catch (e) {
-    console.error('[email_invoice]', e.response?.data || e.message);
-    res.status(500).json({ error: 'email_failed', message: e.response?.data?.message || e.message });
-  }
+  const out = await sendSaleDocumentEmail(req.params.id, {
+    to,
+    templateKey: req.body?.templateKey,
+    includeMessage: req.body?.includeMessage,
+    baseUrl: `${req.protocol}://${req.get('host')}`,
+  });
+  if (!out.ok) return res.status(out.error === 'no_email_address' ? 400 : 500).json({ error: 'email_failed', message: out.error });
+  await audit(req, 'email_invoice', 'sale', Number(req.params.id), { to: out.to, resend_id: out.id });
+  res.json({ ok: true, id: out.id });
 });
 
 // POST /api/sales/:id/items/:itemId/link-product

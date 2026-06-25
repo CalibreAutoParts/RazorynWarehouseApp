@@ -14798,6 +14798,16 @@ function renderSettings() {
           <div class="card-desc">The covering messages you can pick from when emailing an invoice (private/retail, trade, local DropFleet delivery, eBay buy-direct…). The brand signature is added automatically. Placeholders: <code>{customer} {brand} {ref} {doc} {website}</code>.</div>
         </div>
         <div class="card-body">
+          <div style="padding:12px 14px;background:var(--bg-soft);border-radius:8px;margin-bottom:12px">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:600">
+              <label class="switch"><input type="checkbox" id="set-auto-email"><span></span></label>
+              Automatically email the customer when a proforma or invoice is created
+            </label>
+            <div style="font-size:12px;color:var(--ink-soft);margin-top:6px">
+              When on, recording a sale (or marking an issued invoice paid) emails the document to the customer automatically — no need to click ✉. Only fires when the customer has an email and Resend is connected. <span id="set-resend-status"></span>
+            </div>
+            <div style="margin-top:8px"><button type="button" class="btn btn-primary btn-sm" onclick="saveAutoEmailSetting()">Save</button></div>
+          </div>
           <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px">
             <button type="button" class="btn btn-outline btn-sm" onclick="emailTplAdd()">+ Add message</button>
             <button type="button" class="btn btn-primary btn-sm" onclick="emailTplSave()">Save messages</button>
@@ -15411,6 +15421,12 @@ async function loadPricingConfig() {
     setVal('set-vat', r.vatRate);
     setChk('set-vatreg', r.vatRegistered);
     setVal('set-vatnum', r.vatNumber);
+    // Auto-email documents toggle + Resend connection status.
+    setChk('set-auto-email', r.autoEmailDocuments !== false);
+    const rs = el('set-resend-status');
+    if (rs) rs.innerHTML = r.resendConfigured
+      ? `<span style="color:var(--green);font-weight:600">✓ Resend connected</span> — sending from <code>${escapeHtml(r.fromEmail || '')}</code>`
+      : `<span style="color:var(--amber);font-weight:600">⚠ Resend not connected</span> — set <code>RESEND_API_KEY</code> in Railway to enable sending.`;
     setVal('set-address', r.companyAddress);
     setVal('set-phone', r.companyPhone);
     setVal('set-email', r.companyEmail);
@@ -16213,6 +16229,15 @@ async function ebaySaveTemplates() {
   } catch (e) {
     toast('Couldn’t save templates: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+async function saveAutoEmailSetting() {
+  const enabled = !!el('set-auto-email')?.checked;
+  try {
+    await Api.post('/api/settings/pricing-config', { autoEmailDocuments: enabled });
+    if (State.pricingConfig) State.pricingConfig.autoEmailDocuments = enabled;
+    toast(enabled ? 'Auto-email turned on — customers will get proformas/invoices automatically' : 'Auto-email turned off', 'success', 5000);
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 async function savePricingConfig() {
