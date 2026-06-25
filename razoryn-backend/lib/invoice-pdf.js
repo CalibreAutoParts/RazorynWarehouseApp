@@ -177,7 +177,23 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
       const total = parseFloat(sale.total || 0);
       const isBank = sale.payment_method === 'bank' && company.bank_account_name;
       const totalsRows = (showVat ? (shippingGross > 0 ? 3 : 2) : (shippingGross > 0 ? 2 : 1));
-      const blockNeed = totalsRows * 16 + 34 + (isBank ? 80 : 20) + 110;
+
+      // Social handles + review CTA — same rules as the on-screen invoice.
+      const handle = (h) => String(h || '').replace(/^@/, '');
+      const socials = [];
+      if (company.social_instagram) socials.push({ label: `Instagram @${handle(company.social_instagram)}`, url: `https://instagram.com/${handle(company.social_instagram)}` });
+      if (company.social_tiktok) socials.push({ label: `TikTok @${handle(company.social_tiktok)}`, url: `https://tiktok.com/@${handle(company.social_tiktok)}` });
+      if (company.social_facebook) socials.push({ label: 'Facebook', url: company.social_facebook });
+      if (company.social_linkedin) socials.push({ label: 'LinkedIn', url: company.social_linkedin });
+      const tp = company.trustpilot_url || '', gg = company.google_review_url || '', platform = company.review_platform || 'trustpilot';
+      const reviews = [];
+      if ((platform === 'trustpilot' || platform === 'both') && tp) reviews.push({ label: 'Trustpilot', url: tp });
+      if ((platform === 'google' || platform === 'both') && gg) reviews.push({ label: 'Google', url: gg });
+      if (!reviews.length && tp) reviews.push({ label: 'Trustpilot', url: tp });
+      if (!reviews.length && gg) reviews.push({ label: 'Google', url: gg });
+
+      const blockNeed = totalsRows * 16 + 34 + (isBank ? 80 : 20)
+        + (socials.length ? 28 : 0) + (reviews.length ? 46 : 0) + 110;
       if (y + blockNeed > pageBottom) { doc.addPage(); y = 40; }
 
       // Totals (right aligned) + black TOTAL bar
@@ -217,6 +233,41 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
            `Use reference: ${ref}`].filter(Boolean).join('\n'),
           left + 14, y + 24, { width: contentW - 28 });
         y += boxH + 16;
+      }
+
+      // ---------- Follow us ----------
+      if (socials.length) {
+        doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#999').text('FOLLOW US', left, y);
+        y += 11;
+        doc.font('Helvetica').fontSize(9);
+        let cx = left;
+        socials.forEach((s, i) => {
+          const seg = (i ? '   ·   ' : '') + s.label;
+          const segW = doc.widthOfString(seg);
+          doc.fillColor('#1a3c6e').text(seg, cx, y, { link: s.url, underline: false, width: segW + 2 });
+          cx += segW;
+        });
+        y += 18;
+      }
+
+      // ---------- Review CTA (amber banner) ----------
+      if (reviews.length) {
+        const rh = 32;
+        doc.rect(left, y, contentW, rh).fillColor('#fff8e6').fill();
+        doc.rect(left, y, contentW, rh).strokeColor('#f0d171').lineWidth(1).stroke();
+        // Right-aligned review link(s) first, so we know how much room the text has.
+        doc.font('Helvetica-Bold').fontSize(9).fillColor('#5a4400');
+        let rrx = right - 12;
+        for (const rv of reviews.slice().reverse()) {
+          const label = `Review us on ${rv.label}`;
+          const w = doc.widthOfString(label);
+          rrx -= w;
+          doc.text(label, rrx, y + 11, { link: rv.url, underline: false, width: w + 2 });
+          rrx -= 16;
+        }
+        doc.font('Helvetica').fontSize(9.5).fillColor('#5a4400')
+          .text('Enjoyed your order? A quick review really helps a small business.', left + 12, y + 11, { width: rrx - left - 18, lineBreak: false, ellipsis: true });
+        y += rh + 16;
       }
 
       // ---------- Footer: returns / fitment / contact ----------
