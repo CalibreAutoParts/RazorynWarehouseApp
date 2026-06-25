@@ -8,9 +8,37 @@ const express = require('express');
 const { query } = require('../db');
 const { requireAuth, requireAdmin, requirePermission } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
+const fx = require('../lib/fx');
 
 const router = express.Router();
 router.use(requireAuth);
+
+// Convert a foreign unit cost to GBP at a date, swallowing failures so a cost
+// can never block adding incoming stock. Returns { gbp, rate } (gbp null on fail).
+async function costToGbp(foreign, currency, date, override) {
+  const amt = (foreign != null && foreign !== '') ? parseFloat(foreign) : null;
+  if (amt == null || Number.isNaN(amt)) return { gbp: null, rate: null };
+  const cur = String(currency || 'CNY').toUpperCase();
+  if (cur === 'GBP') return { gbp: +amt.toFixed(4), rate: 1 };
+  try { const c = await fx.convert(amt, cur, 'GBP', date || new Date().toISOString().slice(0, 10), { override }); return { gbp: c.gbp, rate: c.rate }; }
+  catch (e) { return { gbp: null, rate: (override ? parseFloat(override) : null), failed: true }; }
+}
+
+// On receive, copy the line's captured cost into product_cost_history and set the
+// product's current cost. Best-effort — never blocks stock receiving.
+async function recordReceivedCost(row, qtyReceived, userId) {
+  try {
+    if (row.unit_cost_gbp == null) return false;
+    await query(
+      `INSERT INTO product_cost_history (product_id, supplier, purchase_date, currency, unit_cost_foreign, fx_rate, unit_cost_gbp, qty, incoming_id, freight_total, duty, note, created_by)
+       VALUES ($1,$2,COALESCE($3::date, CURRENT_DATE),$4,$5,$6,$7,$8,$9,$10,$11,'Received from incoming',$12)`,
+      [row.product_id, row.supplier || null, row.received_at || row.expected_date || null,
+       row.currency || 'CNY', row.unit_cost_foreign, row.fx_rate, row.unit_cost_gbp, qtyReceived,
+       row.id, row.freight_total, row.duty, userId]);
+    await query(`UPDATE products SET cost_price = $1, updated_at = now() WHERE id = $2`, [row.unit_cost_gbp, row.product_id]);
+    return true;
+  } catch (e) { console.warn('[incoming] cost record warning:', e.message); return false; }
+}
 
 let _ready = false;
 async function ensureTable() {
@@ -35,6 +63,13 @@ async function ensureTable() {
   )`);
   await query(`CREATE INDEX IF NOT EXISTS incoming_status_idx ON incoming_stock (status)`);
   await query(`CREATE INDEX IF NOT EXISTS incoming_product_idx ON incoming_stock (product_id)`);
+  // Cost capture columns (RMB on the order sheet → GBP at purchase date).
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS unit_cost_foreign NUMERIC(12,4)`);
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS currency          TEXT DEFAULT 'CNY'`);
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS fx_rate           NUMERIC(14,8)`);
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS unit_cost_gbp     NUMERIC(12,4)`);
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS freight_total     NUMERIC(12,2)`);
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS duty              NUMERIC(12,2)`);
   _ready = true;
 }
 ensureTable();
@@ -100,11 +135,20 @@ router.post('/', requirePermission('inventory'), async (req, res) => {
     if (pr.rows[0]) { sku = sku || pr.rows[0].sku; title = title || pr.rows[0].title; partNumber = partNumber || pr.rows[0].part_number; }
   }
 
+  // Cost capture (optional): foreign unit cost → GBP at the expected/purchase date.
+  const currency = String(b.currency || 'CNY').toUpperCase();
+  const { gbp: unitCostGbp, rate: usedRate, failed: fxFailed } =
+    await costToGbp(b.unitCostForeign, currency, b.expectedDate, b.fxRate);
   const { rows } = await query(
-    `INSERT INTO incoming_stock (product_id, sku, title, part_number, qty_ordered, container_ref, supplier, expected_date, status, notes, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+    `INSERT INTO incoming_stock (product_id, sku, title, part_number, qty_ordered, container_ref, supplier, expected_date, status, notes, created_by,
+                                 unit_cost_foreign, currency, fx_rate, unit_cost_gbp, freight_total, duty)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
     [productId, sku, title, partNumber, qty, b.containerRef || null, b.supplier || null,
-     b.expectedDate || null, b.status || 'on_order', b.notes || null, req.user.id]);
+     b.expectedDate || null, b.status || 'on_order', b.notes || null, req.user.id,
+     (b.unitCostForeign != null && b.unitCostForeign !== '') ? parseFloat(b.unitCostForeign) : null,
+     currency, usedRate, unitCostGbp,
+     (b.freightTotal != null && b.freightTotal !== '') ? parseFloat(b.freightTotal) : null,
+     (b.duty != null && b.duty !== '') ? parseFloat(b.duty) : null]);
   await audit(req, 'incoming_create', 'incoming', rows[0].id, { qty, container: b.containerRef });
 
   // If staff linked this line to an existing product AND typed a part number that
@@ -131,7 +175,7 @@ router.post('/', requirePermission('inventory'), async (req, res) => {
     }
   } catch (e) { /* non-critical — alias capture is best-effort */ }
 
-  res.status(201).json({ item: rows[0] });
+  res.status(201).json({ item: rows[0], fxFailed: !!fxFailed });
 });
 
 // POST /api/incoming/bulk
@@ -176,11 +220,20 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
       || (l.partNumber && byPart.get(String(l.partNumber).trim().toLowerCase()))
       || null;
     if (!prod) { unmatched.push({ ...l, reason: 'no matching product' }); continue; }
+    // Per-line cost capture (foreign → GBP). Container-level freight/duty are
+    // captured on each line (not apportioned in v1).
+    const lineCurrency = String(l.currency || b.currency || 'CNY').toUpperCase();
+    const { gbp: lineGbp, rate: lineRate } = await costToGbp(l.unitCostForeign, lineCurrency, b.expectedDate, l.fxRate);
     const ins = await query(
-      `INSERT INTO incoming_stock (product_id, sku, title, part_number, qty_ordered, container_ref, supplier, expected_date, status, notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+      `INSERT INTO incoming_stock (product_id, sku, title, part_number, qty_ordered, container_ref, supplier, expected_date, status, notes, created_by,
+                                   unit_cost_foreign, currency, fx_rate, unit_cost_gbp, freight_total, duty)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
       [prod.id, prod.sku, prod.title, prod.part_number, qty, b.containerRef || null, b.supplier || null,
-       b.expectedDate || null, b.status || 'on_order', b.notes || null, req.user.id]);
+       b.expectedDate || null, b.status || 'on_order', b.notes || null, req.user.id,
+       (l.unitCostForeign != null && l.unitCostForeign !== '') ? parseFloat(l.unitCostForeign) : null,
+       lineCurrency, lineRate, lineGbp,
+       (b.freightTotal != null && b.freightTotal !== '') ? parseFloat(b.freightTotal) : null,
+       (b.duty != null && b.duty !== '') ? parseFloat(b.duty) : null]);
     created.push({ id: ins.rows[0].id, productId: prod.id, sku: prod.sku, qty });
   }
   await audit(req, 'incoming_bulk_add', 'incoming', null, { created: created.length, unmatched: unmatched.length, container: b.containerRef });
@@ -213,6 +266,7 @@ router.post('/receive-container', requirePermission('inventory'), async (req, re
     if (row.product_id) {
       await query(`UPDATE products SET qty_on_hand = qty_on_hand + $1, updated_at = now() WHERE id = $2`, [remaining, row.product_id]);
       await query(`INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by) VALUES ($1,$2,'incoming_received',$3,$4)`, [row.product_id, remaining, row.id, req.user.id]).catch(() => {});
+      await recordReceivedCost(row, remaining, req.user.id);
       if (push) { try { await pushProductStockToChannels(row.product_id); pushed++; } catch (e) {} }
     }
   }
@@ -228,13 +282,24 @@ router.patch('/:id', requirePermission('inventory'), async (req, res) => {
     qtyOrdered: 'qty_ordered', containerRef: 'container_ref', supplier: 'supplier',
     expectedDate: 'expected_date', status: 'status', notes: 'notes',
     sku: 'sku', title: 'title', partNumber: 'part_number', productId: 'product_id',
+    unitCostForeign: 'unit_cost_foreign', currency: 'currency', fxRate: 'fx_rate',
+    unitCostGbp: 'unit_cost_gbp', freightTotal: 'freight_total', duty: 'duty',
   };
+  // If the foreign cost or rate is edited (and no explicit GBP given), recompute GBP.
+  if ((b.unitCostForeign !== undefined || b.fxRate !== undefined) && b.unitCostGbp === undefined) {
+    const cur = (await query(`SELECT unit_cost_foreign, currency, fx_rate, expected_date FROM incoming_stock WHERE id = $1`, [req.params.id])).rows[0] || {};
+    const foreign = b.unitCostForeign !== undefined ? b.unitCostForeign : cur.unit_cost_foreign;
+    const currency = b.currency !== undefined ? b.currency : (cur.currency || 'CNY');
+    const conv = await costToGbp(foreign, currency, b.expectedDate || cur.expected_date, b.fxRate);
+    if (conv.gbp != null) { b.unitCostGbp = conv.gbp; if (b.fxRate === undefined && conv.rate != null) b.fxRate = conv.rate; }
+  }
   const sets = [], params = [];
   for (const [k, col] of Object.entries(map)) {
     if (b[k] === undefined) continue;
     let v = b[k];
     if (col === 'qty_ordered') v = parseInt(v) || 0;
     if (col === 'expected_date' && !v) v = null;
+    if (['unit_cost_foreign', 'fx_rate', 'unit_cost_gbp', 'freight_total', 'duty'].includes(col)) v = (v === '' || v == null) ? null : parseFloat(v);
     params.push(v); sets.push(`${col} = $${params.length}`);
   }
   if (!sets.length) return res.status(400).json({ error: 'no_fields' });
@@ -266,11 +331,14 @@ router.post('/:id/receive', requirePermission('inventory'), async (req, res) => 
     [newReceived, fully ? 'received' : 'arrived', row.id]);
 
   // Add to warehouse stock + push to channels when linked to a product.
-  let channelPush = null, stockUpdated = false;
+  let channelPush = null, stockUpdated = false, costUpdated = false;
   if (row.product_id) {
     await query(`UPDATE products SET qty_on_hand = qty_on_hand + $1, updated_at = now() WHERE id = $2`, [qty, row.product_id]);
     await query(`INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by) VALUES ($1,$2,'incoming_received',$3,$4)`,
       [row.product_id, qty, row.id, req.user.id]).catch(() => {});
+    // Reload the row so received_at (just set) is available for the cost record.
+    const fresh = (await query(`SELECT * FROM incoming_stock WHERE id = $1`, [row.id])).rows[0] || row;
+    costUpdated = await recordReceivedCost(fresh, qty, req.user.id);
     stockUpdated = true;
     if (b.push !== false) {
       try {
@@ -280,7 +348,7 @@ router.post('/:id/receive', requirePermission('inventory'), async (req, res) => 
     }
   }
   await audit(req, 'incoming_receive', 'incoming', row.id, { qty, fully });
-  res.json({ ok: true, received: qty, fully, stockUpdated, notLinked: !row.product_id, channelPush });
+  res.json({ ok: true, received: qty, fully, stockUpdated, costUpdated, notLinked: !row.product_id, channelPush });
 });
 
 // DELETE /api/incoming/:id

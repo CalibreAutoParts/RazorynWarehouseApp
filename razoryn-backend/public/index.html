@@ -1011,6 +1011,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
           Shared parts
         </button>
+        <button class="nav-item admin-only" data-page="costs">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          Costs &amp; margins
+        </button>
         <button class="nav-item admin-only" data-page="pricing">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><polyline points="9 14 11 16 15 12"/></svg>
           Quote Builder
@@ -1941,6 +1945,7 @@ function enterApp() {
   initTableLabeller();
   routeTo('dashboard');
   refreshNavCounts();
+  refreshCostFloors();   // admin-only cost floors for app-wide price warnings
 
   toast('Welcome, ' + State.user.name + ' 👋', 'success');
 
@@ -2495,6 +2500,7 @@ function hasPerm(page) {
     labels:       false,
     mirror:       false,
     bundles:      false,
+    costs:        false,
     createlisting: false,
     staff:        false,
     settings:     false,
@@ -2544,7 +2550,7 @@ function routeTo(page) {
     activity: renderActivity, pricingrules: renderPricingRules,
     labels: renderLabels, notes: renderNotes, dispatch: renderDispatch,
     competitors: renderCompetitors, bundles: renderBundles, createlisting: renderCreateListing,
-    sharedstock: renderSharedStock, editlisting: renderEditListing
+    sharedstock: renderSharedStock, editlisting: renderEditListing, costs: renderCosts
   };
   try {
     (pages[page] || renderDashboard)();
@@ -7481,6 +7487,7 @@ function manualSaleAddRow() {
       <input type="number" class="ms-price" placeholder="Unit £" step="0.01" min="0">
       <button class="btn btn-ghost btn-sm" onclick="this.closest('[data-idx]').remove();manualSaleRecalc()">×</button>
     </div>
+    <div class="ms-floor-warn"></div>
     <div class="ms-custom-toggle" style="margin-top:6px;font-size:11px">
       <a href="#" onclick="manualSaleToggleCustom(this);return false" style="color:var(--ink-soft)">+ Custom item (no stock change)</a>
     </div>
@@ -7498,6 +7505,7 @@ function manualSaleAddRow() {
   const priceInput = row.querySelector('.ms-price');
   qtyInput.addEventListener('change', manualSaleRecalc);
   priceInput.addEventListener('change', manualSaleRecalc);
+  priceInput.addEventListener('input', manualSaleRecalc);
 
   // Live search
   searchInput.addEventListener('input', () => {
@@ -7567,6 +7575,7 @@ function manualSalePrefillPrice(row) {
     suggested = shopifyP;
   }
   if (suggested > 0) row.querySelector('.ms-price').value = suggested;
+  manualSaleRecalc();
 }
 
 function manualSaleRecalc() {
@@ -7576,6 +7585,9 @@ function manualSaleRecalc() {
     const qty = parseFloat(r.querySelector('.ms-qty').value) || 0;
     const price = parseFloat(r.querySelector('.ms-price').value) || 0;
     subtotal += qty * price;
+    // Cost-floor warning per line (direct sale).
+    const fw = r.querySelector('.ms-floor-warn');
+    if (fw) fw.innerHTML = (r.dataset.productId && price) ? floorWarnHtml(r.dataset.productId, price, 'direct') : '';
   }
   const shipping = parseFloat(el('ms-shipping')?.value || 0);
   const cfg = State.pricingConfig || {};
@@ -8026,7 +8038,7 @@ function qbSelectProduct(id) {
           : `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ Not linked to an eBay listing yet — using Shopify price as the basis. Link via Listing Mirror → Link Status.</div>`
         ) : ''}
         <div class="pt-result">
-
+          ${floorWarnHtml(p.id, Math.min(prices.cash || Infinity, prices.bank || Infinity), 'direct')}
           <!-- Cash on collection -->
           <div class="pt-row ${cashAddable ? 'clickable' : 'info-only'} ${pm === 'cash' ? 'matches-lock' : ''}"
                ${cashAddable ? `onclick="qbAddToQuote('${p.id}', 'cash')"` : ''}>
@@ -10282,8 +10294,14 @@ async function renderEditListing() {
   set('ce-qty', (eb.quantity != null ? eb.quantity : p.qty_on_hand) ?? 1);
   if (eb.categoryId) { set('ce-category', eb.categoryId); const path = el('ce-cat-path'); if (path && eb.categoryName) path.textContent = eb.categoryName; }
   if (eb.description) set('ce-desc', eb.description);
-  // Keep the derived Shopify price label in sync with the eBay price.
-  setTimeout(() => { const pr = el('ce-price'); if (pr) pr.addEventListener('input', clUpdateDerivedFromEbay); clUpdateDerivedFromEbay(); }, 150);
+  // Keep the derived Shopify price label in sync with the eBay price + show a
+  // cost-floor warning under the eBay price field (non-blocking).
+  setTimeout(() => {
+    const pr = el('ce-price');
+    if (pr && !el('ce-floor-warn')) { const d = document.createElement('div'); d.id = 'ce-floor-warn'; pr.insertAdjacentElement('afterend', d); }
+    if (pr) pr.addEventListener('input', clUpdateDerivedFromEbay);
+    clUpdateDerivedFromEbay();
+  }, 150);
 }
 
 // Render the eBay item specifics from the listing's actual values (edit mode) —
@@ -10420,6 +10438,12 @@ function clCoreHtml() {
 function clUpdateDerivedFromEbay() {
   const eb = parseFloat(el('ce-price')?.value) || 0;
   const o = el('cl-shop'); if (o) o.value = eb ? '£' + (eb * (1 - clPct() / 100)).toFixed(2) : '';
+  // Edit-listing floor warning (cost-based). Only when editing a known product.
+  const w = el('ce-floor-warn');
+  if (w && CL.editProductId) {
+    const shop = eb ? eb * (1 - clPct() / 100) : 0;
+    w.innerHTML = (floorWarnHtml(CL.editProductId, eb, 'ebay') || '') + (floorWarnHtml(CL.editProductId, shop, 'shopify') || '');
+  }
 }
 // overrides lets the SKU-collision flow re-submit with a unique SKU + a shared
 // barcode/part number (multi-fitment siblings) without re-reading the form.
@@ -11632,6 +11656,320 @@ function sgPickToggle(id) {
 }
 function sgOpenCreateModal() { sgOpenPicker({ title: 'New shared stock pool', mode: 'create' }); }
 function sgAddMembers(gid) { sgOpenPicker({ title: 'Add listings to pool', mode: 'add', gid }); }
+
+/* ==================== COSTS & MARGINS BACKROOM (admin) ==================== */
+// Track true landed cost per item, see per-channel breakeven/floor, supplier
+// cost trends, overstock clearance prices and stock value at cost.
+const CT = { items: [], settings: null, summary: null };
+function ctMoney(n) { return n == null ? '—' : '£' + Number(n).toFixed(2); }
+function ctPct(n) { return n == null ? '—' : Number(n).toFixed(1) + '%'; }
+function ctToday() { return new Date().toISOString().slice(0, 10); }
+
+function renderCosts() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Costs &amp; margins</h1><div class="desc">True landed cost per item (entered in RMB, converted to GBP at the purchase date), the lowest safe price per channel, supplier cost trends and overstock clearance prices.</div></div>
+        <div class="actions">
+          <button class="btn btn-outline" onclick="ctOpenSettings()">⚙️ Cost settings</button>
+          <button class="btn btn-outline" onclick="loadCosts()">⟳ Refresh</button>
+        </div>
+      </div>
+      <div id="ct-stats" class="grid-4" style="margin-bottom:14px"></div>
+      <div class="toolbar">
+        <input type="search" class="search-input" id="ct-search" placeholder="Search by name, SKU, part #...">
+        <select class="filter-select" id="ct-brand"><option value="">All makes</option></select>
+        <select class="filter-select" id="ct-filter">
+          <option value="">All items</option>
+          <option value="below">Below floor only</option>
+          <option value="overstock">Overstock only</option>
+          <option value="nocost">Missing cost</option>
+        </select>
+      </div>
+      <div class="card"><div id="ct-list"><div class="empty"><div class="t">Loading…</div></div></div></div>
+      <div id="ct-overstock" style="margin-top:16px"></div>
+    </div>`;
+  el('ct-search').addEventListener('input', () => { clearTimeout(CT._t); CT._t = setTimeout(ctPaint, 200); });
+  el('ct-brand').addEventListener('change', ctPaint);
+  el('ct-filter').addEventListener('change', ctPaint);
+  loadCosts();
+}
+
+async function loadCosts() {
+  let data;
+  try { data = await Api.get('/api/costs/products'); }
+  catch (e) { el('ct-list').innerHTML = `<div class="empty" style="padding:24px"><div class="t">Couldn't load costs</div>${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  CT.items = data.items || []; CT.settings = data.settings || {}; CT.summary = data.summary || {};
+  // Make filter dropdown
+  const brandSel = el('ct-brand');
+  if (brandSel) {
+    const cur = brandSel.value;
+    const makes = [...new Set(CT.items.map(p => p.brand).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    brandSel.innerHTML = '<option value="">All makes</option>' + makes.map(m => `<option value="${escapeAttr(m)}"${m === cur ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
+  }
+  ctPaintStats();
+  ctPaint();
+  loadCtOverstock();
+}
+
+function ctPaintStats() {
+  const s = CT.summary || {};
+  el('ct-stats').innerHTML = `
+    <div class="stat"><div class="label">Stock value at cost</div><div class="value">${ctMoney(s.inventoryValueAtCost)}</div><div class="delta">${s.withCost || 0}/${s.count || 0} items costed</div></div>
+    <div class="stat"><div class="label">Below floor</div><div class="value" style="color:var(--red)">${s.belowFloor || 0}</div><div class="delta">priced under the safe minimum</div></div>
+    <div class="stat"><div class="label">Overstock</div><div class="value">${s.overstockCount || 0}</div><div class="delta">≥ ${CT.settings?.overstockThreshold ?? 25} in stock</div></div>
+    <div class="stat"><div class="label">Missing cost</div><div class="value">${(s.count || 0) - (s.withCost || 0)}</div><div class="delta">add a cost to see the floor</div></div>`;
+}
+
+function ctFiltered() {
+  const q = (el('ct-search')?.value || '').toLowerCase().trim();
+  const brand = el('ct-brand')?.value || '';
+  const f = el('ct-filter')?.value || '';
+  return CT.items.filter(p => {
+    if (q && !matchesKeywords(q, p.title, p.sku)) return false;
+    if (brand && p.brand !== brand) return false;
+    if (f === 'below' && !(p.belowFloorEbay || p.belowFloorShopify)) return false;
+    if (f === 'overstock' && !p.overstock) return false;
+    if (f === 'nocost' && p.costPrice != null) return false;
+    return true;
+  });
+}
+
+function ctRow(p) {
+  const flag = (cond, txt, col) => cond ? `<span class="pill" style="font-size:9px;background:${col}22;color:${col};font-weight:700">${txt}</span>` : '';
+  const marginCol = (m) => m == null ? 'var(--ink-soft)' : (m < 0 ? 'var(--red)' : m < 10 ? 'var(--amber)' : 'var(--green)');
+  return `
+    <div onclick="ctOpenEditor(${p.id})" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--line-2);cursor:pointer">
+      ${p.imageUrl ? `<img src="${escapeAttr(p.imageUrl)}" alt="" loading="lazy" style="width:38px;height:38px;object-fit:cover;border-radius:6px;background:var(--line-2);flex-shrink:0">` : `<div style="width:38px;height:38px;border-radius:6px;background:var(--line-2);flex-shrink:0"></div>`}
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(p.title || '')}</div>
+        <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(p.sku || '')}${p.lastSupplier ? ' · ' + escapeHtml(p.lastSupplier) : ''}${p.lastPurchaseDate ? ' · ' + new Date(p.lastPurchaseDate).toLocaleDateString('en-GB') : ''} ${flag(p.overstock, '📦 ' + p.qtyOnHand, 'var(--amber)')}</div>
+      </div>
+      <div style="width:74px;text-align:right"><div style="font-size:10px;color:var(--ink-soft)">Cost</div><div style="font-weight:700;font-size:13px">${p.costPrice == null ? '<span style="color:var(--amber)">add</span>' : ctMoney(p.costPrice)}</div></div>
+      <div style="width:118px;text-align:right">
+        <div style="font-size:10px;color:var(--ink-soft)">eBay floor / price</div>
+        <div style="font-size:12px">${ctMoney(p.floorEbay)} <span style="color:var(--ink-soft)">/</span> <span style="${p.belowFloorEbay ? 'color:var(--red);font-weight:700' : ''}">${ctMoney(p.priceEbay)}</span></div>
+        <div style="font-size:10px;color:${marginCol(p.marginEbayPct)}">${p.marginEbayPct == null ? '' : 'margin ' + ctPct(p.marginEbayPct)}</div>
+      </div>
+      <div style="width:118px;text-align:right">
+        <div style="font-size:10px;color:var(--ink-soft)">Shopify floor / price</div>
+        <div style="font-size:12px">${ctMoney(p.floorShopify)} <span style="color:var(--ink-soft)">/</span> <span style="${p.belowFloorShopify ? 'color:var(--red);font-weight:700' : ''}">${ctMoney(p.priceShopify)}</span></div>
+        <div style="font-size:10px;color:${marginCol(p.marginShopifyPct)}">${p.marginShopifyPct == null ? '' : 'margin ' + ctPct(p.marginShopifyPct)}</div>
+      </div>
+      ${(p.belowFloorEbay || p.belowFloorShopify) ? '<span class="pill" style="font-size:9px;background:var(--red-light);color:var(--red);font-weight:700">🔻 below floor</span>' : ''}
+    </div>`;
+}
+
+function ctPaint() {
+  const list = ctFiltered();
+  const wrap = el('ct-list'); if (!wrap) return;
+  wrap.innerHTML = list.length ? list.slice(0, 600).map(ctRow).join('') + (list.length > 600 ? `<div style="padding:10px;text-align:center;font-size:12px;color:var(--ink-soft)">Showing 600 of ${list.length} — narrow with search.</div>` : '')
+    : '<div class="empty" style="padding:24px;text-align:center"><div class="t">No items match</div></div>';
+}
+
+async function loadCtOverstock() {
+  let data; try { data = await Api.get('/api/costs/overstock'); } catch (e) { return; }
+  const wrap = el('ct-overstock'); if (!wrap) return;
+  const items = data.items || [];
+  if (!items.length) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = `
+    <div class="card">
+      <div class="card-head"><h3>📦 Overstock — safe to discount</h3><div class="card-desc">Items with ≥ ${data.threshold} in stock. "Min price" is the floor (most aggressive price that still clears target margin). Capital = stock × cost.</div></div>
+      <div style="overflow-x:auto"><table class="table">
+        <thead><tr><th>Item</th><th style="text-align:right">In stock</th><th style="text-align:right">Cost</th><th style="text-align:right">Capital tied</th><th style="text-align:right">eBay price</th><th style="text-align:right">Min price (floor)</th></tr></thead>
+        <tbody>${items.map(i => `<tr style="cursor:pointer" onclick="ctOpenEditor(${i.id})">
+          <td><div style="font-weight:500">${escapeHtml(i.title || '')}</div><div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escapeHtml(i.sku || '')}</div></td>
+          <td style="text-align:right">${i.qtyOnHand}</td>
+          <td style="text-align:right">${ctMoney(i.costPrice)}</td>
+          <td style="text-align:right;font-weight:600">${ctMoney(i.capitalTied)}</td>
+          <td style="text-align:right">${ctMoney(i.priceEbay)}</td>
+          <td style="text-align:right;font-weight:700;color:var(--brand-primary)">${ctMoney(i.suggestedClearance)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+    </div>`;
+}
+
+// ---- Per-product cost editor (FX preview + history) ----
+async function ctOpenEditor(productId) {
+  const p = CT.items.find(x => x.id === productId) || {};
+  modal({
+    title: 'Cost — ' + (p.title || ('#' + productId)),
+    body: `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field"><label>Supplier</label><input id="ct-supplier" value="${escapeAttr(p.lastSupplier || '')}" placeholder="e.g. Guangzhou XYZ"></div>
+        <div class="field"><label>Purchase date</label><input id="ct-date" type="date" value="${ctToday()}"></div>
+        <div class="field"><label>Currency</label>
+          <select id="ct-cur"><option value="CNY"${(p.lastCurrency || 'CNY') === 'CNY' ? ' selected' : ''}>CNY (RMB)</option><option value="GBP"${p.lastCurrency === 'GBP' ? ' selected' : ''}>GBP</option><option value="USD"${p.lastCurrency === 'USD' ? ' selected' : ''}>USD</option><option value="EUR"${p.lastCurrency === 'EUR' ? ' selected' : ''}>EUR</option></select></div>
+        <div class="field"><label>Unit cost (foreign)</label><input id="ct-foreign" type="number" step="0.01" min="0" value="${p.lastUnitCostForeign != null ? p.lastUnitCostForeign : ''}" placeholder="e.g. 80"></div>
+        <div class="field"><label>FX rate → GBP <span style="color:var(--ink-soft);font-weight:400">auto</span></label>
+          <div style="display:flex;gap:6px"><input id="ct-rate" type="number" step="0.00001" min="0" placeholder="auto" style="flex:1"><button type="button" class="btn btn-outline btn-sm" onclick="ctFetchRate()">↻</button></div></div>
+        <div class="field"><label>= GBP unit cost</label><input id="ct-gbp" disabled style="background:var(--bg-soft);font-weight:700"></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+        <div class="field"><label>Qty on order <span style="color:var(--ink-soft);font-weight:400">(opt)</span></label><input id="ct-qty" type="number" min="0" placeholder="optional"></div>
+        <div class="field"><label>Container freight £ <span style="color:var(--ink-soft);font-weight:400">(not apportioned yet)</span></label><input id="ct-freight" type="number" step="0.01" min="0" placeholder="optional"></div>
+        <div class="field"><label>Duty £ <span style="color:var(--ink-soft);font-weight:400">(not apportioned)</span></label><input id="ct-duty" type="number" step="0.01" min="0" placeholder="optional"></div>
+      </div>
+      <div class="field"><label>Note</label><input id="ct-note" placeholder="optional"></div>
+      <div id="ct-floors-preview" style="font-size:12px;color:var(--ink-soft);margin:4px 0 8px"></div>
+      <div id="ct-history" style="border-top:1px solid var(--line);padding-top:10px"><div style="font-size:12px;color:var(--ink-soft)">Loading history…</div></div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Save cost', primary: true, onClick: () => ctSaveCost(productId) },
+    ],
+  });
+  // live GBP preview
+  ['ct-foreign', 'ct-rate', 'ct-cur'].forEach(id => { const e = el(id); if (e) e.addEventListener('input', ctUpdateGbpPreview); });
+  setTimeout(() => { ctFetchRate(); }, 80);
+  ctLoadHistory(productId);
+}
+
+function ctUpdateGbpPreview() {
+  const cur = el('ct-cur')?.value || 'CNY';
+  const foreign = parseFloat(el('ct-foreign')?.value) || 0;
+  const rate = cur === 'GBP' ? 1 : parseFloat(el('ct-rate')?.value) || 0;
+  const gbp = foreign * rate;
+  if (el('ct-gbp')) el('ct-gbp').value = (foreign && rate) ? '£' + gbp.toFixed(2) : '';
+}
+
+async function ctFetchRate() {
+  const cur = el('ct-cur')?.value || 'CNY';
+  if (cur === 'GBP') { if (el('ct-rate')) el('ct-rate').value = '1'; ctUpdateGbpPreview(); return; }
+  const date = el('ct-date')?.value || ctToday();
+  try {
+    const r = await Api.get(`/api/costs/fx?from=${encodeURIComponent(cur)}&to=GBP&date=${encodeURIComponent(date)}`);
+    if (el('ct-rate') && !el('ct-rate').value) el('ct-rate').value = Number(r.rate).toFixed(5);
+    ctUpdateGbpPreview();
+  } catch (e) { /* leave blank for manual entry */ }
+}
+
+async function ctSaveCost(productId) {
+  const cur = el('ct-cur')?.value || 'CNY';
+  const foreign = el('ct-foreign')?.value;
+  const rate = el('ct-rate')?.value;
+  if (!foreign && cur !== 'GBP') { toast('Enter the unit cost', 'warn'); return; }
+  const payload = {
+    supplier: el('ct-supplier')?.value || null,
+    purchaseDate: el('ct-date')?.value || ctToday(),
+    currency: cur,
+    unitCostForeign: foreign || null,
+    fxRate: rate || null,
+    qty: el('ct-qty')?.value || null,
+    freightTotal: el('ct-freight')?.value || null,
+    duty: el('ct-duty')?.value || null,
+    note: el('ct-note')?.value || null,
+  };
+  try {
+    const r = await Api.post('/api/costs/products/' + productId + '/cost', payload);
+    toast('Cost saved — £' + Number(r.costPrice).toFixed(2) + ' landed', 'success');
+    closeModal();
+    await loadCosts();
+    await refreshCostFloors();
+    Store.refresh('products').catch(() => {});
+  } catch (e) {
+    toast('Save failed: ' + (e.data?.message || e.message), 'error', 7000);
+  }
+}
+
+async function ctLoadHistory(productId) {
+  const wrap = el('ct-history'); if (!wrap) return;
+  let data; try { data = await Api.get('/api/costs/products/' + productId + '/history'); } catch (e) { wrap.innerHTML = ''; return; }
+  const h = data.history || [];
+  if (!h.length) { wrap.innerHTML = '<div style="font-size:12px;color:var(--ink-soft)">No cost history yet.</div>'; return; }
+  // sparkline
+  const vals = h.map(x => x.unitCostGbp);
+  const min = Math.min(...vals), max = Math.max(...vals), span = (max - min) || 1;
+  const W = 220, H = 36;
+  const pts = h.map((x, i) => `${(i / Math.max(1, h.length - 1) * W).toFixed(1)},${(H - ((x.unitCostGbp - min) / span) * H).toFixed(1)}`).join(' ');
+  const last = h[h.length - 1];
+  const trend = last.trendPct;
+  const trendBadge = trend == null ? '' : `<span style="color:${trend > 0 ? 'var(--red)' : trend < 0 ? 'var(--green)' : 'var(--ink-soft)'};font-weight:700">${trend > 0 ? '▲' : trend < 0 ? '▼' : ''} ${Math.abs(trend)}% since last order</span>`;
+  wrap.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft)">Cost history (${h.length})</div>
+      <div style="font-size:11px">${trendBadge}</div>
+    </div>
+    <svg width="${W}" height="${H}" style="display:block;margin-bottom:8px"><polyline points="${pts}" fill="none" stroke="var(--brand-primary)" stroke-width="1.5"/></svg>
+    <div style="max-height:140px;overflow:auto;font-size:11px">
+      ${h.slice().reverse().map(x => `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line-2)">
+        <span>${new Date(x.purchaseDate).toLocaleDateString('en-GB')}${x.supplier ? ' · ' + escapeHtml(x.supplier) : ''}</span>
+        <span>${x.unitCostForeign != null ? x.unitCostForeign + ' ' + escapeHtml(x.currency || '') + ' → ' : ''}<strong>£${Number(x.unitCostGbp).toFixed(2)}</strong>${x.trendPct != null ? ` <span style="color:${x.trendPct > 0 ? 'var(--red)' : 'var(--green)'}">${x.trendPct > 0 ? '+' : ''}${x.trendPct}%</span>` : ''}</span>
+      </div>`).join('')}
+    </div>`;
+}
+
+// ---- Cost settings ----
+async function ctOpenSettings() {
+  let s = CT.settings;
+  if (!s) { try { s = (await Api.get('/api/costs/settings')).settings; } catch (e) { toast('Failed to load settings', 'error'); return; } }
+  const f = (id, label, val, hint) => `<div class="field"><label>${label}</label><input id="cs-${id}" type="number" step="0.01" value="${val != null ? val : ''}">${hint ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">${hint}</div>` : ''}</div>`;
+  modal({
+    title: '⚙️ Cost settings',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">These drive the breakeven/floor maths. VAT is taken from your main Settings (${s.vatRegistered ? 'VAT-registered @ ' + s.vatRate + '%' : 'not VAT-registered'}).</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        ${f('postageSmall', 'Postage — small item £', s.postageSmall)}
+        ${f('postageLarge', 'Postage — large panel £', s.postageLarge, 'Used when an item is flagged "large panel".')}
+        ${f('packagingCost', 'Packaging £/order', s.packagingCost)}
+        ${f('targetMarginPct', 'Target margin %', s.targetMarginPct, 'Floor = breakeven + this %.')}
+        ${f('ebayFeePct', 'eBay fee %', s.ebayFeePct)}
+        ${f('ebayFixedFee', 'eBay fixed fee £', s.ebayFixedFee)}
+        ${f('shopifyFeePct', 'Shopify fee %', s.shopifyFeePct)}
+        ${f('shopifyFixedFee', 'Shopify fixed fee £', s.shopifyFixedFee)}
+        ${f('adRatePct', 'eBay ad rate %', s.adRatePct, 'Promoted-listing rate, if you run ads.')}
+        ${f('overstockThreshold', 'Overstock threshold (units)', s.overstockThreshold)}
+      </div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Save', primary: true, onClick: ctSaveSettings },
+    ],
+  });
+}
+async function ctSaveSettings() {
+  const keys = ['postageSmall', 'postageLarge', 'packagingCost', 'targetMarginPct', 'ebayFeePct', 'ebayFixedFee', 'shopifyFeePct', 'shopifyFixedFee', 'adRatePct', 'overstockThreshold'];
+  const payload = {};
+  for (const k of keys) { const v = el('cs-' + k)?.value; if (v !== '' && v != null) payload[k] = parseFloat(v); }
+  try {
+    const r = await Api.post('/api/costs/settings', payload);
+    CT.settings = r.settings;
+    toast('Cost settings saved', 'success');
+    closeModal();
+    await loadCosts();
+    await refreshCostFloors();
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// ---- App-wide floor warnings (non-blocking) ----
+// A cached map { productId: { costPrice, floorEbay, floorShopify, breakeven* } }
+// loaded once for admins, refreshed after any cost change. Drives "below floor"
+// notes wherever a price is set. No per-keystroke network calls.
+async function refreshCostFloors() {
+  if (State.user?.role !== 'admin') return;
+  try { const r = await Api.get('/api/costs/floors'); State.costFloors = r.floors || {}; }
+  catch (e) { /* 403 / not configured — ignore */ }
+}
+function costFloorFor(productId) { return (State.costFloors || {})[productId] || null; }
+// channel: 'ebay' | 'shopify' | 'direct'. Returns an inline amber note, or ''.
+function floorFor(f, channel) {
+  if (channel === 'shopify') return { floor: f.floorShopify, be: f.breakevenShopify };
+  if (channel === 'direct') return { floor: f.floorDirect, be: f.breakevenDirect };
+  return { floor: f.floorEbay, be: f.breakevenEbay };
+}
+function floorWarnHtml(productId, price, channel) {
+  const f = costFloorFor(productId); if (!f) return '';
+  const { floor, be } = floorFor(f, channel);
+  const p = parseFloat(price);
+  if (floor == null || isNaN(p) || p <= 0 || p >= floor) return '';
+  return `<div style="font-size:11px;color:var(--amber);font-weight:600;margin-top:3px">⚠ Below floor — min £${Number(floor).toFixed(2)}${be != null ? ` <span style="font-weight:400;color:var(--ink-soft)">(breakeven £${Number(be).toFixed(2)})</span>` : ''}</div>`;
+}
+// Inline (single-line) variant for tight rows.
+function floorWarnInline(productId, price, channel) {
+  const f = costFloorFor(productId); if (!f) return '';
+  const { floor } = floorFor(f, channel);
+  const p = parseFloat(price);
+  if (floor == null || isNaN(p) || p <= 0 || p >= floor) return '';
+  return ` <span style="color:var(--amber);font-weight:700" title="Cost-based minimum">⚠ min £${Number(floor).toFixed(2)}</span>`;
+}
 
 function reconcileRow(g) {
   const dupBadge = (n, label) => `<div style="font-size:10px;color:var(--red);font-weight:700;margin-bottom:3px">⚠ ${n} ${label} — possible duplicate</div>`;

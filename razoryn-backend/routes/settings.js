@@ -372,6 +372,8 @@ router.get('/pricing-config', async (req, res) => {
     // Auto-email proformas / paid invoices to the customer (lives in data JSONB).
     // Defaults ON — only ever fires when Resend is configured + there's an email.
     autoEmailDocuments: (r.data?.autoEmailDocuments !== false),
+    // Cost/margin knobs (Costs & margins backroom) — resolved with defaults + VAT.
+    costs: require('../lib/pricing-floor').resolveCostSettings(r),
     resendConfigured: !!process.env.RESEND_API_KEY,
     fromEmail: (() => {
       const dom = (require('../lib/brand').domain || '').toLowerCase();
@@ -502,6 +504,14 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       const cur = await query(`SELECT data FROM app_settings WHERE id = 1`);
       const data = { ...(cur.rows[0]?.data || {}), autoEmailDocuments: enabled };
       await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify(data)]);
+    }
+    // Cost knobs live in data.costs JSONB — merge any provided numeric keys.
+    if (b.costs && typeof b.costs === 'object') {
+      const keys = ['postageSmall', 'postageLarge', 'packagingCost', 'ebayFeePct', 'ebayFixedFee', 'shopifyFeePct', 'shopifyFixedFee', 'adRatePct', 'targetMarginPct', 'overstockThreshold'];
+      const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+      const costs = { ...(cur.costs || {}) };
+      for (const k of keys) { if (b.costs[k] != null && b.costs[k] !== '') { const n = parseFloat(b.costs[k]); if (!Number.isNaN(n)) costs[k] = n; } }
+      await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify({ ...cur, costs })]);
     }
     if (!updates.length) return res.json({ ok: true });
     await query(`UPDATE app_settings SET ${updates.join(', ')}, updated_at = now() WHERE id = 1`, params);
