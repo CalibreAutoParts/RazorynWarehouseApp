@@ -1436,7 +1436,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     if (items.length === 0) return '';
     return `
   <div class="review-cta">
-    <span class="rc-text">Enjoyed your order? A quick review really helps a small business.</span>
+    <span class="rc-text">Enjoyed your order? A quick review really helps — thank you!</span>
     <span class="rc-links">
       ${items.map(it => `<a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">★ Review us on ${escapeHtml(it.label)}</a>`).join('')}
     </span>

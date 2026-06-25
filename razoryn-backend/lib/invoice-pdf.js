@@ -266,7 +266,7 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
           rrx -= 16;
         }
         doc.font('Helvetica').fontSize(9.5).fillColor('#5a4400')
-          .text('Enjoyed your order? A quick review really helps a small business.', left + 12, y + 11, { width: rrx - left - 18, lineBreak: false, ellipsis: true });
+          .text('Enjoyed your order? A quick review really helps — thank you!', left + 12, y + 11, { width: rrx - left - 18, lineBreak: false, ellipsis: true });
         y += rh + 16;
       }
 
