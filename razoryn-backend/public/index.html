@@ -7583,7 +7583,8 @@ function manualSaleRecalc() {
   // (VAT-inclusive), so VAT is the portion WITHIN the subtotal — never added on
   // top. Total = subtotal + shipping. (Matches the backend exactly.)
   const vatRate = (!isCash && vatRegistered) ? (cfg.vatRate || 20) / 100 : 0;
-  const vat = vatRate ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2) : 0;
+  // Delivery is taxable income too — VAT is the portion within (subtotal + shipping).
+  const vat = vatRate ? +((subtotal + shipping) - (subtotal + shipping) / (1 + vatRate)).toFixed(2) : 0;
   const total = +(subtotal + shipping).toFixed(2);
   const sum = el('ms-summary');
   if (sum) {

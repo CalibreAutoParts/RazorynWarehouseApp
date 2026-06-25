@@ -478,12 +478,15 @@ router.post('/', requireAdmin, async (req, res) => {
     // Policy:
     //  • Cash on collection → no VAT recorded (£0). Receipt, not an invoice.
     //  • Bank / Card / Online → if vat_registered, record VAT portion of gross.
+    // Delivery is taxable income too, so VAT is taken on the gross subtotal PLUS
+    // shipping (both are VAT-inclusive). Total is unchanged.
     const isCashSale = paymentMethod === 'cash';
     const vatChargeable = !isCashSale && vatRegistered;
-    const vat = vatChargeable
-      ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2)  // VAT portion of gross
-      : 0;
     const shipping = parseFloat(b.shipping || 0);
+    const grossForVat = subtotal + shipping;
+    const vat = vatChargeable
+      ? +(grossForVat - grossForVat / (1 + vatRate)).toFixed(2)  // VAT portion of gross (goods + delivery)
+      : 0;
     const total = +(subtotal + shipping).toFixed(2);  // subtotal IS gross — no VAT added
 
     // Generate identifiers — one unified reference for both columns. Estimates
@@ -836,7 +839,8 @@ router.post('/:id/convert-to-invoice', requireAdmin, async (req, res) => {
     const vatChargeable = !isCashSale && vatRegistered;
     const subtotal = parseFloat(s.rows[0].subtotal);
     const shipping = parseFloat(s.rows[0].shipping || 0);
-    const vat = vatChargeable ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2) : 0;
+    const grossForVat = subtotal + shipping;   // delivery is taxable income too
+    const vat = vatChargeable ? +(grossForVat - grossForVat / (1 + vatRate)).toFixed(2) : 0;
     const total = +(subtotal + shipping).toFixed(2);
 
     const updated = await c.query(`
@@ -1132,7 +1136,11 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   const isCashSale = sale.payment_method === 'cash';
   const showVatBreakdown = isVatRegistered && !isCashSale;
   const subtotalNet = showVatBreakdown ? (parseFloat(sale.subtotal) / (1 + 0.2)) : parseFloat(sale.subtotal);
-  const vatAmount = showVatBreakdown ? (parseFloat(sale.subtotal) - subtotalNet) : 0;
+  // Delivery is taxable too — net it out and include its VAT in the VAT line so
+  // the breakdown (goods net + delivery net + VAT) ties back to the gross total.
+  const shippingGross = parseFloat(sale.shipping || 0);
+  const shippingNet = showVatBreakdown ? (shippingGross / (1 + 0.2)) : shippingGross;
+  const vatAmount = showVatBreakdown ? ((parseFloat(sale.subtotal) + shippingGross) - (subtotalNet + shippingNet)) : 0;
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title></title>
@@ -1354,11 +1362,12 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     <div class="totals">
       ${showVatBreakdown ? `
         <div class="row"><span>Subtotal (Net)</span><span>${fmt(subtotalNet)}</span></div>
+        ${shippingGross > 0 ? `<div class="row"><span>Delivery (Net)</span><span>${fmt(shippingNet)}</span></div>` : ''}
         <div class="row"><span>VAT (${company.vat_rate || 20}%)</span><span>${fmt(vatAmount)}</span></div>
       ` : `
         <div class="row"><span>Subtotal</span><span>${fmt(sale.subtotal)}</span></div>
+        ${shippingGross > 0 ? `<div class="row"><span>Shipping</span><span>${fmt(sale.shipping)}</span></div>` : ''}
       `}
-      ${parseFloat(sale.shipping || 0) > 0 ? `<div class="row"><span>Shipping</span><span>${fmt(sale.shipping)}</span></div>` : ''}
       <div class="grand"><span>TOTAL${showVatBreakdown ? ' (incl. VAT)' : ''}</span><span>${fmt(sale.total)}</span></div>
     </div>
   </div>
@@ -1683,8 +1692,10 @@ async function recomputeSaleTotals(c, saleId) {
   const vatRegistered = !!setRow.vat_registered;
   const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
   const isCashSale = saleRow.rows[0]?.payment_method === 'cash';
-  const vat = (!isCashSale && vatRegistered) ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2) : 0;
   const shipping = parseFloat(saleRow.rows[0]?.shipping || 0);
+  // Delivery is taxable income too — VAT is on (subtotal + shipping) gross.
+  const grossForVat = subtotal + shipping;
+  const vat = (!isCashSale && vatRegistered) ? +(grossForVat - grossForVat / (1 + vatRate)).toFixed(2) : 0;
   const total = +(subtotal + shipping).toFixed(2);
   await c.query(`UPDATE sales SET subtotal = $1, vat = $2, total = $3 WHERE id = $4`, [subtotal, vat, total, saleId]);
   return { subtotal, vat, total };
@@ -1907,7 +1918,8 @@ router.post('/backfill-vat', requireAdmin, async (req, res) => {
     const shipping = parseFloat(s.shipping || 0);
     const isCashSale = s.payment_method === 'cash';
     const vatChargeable = !isCashSale && vatRegistered;
-    const correctVat = vatChargeable ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2) : 0;
+    const grossForVat = subtotal + shipping;   // delivery is taxable income too
+    const correctVat = vatChargeable ? +(grossForVat - grossForVat / (1 + vatRate)).toFixed(2) : 0;
     const correctTotal = +(subtotal + shipping).toFixed(2);
     if (Math.abs(parseFloat(s.vat || 0) - correctVat) < 0.005
         && Math.abs(parseFloat(s.total || 0) - correctTotal) < 0.005) {
