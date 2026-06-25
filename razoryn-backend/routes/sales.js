@@ -1573,8 +1573,23 @@ async function sendSaleDocumentEmail(saleId, { to, templateKey, includeMessage, 
       <p style="margin:14px 0 0;font-weight:700">${esc(brand.name)}</p>
       ${sigBits ? `<p style="margin:3px 0 0;font-size:12px;color:#666">${esc(sigBits)}</p>` : ''}
     </div>`;
-  const htmlWithCover = cover ? html.replace(/(<body[^>]*>)/i, `$1${cover}`) : html;
-  const finalHtml = (cover && htmlWithCover === html) ? cover + html : htmlWithCover;
+  // Attach the document as a PDF. The email body is then just the covering
+  // message (clean), with the invoice in the attachment. If PDF generation fails
+  // for any reason, fall back to the full invoice rendered inline so the customer
+  // still gets it.
+  let attachments;
+  let emailHtml;
+  try {
+    const { buildInvoicePdf } = require('../lib/invoice-pdf');
+    const pdf = await buildInvoicePdf({ sale, items, company, brand, mode });
+    attachments = [{ filename: `${docLabel.replace(/[^a-z0-9]+/gi, '-')}-${(sale.invoice_number || sale.payment_reference || sale.id)}.pdf`, content: pdf.toString('base64') }];
+    const fallbackMsg = `<p style="margin:0">Please find your ${esc(docLabel.toLowerCase())} attached.</p>`;
+    emailHtml = `<div style="font-family:Arial,Helvetica,sans-serif;color:#222;line-height:1.5;padding:8px">${cover || fallbackMsg}</div>`;
+  } catch (e) {
+    console.warn('[sendSaleDocumentEmail] PDF failed, sending inline:', e.message);
+    const htmlWithCover = cover ? html.replace(/(<body[^>]*>)/i, `$1${cover}`) : html;
+    emailHtml = (cover && htmlWithCover === html) ? cover + html : htmlWithCover;
+  }
 
   const fromEmail = process.env.WAREHOUSE_FROM_EMAIL || `noreply@${brand.domain}`;
   try {
@@ -1583,12 +1598,13 @@ async function sendSaleDocumentEmail(saleId, { to, templateKey, includeMessage, 
       from: `${brand.name} <${fromEmail}>`,
       to: [recipient],
       subject,
-      html: finalHtml,
+      html: emailHtml,
       // Replies go to the business inbox, not the no-reply send address.
       ...(company.company_email ? { reply_to: company.company_email } : {}),
+      ...(attachments ? { attachments } : {}),
     }, {
       headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      timeout: 15000,
+      timeout: 20000,
     });
     return { ok: true, id: r.data?.id, to: recipient, mode, docLabel };
   } catch (e) {

@@ -53,6 +53,18 @@ Did you know you can buy direct from {website}? You'll get better prices than th
 Thank you again for your order.`,
   },
   {
+    key: 'paid_thanks',
+    name: 'Paid — simple thank-you',
+    body:
+`Hi {customer},
+
+Thank you for your purchase from {brand}. Your {doc}{ref} is attached to this email for your records.
+
+If you have any questions, just reply to this email.
+
+Thanks again.`,
+  },
+  {
     key: 'none',
     name: 'Invoice only (no message)',
     body: '',
@@ -82,6 +94,9 @@ async function getEmailTemplates(query) {
 function defaultKeyForSale(sale) {
   const ch = (sale && sale.channel) || '';
   if (ch.startsWith('ebay')) return 'ebay_convert';
+  // A paid direct invoice/receipt → a plain thank-you (no marketing or links),
+  // with the invoice attached as a PDF.
+  if (sale && !sale.is_estimate && sale.is_paid !== false && ch.startsWith('direct')) return 'paid_thanks';
   return 'standard';
 }
 

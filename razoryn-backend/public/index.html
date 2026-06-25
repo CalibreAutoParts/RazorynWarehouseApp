@@ -7036,7 +7036,10 @@ async function emailSingleInvoice(id) {
   const isEbay = (sale?.apiChannel || sale?.channel || '').startsWith('ebay');
   let templates = [];
   try { templates = (await Api.get('/api/sales/email-templates')).templates || []; } catch (_) {}
-  const defaultKey = isEbay ? 'ebay_convert' : 'standard';
+  // Paid direct invoice → default to the simple thank-you (invoice attached as PDF).
+  const isDirectPaid = (sale?.apiChannel || '').startsWith('direct') && !sale?.isEstimate && sale?.isPaid !== false;
+  const wantKey = isEbay ? 'ebay_convert' : (isDirectPaid && templates.some(t => t.key === 'paid_thanks') ? 'paid_thanks' : 'standard');
+  const defaultKey = templates.some(t => t.key === wantKey) ? wantKey : 'standard';
   const opts = templates.map(t => `<option value="${escapeAttr(t.key)}" ${t.key === defaultKey ? 'selected' : ''}>${escapeHtml(t.name)}</option>`).join('');
   modal({
     title: '✉ Email invoice',
