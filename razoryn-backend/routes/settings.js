@@ -369,6 +369,17 @@ router.get('/pricing-config', async (req, res) => {
     // Disabled when stock_check_enabled is false OR day is null.
     stockCheckDay:     r.stock_check_day || null,
     stockCheckEnabled: !!r.stock_check_enabled,
+    // Auto-email proformas / paid invoices to the customer (lives in data JSONB).
+    // Defaults ON — only ever fires when Resend is configured + there's an email.
+    autoEmailDocuments: (r.data?.autoEmailDocuments !== false),
+    // Cost/margin knobs (Costs & margins backroom) — resolved with defaults + VAT.
+    costs: require('../lib/pricing-floor').resolveCostSettings(r),
+    resendConfigured: !!process.env.RESEND_API_KEY,
+    fromEmail: (() => {
+      const dom = (require('../lib/brand').domain || '').toLowerCase();
+      const onBrand = r.company_email && r.company_email.toLowerCase().endsWith('@' + dom);
+      return process.env.WAREHOUSE_FROM_EMAIL || (onBrand ? r.company_email : `invoices@${dom}`);
+    })(),
     // Per-store policy overrides (multi-store brands only).
     // Shape: { storeCode: { payment, shipping, return } }
     ebayPerStorePolicies:   (() => {
@@ -487,7 +498,22 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
         }
       }
     }
-    if (!updates.length) return res.json({ ok: true, message: 'no_changes' });
+    // Auto-email toggle lives in the data JSONB, not a column — save it separately.
+    if (b.autoEmailDocuments !== undefined) {
+      const enabled = (b.autoEmailDocuments === true || b.autoEmailDocuments === 'true' || b.autoEmailDocuments === 1 || b.autoEmailDocuments === '1');
+      const cur = await query(`SELECT data FROM app_settings WHERE id = 1`);
+      const data = { ...(cur.rows[0]?.data || {}), autoEmailDocuments: enabled };
+      await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify(data)]);
+    }
+    // Cost knobs live in data.costs JSONB — merge any provided numeric keys.
+    if (b.costs && typeof b.costs === 'object') {
+      const keys = ['postageSmall', 'postageLarge', 'packagingCost', 'ebayFeePct', 'ebayFixedFee', 'shopifyFeePct', 'shopifyFixedFee', 'adRatePct', 'targetMarginPct', 'overstockThreshold'];
+      const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+      const costs = { ...(cur.costs || {}) };
+      for (const k of keys) { if (b.costs[k] != null && b.costs[k] !== '') { const n = parseFloat(b.costs[k]); if (!Number.isNaN(n)) costs[k] = n; } }
+      await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify({ ...cur, costs })]);
+    }
+    if (!updates.length) return res.json({ ok: true });
     await query(`UPDATE app_settings SET ${updates.join(', ')}, updated_at = now() WHERE id = 1`, params);
     await audit(req, 'update_pricing_config', null, null, Object.keys(b));
     res.json({ ok: true });

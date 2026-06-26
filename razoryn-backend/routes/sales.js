@@ -359,6 +359,31 @@ router.get('/export.xlsx', requireAdmin, async (req, res) => {
   res.send(buf);
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// Invoice Hub — admin tools (registered before /:id so the literal paths win).
+// GET  /api/sales/invoice-hub/status   — is it configured + which company.
+// POST /api/sales/invoice-hub/backfill — { month:"YYYY-MM", dryRun?, withRefunds? }
+//   Backfills past direct cash/bank sales. Powers the Settings button so a
+//   one-off catch-up needs no terminal. Idempotent on the Hub side.
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/invoice-hub/status', requireAdmin, async (req, res) => {
+  res.json(require('../services/invoiceHub').status());
+});
+
+router.post('/invoice-hub/backfill', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const result = await require('../services/invoiceHub').backfillMonth({
+    month: b.month,
+    dryRun: !!b.dryRun,
+    withRefunds: !!b.withRefunds,
+  });
+  if (!result.dryRun && result.ok) {
+    await audit(req, 'invoice_hub_backfill', 'sale', null,
+      { month: result.month, found: result.found, saleOk: result.saleOk, saleErr: result.saleErr });
+  }
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
 // GET /api/sales/:id
 router.get('/:id', requireAdmin, async (req, res, next) => {
   // Sale ids are numeric. Let non-numeric paths (e.g. /vat-report, /vat-report.csv)
@@ -396,6 +421,10 @@ router.post('/', requireAdmin, async (req, res) => {
   const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
 
   const isEstimate = !!b.isEstimate;
+  // Whether this sale is paid now (vs an issued-but-unpaid invoice). Needed both
+  // inside the transaction (sale status/stock) AND after it (Invoice Hub push),
+  // so it lives in the outer scope.
+  const isPaid = isEstimate ? true : (b.paid !== false);
 
   const result = await withTx(async (c) => {
     let subtotal = 0;
@@ -449,12 +478,15 @@ router.post('/', requireAdmin, async (req, res) => {
     // Policy:
     //  • Cash on collection → no VAT recorded (£0). Receipt, not an invoice.
     //  • Bank / Card / Online → if vat_registered, record VAT portion of gross.
+    // Delivery is taxable income too, so VAT is taken on the gross subtotal PLUS
+    // shipping (both are VAT-inclusive). Total is unchanged.
     const isCashSale = paymentMethod === 'cash';
     const vatChargeable = !isCashSale && vatRegistered;
-    const vat = vatChargeable
-      ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2)  // VAT portion of gross
-      : 0;
     const shipping = parseFloat(b.shipping || 0);
+    const grossForVat = subtotal + shipping;
+    const vat = vatChargeable
+      ? +(grossForVat - grossForVat / (1 + vatRate)).toFixed(2)  // VAT portion of gross (goods + delivery)
+      : 0;
     const total = +(subtotal + shipping).toFixed(2);  // subtotal IS gross — no VAT added
 
     // Generate identifiers — one unified reference for both columns. Estimates
@@ -493,7 +525,7 @@ router.post('/', requireAdmin, async (req, res) => {
 
     // #13: an issued-but-unpaid invoice (b.paid === false) still gives the parts
     // (stock decrements like any invoice) but is flagged for payment follow-up.
-    const isPaid = isEstimate ? true : (b.paid !== false);
+    // isPaid is computed in the outer scope (used again for the Invoice Hub push).
     await ensurePaidColumn();
     // Fitment only applies to self-service Shopify storefront orders. Direct
     // sales (cash/bank/card) are quoted by staff who confirm fitment first, so
@@ -556,6 +588,21 @@ router.post('/', requireAdmin, async (req, res) => {
       sync.pushStockForSaleItems(result.items).catch(e => console.warn('[sync] push failed:', e.message));
     });
   }
+  // Forward our own direct bank/cash sales to the Invoice Hub (best-effort).
+  // Only paid, non-estimate, in-scope sales — eBay/Shopify/card are excluded
+  // (reconciled via platform statement uploads). A pending invoice is pushed
+  // later when it's marked paid.
+  if (!isEstimate && isPaid) {
+    const invoiceHub = require('../services/invoiceHub');
+    if (invoiceHub.isInScope(result.sale.channel)) {
+      setImmediate(() => invoiceHub.pushSale(result.sale.id).catch(e => console.warn('[invoiceHub] push failed:', e.message)));
+    }
+  }
+  // Auto-email the document (proforma / estimate / paid invoice / receipt) to the
+  // customer — best-effort, only when Resend is configured, auto-send is on, and a
+  // customer email is present.
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  setImmediate(() => maybeAutoEmailSale(result.sale.id, baseUrl));
   res.status(201).json(result);
 });
 
@@ -564,7 +611,7 @@ router.post('/', requireAdmin, async (req, res) => {
 // flips the payment state — no inventory change.
 router.post('/:id/mark-paid', requireAdmin, async (req, res) => {
   await ensurePaidColumn();
-  const s = await query(`SELECT id, is_estimate, status FROM sales WHERE id = $1`, [req.params.id]);
+  const s = await query(`SELECT id, is_estimate, status, channel FROM sales WHERE id = $1`, [req.params.id]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   if (s.rows[0].is_estimate) return res.status(400).json({ error: 'is_estimate', message: 'Use “Mark paid” on the estimate to convert it to an invoice.' });
   const newStatus = (s.rows[0].status === 'pending') ? 'paid' : s.rows[0].status;
@@ -576,6 +623,19 @@ router.post('/:id/mark-paid', requireAdmin, async (req, res) => {
     `UPDATE sales SET is_paid = true, paid_at = COALESCE($3, now()), status = $2 WHERE id = $1 RETURNING *`,
     [req.params.id, newStatus, paidAt]);
   await audit(req, 'sale_mark_paid', 'sale', req.params.id, { paidAt: paidAt || 'now' });
+  // A pending direct bank/cash invoice has now been paid → forward it to the
+  // Invoice Hub (best-effort; idempotent on the Hub side).
+  {
+    const invoiceHub = require('../services/invoiceHub');
+    if (invoiceHub.isInScope(s.rows[0].channel)) {
+      setImmediate(() => invoiceHub.pushSale(req.params.id).catch(e => console.warn('[invoiceHub] push failed:', e.message)));
+    }
+  }
+  // Was an unpaid (pending) invoice → now paid: email the paid invoice/receipt.
+  if (s.rows[0].status === 'pending') {
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    setImmediate(() => maybeAutoEmailSale(req.params.id, baseUrl));
+  }
   res.json({ ok: true, sale: upd.rows[0] });
 });
 
@@ -588,6 +648,24 @@ router.post('/:id/mark-unpaid', requireAdmin, async (req, res) => {
   const upd = await query(`UPDATE sales SET is_paid = false, paid_at = NULL WHERE id = $1 RETURNING *`, [req.params.id]);
   await audit(req, 'sale_mark_unpaid', 'sale', req.params.id, null);
   res.json({ ok: true, sale: upd.rows[0] });
+});
+
+// POST /api/sales/:id/retry-invoice-push — manually re-send a direct bank/cash
+// sale (and any refund against it) to the Invoice Hub after a failed push.
+// Mirrors the dispatch "retry-push" button. Idempotent on the Hub side.
+router.post('/:id/retry-invoice-push', requireAdmin, async (req, res) => {
+  const invoiceHub = require('../services/invoiceHub');
+  const s = await query(`SELECT id, channel, status FROM sales WHERE id = $1`, [req.params.id]);
+  if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
+  if (!invoiceHub.isInScope(s.rows[0].channel)) {
+    return res.status(409).json({ error: 'out_of_scope', message: 'Only direct bank/cash sales are pushed to the Invoice Hub.' });
+  }
+  setImmediate(() => invoiceHub.pushSale(req.params.id).catch(e => console.warn('[invoiceHub.retry]', e.message)));
+  if (s.rows[0].status === 'refunded') {
+    setImmediate(() => invoiceHub.pushRefund(req.params.id).catch(e => console.warn('[invoiceHub.retry]', e.message)));
+  }
+  await audit(req, 'sale_retry_invoice_push', 'sale', req.params.id, null);
+  res.json({ ok: true, message: 'Retry queued — check back in a few seconds.' });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -771,7 +849,8 @@ router.post('/:id/convert-to-invoice', requireAdmin, async (req, res) => {
     const vatChargeable = !isCashSale && vatRegistered;
     const subtotal = parseFloat(s.rows[0].subtotal);
     const shipping = parseFloat(s.rows[0].shipping || 0);
-    const vat = vatChargeable ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2) : 0;
+    const grossForVat = subtotal + shipping;   // delivery is taxable income too
+    const vat = vatChargeable ? +(grossForVat - grossForVat / (1 + vatRate)).toFixed(2) : 0;
     const total = +(subtotal + shipping).toFixed(2);
 
     const updated = await c.query(`
@@ -793,6 +872,9 @@ router.post('/:id/convert-to-invoice', requireAdmin, async (req, res) => {
     sync.pushStockForSaleItems(result.items.map(i => ({ productId: i.product_id })))
       .catch(e => console.warn('[sync] push failed:', e.message));
   });
+  // Estimate → invoice: email the finalised invoice to the customer.
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  setImmediate(() => maybeAutoEmailSale(result.sale.id, baseUrl));
   res.json(result);
 });
 
@@ -1065,9 +1147,17 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   //  • Bank / Card / Online (vat_registered): break out the VAT *portion* of the gross subtotal.
   //  • Bank / Card / Online (not vat_registered): just show "Subtotal" + "Total" — no VAT.
   const isCashSale = sale.payment_method === 'cash';
-  const showVatBreakdown = isVatRegistered && !isCashSale;
-  const subtotalNet = showVatBreakdown ? (parseFloat(sale.subtotal) / (1 + 0.2)) : parseFloat(sale.subtotal);
-  const vatAmount = showVatBreakdown ? (parseFloat(sale.subtotal) - subtotalNet) : 0;
+  // Break out VAT only when the order ACTUALLY carried VAT (sale.vat > 0). An
+  // international export (eBay/Shopify) is zero-rated — sale.vat is 0 — so we must
+  // NOT fabricate a 20% split; show plain Subtotal/Shipping/Total instead.
+  const vatAmount = parseFloat(sale.vat || 0);
+  const shippingGross = parseFloat(sale.shipping || 0);
+  const showVatBreakdown = isVatRegistered && !isCashSale && vatAmount > 0;
+  // Derive net from the real VAT amount so net + VAT = total exactly (any rate).
+  const grossTotal = parseFloat(sale.subtotal || 0) + shippingGross;
+  const netFactor = (showVatBreakdown && grossTotal > 0) ? (grossTotal - vatAmount) / grossTotal : 1;
+  const subtotalNet = parseFloat(sale.subtotal || 0) * netFactor;
+  const shippingNet = shippingGross * netFactor;
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title></title>
@@ -1272,9 +1362,10 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     </tr></thead>
     <tbody>
       ${items.map(i => {
-        // Unit prices in the DB are gross. If we're breaking out VAT, divide for the net display.
-        const unitNet = showVatBreakdown ? (parseFloat(i.unit_price) / (1 + 0.2)) : parseFloat(i.unit_price);
-        const lineNet = showVatBreakdown ? (parseFloat(i.line_total) / (1 + 0.2)) : parseFloat(i.line_total);
+        // Unit prices in the DB are gross. Show net using the same factor as the
+        // totals (derived from the real VAT) so columns reconcile with the VAT line.
+        const unitNet = parseFloat(i.unit_price) * netFactor;
+        const lineNet = parseFloat(i.line_total) * netFactor;
         return `<tr>
           <td>${escapeHtml(i.title)}<div class="sku">${escapeHtml(i.sku || '')}</div></td>
           <td class="num">${i.qty}</td>
@@ -1289,11 +1380,12 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     <div class="totals">
       ${showVatBreakdown ? `
         <div class="row"><span>Subtotal (Net)</span><span>${fmt(subtotalNet)}</span></div>
+        ${shippingGross > 0 ? `<div class="row"><span>Delivery (Net)</span><span>${fmt(shippingNet)}</span></div>` : ''}
         <div class="row"><span>VAT (${company.vat_rate || 20}%)</span><span>${fmt(vatAmount)}</span></div>
       ` : `
         <div class="row"><span>Subtotal</span><span>${fmt(sale.subtotal)}</span></div>
+        ${shippingGross > 0 ? `<div class="row"><span>Shipping</span><span>${fmt(sale.shipping)}</span></div>` : ''}
       `}
-      ${parseFloat(sale.shipping || 0) > 0 ? `<div class="row"><span>Shipping</span><span>${fmt(sale.shipping)}</span></div>` : ''}
       <div class="grand"><span>TOTAL${showVatBreakdown ? ' (incl. VAT)' : ''}</span><span>${fmt(sale.total)}</span></div>
     </div>
   </div>
@@ -1349,7 +1441,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     if (items.length === 0) return '';
     return `
   <div class="review-cta">
-    <span class="rc-text">Enjoyed your order? A quick review really helps a small business.</span>
+    <span class="rc-text">Enjoyed your order? A quick review really helps — thank you!</span>
     <span class="rc-links">
       ${items.map(it => `<a href="${escapeHtml(it.url)}" target="_blank" rel="noopener">★ Review us on ${escapeHtml(it.label)}</a>`).join('')}
     </span>
@@ -1435,46 +1527,52 @@ router.put('/email-templates', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/sales/:id/email — email the invoice to the customer
-router.post('/:id/email', requireAdmin, async (req, res) => {
-  const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
-  if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
-  const sale = s.rows[0];
-  const to = req.body.to || sale.customer_email;
-  if (!to) return res.status(400).json({ error: 'no_email_address' });
+// Build the invoice/proforma/estimate/receipt email for a sale and send it via
+// Resend. Reusable by the manual "✉ Email" button AND the auto-send hooks
+// (after a proforma or paid invoice is recorded). Returns {ok,id,...} — never
+// throws, so callers (incl. fire-and-forget setImmediate) stay safe.
+async function sendSaleDocumentEmail(saleId, { to, templateKey, includeMessage, baseUrl } = {}) {
+  if (!process.env.RESEND_API_KEY) return { ok: false, error: 'email_not_configured' };
+  const sr = await query('SELECT * FROM sales WHERE id = $1', [saleId]);
+  const sale = sr.rows[0];
+  if (!sale) return { ok: false, error: 'sale_not_found' };
+  const recipient = String(to || sale.customer_email || '').trim();
+  if (!recipient) return { ok: false, error: 'no_email_address' };
 
-  const items = (await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id])).rows;
+  const items = (await query('SELECT * FROM sale_items WHERE sale_id = $1', [saleId])).rows;
   const company = await getCompanySettings();
   const brand = require('../lib/brand');
-  // Same proforma detection as the invoice.html route.
+  return composeAndSendInvoiceEmail({ sale, items, company, brand, to: recipient, templateKey, includeMessage, baseUrl });
+}
+
+// The actual compose + Resend send, taking the sale/items directly (so the test
+// endpoint can use synthetic data without touching the DB).
+async function composeAndSendInvoiceEmail({ sale, items = [], company = {}, brand, to, templateKey, includeMessage, baseUrl }) {
+  brand = brand || require('../lib/brand');
+  const recipient = String(to || sale.customer_email || '').trim();
+  if (!recipient) return { ok: false, error: 'no_email_address' };
+  // Same document-mode detection as the invoice.html route.
   const isProforma = sale.is_estimate && !!sale.payment_method;
   const mode = isProforma ? 'proforma'
              : sale.is_estimate ? 'estimate'
              : (sale.payment_method === 'cash') ? 'receipt'
              : 'invoice';
-  const html = renderInvoiceHtml({ sale, items, company, mode, baseUrl: `${req.protocol}://${req.get('host')}` });
+  const html = renderInvoiceHtml({ sale, items, company, mode, baseUrl: baseUrl || (brand.domain ? `https://${brand.domain}` : '') });
   const docLabel = mode === 'estimate' ? 'Estimate'
                  : mode === 'proforma' ? 'Pro-forma invoice'
                  : mode === 'receipt' ? 'Receipt'
                  : 'Invoice';
   const subject = `${docLabel} ${sale.invoice_number || sale.payment_reference || ''} — ${brand.name}`;
 
-  // Covering message + brand signature prepended above the invoice (#6/#email
-  // templates). The admin picks a template at send time (private/retail, trade,
-  // local DropFleet delivery, eBay buy-direct, or none) — defaulting by channel.
+  // Covering message + brand signature, from the chosen (or default) template.
   const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const site = company.company_website || (brand.domain ? `https://${brand.domain}` : '');
   const siteLabel = (company.company_website || brand.domain || '').replace(/^https?:\/\//, '');
   const sigBits = [company.company_phone, company.company_email, siteLabel].filter(Boolean).join(' · ');
-
   const { getEmailTemplates, defaultKeyForSale } = require('../lib/email-templates');
   const templates = await getEmailTemplates(query);
-  // includeMessage:false (legacy) forces no message; else use the chosen key.
-  const chosenKey = req.body?.includeMessage === false ? 'none'
-                  : (req.body?.templateKey || defaultKeyForSale(sale));
+  const chosenKey = includeMessage === false ? 'none' : (templateKey || defaultKeyForSale(sale));
   const tpl = templates.find(t => t.key === chosenKey) || templates.find(t => t.key === 'standard');
   const rawBody = tpl ? (tpl.body || '') : '';
-  // Substitute placeholders, escape, and convert newlines/blank-lines to HTML.
   const subst = rawBody
     .replace(/\{customer\}/g, sale.customer_name || 'there')
     .replace(/\{brand\}/g, brand.name || '')
@@ -1489,34 +1587,137 @@ router.post('/:id/email', requireAdmin, async (req, res) => {
       <p style="margin:14px 0 0;font-weight:700">${esc(brand.name)}</p>
       ${sigBits ? `<p style="margin:3px 0 0;font-size:12px;color:#666">${esc(sigBits)}</p>` : ''}
     </div>`;
-  const htmlWithCover = cover ? html.replace(/(<body[^>]*>)/i, `$1${cover}`) : html;
-  // If there was no <body> tag to inject into, fall back to prepending.
-  const finalHtml = (cover && htmlWithCover === html) ? cover + html : htmlWithCover;
+  // Attach the document as a PDF. The email body is then just the covering
+  // message (clean), with the invoice in the attachment. If PDF generation fails
+  // for any reason, fall back to the full invoice rendered inline so the customer
+  // still gets it.
+  let attachments;
+  let emailHtml;
+  try {
+    const { buildInvoicePdf } = require('../lib/invoice-pdf');
+    const pdf = await buildInvoicePdf({ sale, items, company, brand, mode });
+    attachments = [{ filename: `${docLabel.replace(/[^a-z0-9]+/gi, '-')}-${(sale.invoice_number || sale.payment_reference || sale.id)}.pdf`, content: pdf.toString('base64') }];
+    const fallbackMsg = `<p style="margin:0">Please find your ${esc(docLabel.toLowerCase())} attached.</p>`;
+    emailHtml = `<div style="font-family:Arial,Helvetica,sans-serif;color:#222;line-height:1.5;padding:8px">${cover || fallbackMsg}</div>`;
+  } catch (e) {
+    console.warn('[sendSaleDocumentEmail] PDF failed, sending inline:', e.message);
+    const htmlWithCover = cover ? html.replace(/(<body[^>]*>)/i, `$1${cover}`) : html;
+    emailHtml = (cover && htmlWithCover === html) ? cover + html : htmlWithCover;
+  }
 
+  // Avoid "no-reply" senders (hurts deliverability + Resend flags it). Use the
+  // company email when it's on the verified brand domain, else invoices@domain.
+  // Override per-deployment with WAREHOUSE_FROM_EMAIL.
+  const dom = (brand.domain || '').toLowerCase();
+  const onBrandDomain = company.company_email && company.company_email.toLowerCase().endsWith('@' + dom);
+  const fromEmail = process.env.WAREHOUSE_FROM_EMAIL || (onBrandDomain ? company.company_email : `invoices@${brand.domain}`);
+  try {
+    const axios = require('axios');
+    const r = await axios.post('https://api.resend.com/emails', {
+      from: `${brand.name} <${fromEmail}>`,
+      to: [recipient],
+      subject,
+      html: emailHtml,
+      // Replies go to the business inbox, not the no-reply send address.
+      ...(company.company_email ? { reply_to: company.company_email } : {}),
+      ...(attachments ? { attachments } : {}),
+    }, {
+      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      timeout: 20000,
+    });
+    return { ok: true, id: r.data?.id, to: recipient, mode, docLabel };
+  } catch (e) {
+    console.error('[sendSaleDocumentEmail]', e.response?.data || e.message);
+    return { ok: false, error: e.response?.data?.message || e.message };
+  }
+}
+
+// Is auto-emailing of documents (proforma / invoice) enabled? Stored in the
+// app_settings.data JSONB; defaults ON (only ever fires when Resend is
+// configured AND the sale has a customer email, so it's a safe default).
+async function autoEmailEnabled() {
+  try {
+    const r = await query(`SELECT data FROM app_settings WHERE id = 1`);
+    return r.rows[0]?.data?.autoEmailDocuments !== false;
+  } catch (_) { return false; }
+}
+
+// Fire-and-forget auto-send for a freshly-finalised sale (creation / mark-paid /
+// convert). No-ops unless Resend is configured, auto-send is on, and there's a
+// customer email. Logged for the audit trail.
+async function maybeAutoEmailSale(saleId, baseUrl) {
+  try {
+    if (!process.env.RESEND_API_KEY) return;
+    if (!(await autoEmailEnabled())) return;
+    const sr = await query('SELECT customer_email, invoice_number, payment_reference FROM sales WHERE id = $1', [saleId]);
+    if (!sr.rows[0]?.customer_email) return;
+    const out = await sendSaleDocumentEmail(saleId, { baseUrl });
+    if (out.ok) {
+      await query(
+        `INSERT INTO audit_log (user_id, action, target_type, target_id, metadata) VALUES (NULL,'auto_email_document','sale',$1,$2)`,
+        [saleId, JSON.stringify({ to: out.to, mode: out.mode, resend_id: out.id })]
+      ).catch(() => {});
+    } else if (out.error !== 'no_email_address' && out.error !== 'email_not_configured') {
+      console.warn(`[auto-email] sale ${saleId}:`, out.error);
+    }
+  } catch (e) { console.warn('[auto-email] failed:', e.message); }
+}
+
+// POST /api/sales/:id/email — email the invoice to the customer (manual button)
+router.post('/:id/email', requireAdmin, async (req, res) => {
+  const s = await query('SELECT id, customer_email FROM sales WHERE id = $1', [req.params.id]);
+  if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
+  const to = req.body.to || s.rows[0].customer_email;
+  if (!to) return res.status(400).json({ error: 'no_email_address' });
   if (!process.env.RESEND_API_KEY) {
     return res.status(503).json({
       error: 'email_not_configured',
       message: 'Set RESEND_API_KEY env var in Railway. Sign up at resend.com (free tier: 3000 emails/month).'
     });
   }
-  const fromEmail = process.env.WAREHOUSE_FROM_EMAIL || `noreply@${brand.domain}`;
-  try {
-    const axios = require('axios');
-    const r = await axios.post('https://api.resend.com/emails', {
-      from: `${brand.name} <${fromEmail}>`,
-      to: [to],
-      subject,
-      html: finalHtml,
-    }, {
-      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      timeout: 15000,
-    });
-    await audit(req, 'email_invoice', 'sale', sale.id, { to, resend_id: r.data?.id });
-    res.json({ ok: true, id: r.data?.id });
-  } catch (e) {
-    console.error('[email_invoice]', e.response?.data || e.message);
-    res.status(500).json({ error: 'email_failed', message: e.response?.data?.message || e.message });
+  const out = await sendSaleDocumentEmail(req.params.id, {
+    to,
+    templateKey: req.body?.templateKey,
+    includeMessage: req.body?.includeMessage,
+    baseUrl: `${req.protocol}://${req.get('host')}`,
+  });
+  if (!out.ok) return res.status(out.error === 'no_email_address' ? 400 : 500).json({ error: 'email_failed', message: out.error });
+  await audit(req, 'email_invoice', 'sale', Number(req.params.id), { to: out.to, resend_id: out.id });
+  res.json({ ok: true, id: out.id });
+});
+
+// POST /api/sales/test-email { to } — send a SAMPLE invoice email (with the PDF
+// attached) to verify the whole pipeline end-to-end: Resend connection, from-
+// address, template and the PDF attachment. Uses synthetic data — no DB sale.
+router.post('/test-email', requireAdmin, async (req, res) => {
+  const to = String(req.body?.to || req.user?.email || '').trim();
+  if (!to) return res.status(400).json({ error: 'no_email_address', message: 'Enter an email address to send the test to.' });
+  if (!process.env.RESEND_API_KEY) {
+    return res.status(503).json({ error: 'email_not_configured', message: 'Connect Resend first: set RESEND_API_KEY in Railway and verify your domain at resend.com/domains.' });
   }
+  const company = await getCompanySettings();
+  const brand = require('../lib/brand');
+  const vatReg = !!company.vat_registered;
+  const rate = parseFloat(company.vat_rate || 20) / 100;
+  const subtotal = 120, shipping = 10, gross = subtotal + shipping;
+  const sale = {
+    id: 0, invoice_number: `${brand.invoicePrefix || 'INV'}-TEST-1001`,
+    payment_reference: `${brand.invoicePrefix || 'INV'}-TEST-1001`,
+    occurred_at: new Date().toISOString(),
+    customer_name: 'Test Customer', customer_email: to,
+    payment_method: 'bank', channel: 'direct_bank',
+    is_estimate: false, is_paid: true, status: 'paid',
+    subtotal, shipping, vat: vatReg ? +(gross - gross / (1 + rate)).toFixed(2) : 0, total: gross,
+    shipping_address: '123 Test Street\nLondon\nSW1A 1AA',
+  };
+  const items = [{ title: 'Sample part — front bumper (TEST)', sku: 'TEST-001', qty: 1, unit_price: 120, line_total: 120 }];
+  const out = await composeAndSendInvoiceEmail({
+    sale, items, company, brand, to, templateKey: 'paid_thanks',
+    baseUrl: `${req.protocol}://${req.get('host')}`,
+  });
+  if (!out.ok) return res.status(500).json({ error: 'email_failed', message: out.error });
+  await audit(req, 'test_email', null, null, { to });
+  res.json({ ok: true, id: out.id, to });
 });
 
 // POST /api/sales/:id/items/:itemId/link-product
@@ -1606,13 +1807,45 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   res.json({ ok: true, sale: r.rows[0] });
 });
 
+// Recompute a sale's subtotal/vat/total from its current line items. Same VAT
+// model as creation: subtotal is gross (VAT-inclusive); total = subtotal + shipping;
+// vat stores the portion (0 for cash / when not VAT-registered).
+async function recomputeSaleTotals(c, saleId) {
+  const tot = await c.query(`SELECT COALESCE(SUM(line_total),0) AS subtotal FROM sale_items WHERE sale_id = $1`, [saleId]);
+  const subtotal = parseFloat(tot.rows[0].subtotal);
+  const saleRow = await c.query(`SELECT payment_method, shipping FROM sales WHERE id = $1`, [saleId]);
+  const settings = await c.query('SELECT vat_rate, vat_registered FROM app_settings WHERE id = 1');
+  const setRow = settings.rows[0] || {};
+  const vatRegistered = !!setRow.vat_registered;
+  const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
+  const isCashSale = saleRow.rows[0]?.payment_method === 'cash';
+  const shipping = parseFloat(saleRow.rows[0]?.shipping || 0);
+  // Delivery is taxable income too — VAT is on (subtotal + shipping) gross.
+  const grossForVat = subtotal + shipping;
+  const vat = (!isCashSale && vatRegistered) ? +(grossForVat - grossForVat / (1 + vatRate)).toFixed(2) : 0;
+  const total = +(subtotal + shipping).toFixed(2);
+  await c.query(`UPDATE sales SET subtotal = $1, vat = $2, total = $3 WHERE id = $4`, [subtotal, vat, total, saleId]);
+  return { subtotal, vat, total };
+}
+
+// Only DIRECT (cash/bank/card) paid sales own their warehouse stock locally —
+// eBay/Shopify stock is reconciled by the channel sync, so we never restock those
+// from a manual line edit (it would double-count).
+function saleStockManaged(row) {
+  return ['direct_cash', 'direct_bank', 'direct_card'].includes(row.sale_channel)
+    && !row.sale_is_estimate && row.sale_status === 'paid';
+}
+
 // PATCH /api/sales/:id/items/:itemId — edit a line item (title, qty, unit_price)
-// Recalculates sale totals afterwards. Logs an audit entry capturing the old + new values.
+// Recalculates sale totals afterwards. For direct cash/bank/card paid sales,
+// changing the quantity also adjusts warehouse stock (reduce qty → stock back).
+// Logs an audit entry capturing the old + new values.
 router.patch('/:id/items/:itemId', requireAdmin, async (req, res) => {
   const b = req.body || {};
   const result = await withTx(async (c) => {
     const existing = await c.query(
-      `SELECT si.*, s.vat AS sale_vat, s.subtotal AS sale_subtotal, s.shipping AS sale_shipping
+      `SELECT si.*, s.shipping AS sale_shipping, s.status AS sale_status,
+              s.is_estimate AS sale_is_estimate, s.channel AS sale_channel
        FROM sale_items si JOIN sales s ON s.id = si.sale_id
        WHERE si.id = $1 AND si.sale_id = $2 FOR UPDATE`,
       [req.params.itemId, req.params.id]
@@ -1625,35 +1858,70 @@ router.patch('/:id/items/:itemId', requireAdmin, async (req, res) => {
     const newUnitPrice = b.unitPrice !== undefined ? parseFloat(b.unitPrice) : parseFloat(old.unit_price);
     const newLineTotal = +(newQty * newUnitPrice).toFixed(2);
 
+    // Stock follows the quantity change for direct paid sales.
+    let affectedProductId = null;
+    if (saleStockManaged(old) && old.product_id && newQty !== old.qty) {
+      const delta = old.qty - newQty;   // >0 → return units to stock; <0 → consume more
+      if (delta < 0) {
+        const pr = await c.query(`SELECT qty_on_hand FROM products WHERE id = $1 FOR UPDATE`, [old.product_id]);
+        const have = pr.rows[0]?.qty_on_hand || 0;
+        if (have < -delta) return { error: 'insufficient_stock', available: have, sku: old.sku, title: old.title, productId: old.product_id };
+      }
+      await c.query(`UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2`, [delta, old.product_id]);
+      await c.query(
+        `INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by) VALUES ($1,$2,'sale_item_edit',$3,$4)`,
+        [old.product_id, delta, req.params.id, req.user.id]);
+      affectedProductId = old.product_id;
+    }
+
     await c.query(
       `UPDATE sale_items SET title = $1, qty = $2, unit_price = $3, line_total = $4 WHERE id = $5`,
       [newTitle, newQty, newUnitPrice, newLineTotal, req.params.itemId]
     );
+    const totals = await recomputeSaleTotals(c, req.params.id);
+    return { ok: true, oldItem: old, totals, affectedProductId,
+             newItem: { title: newTitle, qty: newQty, unit_price: newUnitPrice, line_total: newLineTotal } };
+  });
+  if (result.error) return res.status(result.error === 'item_not_found' ? 404 : 409).json(result);
+  await audit(req, 'edit_sale_item', 'sale_item', req.params.itemId, { saleId: req.params.id, ...result.newItem });
+  if (result.affectedProductId) {
+    setImmediate(() => { try { require('./products').pushProductStockToChannels(result.affectedProductId); } catch (_) {} });
+  }
+  res.json(result);
+});
 
-    // Recompute sale totals from all line items.
-    // Same VAT model as sale creation: subtotal is gross (VAT-inclusive),
-    // total = subtotal + shipping. VAT column stores the portion, not an addition.
-    const tot = await c.query(`SELECT COALESCE(SUM(line_total),0) AS subtotal FROM sale_items WHERE sale_id = $1`, [req.params.id]);
-    const newSubtotal = parseFloat(tot.rows[0].subtotal);
-    const saleRow = await c.query(`SELECT payment_method FROM sales WHERE id = $1`, [req.params.id]);
-    const settings = await c.query('SELECT vat_rate, vat_registered FROM app_settings WHERE id = 1');
-    const setRow = settings.rows[0] || {};
-    const vatRegistered = !!setRow.vat_registered;
-    const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
-    const isCashSale = saleRow.rows[0]?.payment_method === 'cash';
-    const vatChargeable = !isCashSale && vatRegistered;
-    const newVat = vatChargeable
-      ? +(newSubtotal - newSubtotal / (1 + vatRate)).toFixed(2)
-      : 0;
-    const newTotal = +(newSubtotal + parseFloat(old.sale_shipping || 0)).toFixed(2);
-    await c.query(
-      `UPDATE sales SET subtotal = $1, vat = $2, total = $3 WHERE id = $4`,
-      [newSubtotal, newVat, newTotal, req.params.id]
+// DELETE /api/sales/:id/items/:itemId — remove a single line from an invoice
+// (e.g. it was added by mistake, or the whole line is being returned). For direct
+// cash/bank/card paid sales the line's stock is restored (?restock=false to skip).
+// Recomputes the sale totals. Won't touch eBay/Shopify-channel stock.
+router.delete('/:id/items/:itemId', requireAdmin, async (req, res) => {
+  const restock = req.query.restock !== 'false';
+  const result = await withTx(async (c) => {
+    const ex = await c.query(
+      `SELECT si.*, s.status AS sale_status, s.is_estimate AS sale_is_estimate, s.channel AS sale_channel
+       FROM sale_items si JOIN sales s ON s.id = si.sale_id
+       WHERE si.id = $1 AND si.sale_id = $2 FOR UPDATE`,
+      [req.params.itemId, req.params.id]
     );
-    return { ok: true, oldItem: old, newItem: { title: newTitle, qty: newQty, unit_price: newUnitPrice, line_total: newLineTotal } };
+    if (!ex.rows[0]) return { error: 'item_not_found' };
+    const it = ex.rows[0];
+    const doRestock = restock && saleStockManaged(it) && !!it.product_id;
+    if (doRestock) {
+      await c.query(`UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2`, [it.qty, it.product_id]);
+      await c.query(
+        `INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by) VALUES ($1,$2,'sale_item_removed',$3,$4)`,
+        [it.product_id, it.qty, req.params.id, req.user.id]);
+    }
+    await c.query(`DELETE FROM sale_items WHERE id = $1`, [req.params.itemId]);
+    const totals = await recomputeSaleTotals(c, req.params.id);
+    const remaining = await c.query(`SELECT COUNT(*)::int AS n FROM sale_items WHERE sale_id = $1`, [req.params.id]);
+    return { ok: true, restocked: doRestock ? it.qty : 0, totals, remaining: remaining.rows[0].n, affectedProductId: doRestock ? it.product_id : null };
   });
   if (result.error) return res.status(404).json(result);
-  await audit(req, 'edit_sale_item', 'sale_item', req.params.itemId, { saleId: req.params.id, ...result.newItem });
+  await audit(req, 'remove_sale_item', 'sale_item', req.params.itemId, { saleId: req.params.id, restocked: result.restocked });
+  if (result.affectedProductId) {
+    setImmediate(() => { try { require('./products').pushProductStockToChannels(result.affectedProductId); } catch (_) {} });
+  }
   res.json(result);
 });
 
@@ -1777,7 +2045,8 @@ router.post('/backfill-vat', requireAdmin, async (req, res) => {
     const shipping = parseFloat(s.shipping || 0);
     const isCashSale = s.payment_method === 'cash';
     const vatChargeable = !isCashSale && vatRegistered;
-    const correctVat = vatChargeable ? +(subtotal - subtotal / (1 + vatRate)).toFixed(2) : 0;
+    const grossForVat = subtotal + shipping;   // delivery is taxable income too
+    const correctVat = vatChargeable ? +(grossForVat - grossForVat / (1 + vatRate)).toFixed(2) : 0;
     const correctTotal = +(subtotal + shipping).toFixed(2);
     if (Math.abs(parseFloat(s.vat || 0) - correctVat) < 0.005
         && Math.abs(parseFloat(s.total || 0) - correctTotal) < 0.005) {

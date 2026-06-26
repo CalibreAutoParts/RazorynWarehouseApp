@@ -122,6 +122,90 @@ DO $$ BEGIN
 END $$;
 CREATE INDEX IF NOT EXISTS products_stock_group_idx ON products (stock_group_id) WHERE stock_group_id IS NOT NULL;
 
+-- ---------- Incoming stock (containers on the way) ----------
+-- Canonical definition (routes/incoming.js also self-heals this at runtime).
+-- Defined here so product_cost_history's FK + the cost-column migration below
+-- have the table to reference during a fresh-DB migrate.
+CREATE TABLE IF NOT EXISTS incoming_stock (
+  id            SERIAL PRIMARY KEY,
+  product_id    INTEGER REFERENCES products(id) ON DELETE SET NULL,
+  sku           TEXT,
+  title         TEXT,
+  part_number   TEXT,
+  qty_ordered   INTEGER NOT NULL DEFAULT 0,
+  qty_received  INTEGER NOT NULL DEFAULT 0,
+  container_ref TEXT,
+  supplier      TEXT,
+  expected_date DATE,
+  status        TEXT NOT NULL DEFAULT 'on_order',
+  notes         TEXT,
+  created_by    INTEGER,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  received_at   TIMESTAMPTZ,
+  -- Cost capture (RMB on the order sheet → GBP at purchase date)
+  unit_cost_foreign NUMERIC(12,4),
+  currency          TEXT DEFAULT 'CNY',
+  fx_rate           NUMERIC(14,8),
+  unit_cost_gbp     NUMERIC(12,4),
+  freight_total     NUMERIC(12,2),
+  duty              NUMERIC(12,2)
+);
+CREATE INDEX IF NOT EXISTS incoming_status_idx ON incoming_stock (status);
+CREATE INDEX IF NOT EXISTS incoming_product_idx ON incoming_stock (product_id);
+
+-- ---------- Cost tracking (the "Costs & margins" backroom) ----------
+-- products.cost_price holds the CURRENT landed unit cost in GBP. This table is
+-- the audit trail of every purchase cost, so supplier price trends are visible.
+-- Costs are entered in a foreign currency (usually CNY) and converted to GBP at
+-- the purchase date; the rate used is stored for reproducibility. v1 stores the
+-- item unit cost only — freight/duty are captured but not apportioned yet.
+CREATE TABLE IF NOT EXISTS product_cost_history (
+  id                 SERIAL PRIMARY KEY,
+  product_id         INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  supplier           TEXT,
+  purchase_date      DATE NOT NULL DEFAULT CURRENT_DATE,
+  currency           TEXT NOT NULL DEFAULT 'CNY',
+  unit_cost_foreign  NUMERIC(12,4),
+  fx_rate            NUMERIC(14,8),
+  unit_cost_gbp      NUMERIC(12,4) NOT NULL,   -- computed in JS at write (not generated)
+  qty                INTEGER,
+  incoming_id        INTEGER REFERENCES incoming_stock(id) ON DELETE SET NULL,
+  freight_total      NUMERIC(12,2),
+  duty               NUMERIC(12,2),
+  note               TEXT,
+  created_by         INTEGER,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS pch_product_idx ON product_cost_history (product_id, purchase_date DESC);
+CREATE INDEX IF NOT EXISTS pch_incoming_idx ON product_cost_history (incoming_id);
+CREATE INDEX IF NOT EXISTS pch_supplier_idx ON product_cost_history (supplier);
+
+-- Cached FX rates (foreign -> GBP) by date, so conversions are reproducible and
+-- resilient to the rate API being unavailable.
+CREATE TABLE IF NOT EXISTS fx_rates (
+  base       TEXT NOT NULL,
+  quote      TEXT NOT NULL,
+  rate_date  DATE NOT NULL,
+  rate       NUMERIC(14,8) NOT NULL,
+  source     TEXT,
+  fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (base, quote, rate_date)
+);
+
+-- Cost columns on incoming_stock — the order sheet is entered in RMB; the GBP
+-- conversion is captured at entry and copied to product_cost_history on receive.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'incoming_stock' AND column_name = 'unit_cost_foreign') THEN
+    ALTER TABLE incoming_stock ADD COLUMN unit_cost_foreign NUMERIC(12,4);
+    ALTER TABLE incoming_stock ADD COLUMN currency          TEXT DEFAULT 'CNY';
+    ALTER TABLE incoming_stock ADD COLUMN fx_rate           NUMERIC(14,8);
+    ALTER TABLE incoming_stock ADD COLUMN unit_cost_gbp     NUMERIC(12,4);
+    ALTER TABLE incoming_stock ADD COLUMN freight_total     NUMERIC(12,2);
+    ALTER TABLE incoming_stock ADD COLUMN duty              NUMERIC(12,2);
+  END IF;
+END $$;
+
 -- ---------- Stock movements (audit trail of every change) ----------
 -- Replaces ad-hoc stock adjustments. Every change goes through here.
 CREATE TABLE IF NOT EXISTS stock_movements (
