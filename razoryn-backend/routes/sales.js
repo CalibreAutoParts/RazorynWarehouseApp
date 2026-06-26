@@ -1147,13 +1147,17 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   //  • Bank / Card / Online (vat_registered): break out the VAT *portion* of the gross subtotal.
   //  • Bank / Card / Online (not vat_registered): just show "Subtotal" + "Total" — no VAT.
   const isCashSale = sale.payment_method === 'cash';
-  const showVatBreakdown = isVatRegistered && !isCashSale;
-  const subtotalNet = showVatBreakdown ? (parseFloat(sale.subtotal) / (1 + 0.2)) : parseFloat(sale.subtotal);
-  // Delivery is taxable too — net it out and include its VAT in the VAT line so
-  // the breakdown (goods net + delivery net + VAT) ties back to the gross total.
+  // Break out VAT only when the order ACTUALLY carried VAT (sale.vat > 0). An
+  // international export (eBay/Shopify) is zero-rated — sale.vat is 0 — so we must
+  // NOT fabricate a 20% split; show plain Subtotal/Shipping/Total instead.
+  const vatAmount = parseFloat(sale.vat || 0);
   const shippingGross = parseFloat(sale.shipping || 0);
-  const shippingNet = showVatBreakdown ? (shippingGross / (1 + 0.2)) : shippingGross;
-  const vatAmount = showVatBreakdown ? ((parseFloat(sale.subtotal) + shippingGross) - (subtotalNet + shippingNet)) : 0;
+  const showVatBreakdown = isVatRegistered && !isCashSale && vatAmount > 0;
+  // Derive net from the real VAT amount so net + VAT = total exactly (any rate).
+  const grossTotal = parseFloat(sale.subtotal || 0) + shippingGross;
+  const netFactor = (showVatBreakdown && grossTotal > 0) ? (grossTotal - vatAmount) / grossTotal : 1;
+  const subtotalNet = parseFloat(sale.subtotal || 0) * netFactor;
+  const shippingNet = shippingGross * netFactor;
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title></title>
@@ -1358,9 +1362,10 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     </tr></thead>
     <tbody>
       ${items.map(i => {
-        // Unit prices in the DB are gross. If we're breaking out VAT, divide for the net display.
-        const unitNet = showVatBreakdown ? (parseFloat(i.unit_price) / (1 + 0.2)) : parseFloat(i.unit_price);
-        const lineNet = showVatBreakdown ? (parseFloat(i.line_total) / (1 + 0.2)) : parseFloat(i.line_total);
+        // Unit prices in the DB are gross. Show net using the same factor as the
+        // totals (derived from the real VAT) so columns reconcile with the VAT line.
+        const unitNet = parseFloat(i.unit_price) * netFactor;
+        const lineNet = parseFloat(i.line_total) * netFactor;
         return `<tr>
           <td>${escapeHtml(i.title)}<div class="sku">${escapeHtml(i.sku || '')}</div></td>
           <td class="num">${i.qty}</td>

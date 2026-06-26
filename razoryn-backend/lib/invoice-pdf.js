@@ -84,9 +84,14 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
       const muted = '#888';
       const isCash = sale.payment_method === 'cash';
       const vatReg = !!company.vat_registered;
-      const showVat = vatReg && !isCash && mode !== 'estimate';
       const rate = parseFloat(company.vat_rate || 20) / 100;
-      const net = (g) => showVat ? (Number(g) / (1 + rate)) : Number(g);
+      // Only break out VAT when the order actually carried VAT (sale.vat > 0).
+      // Zero-rated exports (international) have vat=0 → show gross, no VAT line.
+      const vatAmt = parseFloat(sale.vat || 0);
+      const showVat = vatReg && !isCash && mode !== 'estimate' && vatAmt > 0;
+      const grossTotalForVat = parseFloat(sale.subtotal || 0) + parseFloat(sale.shipping || 0);
+      const netFactor = (showVat && grossTotalForVat > 0) ? (grossTotalForVat - vatAmt) / grossTotalForVat : 1;
+      const net = (g) => Number(g) * netFactor;
       const companyName = company.company_name || brand.fullName || brand.name || 'Invoice';
       const ref = sale.invoice_number || sale.payment_reference || ('#' + sale.id);
 
@@ -226,8 +231,8 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
         y += 16;
       };
       if (showVat) {
-        totalRow('Subtotal (net)', money(subtotalGross / (1 + rate)));
-        if (shippingGross > 0) totalRow('Delivery (net)', money(shippingGross / (1 + rate)));
+        totalRow('Subtotal (net)', money(net(subtotalGross)));
+        if (shippingGross > 0) totalRow('Delivery (net)', money(net(shippingGross)));
         totalRow(`VAT (${(rate * 100).toFixed(0)}%)`, money(vat));
       } else {
         totalRow('Subtotal', money(subtotalGross));
