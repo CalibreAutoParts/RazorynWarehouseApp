@@ -421,6 +421,12 @@ router.post('/', requireAdmin, async (req, res) => {
   const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
 
   const isEstimate = !!b.isEstimate;
+  // Pre-order: the item isn't in stock yet (a pre-listed product or simply out of
+  // stock with a container on the way). A pre-order does NOT validate or deduct
+  // stock, is allowed at 0 qty, and is kept out of revenue/dispatch until the
+  // stock arrives and it's flipped to a normal order (see the stock-in hook in
+  // routes/products.js / routes/incoming.js). docType 'preorder' or preorder=true.
+  const isPreorder = !isEstimate && (b.docType === 'preorder' || !!b.preorder);
   // Whether this sale is paid now (vs an issued-but-unpaid invoice). Needed both
   // inside the transaction (sale status/stock) AND after it (Invoice Hub push),
   // so it lives in the outer scope.
@@ -440,8 +446,9 @@ router.post('/', requireAdmin, async (req, res) => {
           [it.productId]
         );
         if (!p.rows[0]) return { error: 'product_not_found', productId: it.productId };
-        // For non-estimate paid sales, validate stock. Estimates don't touch stock at all.
-        if (!isEstimate && p.rows[0].qty_on_hand < it.qty) {
+        // For non-estimate paid sales, validate stock. Estimates and pre-orders
+        // don't touch stock at all (a pre-order is expressly for items not yet in).
+        if (!isEstimate && !isPreorder && p.rows[0].qty_on_hand < it.qty) {
           shortages.push({ productId: p.rows[0].id, sku: p.rows[0].sku, title: p.rows[0].title,
                            requested: parseInt(it.qty), available: p.rows[0].qty_on_hand });
           continue;
@@ -546,7 +553,7 @@ router.post('/', requireAdmin, async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING *`,
       [b.channel, b.customerName || null, b.customerPhone || null, b.customerEmail || null,
        subtotal, vat, shipping, total,
-       isEstimate ? 'pending' : (isPaid ? 'paid' : 'pending'),
+       isEstimate ? 'pending' : (isPreorder ? 'preorder' : (isPaid ? 'paid' : 'pending')),
        invoiceNumber, b.notes || null, req.user.id,
        paymentMethod, paymentReference,
        isEstimate, b.orderNumber || null, b.vehicleReg || null, b.vinNumber || null, b.shippingAddress || null,
@@ -559,8 +566,9 @@ router.post('/', requireAdmin, async (req, res) => {
          VALUES ($1,$2,$3,$4,$5,$6,$7)`,
         [sale.rows[0].id, it.productId, it.sku, it.title, it.qty, it.unitPrice, it.lineTotal]
       );
-      // Estimates NEVER touch stock. Paid sales decrement only inventory-backed items.
-      if (!isEstimate && it.productId) {
+      // Estimates and pre-orders NEVER touch stock. Paid sales decrement only
+      // inventory-backed items.
+      if (!isEstimate && !isPreorder && it.productId) {
         await c.query(
           `UPDATE products SET qty_on_hand = qty_on_hand - $1 WHERE id = $2`,
           [it.qty, it.productId]
@@ -577,12 +585,12 @@ router.post('/', requireAdmin, async (req, res) => {
   });
 
   if (result.error) return res.status(409).json(result);
-  await audit(req, isEstimate ? 'create_estimate' : 'create_sale', 'sale', result.sale.id, {
+  await audit(req, isEstimate ? 'create_estimate' : (isPreorder ? 'create_preorder' : 'create_sale'), 'sale', result.sale.id, {
     channel: b.channel, total: result.sale.total
   });
 
-  // Push stock for non-estimate sales
-  if (!isEstimate) {
+  // Push stock for non-estimate, non-preorder sales (pre-orders don't change stock).
+  if (!isEstimate && !isPreorder) {
     setImmediate(() => {
       const sync = require('../services/sync');
       sync.pushStockForSaleItems(result.items).catch(e => console.warn('[sync] push failed:', e.message));
@@ -592,7 +600,7 @@ router.post('/', requireAdmin, async (req, res) => {
   // Only paid, non-estimate, in-scope sales — eBay/Shopify/card are excluded
   // (reconciled via platform statement uploads). A pending invoice is pushed
   // later when it's marked paid.
-  if (!isEstimate && isPaid) {
+  if (!isEstimate && !isPreorder && isPaid) {
     const invoiceHub = require('../services/invoiceHub');
     if (invoiceHub.isInScope(result.sale.channel)) {
       setImmediate(() => invoiceHub.pushSale(result.sale.id).catch(e => console.warn('[invoiceHub] push failed:', e.message)));

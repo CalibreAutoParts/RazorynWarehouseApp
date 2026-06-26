@@ -105,7 +105,7 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
         AND s.dispatched_at IS NULL
         AND COALESCE(s.fulfillment_method,
               CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
-        AND s.status NOT IN ('refunded', 'cancelled', 'dispatched')
+        AND s.status NOT IN ('refunded', 'cancelled', 'dispatched', 'preorder')
         AND s.occurred_at >= now() - ($1 || ' days')::interval
       ORDER BY s.occurred_at ASC
       LIMIT 500
@@ -122,7 +122,7 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
         AND COALESCE(s.fulfillment_method,
               CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'collect'
         AND s.collected_at IS NULL
-        AND s.status NOT IN ('refunded', 'cancelled', 'dispatched')
+        AND s.status NOT IN ('refunded', 'cancelled', 'dispatched', 'preorder')
         AND s.occurred_at >= now() - ($1 || ' days')::interval
       ORDER BY s.occurred_at ASC
       LIMIT 500

@@ -33,6 +33,21 @@ async function ensureProductLocationColumns() {
     // Price lock: when true, automated price derivation (eBay→Shopify link, bulk
     // price tools) won't overwrite this product's prices — staff keep it manual.
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS price_locked BOOLEAN NOT NULL DEFAULT false`);
+    // Pre-listing / pre-order: a product created BEFORE its stock arrives. It is
+    // listed (Shopify as a pre-order, eBay scheduled to go live) and can be
+    // quoted/pre-ordered, but is excluded from the stock-take quantity count.
+    //   is_prelisted        — true while awaiting incoming stock
+    //   preorder_eta        — expected availability date (drives the notice)
+    //   ebay_scheduled_at   — warehouse-held eBay go-live time (we publish it)
+    //   ebay_prelist_payload— captured AddItem opts so the cron can publish later
+    //   ebay_prelist_status — 'scheduled' | 'live' | 'failed' (NULL = n/a)
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS is_prelisted BOOLEAN NOT NULL DEFAULT false`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS preorder_eta DATE`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_scheduled_at TIMESTAMPTZ`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_prelist_payload JSONB`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_prelist_status TEXT`);
+    await query(`CREATE INDEX IF NOT EXISTS products_prelisted_idx ON products (is_prelisted) WHERE is_prelisted = true`);
+    await query(`CREATE INDEX IF NOT EXISTS products_ebay_sched_idx ON products (ebay_scheduled_at) WHERE ebay_prelist_status = 'scheduled'`);
     _prodLocMigrated = true;
   } catch (e) { console.warn('[products] location-columns migration warning:', e.message); }
 }
@@ -142,6 +157,9 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
     delete r.item_photo_data_url;
     delete r.location_photo_data_url;
     delete r.location_photo_data_url_2;
+    // The captured eBay AddItem payload is only needed server-side (cron/publish);
+    // don't ship it in the catalogue list.
+    delete r.ebay_prelist_payload;
   }
   // Attach incoming/pre-order info per product (units on the way + earliest ETA).
   // Lets the inventory list flag items as pre-order with an arrival date. Done
@@ -711,6 +729,11 @@ router.post('/:id/adjust-stock', requirePermission('inventory'), async (req, res
   if (!result) return res.status(404).json({ error: 'not_found' });
   await audit(req, 'adjust_stock', 'product', result.id, { delta: d, reason });
 
+  // Stock arrived → flip any pre-listing/pre-orders for this product (best-effort).
+  if (d > 0 && result.qty_on_hand > 0) {
+    setImmediate(() => require('../services/sync').handlePreorderStockArrival(result.id).catch(() => {}));
+  }
+
   // Propagate the new quantity to channels (unless explicitly disabled)
   let channelPush = null;
   if (push !== false) {
@@ -745,6 +768,11 @@ router.post('/:id/set-quantity', requirePermission('inventory'), async (req, res
   });
   if (!result) return res.status(404).json({ error: 'not_found' });
   await audit(req, 'set_quantity', 'product', result.id, { quantity: q });
+
+  // Stock arrived → flip any pre-listing/pre-orders for this product (best-effort).
+  if (result.qty_on_hand > 0) {
+    setImmediate(() => require('../services/sync').handlePreorderStockArrival(result.id).catch(() => {}));
+  }
 
   let channelPush = null;
   if (push !== false) {

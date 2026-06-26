@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS products (
   ebay_listing_id_cl    TEXT,    -- Cappanel & Lamps account
   ebay_offer_id_em      TEXT,
   ebay_offer_id_cl      TEXT,
+  -- Pre-listing / pre-order: a product created before its stock arrives. Listed
+  -- (Shopify pre-order, eBay scheduled go-live), quotable/pre-orderable, but
+  -- excluded from the stock-take count until the incoming container lands.
+  is_prelisted       BOOLEAN NOT NULL DEFAULT false,
+  preorder_eta       DATE,                  -- expected availability date
+  ebay_scheduled_at  TIMESTAMPTZ,           -- warehouse-held eBay go-live time
+  ebay_prelist_payload JSONB,               -- captured AddItem opts for the cron
+  ebay_prelist_status  TEXT,                -- 'scheduled' | 'live' | 'failed'
   active             BOOLEAN NOT NULL DEFAULT true,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()

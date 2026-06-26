@@ -14,6 +14,7 @@ router.use(requireAuth);
 // competitor-monitor matcher reuses the exact same logic. Behaviour here is
 // unchanged — it's the same function, just imported.
 const { VEHICLE_MAKES, parseVehicleFromTitle } = require('../lib/vehicle');
+const preorder = require('../lib/preorder');
 
 // GET /api/listings/category-specifics?categoryId=&storeCode=
 // eBay's recommended/required item specifics for a category, so the UI can show
@@ -1763,12 +1764,12 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
     : (s.bank_transfer_pct != null ? parseFloat(s.bank_transfer_pct) : 10);
   const shopifyPrice = +(ebayPrice * (1 - shopPct / 100)).toFixed(2);
 
-  const qty = Number.isInteger(b.qty) ? b.qty : (parseInt(b.qty) || 0);
+  let qty = Number.isInteger(b.qty) ? b.qty : (parseInt(b.qty) || 0);
   const imageUrls = Array.isArray(b.imageUrls) ? b.imageUrls.filter(Boolean) : [];
   const imageData = Array.isArray(b.imagesBase64) ? b.imagesBase64.filter(Boolean) : [];
   const metafields = Array.isArray(b.metafields) ? b.metafields : [];
-  const tags = b.tags || null;
-  const status = ['active', 'draft'].includes(b.status) ? b.status : 'draft';
+  let tags = b.tags || null;
+  let status = ['active', 'draft'].includes(b.status) ? b.status : 'draft';
   const taxable = b.taxable !== false;                       // Shopify "charge tax (VAT)"
   const templateSuffix = b.templateSuffix || null;           // theme product template
   const shippingProfileId = b.shippingProfileId || null;     // Shopify delivery profile
@@ -1779,13 +1780,39 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
     metafields.push({ namespace: 'custom', key: 'alternate_part_numbers', type: 'single_line_text_field', value: subPartNumbers.join(', ') });
   }
 
+  // ── Pre-listing / pre-order ────────────────────────────────────────────────
+  // A product created BEFORE its stock arrives. On Shopify it's listed active but
+  // sold as a pre-order (keeps selling at 0 stock, 'preorder' tag, ETA metafield,
+  // and a "Pre-order — ships ~DATE" notice baked into the title/description so it
+  // shows on any theme). On eBay it's held by us and published at a go-live time
+  // (see ebayPrelist + the go-live cron). The clean title/description stay on the
+  // warehouse row + eBay; only the Shopify push carries the pre-order notice.
+  const isPrelisted = !!b.prelisted;
+  if (isPrelisted) qty = 0;                              // not in stock yet
+  const preorderEta = (isPrelisted && b.preorderEta) ? String(b.preorderEta).slice(0, 10) : null;
+  const ebayScheduledAt = (isPrelisted && b.ebayScheduledAt) ? new Date(b.ebayScheduledAt) : null;
+  // The full create-ebay payload to replay at go-live (storeCode, categoryId,
+  // price, itemSpecifics, etc.). Stored verbatim; productId is injected at publish.
+  const ebayPrelistPayload = (isPrelisted && b.ebayPrelist && b.ebayPrelist.storeCode)
+    ? { ...b.ebayPrelist } : null;
+
+  let shopifyTitle = title, shopifyDescription = b.description || null;
+  if (isPrelisted) {
+    status = 'active';                                   // listed now, sells as pre-order
+    tags = preorder.addPreorderTag(tags);               // 'preorder' tag (theme/coll filters)
+    metafields.push({ namespace: 'custom', key: 'preorder_eta', type: 'date', value: preorderEta || '' });
+    shopifyTitle = preorder.addTitleNotice(title, preorderEta);
+    shopifyDescription = preorder.addBodyNotice(shopifyDescription, preorderEta);
+  }
+
   const result = { ok: true, sku, ebayPrice, shopifyPrice, shopPct };
   let shopifyProduct = null;
   if (shopify.isConfigured()) {
     try {
       shopifyProduct = await shopify.createProduct({
-        title, sku, price: shopifyPrice, imageUrls, imageData, status, metafields, qty, tags,
-        description: b.description || null, taxable, templateSuffix,
+        title: shopifyTitle, sku, price: shopifyPrice, imageUrls, imageData, status, metafields, qty, tags,
+        description: shopifyDescription, taxable, templateSuffix,
+        inventoryPolicy: isPrelisted ? 'continue' : null,
       });
       for (const mf of (shopifyProduct?.__metafieldResults || [])) {
         if (!mf.ok) (result.metafieldIssues = result.metafieldIssues || []).push({ key: `${mf.namespace}.${mf.key}`, error: mf.error });
@@ -1818,12 +1845,18 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   result.imageUrls = imgSrcs;
   const ins = await query(`
     INSERT INTO products (sku, title, barcode, part_number, qty_on_hand, price_ebay, price_shopify, image_url,
-                          shopify_product_id, shopify_variant_id, shopify_inventory_id, active)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true) RETURNING id`,
+                          shopify_product_id, shopify_variant_id, shopify_inventory_id, active,
+                          is_prelisted, preorder_eta, ebay_scheduled_at, ebay_prelist_payload, ebay_prelist_status)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16) RETURNING id`,
     [sku, title, barcode, partNumber, qty, ebayPrice, shopifyPrice, imgSrcs[0] || null,
      shopifyProduct ? String(shopifyProduct.id) : null,
      v?.id ? String(v.id) : null,
-     v?.inventory_item_id ? String(v.inventory_item_id) : null]);
+     v?.inventory_item_id ? String(v.inventory_item_id) : null,
+     isPrelisted,
+     preorderEta,
+     ebayScheduledAt,
+     ebayPrelistPayload ? JSON.stringify(ebayPrelistPayload) : null,
+     ebayPrelistPayload ? 'scheduled' : null]);
   const productId = ins.rows[0].id;
 
   // Store the alternate / sub part numbers against the new product (searchable).
@@ -1840,8 +1873,33 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
     if (pool) result.stockPool = pool;
   } catch (e) { /* best-effort — never fail the create over pooling */ }
 
-  await audit(req, 'create_listing', 'product', productId, { sku, partNumber, ebayPrice, shopifyPrice, subPartNumbers: subPartNumbers.length, shopify: !!shopifyProduct, pooled: !!result.stockPool });
-  res.status(201).json({ ...result, productId, partNumber, shopifyProductId: shopifyProduct ? String(shopifyProduct.id) : null });
+  // Pre-listing: create a linked incoming_stock line (existing or new container)
+  // so the arriving units are tracked and "receiving" them later flips this
+  // product live. Best-effort — never fail the listing over the incoming link.
+  if (isPrelisted && b.incoming && (b.incoming.containerRef || b.incoming.qtyOrdered)) {
+    try {
+      const incoming = require('./incoming');
+      await incoming.ensureIncomingTable();
+      const inc = b.incoming;
+      const incQty = parseInt(inc.qtyOrdered) || 0;
+      const incCurrency = String(inc.currency || 'CNY').toUpperCase();
+      const { gbp: incGbp, rate: incRate } = await incoming.costToGbp(inc.unitCostForeign, incCurrency, inc.expectedDate || preorderEta, inc.fxRate);
+      const incIns = await query(
+        `INSERT INTO incoming_stock (product_id, sku, title, part_number, qty_ordered, container_ref, supplier, expected_date, status, notes, created_by,
+                                     unit_cost_foreign, currency, fx_rate, unit_cost_gbp, freight_total, duty)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
+        [productId, sku, title, partNumber, incQty, inc.containerRef || null, inc.supplier || null,
+         inc.expectedDate || preorderEta || null, inc.status || 'on_order', inc.notes || 'Pre-listing', req.user.id,
+         (inc.unitCostForeign != null && inc.unitCostForeign !== '') ? parseFloat(inc.unitCostForeign) : null,
+         incCurrency, incRate, incGbp,
+         (inc.freightTotal != null && inc.freightTotal !== '') ? parseFloat(inc.freightTotal) : null,
+         (inc.duty != null && inc.duty !== '') ? parseFloat(inc.duty) : null]);
+      result.incomingId = incIns.rows[0].id;
+    } catch (e) { result.incomingError = e.message; }
+  }
+
+  await audit(req, 'create_listing', 'product', productId, { sku, partNumber, ebayPrice, shopifyPrice, subPartNumbers: subPartNumbers.length, shopify: !!shopifyProduct, pooled: !!result.stockPool, prelisted: isPrelisted });
+  res.status(201).json({ ...result, productId, partNumber, prelisted: isPrelisted, preorderEta, shopifyProductId: shopifyProduct ? String(shopifyProduct.id) : null });
 });
 
 // GET /api/listings/listing-detail/:productId — gather EVERYTHING needed to
@@ -2767,25 +2825,40 @@ router.get('/test-ebay-connection', requireAdmin, async (req, res) => {
 // On success, inserts a row into mirror_links so the product is treated as
 // "linked" by the rest of the warehouse system.
 // ──────────────────────────────────────────────────────────────────────────
-router.post('/create-ebay', requireAdmin, async (req, res) => {
+// HTTP-aware error helper so doCreateEbay (used by the route, "Push live now" and
+// the scheduled go-live cron) can signal a specific status + JSON body that the
+// route wrapper maps to res.status(...).json(...). Programmatic callers just see a
+// thrown Error.
+function httpErr(status, body) {
+  const e = new Error(body && (body.message || body.error) || 'error');
+  e.httpStatus = status; e.body = body;
+  return e;
+}
+
+// Core eBay listing creation, extracted from the route so it can be replayed for
+// pre-listings (warehouse-held items published at their go-live time). Resolves
+// settings/policies/Shopify content fresh on every call, so a listing scheduled
+// today and published next week still uses current config. `b` is the same body
+// the POST /create-ebay route accepts. Returns the route's JSON payload, or throws
+// (httpErr for validation, plain Error for eBay failures).
+async function doCreateEbay(b, { req } = {}) {
   const ebay = require('../services/ebay');
   const shopify = require('../services/shopify');
   const brand = require('../lib/brand');
-  const b = req.body || {};
 
-  if (!b.productId)  return res.status(400).json({ error: 'productId required' });
-  if (!b.storeCode)  return res.status(400).json({ error: 'storeCode required' });
+  if (!b.productId)  throw httpErr(400, { error: 'productId required' });
+  if (!b.storeCode)  throw httpErr(400, { error: 'storeCode required' });
   // categoryId is resolved after settings load (falls back to the Settings default).
-  if (b.price == null || isNaN(parseFloat(b.price))) return res.status(400).json({ error: 'valid price required' });
+  if (b.price == null || isNaN(parseFloat(b.price))) throw httpErr(400, { error: 'valid price required' });
 
   // Look up the product. We need at minimum: sku, title, image_url, brand, mpn.
   const pr = await query(`SELECT * FROM products WHERE id = $1`, [b.productId]);
   const product = pr.rows[0];
-  if (!product) return res.status(404).json({ error: 'product_not_found' });
+  if (!product) throw httpErr(404, { error: 'product_not_found' });
 
   // Resolve the store. For multi-store brands the user must pass storeCode.
   const store = brand.getStore(b.storeCode);
-  if (!store) return res.status(400).json({ error: 'unknown_store', message: `No eBay store configured with code "${b.storeCode}". Available: ${brand.stores.map(s => s.code).join(', ')}` });
+  if (!store) throw httpErr(400, { error: 'unknown_store', message: `No eBay store configured with code "${b.storeCode}". Available: ${brand.stores.map(s => s.code).join(', ')}` });
 
   // Pull eBay listing defaults from app_settings (per-store policies + location).
   // The settings UI lets the user save these once so they don't have to type them
@@ -2841,11 +2914,11 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
   }
 
   const title = (b.titleOverride || product.title || '').trim();
-  if (!title) return res.status(400).json({ error: 'no_title', message: 'Product has no title — set one in inventory before listing.' });
+  if (!title) throw httpErr(400, { error: 'no_title', message: 'Product has no title — set one in inventory before listing.' });
 
   // Resolve category — fall back to the Settings default if none was passed.
   const categoryId = b.categoryId || settings.ebay_default_category_id;
-  if (!categoryId) return res.status(400).json({ error: 'no_category', message: 'No eBay category — pass categoryId or set a default in Settings.' });
+  if (!categoryId) throw httpErr(400, { error: 'no_category', message: 'No eBay category — pass categoryId or set a default in Settings.' });
 
   // Vehicle fitment specifics. product.brand/model hold the VEHICLE make/model
   // in this catalogue, so prefer them; fall back to title parsing for anything
@@ -2891,7 +2964,7 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
       if (product.part_number) provided.add('manufacturer part number');
       const missing = specifics.filter(s => s.required && !provided.has(s.name.toLowerCase())).map(s => s.name);
       if (missing.length) {
-        return res.status(422).json({
+        throw httpErr(422, {
           error: 'missing_item_specifics', missing,
           message: `eBay category ${categoryId} requires item specifics you haven't provided: ${missing.join(', ')}. Add them via itemSpecifics, or resend with skipSpecificsCheck=true.`,
         });
@@ -2901,94 +2974,186 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
     }
   }
 
+  const result = await ebay.addItem(store.code, {
+    sku: product.sku,
+    title,
+    description,
+    categoryId,
+    conditionId: b.conditionId || 1000,
+    price: parseFloat(b.price),
+    quantity: parseInt(b.quantity) || product.qty_on_hand || 1,
+    currency: 'GBP',
+    imageUrls,
+    businessPolicies: pol,
+    location: loc,
+    brand: ebayBrand,
+    mpn: product.part_number,
+    itemSpecifics: mergedSpecifics,
+    // Shop/store category — per-listing choice, else the saved default.
+    storeCategoryId: b.storeCategoryId || settings.ebay_default_store_category_id || null,
+    // VAT — per-listing override, else dedicated eBay VAT %, else the general
+    // VAT rate, else 20%. Sent only when > 0 (addItem omits it otherwise).
+    vatPercent: b.vatPercent != null ? b.vatPercent
+      : (settings.ebay_vat_percent != null ? settings.ebay_vat_percent
+      : (settings.vat_rate != null ? settings.vat_rate : 20)),
+    verify: !!b.preview,
+  });
+
+  // Preview mode (VerifyAddItem) — validated only, no live listing, nothing
+  // persisted. Returns the fees + ack so the user can review before listing.
+  if (b.preview) {
+    return { ok: true, preview: true, ack: result.ack, fees: result.fees,
+      message: 'Validated successfully — no live listing was created. Untick Preview to publish.' };
+  }
+
+  if (!result.itemId) throw new Error('AddItem succeeded but returned no ItemID');
+
+  // Save the new ItemID into mirror_links so the rest of the system treats
+  // this product as linked to eBay. mirror_links is keyed on ebay_item_id;
+  // there is no `sku` column (SKU lives in last_synced_sku).
   try {
-    const result = await ebay.addItem(store.code, {
-      sku: product.sku,
-      title,
-      description,
-      categoryId,
-      conditionId: b.conditionId || 1000,
-      price: parseFloat(b.price),
-      quantity: parseInt(b.quantity) || product.qty_on_hand || 1,
-      currency: 'GBP',
-      imageUrls,
-      businessPolicies: pol,
-      location: loc,
-      brand: ebayBrand,
-      mpn: product.part_number,
-      itemSpecifics: mergedSpecifics,
-      // Shop/store category — per-listing choice, else the saved default.
-      storeCategoryId: b.storeCategoryId || settings.ebay_default_store_category_id || null,
-      // VAT — per-listing override, else dedicated eBay VAT %, else the general
-      // VAT rate, else 20%. Sent only when > 0 (addItem omits it otherwise).
-      vatPercent: b.vatPercent != null ? b.vatPercent
-        : (settings.ebay_vat_percent != null ? settings.ebay_vat_percent
-        : (settings.vat_rate != null ? settings.vat_rate : 20)),
-      verify: !!b.preview,
-    });
+    await query(`ALTER TABLE mirror_links ADD COLUMN IF NOT EXISTS store_code TEXT`);
+  } catch (e) {}
+  await query(`
+    INSERT INTO mirror_links (ebay_item_id, shopify_product_id, store_code, last_mirrored_at, last_synced_sku, last_synced_title)
+    VALUES ($1, $2, $3, now(), $4, $5)
+    ON CONFLICT (ebay_item_id) DO UPDATE
+      SET shopify_product_id = EXCLUDED.shopify_product_id,
+          store_code = EXCLUDED.store_code,
+          last_synced_sku = EXCLUDED.last_synced_sku,
+          last_mirrored_at = now()
+  `, [String(result.itemId), product.shopify_product_id, store.code, product.sku, product.title]).catch(async (e) => {
+    // No unique constraint on ebay_item_id (older schema) — insert plainly.
+    console.warn('[create-ebay] mirror_links upsert fell back to plain insert:', e.message);
+    await query(`INSERT INTO mirror_links (ebay_item_id, shopify_product_id, store_code, last_mirrored_at, last_synced_sku, last_synced_title) VALUES ($1, $2, $3, now(), $4, $5)`,
+      [String(result.itemId), product.shopify_product_id, store.code, product.sku, product.title]);
+  });
 
-    // Preview mode (VerifyAddItem) — validated only, no live listing, nothing
-    // persisted. Returns the fees + ack so the user can review before listing.
-    if (b.preview) {
-      return res.json({ ok: true, preview: true, ack: result.ack, fees: result.fees,
-        message: 'Validated successfully — no live listing was created. Untick Preview to publish.' });
-    }
-
-    if (!result.itemId) throw new Error('AddItem succeeded but returned no ItemID');
-
-    // Save the new ItemID into mirror_links so the rest of the system treats
-    // this product as linked to eBay. mirror_links is keyed on ebay_item_id;
-    // there is no `sku` column (SKU lives in last_synced_sku).
-    try {
-      await query(`ALTER TABLE mirror_links ADD COLUMN IF NOT EXISTS store_code TEXT`);
-    } catch (e) {}
-    await query(`
-      INSERT INTO mirror_links (ebay_item_id, shopify_product_id, store_code, last_mirrored_at, last_synced_sku, last_synced_title)
-      VALUES ($1, $2, $3, now(), $4, $5)
-      ON CONFLICT (ebay_item_id) DO UPDATE
-        SET shopify_product_id = EXCLUDED.shopify_product_id,
-            store_code = EXCLUDED.store_code,
-            last_synced_sku = EXCLUDED.last_synced_sku,
-            last_mirrored_at = now()
-    `, [String(result.itemId), product.shopify_product_id, store.code, product.sku, product.title]).catch(async (e) => {
-      // No unique constraint on ebay_item_id (older schema) — insert plainly.
-      console.warn('[create-ebay] mirror_links upsert fell back to plain insert:', e.message);
-      await query(`INSERT INTO mirror_links (ebay_item_id, shopify_product_id, store_code, last_mirrored_at, last_synced_sku, last_synced_title) VALUES ($1, $2, $3, now(), $4, $5)`,
-        [String(result.itemId), product.shopify_product_id, store.code, product.sku, product.title]);
-    });
-
+  if (req) {
     await audit(req, 'create_ebay_listing', 'product', product.id, {
       sku: product.sku, itemId: result.itemId, store: store.code, categoryId: b.categoryId,
     });
+  }
 
-    // Promoted Listings (General) — best-effort. Runs only when the user asked,
-    // and only on a live listing. A failure here (e.g. marketing scope not
-    // granted) never fails the listing — it's surfaced in the response so the
-    // user knows the item is live but wasn't promoted.
-    let promotion = null;
-    if (b.promote?.enabled && result.itemId) {
-      try {
-        const pr = await ebay.promoteListing(store.code, { itemId: result.itemId, bidPercent: b.promote.percent });
-        promotion = { ok: true, ...pr };
-      } catch (e) {
-        console.warn('[create-ebay] promotion failed:', e.message);
-        promotion = { ok: false, message: e.message };
-      }
+  // Promoted Listings (General) — best-effort. Runs only when the user asked,
+  // and only on a live listing. A failure here (e.g. marketing scope not
+  // granted) never fails the listing — it's surfaced in the response so the
+  // user knows the item is live but wasn't promoted.
+  let promotion = null;
+  if (b.promote?.enabled && result.itemId) {
+    try {
+      const pr = await ebay.promoteListing(store.code, { itemId: result.itemId, bidPercent: b.promote.percent });
+      promotion = { ok: true, ...pr };
+    } catch (e) {
+      console.warn('[create-ebay] promotion failed:', e.message);
+      promotion = { ok: false, message: e.message };
     }
+  }
 
-    res.json({
-      ok: true,
-      itemId: result.itemId,
-      url: `https://www.ebay.co.uk/itm/${result.itemId}`,
-      fees: result.fees,
-      ack: result.ack,
-      promotion,
-    });
+  return {
+    ok: true,
+    itemId: result.itemId,
+    url: `https://www.ebay.co.uk/itm/${result.itemId}`,
+    fees: result.fees,
+    ack: result.ack,
+    promotion,
+  };
+}
+
+// POST /api/listings/create-ebay — thin wrapper over doCreateEbay.
+router.post('/create-ebay', requireAdmin, async (req, res) => {
+  try {
+    const out = await doCreateEbay(req.body || {}, { req });
+    res.json(out);
   } catch (e) {
+    if (e.httpStatus) return res.status(e.httpStatus).json(e.body || { error: 'create_failed', message: e.message });
     console.error('[create-ebay]', e.message);
     res.status(500).json({ error: 'create_failed', message: e.message });
   }
 });
+
+// ──────────────────────────────────────────────────────────────────────────
+// Pre-listing eBay go-live.
+//
+// A pre-listed product is held in the warehouse (status 'scheduled') with the
+// captured create-ebay payload in products.ebay_prelist_payload and a go-live
+// time in ebay_scheduled_at. publishPrelisting() replays that payload through
+// doCreateEbay to create the real listing now, marking the product 'live' (or
+// 'failed' with a notification). Both the go-live cron and the "Push live now"
+// button call it.
+// ──────────────────────────────────────────────────────────────────────────
+async function publishPrelisting(product, { req } = {}) {
+  let payload = product.ebay_prelist_payload;
+  if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch (_) { payload = null; } }
+  if (!payload || !payload.storeCode) {
+    throw new Error('no eBay pre-listing payload stored for this product');
+  }
+  // Force a live publish (never a preview), and list the current quantity.
+  const b = { ...payload, productId: product.id, preview: false };
+  try {
+    const out = await doCreateEbay(b, { req });
+    await query(`UPDATE products SET ebay_prelist_status = 'live', ebay_scheduled_at = NULL WHERE id = $1`, [product.id]);
+    return { ok: true, itemId: out.itemId, url: out.url };
+  } catch (e) {
+    await query(`UPDATE products SET ebay_prelist_status = 'failed' WHERE id = $1`, [product.id]).catch(() => {});
+    // Best-effort notification so staff know an automatic go-live failed.
+    try {
+      await query(
+        `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+         VALUES ('ebay_prelist_failed', $1, $2, 'error', 'product', $3)`,
+        [`eBay go-live failed: ${product.title || product.sku}`,
+         `The scheduled eBay listing for "${product.title || product.sku}" (SKU ${product.sku}) could not be published automatically: ${e.message}. Try "Push live now" from the product.`,
+         product.id]
+      );
+      require('../services/push').sendToAll({
+        title: 'eBay go-live failed', body: product.title || product.sku, url: '/', tag: 'prelist-fail-' + product.id, category: 'ebay_prelist_failed',
+      }).catch(() => {});
+    } catch (_) { /* notifications table/push optional */ }
+    throw e;
+  }
+}
+
+// Publish every scheduled pre-listing whose go-live time has passed. Called by the
+// boot cron. Returns a small summary for logging.
+async function publishDuePrelistings() {
+  let due;
+  try {
+    due = await query(
+      `SELECT * FROM products
+        WHERE ebay_prelist_status = 'scheduled'
+          AND ebay_scheduled_at IS NOT NULL
+          AND ebay_scheduled_at <= now()
+        ORDER BY ebay_scheduled_at ASC
+        LIMIT 25`);
+  } catch (e) {
+    // Columns may not exist yet on a very old DB — non-fatal.
+    return { published: 0, failed: 0, skipped: true };
+  }
+  let published = 0, failed = 0;
+  for (const product of due.rows) {
+    try { await publishPrelisting(product); published++; }
+    catch (e) { failed++; console.warn('[prelist go-live] failed for', product.sku, '-', e.message); }
+  }
+  return { published, failed, total: due.rows.length };
+}
+
+// POST /api/listings/:id/publish-ebay — "Push live now". Publishes a scheduled
+// pre-listing immediately, regardless of its go-live time.
+router.post('/:id/publish-ebay', requireAdmin, async (req, res) => {
+  try {
+    const pr = await query(`SELECT * FROM products WHERE id = $1`, [req.params.id]);
+    const product = pr.rows[0];
+    if (!product) return res.status(404).json({ error: 'product_not_found' });
+    const out = await publishPrelisting(product, { req });
+    if (req) await audit(req, 'publish_prelisting_ebay', 'product', product.id, { itemId: out.itemId });
+    res.json(out);
+  } catch (e) {
+    if (e.httpStatus) return res.status(e.httpStatus).json(e.body || { error: 'publish_failed', message: e.message });
+    res.status(500).json({ error: 'publish_failed', message: e.message });
+  }
+});
+
+router.publishDuePrelistings = publishDuePrelistings;
 
 // Helper: minimal HTML-escape for server-side description fallback strings
 function escapeHtmlServer(s) {
