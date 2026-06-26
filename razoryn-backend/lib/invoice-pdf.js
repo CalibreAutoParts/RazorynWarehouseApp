@@ -103,11 +103,43 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
       } else {
         doc.font('Helvetica-Bold').fontSize(20).fillColor(ink).text(companyName, left, y + 6, { width: 280 });
       }
-      doc.font('Helvetica-Bold').fontSize(20).fillColor(ink).text(docTitle(mode), right - 240, y, { width: 240, align: 'right' });
+      doc.font('Helvetica-Bold').fontSize(20).fillColor(ink).text(docTitle(mode), right - 240, y, { width: 240, align: 'right', lineBreak: false });
       doc.font('Helvetica').fontSize(10).fillColor(muted).text(ref, right - 240, y + 26, { width: 240, align: 'right' });
       y += 64;
       doc.moveTo(left, y).lineTo(right, y).strokeColor('#e5e5e5').lineWidth(1).stroke();
       y += 16;
+
+      // ---------- Pro-forma notice (mirror the on-screen invoice's banner) ----------
+      // Makes the emailed pro-forma unmistakably a pro-forma and tells the customer
+      // how to pay. Colour-coded by payment method, like renderInvoiceHtml.
+      if (mode === 'proforma') {
+        const pm = sale.payment_method;
+        const pal = pm === 'bank' ? { bg: '#eaf2ff', br: '#b3ccef', fg: '#1a3c6e' }
+                  : pm === 'cash' ? { bg: '#fff8e6', br: '#f0d171', fg: '#5a4400' }
+                  : pm === 'card' ? { bg: '#e8f5e8', br: '#99cc99', fg: '#1f6b2e' }
+                  : { bg: '#f5f5f5', br: '#dddddd', fg: '#444444' };
+        const methodLine = pm === 'cash' ? 'Payment by Cash on Collection'
+                         : pm === 'bank' ? 'Payment by Bank Transfer'
+                         : pm === 'card' ? 'Payment by Card'
+                         : 'Payment method not specified';
+        const body = pm === 'cash'
+          ? `This is a pro-forma invoice for cash payment on collection. Bring reference ${ref} when you collect. We'll issue a receipt once payment is received.`
+          : pm === 'bank'
+          ? `This is a pro-forma invoice — not a tax invoice. Pay by bank transfer using the details below, quoting reference ${ref}. Once payment clears we'll issue the final VAT invoice and dispatch your order.`
+          : `This is a pro-forma invoice — not a tax invoice. Quote reference ${ref} when paying. We'll issue a final invoice once payment is received.`;
+        doc.font('Helvetica').fontSize(9);
+        const bodyH = doc.heightOfString(body, { width: contentW - 24 });
+        const boxH = 12 + 13 + 14 + bodyH + 12;   // pad + title + method + body + pad
+        doc.rect(left, y, contentW, boxH).fillColor(pal.bg).fill();
+        doc.rect(left, y, contentW, boxH).strokeColor(pal.br).lineWidth(1).stroke();
+        let by = y + 12;
+        doc.fillColor(pal.fg).font('Helvetica-Bold').fontSize(11).text('PRO FORMA INVOICE — not a tax invoice', left + 12, by, { width: contentW - 24 });
+        by += 15;
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(pal.fg).text(methodLine, left + 12, by, { width: contentW - 24 });
+        by += 14;
+        doc.font('Helvetica').fontSize(9).fillColor(pal.fg).text(body, left + 12, by, { width: contentW - 24 });
+        y += boxH + 16;
+      }
 
       // ---------- From / Billed to (two columns) ----------
       const colW = (contentW - 24) / 2;
