@@ -5487,10 +5487,15 @@ ${labelHtml}
     const t = label.querySelector('.title');
     if (!t || !t.textContent.trim()) return;
     t.style.fontSize = '';                               // reset to the CSS base each run
+    // Elements whose overflow:hidden can clip the title: the title itself, its
+    // wrapper (.body on the 4×6 layouts), and the label. Shrink until NONE overflow
+    // — on 4×6 the clip happens at .body, which the title's own box doesn't report.
+    const boxes = [t, t.parentElement, label].filter(Boolean);
+    const overflowing = () => boxes.some(e => e.scrollHeight > e.clientHeight + 1);
     let fs = parseFloat(getComputedStyle(t).fontSize);   // px
     const min = 6;                                        // legibility floor
-    let guard = 120;
-    while (t.scrollHeight > t.clientHeight + 1 && fs > min && guard-- > 0) {
+    let guard = 200;
+    while (overflowing() && fs > min && guard-- > 0) {
       fs -= 0.5;
       t.style.fontSize = fs + 'px';
     }
