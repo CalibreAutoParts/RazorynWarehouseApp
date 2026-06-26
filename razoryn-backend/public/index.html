@@ -5256,15 +5256,15 @@ function labelsPrint(itemsArg) {
   // Build size config — for 4x6 we swap w/h based on orientation.
   let s;
   if (size === '50x25') {
-    s = { w: 50, h: 25, name: '50×25 mm', barW: 1.5, barH: 28, fontTitle: 7, fontSku: 6.5, fontBar: 7, layout: 'small' };
+    s = { w: 50, h: 25, name: '50×25 mm', barW: 1.4, barH: 22, fontTitle: 7, fontSku: 6.5, fontBar: 7, layout: 'small' };
   } else if (size === '25x50') {
-    s = { w: 25, h: 50, name: '25×50 mm', barW: 1.2, barH: 55, fontTitle: 6, fontSku: 5.5, fontBar: 6, layout: 'tall' };
+    s = { w: 25, h: 50, name: '25×50 mm', barW: 1.1, barH: 46, fontTitle: 6, fontSku: 5.5, fontBar: 6, layout: 'tall' };
   } else {
     // 4×6 inch = 101.6×152.4 mm. Use exact 4x6 inch dimensions for thermal printers.
     if (orient === 'landscape') {
-      s = { w: 152.4, h: 101.6, name: '4×6 inch (landscape)', barW: 3.5, barH: 110, fontTitle: 22, fontSku: 16, fontBar: 13, layout: 'large-landscape', logoSize: '34mm' };
+      s = { w: 152.4, h: 101.6, name: '4×6 inch (landscape)', barW: 3, barH: 92, fontTitle: 22, fontSku: 16, fontBar: 13, layout: 'large-landscape', logoSize: '34mm' };
     } else {
-      s = { w: 101.6, h: 152.4, name: '4×6 inch (portrait)', barW: 3, barH: 130, fontTitle: 20, fontSku: 15, fontBar: 12, layout: 'large-portrait', logoSize: '28mm' };
+      s = { w: 101.6, h: 152.4, name: '4×6 inch (portrait)', barW: 2.6, barH: 108, fontTitle: 20, fontSku: 15, fontBar: 12, layout: 'large-portrait', logoSize: '28mm' };
     }
   }
 
@@ -5382,12 +5382,12 @@ function labelsPrint(itemsArg) {
 
   /* ============ SMALL 50×25 mm thermal ============ */
   /* The SKU + barcode are pinned to the bottom and never shrink (flex-shrink:0)
-     so a long title can only eat its own clamped space — it can never push the
-     barcode off the label. The title shrinks/clips first. */
+     so the barcode is always visible. The title is the only flexible element:
+     it takes the leftover space above the barcode and its font is auto-shrunk by
+     the fitter (fitAll) so the FULL title shows — never truncated/clamped. */
   .label.small { padding: 2mm; justify-content: space-between; }
-  .label.small .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.1;
-    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-    flex: 0 1 auto; min-height: 0; }
+  .label.small .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.12;
+    overflow: hidden; flex: 0 1 auto; min-height: 0; }
   .label.small .sku { font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace; color: #444; margin-top: 0.5mm; flex-shrink: 0; }
   .label.small .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 0.5mm; flex-shrink: 0; }
   /* Secondary identifier (SKU shown under the part number) — smaller + muted. */
@@ -5395,9 +5395,8 @@ function labelsPrint(itemsArg) {
 
   /* ============ TALL 25×50 mm thermal ============ */
   .label.tall { padding: 2mm; justify-content: space-between; text-align: center; }
-  .label.tall .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.1;
-    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
-    flex: 0 1 auto; min-height: 0; }
+  .label.tall .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.12;
+    overflow: hidden; flex: 0 1 auto; min-height: 0; }
   .label.tall .sku { font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace; color: #444; margin-top: 1mm; flex-shrink: 0; }
   .label.tall .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 1mm; flex-shrink: 0; }
 
@@ -5419,7 +5418,7 @@ function labelsPrint(itemsArg) {
   }
   .label.large-landscape .title {
     font-size: ${s.fontTitle}pt; font-weight: 700; line-height: 1.15; color: #111;
-    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+    overflow: hidden; flex: 0 1 auto; min-height: 0;
   }
   .label.large-landscape .sku {
     font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace;
@@ -5442,7 +5441,7 @@ function labelsPrint(itemsArg) {
   .label.large-portrait .body { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: center; padding: 4mm 0; }
   .label.large-portrait .title {
     font-size: ${s.fontTitle}pt; font-weight: 700; line-height: 1.15;
-    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+    overflow: hidden; flex: 0 1 auto; min-height: 0;
   }
   .label.large-portrait .sku {
     font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace;
@@ -5479,9 +5478,29 @@ ${labelHtml}
         el.innerHTML = '<text x="0" y="20" font-size="10" fill="red">Invalid: ' + el.dataset.code + '</text>';
       }
     });
+    fitAll();
   }
+  // Auto-fit: shrink each title's font until the FULL text fits the space above
+  // the barcode (the barcode/SKU never move). Long titles get progressively
+  // smaller instead of being truncated; short titles are left alone.
+  function fitLabel(label) {
+    const t = label.querySelector('.title');
+    if (!t || !t.textContent.trim()) return;
+    t.style.fontSize = '';                               // reset to the CSS base each run
+    let fs = parseFloat(getComputedStyle(t).fontSize);   // px
+    const min = 6;                                        // legibility floor
+    let guard = 120;
+    while (t.scrollHeight > t.clientHeight + 1 && fs > min && guard-- > 0) {
+      fs -= 0.5;
+      t.style.fontSize = fs + 'px';
+    }
+  }
+  function fitAll() { document.querySelectorAll('.label').forEach(fitLabel); }
   if (window.JsBarcode) generate();
   else window.addEventListener('load', generate);
+  // Re-fit once the web font has loaded (metrics change vs the fallback font).
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitAll);
+  window.addEventListener('load', fitAll);
 <\/script>
 </body></html>`);
   w.document.close();
