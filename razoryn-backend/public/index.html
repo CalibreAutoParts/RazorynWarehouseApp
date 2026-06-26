@@ -1286,6 +1286,11 @@ function adaptProduct(p) {
     shopifyHandle: p.shopify_handle || '',
     incomingQty: p.incoming_qty || 0,
     incomingEta: p.incoming_eta || null,
+    // Pre-listing / pre-order — listed before stock arrives.
+    isPrelisted: !!p.is_prelisted,
+    preorderEta: p.preorder_eta || null,
+    ebayScheduledAt: p.ebay_scheduled_at || null,
+    ebayPrelistStatus: p.ebay_prelist_status || null,
     stockGroupId: p.stock_group_id || null,
     stockGroupCode: p.stock_group_code || null,
   };
@@ -1333,10 +1338,13 @@ function adaptSale(s) {
     vehicleReg: s.vehicle_reg || '',
     paymentReference: s.payment_reference,
     status: s.status,
+    // Pre-order — item not in stock yet; kept out of revenue + dispatch until the
+    // stock arrives and the sale auto-flips to 'pending' (see the stock-in hook).
+    isPreorder: s.status === 'preorder',
     // #13 — payment state. unpaid = issued invoice (parts given) not yet paid.
     isPaid: s.is_paid !== false,
     paidAt: s.paid_at || null,
-    unpaid: !s.is_estimate && s.is_paid === false && s.status !== 'refunded' && s.status !== 'cancelled',
+    unpaid: !s.is_estimate && s.status !== 'preorder' && s.is_paid === false && s.status !== 'refunded' && s.status !== 'cancelled',
     subtotal: parseFloat(s.subtotal || 0),
     vat: parseFloat(s.vat || 0),
     shipping: parseFloat(s.shipping || 0),
@@ -2685,6 +2693,8 @@ function stFiltered() {
   const loc = el('st-location')?.value || '';
   const checked = State._stChecked || new Set();
   return (State.products || []).filter(p => {
+    // Pre-listed items aren't physically here yet — exclude from the count.
+    if (p.isPrelisted) return false;
     if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model, ...(p.partNumbers||[]).map(x => x.code))) return false;
     if (make && p.brand !== make) return false;
     if (loc === '__none__') { if (p.location) return false; }
@@ -2696,8 +2706,9 @@ function stFiltered() {
   });
 }
 function stProgress() {
-  const total = (State.products || []).length;
-  const done = (State.products || []).filter(p => State._stChecked.has(String(p.id))).length;
+  const countable = (State.products || []).filter(p => !p.isPrelisted);
+  const total = countable.length;
+  const done = countable.filter(p => State._stChecked.has(String(p.id))).length;
   const pct = total ? Math.round(done / total * 100) : 0;
   if (el('st-progress-text')) el('st-progress-text').textContent = `${done} of ${total} items counted`;
   if (el('st-progress-pct')) el('st-progress-pct').textContent = pct + '%';
@@ -3031,9 +3042,10 @@ function renderDashboard() {
   const sales = Array.isArray(State.sales) ? State.sales : [];
   const returns = Array.isArray(State.returns) ? State.returns : [];
   const lowStock = products.filter(p => totalQty(p) <= (p.lowThresh ?? 3));
-  // Revenue counts only PAID, non-estimate sales — an issued-but-unpaid invoice
-  // (parts given, payment not yet received) is NOT counted until it's marked paid.
-  const todayPaid = sales.filter(s => s && isToday(s.date) && !s.isEstimate && s.isPaid !== false);
+  // Revenue counts only PAID, non-estimate, non-preorder sales — an issued-but-
+  // unpaid invoice (parts given, payment not yet received) is NOT counted until
+  // marked paid, and a pre-order is NOT counted until the stock arrives & ships.
+  const todayPaid = sales.filter(s => s && isToday(s.date) && !s.isEstimate && !s.isPreorder && s.isPaid !== false);
   const todayRev = todayPaid.reduce((a,b)=>a+(b.amount||0),0);
   const totalUnits = products.reduce((a,b)=>a+totalQty(b),0);
   const todaySales = sales.filter(s => s && isToday(s.date));
@@ -3357,18 +3369,25 @@ function incomingModalBody(it) {
     </div>
     <div class="field"><label>Notes</label><input id="inc-notes" value="${escapeAttr(it.notes || '')}"></div>`;
 }
-function openAddIncoming() {
+// openAddIncoming(prefill) — prefill carries the SHARED header (container / ETA /
+// note / currency) when continuing to the next supplier, so only supplier + lines
+// need re-entering. The "Save & add another supplier" action submits the current
+// supplier then re-opens this modal pre-filled with that shared header.
+function openAddIncoming(prefill) {
   _incLines = [];
+  prefill = prefill || {};
+  const curOpts = ['CNY','GBP','USD','EUR'].map(c => `<option value="${c}"${(prefill.currency||'CNY')===c?' selected':''}>${c}</option>`).join('');
   modal({
     title: '+ Add incoming stock',
     body: `
-      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Add a whole container at once. Each line links to a product in your inventory — no need to retype SKUs.</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px">
-        <div class="field"><label>Container number / name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— unique, e.g. MSKU1234567</span></label><input id="incb-container" placeholder="Container no. (trackable) or a name"></div>
-        <div class="field"><label>Supplier</label><input id="incb-supplier"></div>
-        <div class="field"><label>Rough ETA <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(sea freight, approx.)</span></label><input id="incb-expected" type="date"></div>
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Add a whole container at once. Each line links to a product in your inventory — no need to retype SKUs. Adding goods from several suppliers? Use <strong>Save &amp; add another supplier</strong> to keep the container details and just change the supplier + lines.</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 0.7fr;gap:10px;margin-bottom:6px">
+        <div class="field"><label>Container number / name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— unique, e.g. MSKU1234567</span></label><input id="incb-container" placeholder="Container no. (trackable) or a name" value="${escapeAttr(prefill.containerRef||'')}"></div>
+        <div class="field"><label>Supplier</label><input id="incb-supplier" placeholder="This supplier's name"></div>
+        <div class="field"><label>Rough ETA <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(sea freight, approx.)</span></label><input id="incb-expected" type="date" value="${escapeAttr(prefill.expectedDate||'')}"></div>
+        <div class="field"><label>Cost currency</label><select id="incb-currency">${curOpts}</select></div>
       </div>
-      <div class="field" style="margin-bottom:6px"><label>Container note <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— what's in it / which suppliers</span></label><input id="incb-note" placeholder="e.g. MG + Tesla body panels — suppliers T&T and ABC"></div>
+      <div class="field" style="margin-bottom:6px"><label>Container note <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— what's in it / which suppliers</span></label><input id="incb-note" placeholder="e.g. MG + Tesla body panels — suppliers T&T and ABC" value="${escapeAttr(prefill.notes||'')}"></div>
       <div style="border-top:1px solid var(--line);margin:12px 0;padding-top:10px">
         <div style="font-weight:600;font-size:13px;margin-bottom:6px">Add products</div>
         <div style="position:relative">
@@ -3376,9 +3395,9 @@ function openAddIncoming() {
           <div id="incb-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:240px;overflow:auto"></div>
         </div>
         <details style="margin-top:8px">
-          <summary style="cursor:pointer;font-size:12px;color:var(--brand-primary)">📋 Paste from a packing list (SKU/part + quantity per line)</summary>
+          <summary style="cursor:pointer;font-size:12px;color:var(--brand-primary)">📋 Paste from a packing list (SKU/part + quantity, optional unit cost per line)</summary>
           <div style="margin-top:8px">
-            <textarea id="incb-paste" rows="5" placeholder="One per line, e.g.&#10;11192455, 120&#10;10788797 60&#10;EB-277027050399,200" style="width:100%;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+            <textarea id="incb-paste" rows="5" placeholder="One per line: code, qty[, unit cost], e.g.&#10;11192455, 120, 8.50&#10;10788797 60&#10;EB-277027050399,200,12" style="width:100%;font-family:ui-monospace,monospace;font-size:12px"></textarea>
             <button type="button" class="btn btn-outline btn-sm" onclick="incbParsePaste()" style="margin-top:6px">Add pasted lines</button>
             <div id="incb-paste-result" style="font-size:11px;color:var(--ink-soft);margin-top:6px"></div>
           </div>
@@ -3388,7 +3407,8 @@ function openAddIncoming() {
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
-      { label: 'Add all', primary: true, onClick: submitBulkIncoming },
+      { label: 'Save & add another supplier', onClick: () => submitBulkIncoming(true) },
+      { label: 'Add all', primary: true, onClick: () => submitBulkIncoming(false) },
     ],
   });
   incbRenderLines();
@@ -3398,18 +3418,21 @@ function incbRenderLines() {
   const wrap = el('incb-lines-wrap'); if (!wrap) return;
   if (!_incLines.length) { wrap.innerHTML = '<div style="font-size:12px;color:var(--ink-soft);padding:8px 0">No lines yet — search a product above or paste a list.</div>'; return; }
   const units = _incLines.reduce((a, l) => a + (parseInt(l.qty) || 0), 0);
+  const cur = (el('incb-currency')?.value) || 'CNY';
   wrap.innerHTML = `<div style="font-size:12px;font-weight:600;margin-bottom:6px">${_incLines.length} line(s) · ${units} units</div>` +
+    `<div style="display:flex;gap:8px;font-size:10px;color:var(--ink-soft);padding:0 28px 0 0"><div style="flex:1">Product</div><div style="width:80px;text-align:center">Qty</div><div style="width:90px;text-align:center">Unit cost (${escapeHtml(cur)})</div></div>` +
     _incLines.map((l, i) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
       <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(l.title)}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || '')}</div></div>
       <input type="number" min="1" value="${escapeAttr(l.qty)}" onchange="_incLines[${i}].qty=parseInt(this.value)||0" style="width:80px">
+      <input type="number" min="0" step="0.01" value="${l.unitCostForeign != null ? escapeAttr(l.unitCostForeign) : ''}" placeholder="cost" onchange="_incLines[${i}].unitCostForeign=this.value" style="width:90px">
       <button class="btn btn-ghost btn-sm" onclick="_incLines.splice(${i},1);incbRenderLines()" style="color:var(--red)">×</button>
     </div>`).join('');
 }
-function incbAddProduct(p, qty) {
+function incbAddProduct(p, qty, unitCost) {
   if (!p) return;
   const existing = _incLines.find(l => l.productId === p.id);
-  if (existing) existing.qty = (parseInt(existing.qty) || 0) + (qty || 1);
-  else _incLines.push({ productId: p.id, sku: p.sku, title: p.title, qty: qty || 1 });
+  if (existing) { existing.qty = (parseInt(existing.qty) || 0) + (qty || 1); if (unitCost != null && unitCost !== '') existing.unitCostForeign = unitCost; }
+  else _incLines.push({ productId: p.id, sku: p.sku, title: p.title, qty: qty || 1, unitCostForeign: (unitCost != null && unitCost !== '') ? unitCost : null });
 }
 function incbSearch(q) {
   const box = el('incb-suggest'); if (!box) return;
@@ -3435,37 +3458,55 @@ function incbParsePaste() {
   const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   let added = 0; const unmatched = [];
   for (const line of lines) {
-    const m = line.split(/[,\t;]+|\s{2,}|\s+(?=\d+$)/).map(s => s.trim()).filter(Boolean);
-    // Last token that's a number = qty; the rest = code.
-    let qty = NaN, code = '';
-    if (m.length >= 2) { qty = parseInt(m[m.length - 1]); code = m.slice(0, -1).join(' '); }
+    const m = line.split(/[,\t;]+|\s{2,}|\s+(?=\d)/).map(s => s.trim()).filter(Boolean);
+    // Format: code, qty[, unit cost]. A trailing decimal token (e.g. 8.50) is the
+    // optional unit cost; the integer before it is the qty; the rest is the code.
+    let qty = NaN, code = '', cost = null;
+    if (m.length >= 3 && /^\d+(\.\d+)?$/.test(m[m.length - 1]) && /^\d+$/.test(m[m.length - 2])) {
+      cost = m[m.length - 1]; qty = parseInt(m[m.length - 2]); code = m.slice(0, -2).join(' ');
+    } else if (m.length >= 2) { qty = parseInt(m[m.length - 1]); code = m.slice(0, -1).join(' '); }
     else { const parts = line.split(/\s+/); qty = parseInt(parts[parts.length - 1]); code = parts.slice(0, -1).join(' '); }
     if (!code || !Number.isInteger(qty) || qty <= 0) { unmatched.push(line); continue; }
     const cl = code.toLowerCase();
     const p = (State.products || []).find(x => (x.sku || '').toLowerCase() === cl || (x.part_number || '').toLowerCase() === cl);
-    if (p) { incbAddProduct(p, qty); added++; } else unmatched.push(code + ' (no match)');
+    if (p) { incbAddProduct(p, qty, cost); added++; } else unmatched.push(code + ' (no match)');
   }
   const res = el('incb-paste-result');
   if (res) res.innerHTML = `Added ${added} line(s).` + (unmatched.length ? ` <span style="color:var(--amber)">Couldn't match ${unmatched.length}:</span> ${unmatched.slice(0, 8).map(escapeHtml).join(', ')}${unmatched.length > 8 ? '…' : ''}` : '');
   if (el('incb-paste')) el('incb-paste').value = '';
   incbRenderLines();
 }
-async function submitBulkIncoming() {
+async function submitBulkIncoming(andNext) {
   if (!_incLines.length) { toast('Add at least one line', 'warn'); return; }
-  const payload = {
+  // Capture the shared header BEFORE the modal is replaced, so "add another
+  // supplier" can re-prefill it.
+  const header = {
     containerRef: el('incb-container')?.value || null,
-    supplier: el('incb-supplier')?.value || null,
     expectedDate: el('incb-expected')?.value || null,
     notes: el('incb-note')?.value || null,
+    currency: el('incb-currency')?.value || 'CNY',
+  };
+  const payload = {
+    ...header,
+    supplier: el('incb-supplier')?.value || null,
     status: 'on_order',
-    lines: _incLines.filter(l => (parseInt(l.qty) || 0) > 0).map(l => ({ productId: l.productId, qty: parseInt(l.qty) })),
+    lines: _incLines.filter(l => (parseInt(l.qty) || 0) > 0).map(l => ({
+      productId: l.productId, qty: parseInt(l.qty),
+      unitCostForeign: (l.unitCostForeign != null && l.unitCostForeign !== '') ? parseFloat(l.unitCostForeign) : undefined,
+      currency: header.currency,
+    })),
   };
   const taskId = Task.start('Adding incoming stock…');
   try {
     const r = await Api.post('/api/incoming/bulk', payload);
     Task.done(taskId, 'Added');
     toast(`Added ${r.created} line(s) · ${r.createdUnits} units` + (r.unmatched?.length ? ` · ${r.unmatched.length} skipped` : ''), 'success', 5000);
-    closeModal();
+    if (andNext) {
+      // Re-open with the shared container header pre-filled; supplier + lines clear.
+      openAddIncoming(header);
+    } else {
+      closeModal();
+    }
     loadIncoming();
   } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
@@ -3671,11 +3712,11 @@ function renderInventory() {
         <td style="font-family:ui-monospace,monospace;font-size:12px">${p.partNumber||'—'}</td>
         <td><div style="font-size:12px">${p.location || '—'}</div></td>
         <td class="num">
-          <strong>${tq}</strong> ${tq<=p.lowThresh ? `<span class="pill ${tq===0?'red':'amber'}" style="margin-left:6px">${tq===0?'Out':'Low'}</span>`:''}
-          ${p.incomingQty > 0 ? `<div style="font-size:11px;margin-top:3px"><span class="pill" style="background:var(--bg-soft);color:var(--brand-primary);font-size:10px">${tq===0?'Pre-order':'+'+p.incomingQty+' incoming'}</span>${p.incomingEta ? `<div style="color:var(--ink-soft);font-size:10px;margin-top:2px">ETA ~${new Date(p.incomingEta).toLocaleDateString('en-GB')}</div>` : ''}</div>` : ''}
+          <strong>${tq}</strong> ${(tq<=p.lowThresh && !p.isPrelisted) ? `<span class="pill ${tq===0?'red':'amber'}" style="margin-left:6px">${tq===0?'Out':'Low'}</span>`:''}
+          ${(p.incomingQty > 0 || p.isPrelisted) ? `<div style="font-size:11px;margin-top:3px"><span class="pill" style="background:var(--amber-light);color:var(--amber);font-size:10px;font-weight:600">${(p.isPrelisted || tq===0)?'Pre-order':'+'+p.incomingQty+' incoming'}</span>${(p.preorderEta || p.incomingEta) ? `<div style="color:var(--ink-soft);font-size:10px;margin-top:2px">ETA ~${new Date(p.preorderEta || p.incomingEta).toLocaleDateString('en-GB')}</div>` : ''}${p.isPrelisted && p.ebayPrelistStatus==='scheduled' ? `<div style="color:var(--ink-soft);font-size:10px;margin-top:2px">eBay: scheduled</div>` : ''}</div>` : ''}
         </td>
         <td class="num">${gbp(p.priceShopify)}</td>
-        <td style="white-space:nowrap"><button class="btn btn-outline btn-sm" data-act="edit" data-pid="${p.id}">Edit</button> <button class="btn btn-ghost btn-sm" data-act="del" data-pid="${p.id}" style="color:var(--red)" title="Delete product">🗑</button></td>
+        <td style="white-space:nowrap">${(p.isPrelisted && p.ebayPrelistStatus === 'scheduled') ? `<button class="btn btn-primary btn-sm" onclick="pushPrelistingLive(${p.id})" title="Publish the held eBay listing now">⚡ Push live</button> ` : ''}<button class="btn btn-outline btn-sm" data-act="edit" data-pid="${p.id}">Edit</button> <button class="btn btn-ghost btn-sm" data-act="del" data-pid="${p.id}" style="color:var(--red)" title="Delete product">🗑</button></td>
       </tr>
     `;
   }
@@ -6564,6 +6605,7 @@ function renderSales() {
         <button data-sf="unpaid">⏳ Unpaid${(State.sales||[]).filter(s=>s.unpaid).length ? ' (' + (State.sales||[]).filter(s=>s.unpaid).length + ')' : ''}</button>
         <button data-sf="fitment">🔧 Needs fitment${(State.sales||[]).filter(s=>s.needsFitment && !s.isEstimate && !s.dispatchedAt && !s.collectedAt).length ? ' (' + (State.sales||[]).filter(s=>s.needsFitment && !s.isEstimate && !s.dispatchedAt && !s.collectedAt).length + ')' : ''}</button>
         <button data-sf="estimates">Estimates</button>
+        <button data-sf="preorders">📦 Pre-orders${(State.sales||[]).filter(s=>s.isPreorder).length ? ' (' + (State.sales||[]).filter(s=>s.isPreorder).length + ')' : ''}</button>
       </div>
 
       <div class="toolbar" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -6606,9 +6648,12 @@ function renderSales() {
   function applyFilter(filter) {
     let list;
     if (filter === 'estimates') list = State.sales.filter(s => s.isEstimate);
+    else if (filter === 'preorders') list = State.sales.filter(s => s.isPreorder);
     else if (filter === 'unpaid') list = State.sales.filter(s => s.unpaid);
     else if (filter === 'fitment') list = State.sales.filter(s => s.needsFitment && !s.isEstimate && !s.dispatchedAt && !s.collectedAt);
-    else if (filter === 'all') list = State.sales.filter(s => !s.isEstimate);
+    // 'all' excludes estimates AND pre-orders (pre-orders live under their own tab
+    // until the stock arrives and they flip to a normal pending order).
+    else if (filter === 'all') list = State.sales.filter(s => !s.isEstimate && !s.isPreorder);
     // 'ebay' is the legacy single-store bucket — matches any ebay_* channel.
     else if (filter === 'ebay') list = State.sales.filter(s => (s.channel || '').startsWith('ebay') && !s.isEstimate);
     // Cash / Bank / Card buckets are by payment method (channels are direct_cash/bank/card).
@@ -6624,7 +6669,7 @@ function renderSales() {
     // Revenue counts only PAID sales — issued-but-unpaid invoices (parts given,
     // payment not yet received) are excluded until marked paid. They still show in
     // the table and under the "Unpaid" tab.
-    const allPaid = State.sales.filter(s => !s.isEstimate && s.isPaid !== false);
+    const allPaid = State.sales.filter(s => !s.isEstimate && !s.isPreorder && s.isPaid !== false);
     // #1 — refunds (from completed returns) net off the revenue figures.
     const rbc = State.salesRefundsByChannel || {};
     const refShop = rbc.shopify || 0;
@@ -6638,11 +6683,18 @@ function renderSales() {
     const grossTotal = allPaid.reduce((a,b)=>a+b.amount,0);
     const netTotal = grossTotal - refTotal;
     const estimatesCount = State.sales.filter(s => s.isEstimate).length;
+    const preorders = State.sales.filter(s => s.isPreorder);
+    const preorderValue = preorders.reduce((a,b)=>a+(b.amount||0),0);
+    const fourthTile = filter === 'estimates'
+      ? `<div class="stat"><div class="label">Estimates</div><div class="value">${estimatesCount}</div><div class="delta">open quotes</div></div>`
+      : filter === 'preorders'
+      ? `<div class="stat"><div class="label">Pre-orders</div><div class="value">${preorders.length}</div><div class="delta">${gbp(preorderValue)} reserved · not yet revenue</div></div>`
+      : `<div class="stat"><div class="label">Direct (cash + bank)</div><div class="value">${gbp(totalDirect)}</div><div class="delta">${allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').length} orders${refDirect ? ` · −${gbp(refDirect)}` : ''}</div></div>`;
     el('sales-stats').innerHTML = `
       <div class="stat"><div class="label">Net revenue</div><div class="value">${gbp(netTotal)}</div><div class="delta">${allPaid.length} sales${refTotal ? ` · −${gbp(refTotal)} refunded` : ''}</div></div>
       <div class="stat"><div class="label">Store</div><div class="value">${gbp(totalShop)}</div><div class="delta">${allPaid.filter(s=>s.channel==='shopify').length} orders${refShop ? ` · −${gbp(refShop)}` : ''}</div></div>
       <div class="stat"><div class="label">eBay${(State.brand?.stores||[]).length > 1 ? ' (all)' : ''}</div><div class="value">${gbp(totalEby)}</div><div class="delta">${ebyCount} orders${refEby ? ` · −${gbp(refEby)}` : ''}</div></div>
-      <div class="stat"><div class="label">${filter === 'estimates' ? 'Estimates' : 'Direct (cash + bank)'}</div><div class="value">${filter === 'estimates' ? estimatesCount : gbp(totalDirect)}</div><div class="delta">${filter === 'estimates' ? 'open quotes' : allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').length + ' orders' + (refDirect ? ` · −${gbp(refDirect)}` : '')}</div></div>
+      ${fourthTile}
     `;
   }
   function paintTable(filter='all') {
@@ -6664,6 +6716,7 @@ function renderSales() {
         ? ` <span class="pill green" style="font-size:10px;margin-left:4px" title="${s.collectedAt ? 'Collected ' + new Date(s.collectedAt).toLocaleDateString() : 'Dispatched ' + new Date(s.dispatchedAt).toLocaleDateString()}">${s.collectedAt ? '✓ Collected' : '✓ Shipped'}</span>`
         : '';
       const unpaidBadge = s.unpaid ? ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="Parts given, payment not received yet">⏳ Unpaid</span>` : '';
+      const preorderBadge = s.isPreorder ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--amber-light);color:var(--amber)" title="Item not in stock yet — you'll be notified to ship when it arrives">📦 Pre-order</span>` : '';
       // Fitment + large-panel flags (auto-parts ops). Only meaningful on live orders.
       const fitmentBadge = (!s.isEstimate && s.needsFitment && !s.dispatchedAt && !s.collectedAt)
         ? ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="No vehicle reg captured — confirm fitment before dispatch">🔧 Confirm fitment</span>` : '';
@@ -6675,7 +6728,7 @@ function renderSales() {
       // Cash orders get the same shortcut wired to the collect modal.
       const TEN_DAYS_MS = 10 * 24 * 60 * 60 * 1000;
       const isFresh = new Date(s.date).getTime() >= Date.now() - TEN_DAYS_MS;
-      const canDispatch = !s.isEstimate && !s.dispatchedAt && !s.collectedAt
+      const canDispatch = !s.isEstimate && !s.isPreorder && !s.dispatchedAt && !s.collectedAt
                        && s.status !== 'dispatched' && s.status !== 'refunded' && s.status !== 'cancelled'
                        && isFresh;
       const isCollectOrder = s.fulfillmentMethod === 'collect';
@@ -6689,7 +6742,7 @@ function renderSales() {
         <td onclick="event.stopPropagation()"><input type="checkbox" class="sale-row-check" data-sid="${s.id}" ${State.salesSelected.has(s.id)?'checked':''} onchange="salesToggleRow('${s.id}',this.checked)"></td>
         <td>${fmtDate(s.date)}</td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${s.invoice||'—'}</td>
-        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}${unpaidBadge}${fitmentBadge}${lpBadge}</td>
+        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}${unpaidBadge}${preorderBadge}${fitmentBadge}${lpBadge}</td>
         <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
         <td>${s.customer}</td>
         <td class="num"><strong>${gbp(s.amount)}</strong></td>
@@ -7449,6 +7502,7 @@ function openManualSale() {
             <option value="invoice">Paid invoice (decrements stock)</option>
             <option value="unpaid">Issued — awaiting payment (gives parts, follow up)</option>
             <option value="estimate">Estimate / quote only (no stock change)</option>
+            <option value="preorder">Pre-order (not in stock — ship when it arrives)</option>
           </select>
         </div>
         <div class="field"><label>Payment method</label>
@@ -7684,6 +7738,7 @@ async function submitManualSale() {
   const docType = el('ms-doctype').value;
   const isEstimate = docType === 'estimate';
   const isUnpaid = docType === 'unpaid';   // #13: issued invoice, not yet paid
+  const isPreorder = docType === 'preorder'; // not in stock — ship when it arrives
   const channel = paymentMethod === 'cash' ? 'direct_cash' : 'direct_bank';
 
   const rows = document.querySelectorAll('#ms-items > [data-idx]');
@@ -7709,13 +7764,16 @@ async function submitManualSale() {
     channel,
     paymentMethod,
     isEstimate,
+    docType,                     // 'invoice' | 'unpaid' | 'estimate' | 'preorder'
+    preorder: isPreorder,        // no stock check/deduct; out of revenue until shipped
     customerName: el('ms-cust').value || null,
     customerPhone: el('ms-phone').value || null,
     customerEmail: el('ms-email').value || null,
     shippingAddress: el('ms-address').value || null,
     customerId: _msPickedId || null,
     createCustomer: !_msPickedId && !!el('ms-save-customer')?.checked,
-    paid: !isUnpaid,   // #13 — false = issued but awaiting payment
+    // Pre-orders default to not-yet-paid (reservation); unpaid invoices likewise.
+    paid: !isUnpaid && !isPreorder,
     orderNumber: el('ms-ordernum').value || null,
     vehicleReg: el('ms-reg').value || null,
     vinNumber: el('ms-vin')?.value || null,
@@ -7726,7 +7784,7 @@ async function submitManualSale() {
   try {
     const r = await Api.post('/api/sales', payload);
     closeModal();
-    toast(isEstimate ? 'Estimate saved' : (isUnpaid ? 'Invoice issued — awaiting payment (added to follow-up list)' : 'Sale recorded — opening document…'), 'success');
+    toast(isEstimate ? 'Estimate saved' : (isPreorder ? 'Pre-order saved — you\'ll be notified to ship when stock arrives' : (isUnpaid ? 'Invoice issued — awaiting payment (added to follow-up list)' : 'Sale recorded — opening document…')), 'success');
     await Store.refresh('sales');
     await Store.refresh('products');
     renderSales();
@@ -8057,12 +8115,12 @@ function qbSelectProduct(id) {
       <div class="card-body">
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
           <span class="pill ${totalQty(p)>0?'green':'red'}">${totalQty(p)>0 ? totalQty(p) + ' in stock' : 'Out of stock'}</span>
-          ${totalQty(p) <= 0 && (p.incomingQty > 0) ? `<span class="pill" style="font-size:11px;background:var(--amber-light);color:var(--amber);font-weight:600">⏳ Pre-order${p.incomingEta ? ' · arriving ~' + new Date(p.incomingEta).toLocaleDateString('en-GB') : ''}</span>` : ''}
+          ${(p.isPrelisted || (totalQty(p) <= 0 && p.incomingQty > 0)) ? `<span class="pill" style="font-size:11px;background:var(--amber-light);color:var(--amber);font-weight:600">⏳ Pre-order${(p.preorderEta || p.incomingEta) ? ' · arriving ~' + new Date(p.preorderEta || p.incomingEta).toLocaleDateString('en-GB') : ''}</span>` : ''}
           <span style="color:var(--ink-soft);font-size:13px">${escapeHtml(p.sku)}${p.partNumber ? ' · ' + escapeHtml(p.partNumber) : ''}</span>
           ${p.location ? `<span style="color:var(--ink-soft);font-size:13px">${escapeHtml(p.location)}</span>` : ''}
           ${linkedItemId ? `<span class="pill" style="font-size:10px;background:var(--bg-soft);color:var(--ink);font-weight:600">📦 eBay${linkedStore ? ' · ' + escapeHtml(abbreviateStoreName(linkedStore.name)) : ''}</span>` : ''}
         </div>
-        ${totalQty(p) <= 0 && (p.incomingQty > 0) ? `<div style="font-size:12px;background:var(--amber-light);color:var(--amber);padding:8px 12px;border-radius:6px;margin-bottom:12px"><strong>Not in stock — pre-order only.</strong> ${p.incomingQty} unit(s) on the way${p.incomingEta ? `, estimated arrival around <strong>${new Date(p.incomingEta).toLocaleDateString('en-GB')}</strong>` : ''}. Let the customer know this item is awaiting a delivery.</div>` : ''}
+        ${(p.isPrelisted || (totalQty(p) <= 0 && p.incomingQty > 0)) ? `<div style="font-size:12px;background:var(--amber-light);color:var(--amber);padding:8px 12px;border-radius:6px;margin-bottom:12px"><strong>${p.isPrelisted ? 'Pre-listed — not in stock yet.' : 'Not in stock — pre-order only.'}</strong> ${p.incomingQty > 0 ? p.incomingQty + ' unit(s) on the way' : 'Stock coming in'}${(p.preorderEta || p.incomingEta) ? `, estimated arrival around <strong>${new Date(p.preorderEta || p.incomingEta).toLocaleDateString('en-GB')}</strong>` : ''}. Quote it as a pre-order and let the customer know it's awaiting delivery.</div>` : ''}
         ${prices.fromShopify ? (linkedItemId
           ? `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ Product is linked to eBay item <strong>${escapeHtml(linkedItemId)}</strong> but no eBay price is on file. Run "Hydrate eBay prices" from Listing Mirror to pull the price now.</div>`
           : `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ Not linked to an eBay listing yet — using Shopify price as the basis. Link via Listing Mirror → Link Status.</div>`
@@ -10208,6 +10266,22 @@ function clPct() {
 // Entry point (nav item / links) → the full unified Create-listing PAGE.
 function openCreateListing() { routeTo('createlisting'); }
 
+// "Push live now" — publish a held eBay pre-listing immediately.
+async function pushPrelistingLive(productId) {
+  if (!confirm('Publish the held eBay listing for this item now?')) return;
+  const taskId = Task.start('Publishing eBay listing…');
+  try {
+    const r = await Api.post('/api/listings/' + productId + '/publish-ebay', {});
+    Task.done(taskId, 'Live');
+    toast(`✓ eBay listing live — ItemID ${r.itemId}`, 'success', 8000);
+    await Store.refresh('products').catch(() => {});
+    if (typeof renderInventory === 'function') renderInventory();
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Publish failed: ' + (e.data?.message || e.message), 'error', 9000);
+  }
+}
+
 // Unified page: Warehouse + Shopify panel on the left, the FULL eBay listing form
 // (reused from openCreateEbayListing in draft mode) on the right. One submit
 // creates the warehouse product, pushes it to Shopify, then creates the eBay
@@ -10441,6 +10515,24 @@ function clCoreHtml() {
       <div class="field"><label>Tags (comma-separated)</label><input id="cl-tags" placeholder="MO18, grille"></div>
       <div class="field"><label>Shopify status</label><select id="cl-status">${editing ? '<option value="">— Keep current —</option>' : ''}<option value="draft">Draft</option><option value="active">Active</option></select></div>
     </div>
+    ${editing ? '' : `
+    <div class="field" style="border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--bg-soft)">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600"><input type="checkbox" id="cl-prelist" onchange="clTogglePrelist()"> 📦 Stock coming in (pre-order / pre-listing)</label>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Lists the item before it's in stock. Shopify sells it as a pre-order (keeps selling at 0, shows the ETA); eBay is held and goes live at the time you set (or "Push live now"). Excluded from the stock-take until it arrives.</div>
+      <div id="cl-prelist-fields" style="display:none;margin-top:10px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div class="field"><label>Expected availability (ETA)</label><input id="cl-preorder-eta" type="date"></div>
+          <div class="field"><label>eBay go-live <span style="color:var(--ink-soft);font-weight:400">— blank = manual "Push live now"</span></label><input id="cl-ebay-golive" type="datetime-local"></div>
+        </div>
+        <div style="font-weight:600;font-size:12px;margin:8px 0 4px">Link to incoming stock</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div class="field"><label>Container ref / name</label><input id="cl-inc-container" list="cl-inc-containers" placeholder="existing or new container"><datalist id="cl-inc-containers"></datalist></div>
+          <div class="field"><label>Supplier</label><input id="cl-inc-supplier"></div>
+          <div class="field"><label>Qty on the way</label><input id="cl-inc-qty" type="number" min="0" placeholder="e.g. 50"></div>
+          <div class="field"><label>Unit cost</label><div style="display:flex;gap:6px"><input id="cl-inc-cost" type="number" min="0" step="0.01" style="flex:1" placeholder="optional"><select id="cl-inc-currency" style="width:80px">${['CNY','GBP','USD','EUR'].map(c=>`<option value="${c}">${c}</option>`).join('')}</select></div></div>
+        </div>
+      </div>
+    </div>`}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Product page template</label>
         <select id="cl-template"><option value="">Default product</option><option value="large-parts">large-parts</option></select></div>
@@ -10464,6 +10556,18 @@ function clCoreHtml() {
       <div id="cl-mf-list"></div>
       ${CL.defs.length ? '<button type="button" class="btn btn-outline btn-sm" onclick="clAddMf()" style="margin-top:6px">+ Add metafield</button>' : ''}
     </div>`;
+}
+// Show/hide the pre-listing fields and load existing containers into the datalist.
+function clTogglePrelist() {
+  const on = !!el('cl-prelist')?.checked;
+  const box = el('cl-prelist-fields'); if (box) box.style.display = on ? 'block' : 'none';
+  if (on && !CL._containersLoaded) {
+    CL._containersLoaded = true;
+    Api.get('/api/incoming/containers').then(r => {
+      const dl = el('cl-inc-containers'); if (!dl) return;
+      dl.innerHTML = (r.containers || []).map(c => `<option value="${escapeAttr(c.ref)}">${escapeHtml(c.supplier || '')}${c.expected ? ' · ETA ' + new Date(c.expected).toLocaleDateString('en-GB') : ''}</option>`).join('');
+    }).catch(() => {});
+  }
 }
 function clUpdateDerivedFromEbay() {
   const eb = parseFloat(el('ce-price')?.value) || 0;
@@ -10493,8 +10597,33 @@ async function submitUnifiedCreate(btn, overrides = {}) {
 
   const partNumber = overrides.partNumber !== undefined ? overrides.partNumber : ((el('cl-partnumber')?.value || '').trim() || null);
 
+  // Pre-listing (stock coming in). When on, the item is created as a Shopify
+  // pre-order and the eBay listing is HELD (scheduled go-live / push live) rather
+  // than published now. We capture the eBay panel's fields to replay at go-live.
+  const prelisted = !!el('cl-prelist')?.checked;
+  let prelistPayload = {};
+  if (prelisted) {
+    const golive = el('cl-ebay-golive')?.value || null;   // local datetime
+    const ebayInput = ceCollectListingInput();
+    const ebayPrelist = (ebayInput.storeCode && ebayInput.categoryId && ebayInput.price) ? ebayInput : null;
+    prelistPayload = {
+      prelisted: true,
+      preorderEta: el('cl-preorder-eta')?.value || null,
+      ebayScheduledAt: golive ? new Date(golive).toISOString() : null,
+      ebayPrelist,
+      incoming: {
+        containerRef: el('cl-inc-container')?.value || null,
+        supplier: el('cl-inc-supplier')?.value || null,
+        qtyOrdered: parseInt(el('cl-inc-qty')?.value) || 0,
+        expectedDate: el('cl-preorder-eta')?.value || null,
+        unitCostForeign: el('cl-inc-cost')?.value || null,
+        currency: el('cl-inc-currency')?.value || 'CNY',
+      },
+    };
+  }
+
   if (btn) btn.disabled = true;
-  const taskId = Task.start('Creating warehouse + Shopify…');
+  const taskId = Task.start(prelisted ? 'Creating pre-listing…' : 'Creating warehouse + Shopify…');
   let created;
   try {
     created = await Api.post('/api/listings/create-listing', {
@@ -10512,8 +10641,9 @@ async function submitUnifiedCreate(btn, overrides = {}) {
       categoryId: CL.categoryId || null,
       subPartNumbers: (el('cl-subpn')?.value || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean),
       metafields,
+      ...prelistPayload,
     });
-    Task.done(taskId, 'Shopify created');
+    Task.done(taskId, prelisted ? 'Pre-listed' : 'Shopify created');
   } catch (e) {
     Task.fail(taskId, 'Failed');
     if (btn) btn.disabled = false;
@@ -10526,6 +10656,19 @@ async function submitUnifiedCreate(btn, overrides = {}) {
   }
   if (created.stockPool) toast(`🔗 Linked into a shared stock pool — ${created.stockPool.memberCount} listings now share part № ${escapeHtml(created.partNumber || partNumber || sku)} (qty ${created.stockPool.qty})`, 'success', 8000);
   await Store.refresh('products').catch(() => {});
+
+  // Pre-listing: eBay is held (scheduled / push-live), NOT published now. Stop here.
+  if (prelisted) {
+    const bits = ['Shopify pre-order created'];
+    if (prelistPayload.ebayPrelist) bits.push(prelistPayload.ebayScheduledAt ? 'eBay scheduled to go live' : 'eBay held — use "Push live now" on the product');
+    else bits.push('add eBay later from the product');
+    if (created.incomingId) bits.push('linked to incoming stock');
+    toast('✓ Pre-listing created — ' + bits.join('; '), 'success', 10000);
+    if (btn) btn.disabled = false;
+    routeTo('inventory');
+    return;
+  }
+
   // Now create the eBay listing from the eBay panel's fields, linked to the new product.
   if (el('ce-product-number')) el('ce-product-number').value = created.shopifyProductId || '';
   State._ceCtx = State._ceCtx || {};
@@ -12842,14 +12985,16 @@ async function ceCalcEbayPrice(btn) {
   toast(`eBay price = £${shopifyPrice.toFixed(2)} + ${pct}% = £${ebayPrice.toFixed(2)}`, 'success', 2500);
 }
 
-async function submitCreateEbayListing(productId, opts = {}) {
+// Gather the eBay listing panel into a create-ebay body (minus productId). Shared
+// by the live create flow AND the pre-listing scheduler so a scheduled go-live
+// replays EXACTLY the same fields. Returns the payload object; pure read, no I/O.
+function ceCollectListingInput() {
   const storeCode = el('ce-store')?.value;
   const title     = (el('ce-title')?.value || '').trim();
   const categoryId = (el('ce-category')?.value || '').trim();
   const conditionId = el('ce-condition')?.value;
   const price     = parseFloat(el('ce-price')?.value);
   const quantity  = parseInt(el('ce-qty')?.value);
-  const preview = !!el('ce-preview')?.checked;
   const businessPolicies = {
     shippingId: el('ce-policy-shipping')?.value || undefined,
     paymentId:  el('ce-policy-payment')?.value || undefined,
@@ -12886,23 +13031,38 @@ async function submitCreateEbayListing(productId, opts = {}) {
   const promote = el('ce-promote')?.checked
     ? { enabled: true, percent: parseFloat(el('ce-promote-pct')?.value) || 0 }
     : { enabled: false };
+  return {
+    storeCode, categoryId, conditionId, price, quantity, titleOverride: title,
+    useShopifyDescription: !descriptionOverride, descriptionOverride,
+    itemSpecifics, businessPolicies,
+    countryOfOrigin: countryOfOrigin || undefined,
+    vatPercent, storeCategoryId, promote,
+    _title: title, _mpnFilled: mpnFilled,   // for validation by callers
+  };
+}
+
+async function submitCreateEbayListing(productId, opts = {}) {
+  const inp = ceCollectListingInput();
+  const { storeCode, categoryId, price, promote } = inp;
+  const title = inp._title;
+  const preview = !!el('ce-preview')?.checked;
 
   if (!storeCode)   { toast('Pick a store', 'warn'); return; }
   if (!title)       { toast('Title required', 'warn'); return; }
   if (!categoryId)  { toast('Category required — search by name or type the ID', 'warn'); return; }
   if (!price || isNaN(price)) { toast('Valid price required', 'warn'); return; }
-  if (!mpnFilled && !confirm('No Manufacturer Part Number (MPN) entered. eBay usually rejects car-part listings without it. Continue anyway?')) return;
+  if (!inp._mpnFilled && !confirm('No Manufacturer Part Number (MPN) entered. eBay usually rejects car-part listings without it. Continue anyway?')) return;
   if (promote.enabled && (!promote.percent || promote.percent < 2)) { toast('Promoted listing ad rate must be at least 2%', 'warn'); return; }
 
   const taskId = Task.start(preview ? 'Validating listing…' : 'Creating eBay listing…');
   try {
     const r = await Api.post('/api/listings/create-ebay', {
-      productId, storeCode, categoryId, conditionId,
-      price, quantity, titleOverride: title,
-      useShopifyDescription: !descriptionOverride, descriptionOverride,
-      itemSpecifics, businessPolicies, preview,
-      countryOfOrigin: countryOfOrigin || undefined,
-      vatPercent, storeCategoryId, promote,
+      productId, storeCode, categoryId, conditionId: inp.conditionId,
+      price, quantity: inp.quantity, titleOverride: title,
+      useShopifyDescription: inp.useShopifyDescription, descriptionOverride: inp.descriptionOverride,
+      itemSpecifics: inp.itemSpecifics, businessPolicies: inp.businessPolicies, preview,
+      countryOfOrigin: inp.countryOfOrigin,
+      vatPercent: inp.vatPercent, storeCategoryId: inp.storeCategoryId, promote,
       imageUrls: (opts.imageUrls && opts.imageUrls.length) ? opts.imageUrls : undefined,
     });
     // Preview mode: nothing was listed — show fees, keep the modal open so the

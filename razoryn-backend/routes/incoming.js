@@ -268,6 +268,8 @@ router.post('/receive-container', requirePermission('inventory'), async (req, re
       await query(`INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by) VALUES ($1,$2,'incoming_received',$3,$4)`, [row.product_id, remaining, row.id, req.user.id]).catch(() => {});
       await recordReceivedCost(row, remaining, req.user.id);
       if (push) { try { await pushProductStockToChannels(row.product_id); pushed++; } catch (e) {} }
+      // Stock arrived → flip any pre-listing/pre-orders for this product.
+      setImmediate(() => require('../services/sync').handlePreorderStockArrival(row.product_id).catch(() => {}));
     }
   }
   await audit(req, 'incoming_receive_container', 'incoming', null, { container: ref, receivedLines, receivedUnits });
@@ -346,6 +348,8 @@ router.post('/:id/receive', requirePermission('inventory'), async (req, res) => 
         channelPush = await pushProductStockToChannels(row.product_id);
       } catch (e) { channelPush = { error: e.message }; }
     }
+    // Stock arrived → flip any pre-listing/pre-orders for this product.
+    setImmediate(() => require('../services/sync').handlePreorderStockArrival(row.product_id).catch(() => {}));
   }
   await audit(req, 'incoming_receive', 'incoming', row.id, { qty, fully });
   res.json({ ok: true, received: qty, fully, stockUpdated, costUpdated, notLinked: !row.product_id, channelPush });
@@ -358,5 +362,10 @@ router.delete('/:id', requirePermission('inventory'), async (req, res) => {
   await audit(req, 'incoming_delete', 'incoming', req.params.id, null);
   res.json({ ok: true });
 });
+
+// Expose helpers so other routes (e.g. the pre-listing create flow) can add a
+// linked incoming line with the same FX conversion + table guarantee.
+router.costToGbp = costToGbp;
+router.ensureIncomingTable = ensureTable;
 
 module.exports = router;

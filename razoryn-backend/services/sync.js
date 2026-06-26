@@ -117,6 +117,73 @@ async function recordLowStockIfNeeded(productId) {
   }
 }
 
+// When a product's stock goes from 0 → positive, two things may need to happen:
+//   1. If it was PRE-LISTED, it's now a normal product — clear the pre-listed
+//      flag and revert its Shopify listing (drop the 'preorder' tag, stop
+//      continue-selling, strip the "Pre-order — ships ~DATE" notice from the
+//      title/description).
+//   2. Any open PRE-ORDER sales for it are now shippable — flip them to 'pending'
+//      (so they enter dispatch + revenue) and notify staff to ship.
+// Called from every stock-increase chokepoint (set-quantity, adjust-stock,
+// incoming receive). Idempotent and fully best-effort — never throws.
+async function handlePreorderStockArrival(productId) {
+  if (!productId) return;
+  const preorder = require('../lib/preorder');
+  let pr;
+  try {
+    pr = await query(
+      `SELECT id, sku, title, qty_on_hand, is_prelisted, shopify_product_id
+         FROM products WHERE id = $1`, [productId]);
+  } catch (e) { return; }
+  const p = pr.rows[0];
+  if (!p || p.qty_on_hand <= 0) return;   // nothing actually in stock yet
+
+  // 1. Revert a pre-listed product to normal selling.
+  if (p.is_prelisted) {
+    try { await query(`UPDATE products SET is_prelisted = false, ebay_scheduled_at = NULL WHERE id = $1`, [p.id]); } catch (_) {}
+    if (p.shopify_product_id && shopify.isConfigured()) {
+      try {
+        const full = await shopify.getShopifyProductFull(p.shopify_product_id);
+        await shopify.updateProduct(p.shopify_product_id, {
+          title: preorder.stripTitleNotice(full.title),
+          description: preorder.stripBodyNotice(full.description),
+          tags: preorder.removePreorderTag(full.tags),
+          inventoryPolicy: 'deny',
+        });
+      } catch (e) { console.warn('[preorder] Shopify revert failed for', p.sku, '-', e.message); }
+    }
+  }
+
+  // 2. Flip open pre-order sales for this product to pending + notify.
+  let preSales;
+  try {
+    preSales = await query(
+      `SELECT DISTINCT s.id, s.invoice_number, s.customer_name
+         FROM sales s JOIN sale_items si ON si.sale_id = s.id
+        WHERE si.product_id = $1 AND s.status = 'preorder'`, [p.id]);
+  } catch (e) { return; }
+  for (const s of (preSales?.rows || [])) {
+    try {
+      await query(`UPDATE sales SET status = 'pending' WHERE id = $1 AND status = 'preorder'`, [s.id]);
+      // Idempotent notification: suppress if an unread one already exists.
+      const existing = await query(
+        `SELECT id FROM notifications WHERE type = 'preorder_ready' AND related_id = $1 AND read_at IS NULL`, [s.id]);
+      if (!existing.rows.length) {
+        await query(
+          `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+           VALUES ('preorder_ready', $1, $2, 'info', 'sale', $3)`,
+          [`Pre-order ready to ship: ${p.title}`,
+           `Stock has arrived for ${p.sku}. Pre-order ${s.invoice_number || ('#' + s.id)}${s.customer_name ? ' for ' + s.customer_name : ''} is ready to dispatch.`,
+           s.id]);
+        require('./push').sendToAll({
+          title: 'Pre-order ready to ship', body: `${p.title} — ${s.invoice_number || ('#' + s.id)}`,
+          url: '/', tag: 'preorder-ready-' + s.id, category: 'preorder_ready',
+        }).catch(() => {});
+      }
+    } catch (e) { console.warn('[preorder] flip/notify failed for sale', s.id, '-', e.message); }
+  }
+}
+
 // --------- PULL: Shopify orders ---------
 async function pullShopify() {
   if (!shopify.isConfigured()) return { skipped: 'not_configured' };
@@ -636,6 +703,7 @@ module.exports = {
   pushAllStockToEbay,
   pushAllStockToBoth,
   recordLowStockIfNeeded,
+  handlePreorderStockArrival,
   resolveProductBySku,
   autoMarkDispatched,
 };

@@ -301,6 +301,22 @@ if (cron.validate(competitorCronExpr)) {
   console.error(`[boot] ⚠️  invalid COMPETITOR_SYNC_CRON "${competitorCronExpr}" — competitor monitoring disabled.`);
 }
 
+// Pre-listing eBay go-live — publish warehouse-held pre-listings whose scheduled
+// go-live time has passed. Runs every 5 min (or per PRELIST_GOLIVE_CRON) so a
+// listing scheduled for a given time goes live within ~5 minutes of it.
+const prelistCronExpr = (process.env.PRELIST_GOLIVE_CRON || '*/5 * * * *').trim();
+if (cron.validate(prelistCronExpr)) {
+  cron.schedule(prelistCronExpr, async () => {
+    try {
+      const r = await listings.publishDuePrelistings();
+      if (r && (r.published || r.failed)) console.log('[cron prelist go-live] complete', JSON.stringify(r));
+    } catch (e) {
+      console.error('[cron prelist go-live] failed:', e.message);
+    }
+  });
+  console.log(`[boot] eBay pre-listing go-live scheduled: ${prelistCronExpr}`);
+}
+
 // Market analysis — periodically snapshot whole-eBay saturation + our ranking for
 // products that have competitor matches. Daily by default (heavier API use).
 const marketCronExpr = (process.env.COMPETITOR_MARKET_CRON || '30 4 * * *').trim();

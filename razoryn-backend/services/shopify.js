@@ -281,7 +281,7 @@ function normaliseImageUrls(imageUrls = []) {
   return [...new Set((imageUrls || []).map(maxResImageUrl).filter(Boolean))];
 }
 
-async function createProduct({ title, sku, price, imageUrls = [], imageData = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null, description = null, taxable = true }) {
+async function createProduct({ title, sku, price, imageUrls = [], imageData = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null, description = null, taxable = true, inventoryPolicy = null }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const imgs = normaliseImageUrls(imageUrls);
   // imageData = base64 data URLs (uploaded files). Strip the data: prefix —
@@ -297,6 +297,9 @@ async function createProduct({ title, sku, price, imageUrls = [], imageData = []
       barcode: sku,
       price: price != null ? String(price) : undefined,
       inventory_management: 'shopify',
+      // 'continue' = keep selling at 0 stock (pre-order). Default 'deny' keeps the
+      // normal behaviour of refusing sales when out of stock.
+      inventory_policy: inventoryPolicy === 'continue' ? 'continue' : 'deny',
       taxable: taxable !== false,
     }],
     // Pin an explicit position on every image so the FIRST one we send stays the
@@ -319,7 +322,7 @@ async function createProduct({ title, sku, price, imageUrls = [], imageData = []
 }
 
 // Update an existing product's title, price, and replace images.
-async function updateProduct(productId, { title, sku, price, imageUrls = [], status, metafields = [], qty = null, tags = null, templateSuffix = null, description = null }) {
+async function updateProduct(productId, { title, sku, price, imageUrls = [], status, metafields = [], qty = null, tags = null, templateSuffix = null, description = null, inventoryPolicy = null }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const ex = await shopifyRequest('get', `/products/${productId}.json`);
   const existing = ex.data.product;
@@ -333,17 +336,19 @@ async function updateProduct(productId, { title, sku, price, imageUrls = [], sta
   if (description != null) patchData.product.body_html = description;
   await shopifyRequest('put', `/products/${productId}.json`, { data: patchData });
 
-  if (variant && (sku || price != null)) {
-    await shopifyRequest('put', `/variants/${variant.id}.json`, {
-      data: {
-        variant: {
-          id: variant.id,
-          sku: sku || variant.sku,
-          barcode: sku || variant.barcode,
-          price: price != null ? String(price) : variant.price,
-        },
-      },
-    });
+  if (variant && (sku || price != null || inventoryPolicy != null)) {
+    const variantPatch = {
+      id: variant.id,
+      sku: sku || variant.sku,
+      barcode: sku || variant.barcode,
+      price: price != null ? String(price) : variant.price,
+    };
+    // Flip continue-selling (pre-order) on/off. 'continue' keeps selling at 0;
+    // 'deny' reverts to refusing sales out of stock once real stock arrives.
+    if (inventoryPolicy === 'continue' || inventoryPolicy === 'deny') {
+      variantPatch.inventory_policy = inventoryPolicy;
+    }
+    await shopifyRequest('put', `/variants/${variant.id}.json`, { data: { variant: variantPatch } });
   }
 
   const imgs = normaliseImageUrls(imageUrls);
