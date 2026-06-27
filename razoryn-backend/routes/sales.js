@@ -594,6 +594,10 @@ router.post('/', requireAdmin, async (req, res) => {
     setImmediate(() => {
       const sync = require('../services/sync');
       sync.pushStockForSaleItems(result.items).catch(e => console.warn('[sync] push failed:', e.message));
+      // Any line that sold down to 0 but has stock on the way → list as a pre-order.
+      for (const it of result.items) {
+        if (it.productId) sync.handleStockOutIfIncoming(it.productId).catch(() => {});
+      }
     });
   }
   // Forward our own direct bank/cash sales to the Invoice Hub (best-effort).
@@ -879,6 +883,10 @@ router.post('/:id/convert-to-invoice', requireAdmin, async (req, res) => {
     const sync = require('../services/sync');
     sync.pushStockForSaleItems(result.items.map(i => ({ productId: i.product_id })))
       .catch(e => console.warn('[sync] push failed:', e.message));
+    // Any line that sold down to 0 but has stock on the way → list as a pre-order.
+    for (const it of result.items) {
+      if (it.product_id) sync.handleStockOutIfIncoming(it.product_id).catch(() => {});
+    }
   });
   // Estimate → invoice: email the finalised invoice to the customer.
   const baseUrl = `${req.protocol}://${req.get('host')}`;

@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS products (
   -- (Shopify pre-order, eBay scheduled go-live), quotable/pre-orderable, but
   -- excluded from the stock-take count until the incoming container lands.
   is_prelisted       BOOLEAN NOT NULL DEFAULT false,
+  preorder_active    BOOLEAN NOT NULL DEFAULT false,  -- currently sold as a pre-order
   preorder_eta       DATE,                  -- expected availability date
   ebay_scheduled_at  TIMESTAMPTZ,           -- warehouse-held eBay go-live time
   ebay_prelist_payload JSONB,               -- captured AddItem opts for the cron
