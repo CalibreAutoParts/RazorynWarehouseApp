@@ -1288,6 +1288,7 @@ function adaptProduct(p) {
     incomingEta: p.incoming_eta || null,
     // Pre-listing / pre-order — listed before stock arrives.
     isPrelisted: !!p.is_prelisted,
+    preorderActive: !!p.preorder_active,
     preorderEta: p.preorder_eta || null,
     ebayScheduledAt: p.ebay_scheduled_at || null,
     ebayPrelistStatus: p.ebay_prelist_status || null,
@@ -10266,6 +10267,23 @@ function clPct() {
 // Entry point (nav item / links) → the full unified Create-listing PAGE.
 function openCreateListing() { routeTo('createlisting'); }
 
+// One-off: clean up existing pre-order listings (strip baked title text, ensure
+// tag/ETA metafields + the smart collection).
+async function backfillPreorderPresentation(btn) {
+  if (!confirm('Tidy all current pre-order listings on Shopify? This removes any pre-order text baked into titles and re-applies the clean tag + ETA + collection.')) return;
+  if (btn) btn.disabled = true;
+  const taskId = Task.start('Tidying pre-order listings…');
+  try {
+    const r = await Api.post('/api/listings/backfill-preorder-presentation', {});
+    Task.done(taskId, 'Done');
+    toast(`✓ Tidied ${r.updated}/${r.total} pre-order listing(s)` + (r.errors?.length ? ` · ${r.errors.length} failed` : ''), 'success', 8000);
+    await Store.refresh('products').catch(() => {});
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Tidy failed: ' + (e.data?.message || e.message), 'error', 9000);
+  } finally { if (btn) btn.disabled = false; }
+}
+
 // "Push live now" — publish a held eBay pre-listing immediately.
 async function pushPrelistingLive(productId) {
   if (!confirm('Publish the held eBay listing for this item now?')) return;
@@ -10292,6 +10310,7 @@ async function renderCreateListing() {
       <div class="page-head">
         <div><h1>Create listing</h1><div class="desc">Build a new product in the Warehouse (master) and push it to Shopify + eBay in one go. eBay price is the master; Shopify = eBay − [%].</div></div>
         <div class="actions">
+          <button class="btn btn-ghost" onclick="backfillPreorderPresentation(this)" title="Clean up existing pre-order listings: remove any text baked into titles, ensure the pre-order tag/ETA + collection">🧹 Tidy pre-order listings</button>
           <button class="btn btn-outline" onclick="routeTo('mirror')">Cancel</button>
           <button class="btn btn-primary" onclick="submitUnifiedCreate(this)">Create &amp; push everywhere</button>
         </div>

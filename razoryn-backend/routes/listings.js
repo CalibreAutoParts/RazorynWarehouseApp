@@ -1782,11 +1782,12 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
 
   // ── Pre-listing / pre-order ────────────────────────────────────────────────
   // A product created BEFORE its stock arrives. On Shopify it's listed active but
-  // sold as a pre-order (keeps selling at 0 stock, 'preorder' tag, ETA metafield,
-  // and a "Pre-order — ships ~DATE" notice baked into the title/description so it
-  // shows on any theme). On eBay it's held by us and published at a go-live time
-  // (see ebayPrelist + the go-live cron). The clean title/description stay on the
-  // warehouse row + eBay; only the Shopify push carries the pre-order notice.
+  // sold as a pre-order: keeps selling at 0 stock ('continue'), carries the
+  // 'preorder' tag (auto-joins the "Pre-order & Incoming Stock" smart collection),
+  // and the ETA metafields (custom.preorder_eta + custom.preorder_ships_note) that
+  // the theme snippet renders. The title/description stay CLEAN — the storefront
+  // presentation comes from the tag/metafields, not text baked into the title.
+  // On eBay it's held by us and published at a go-live time (see ebayPrelist + cron).
   const isPrelisted = !!b.prelisted;
   if (isPrelisted) qty = 0;                              // not in stock yet
   const preorderEta = (isPrelisted && b.preorderEta) ? String(b.preorderEta).slice(0, 10) : null;
@@ -1796,13 +1797,11 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   const ebayPrelistPayload = (isPrelisted && b.ebayPrelist && b.ebayPrelist.storeCode)
     ? { ...b.ebayPrelist } : null;
 
-  let shopifyTitle = title, shopifyDescription = b.description || null;
   if (isPrelisted) {
     status = 'active';                                   // listed now, sells as pre-order
     tags = preorder.addPreorderTag(tags);               // 'preorder' tag (theme/coll filters)
     metafields.push({ namespace: 'custom', key: 'preorder_eta', type: 'date', value: preorderEta || '' });
-    shopifyTitle = preorder.addTitleNotice(title, preorderEta);
-    shopifyDescription = preorder.addBodyNotice(shopifyDescription, preorderEta);
+    metafields.push({ namespace: 'custom', key: 'preorder_ships_note', type: 'single_line_text_field', value: preorder.shipsNote(preorderEta) });
   }
 
   const result = { ok: true, sku, ebayPrice, shopifyPrice, shopPct };
@@ -1810,10 +1809,11 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   if (shopify.isConfigured()) {
     try {
       shopifyProduct = await shopify.createProduct({
-        title: shopifyTitle, sku, price: shopifyPrice, imageUrls, imageData, status, metafields, qty, tags,
-        description: shopifyDescription, taxable, templateSuffix,
+        title, sku, price: shopifyPrice, imageUrls, imageData, status, metafields, qty, tags,
+        description: b.description || null, taxable, templateSuffix,
         inventoryPolicy: isPrelisted ? 'continue' : null,
       });
+      if (isPrelisted) { try { await shopify.ensurePreorderCollection(); } catch (_) {} }
       for (const mf of (shopifyProduct?.__metafieldResults || [])) {
         if (!mf.ok) (result.metafieldIssues = result.metafieldIssues || []).push({ key: `${mf.namespace}.${mf.key}`, error: mf.error });
       }
@@ -1846,13 +1846,14 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   const ins = await query(`
     INSERT INTO products (sku, title, barcode, part_number, qty_on_hand, price_ebay, price_shopify, image_url,
                           shopify_product_id, shopify_variant_id, shopify_inventory_id, active,
-                          is_prelisted, preorder_eta, ebay_scheduled_at, ebay_prelist_payload, ebay_prelist_status)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16) RETURNING id`,
+                          is_prelisted, preorder_active, preorder_eta, ebay_scheduled_at, ebay_prelist_payload, ebay_prelist_status)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17) RETURNING id`,
     [sku, title, barcode, partNumber, qty, ebayPrice, shopifyPrice, imgSrcs[0] || null,
      shopifyProduct ? String(shopifyProduct.id) : null,
      v?.id ? String(v.id) : null,
      v?.inventory_item_id ? String(v.inventory_item_id) : null,
      isPrelisted,
+     isPrelisted,            // preorder_active — a pre-listing sells as a pre-order from day one
      preorderEta,
      ebayScheduledAt,
      ebayPrelistPayload ? JSON.stringify(ebayPrelistPayload) : null,
@@ -3151,6 +3152,51 @@ router.post('/:id/publish-ebay', requireAdmin, async (req, res) => {
     if (e.httpStatus) return res.status(e.httpStatus).json(e.body || { error: 'publish_failed', message: e.message });
     res.status(500).json({ error: 'publish_failed', message: e.message });
   }
+});
+
+// POST /api/listings/backfill-preorder-presentation — one-off cleanup. For every
+// product currently sold as a pre-order (is_prelisted or preorder_active), push the
+// CLEAN title/description back to Shopify (stripping any legacy "Pre-order — ships…"
+// text), ensure the 'preorder' tag + ETA metafields + continue-selling, and ensure
+// the smart collection exists. Safe to run repeatedly.
+router.post('/backfill-preorder-presentation', requireAdmin, async (req, res) => {
+  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+  let rows;
+  try {
+    rows = (await query(
+      `SELECT id, sku, title, preorder_eta, shopify_product_id
+         FROM products
+        WHERE (is_prelisted = true OR preorder_active = true) AND shopify_product_id IS NOT NULL`)).rows;
+  } catch (e) { return res.status(500).json({ error: 'query_failed', message: e.message }); }
+
+  await shopify.ensurePreorderCollection().catch(() => {});
+  let updated = 0; const errors = [];
+  for (const p of rows) {
+    try {
+      // ETA: prefer the product's preorder_eta, else the earliest incoming ETA.
+      let eta = p.preorder_eta;
+      if (!eta) {
+        const inc = await query(
+          `SELECT MIN(expected_date) AS eta FROM incoming_stock
+            WHERE product_id = $1 AND status NOT IN ('received','cancelled')`, [p.id]);
+        eta = inc.rows[0]?.eta || null;
+      }
+      const full = await shopify.getShopifyProductFull(p.shopify_product_id);
+      await shopify.updateProduct(p.shopify_product_id, {
+        title: preorder.stripTitleNotice(full.title),
+        description: preorder.stripBodyNotice(full.description),
+        tags: preorder.addPreorderTag(full.tags),
+        inventoryPolicy: 'continue',
+        metafields: [
+          { namespace: 'custom', key: 'preorder_eta', type: 'date', value: eta ? String(eta).slice(0, 10) : '' },
+          { namespace: 'custom', key: 'preorder_ships_note', type: 'single_line_text_field', value: preorder.shipsNote(eta) },
+        ],
+      });
+      updated++;
+    } catch (e) { errors.push({ sku: p.sku, error: e.message }); }
+  }
+  if (req) await audit(req, 'backfill_preorder_presentation', null, null, { updated, total: rows.length });
+  res.json({ ok: true, updated, total: rows.length, errors: errors.slice(0, 20) });
 });
 
 router.publishDuePrelistings = publishDuePrelistings;

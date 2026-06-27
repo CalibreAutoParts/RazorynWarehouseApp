@@ -1,0 +1,65 @@
+{%- comment -%}
+=============================================================================
+ PRE-ORDER / INCOMING STOCK — storefront snippet (paste once)
+=============================================================================
+
+The warehouse app already does the data side automatically:
+  • adds the `preorder` tag to any product that's a pre-listing or has sold out
+    with stock on the way,
+  • sets two metafields:
+        custom.preorder_eta         (date)              e.g. 2026-07-10
+        custom.preorder_ships_note  (single line text)  e.g. "Ships ~10 Jul 2026"
+  • keeps the product selling at 0 stock (inventory policy = continue),
+  • auto-adds it to the smart collection "Pre-order & Incoming Stock"
+    (handle: preorder-incoming).
+
+This snippet renders a clean, on-theme banner that reads the metafield and (when
+the product is a pre-order) hides the theme's default "In stock" badge so the page
+clearly says it's incoming. It's self-contained and inherits your theme's fonts
+and colours.
+
+-----------------------------------------------------------------------------
+ HOW TO INSTALL  (Online Store → Themes → ⋯ → Edit code, OR the theme editor)
+-----------------------------------------------------------------------------
+EASIEST (theme editor, no code):
+  1. Online Store → Themes → Customize.
+  2. Open a pre-order product (e.g. the Evoque fender) in the preview.
+  3. On the product template, click "Add block" → "Custom Liquid" (most themes,
+     incl. Dawn, have this). Drag it just under the price/availability.
+  4. Paste EVERYTHING below the line marked "===== SNIPPET STARTS =====".
+  5. Save. Repeat the "Add block" step once on the "Default product" template so
+     all pre-order items get it.
+
+CODE EDITOR (alternative):
+  1. Edit code → Snippets → "Add a new snippet" → name it `preorder-banner`.
+  2. Paste the snippet (below "===== SNIPPET STARTS =====") and Save.
+  3. In your product section (e.g. sections/main-product.liquid or
+     templates/product.json's main block), add near the buy button:
+        {% render 'preorder-banner' %}
+
+NOTE on hiding "In stock": the CSS below hides the most common theme availability
+selectors when the product is a pre-order. If your theme still shows its own
+"In stock" label, tell us the element/class and we'll add it to the hide list.
+=============================================================================
+{%- endcomment -%}
+
+{%- comment -%} ===== SNIPPET STARTS ===== {%- endcomment -%}
+{%- if product.tags contains 'preorder' -%}
+  {%- assign po_note = product.metafields.custom.preorder_ships_note | default: 'Ships soon' -%}
+  <div class="preorder-banner" role="status" style="
+        margin:12px 0; padding:12px 14px; border-radius:10px;
+        background:#fff8e6; border:1px solid #f0d48a; color:#7a5a00;
+        font-size:14px; line-height:1.4;">
+    <strong style="display:block; font-size:15px; margin-bottom:2px;">Pre-order</strong>
+    {{ po_note }} — order now to reserve yours; we dispatch as soon as the stock lands.
+  </div>
+  <style>
+    /* Hide the theme's default "in stock" availability label on pre-order pages. */
+    .product__inventory,
+    .product-form__inventory,
+    [class*="inventory"] .in-stock,
+    .product__availability,
+    .availability--in-stock { display:none !important; }
+  </style>
+{%- endif -%}
+{%- comment -%} ===== SNIPPET ENDS ===== {%- endcomment -%}

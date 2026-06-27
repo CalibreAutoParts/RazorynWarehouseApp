@@ -55,6 +55,14 @@ function stripBodyNotice(body) {
   return String(body || '').replace(BODY_NOTICE_RE, '');
 }
 
+// A short, storefront-ready note for the Shopify metafield (custom.preorder_ships_note)
+// so the theme snippet can print it directly without Liquid date formatting.
+//   "Ships ~12 Aug 2026"  (or "Ships soon" with no ETA).
+function shipsNote(eta) {
+  const f = formatEta(eta);
+  return f ? `Ships ~${f}` : 'Ships soon';
+}
+
 // Add/remove the `preorder` tag from a comma-separated Shopify tags string.
 function addPreorderTag(tagsCsv) {
   const tags = String(tagsCsv || '').split(',').map(t => t.trim()).filter(Boolean);
@@ -73,5 +81,6 @@ module.exports = {
   formatEta,
   titleNotice, addTitleNotice, stripTitleNotice,
   bodyNotice, addBodyNotice, stripBodyNotice,
+  shipsNote,
   addPreorderTag, removePreorderTag,
 };

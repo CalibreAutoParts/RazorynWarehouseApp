@@ -969,6 +969,47 @@ async function removeCollect(collectId) {
   return { ok: true };
 }
 
+// ---------- Pre-order / incoming-stock SMART collection ----------
+// A single storefront collection that auto-populates from the `preorder` tag, so
+// every pre-listed item AND every sold-out-but-incoming item appears there without
+// us managing membership — we only ever manage the tag. Idempotent: looks the
+// collection up by its fixed handle and creates it once if missing. Returns the
+// collection id (string) or null when Shopify isn't configured / on failure.
+const PREORDER_COLLECTION_HANDLE = 'preorder-incoming';
+let _preorderCollectionId = null;
+async function ensurePreorderCollection() {
+  if (!isConfigured()) return null;
+  if (_preorderCollectionId) return _preorderCollectionId;
+  try {
+    // Look up by handle first (covers a collection created in a previous boot or by hand).
+    const found = await shopifyRequest('get', '/smart_collections.json', { params: { handle: PREORDER_COLLECTION_HANDLE, limit: 1 } });
+    const existing = (found.data.smart_collections || [])[0];
+    if (existing) { _preorderCollectionId = String(existing.id); return _preorderCollectionId; }
+    const created = await shopifyRequest('post', '/smart_collections.json', {
+      data: { smart_collection: {
+        title: 'Pre-order & Incoming Stock',
+        handle: PREORDER_COLLECTION_HANDLE,
+        published: true,
+        body_html: '<p>These parts are arriving soon. Order now to reserve yours — the estimated dispatch date is shown on each item, and we ship as soon as stock lands.</p>',
+        disjunctive: false,
+        rules: [{ column: 'tag', relation: 'equals', condition: 'preorder' }],
+      } },
+    });
+    const col = created.data.smart_collection;
+    _preorderCollectionId = col ? String(col.id) : null;
+    return _preorderCollectionId;
+  } catch (e) {
+    // A 422 "handle already taken" race → re-read once.
+    try {
+      const found = await shopifyRequest('get', '/smart_collections.json', { params: { handle: PREORDER_COLLECTION_HANDLE, limit: 1 } });
+      const existing = (found.data.smart_collections || [])[0];
+      if (existing) { _preorderCollectionId = String(existing.id); return _preorderCollectionId; }
+    } catch (_) {}
+    console.warn('[shopify] ensurePreorderCollection failed:', e.response?.data?.errors || e.message);
+    return null;
+  }
+}
+
 // ---------- Search-engine listing (SEO) ----------
 // Read a product's current SEO fields + category, so the optimiser can show a
 // before/after preview. Uses GraphQL (REST doesn't expose seo/category cleanly).
@@ -1109,6 +1150,7 @@ module.exports = {
   getProductCollects,
   addProductToCollection,
   removeCollect,
+  ensurePreorderCollection,
   bulkSetBarcodeToSku,
   getLocations,
   setInventoryLevel,

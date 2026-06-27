@@ -132,19 +132,21 @@ async function handlePreorderStockArrival(productId) {
   let pr;
   try {
     pr = await query(
-      `SELECT id, sku, title, qty_on_hand, is_prelisted, shopify_product_id
+      `SELECT id, sku, title, qty_on_hand, is_prelisted, preorder_active, shopify_product_id
          FROM products WHERE id = $1`, [productId]);
   } catch (e) { return; }
   const p = pr.rows[0];
   if (!p || p.qty_on_hand <= 0) return;   // nothing actually in stock yet
 
-  // 1. Revert a pre-listed product to normal selling.
-  if (p.is_prelisted) {
-    try { await query(`UPDATE products SET is_prelisted = false, ebay_scheduled_at = NULL WHERE id = $1`, [p.id]); } catch (_) {}
+  // 1. Revert a product that was selling as a pre-order (pre-listed OR an in-stock
+  //    item that had sold out with a container on the way) back to normal selling.
+  if (p.is_prelisted || p.preorder_active) {
+    try { await query(`UPDATE products SET is_prelisted = false, preorder_active = false, ebay_scheduled_at = NULL WHERE id = $1`, [p.id]); } catch (_) {}
     if (p.shopify_product_id && shopify.isConfigured()) {
       try {
         const full = await shopify.getShopifyProductFull(p.shopify_product_id);
         await shopify.updateProduct(p.shopify_product_id, {
+          // strip* also cleans any legacy "Pre-order — ships…" text baked in earlier.
           title: preorder.stripTitleNotice(full.title),
           description: preorder.stripBodyNotice(full.description),
           tags: preorder.removePreorderTag(full.tags),
@@ -182,6 +184,74 @@ async function handlePreorderStockArrival(productId) {
       }
     } catch (e) { console.warn('[preorder] flip/notify failed for sale', s.id, '-', e.message); }
   }
+}
+
+// The inverse of handlePreorderStockArrival: when a normal in-stock product sells
+// down to 0 BUT has stock on the way, flip it into pre-order/incoming mode so the
+// storefront keeps selling it (continue-selling), shows the ETA, and it joins the
+// "Pre-order & Incoming Stock" collection. Called from every stock-decrease
+// chokepoint. Idempotent (no-op if already preorder_active) and best-effort.
+async function handleStockOutIfIncoming(productId) {
+  if (!productId) return;
+  const preorder = require('../lib/preorder');
+  let pr;
+  try {
+    pr = await query(
+      `SELECT id, sku, title, qty_on_hand, is_prelisted, preorder_active, shopify_product_id
+         FROM products WHERE id = $1`, [productId]);
+  } catch (e) { return; }
+  const p = pr.rows[0];
+  if (!p) return;
+  if (p.qty_on_hand > 0) return;            // still in stock — nothing to do
+  if (p.preorder_active || p.is_prelisted) return;  // already selling as a pre-order
+
+  // Is there stock actually on the way? (Same shape as routes/products.js GET.)
+  let inc;
+  try {
+    inc = await query(
+      `SELECT COALESCE(SUM(GREATEST(qty_ordered - qty_received, 0)), 0)::int AS incoming_qty,
+              MIN(expected_date) AS incoming_eta
+         FROM incoming_stock
+        WHERE product_id = $1 AND status NOT IN ('received','cancelled')`, [p.id]);
+  } catch (e) { return; }
+  const incomingQty = inc.rows[0]?.incoming_qty || 0;
+  const incomingEta = inc.rows[0]?.incoming_eta || null;
+  if (incomingQty <= 0) return;             // genuinely out, nothing coming — leave as normal OOS
+
+  // Flip into pre-order mode.
+  try { await query(`UPDATE products SET preorder_active = true WHERE id = $1`, [p.id]); } catch (_) {}
+  if (p.shopify_product_id && shopify.isConfigured()) {
+    try {
+      const full = await shopify.getShopifyProductFull(p.shopify_product_id);
+      await shopify.updateProduct(p.shopify_product_id, {
+        tags: preorder.addPreorderTag(full.tags),
+        inventoryPolicy: 'continue',
+        metafields: [
+          { namespace: 'custom', key: 'preorder_eta', type: 'date', value: incomingEta ? String(incomingEta).slice(0, 10) : '' },
+          { namespace: 'custom', key: 'preorder_ships_note', type: 'single_line_text_field', value: preorder.shipsNote(incomingEta) },
+        ],
+      });
+      await shopify.ensurePreorderCollection();
+    } catch (e) { console.warn('[preorder] sell-out flip failed for', p.sku, '-', e.message); }
+  }
+
+  // Notify staff that an item has flipped to selling-as-pre-order (idempotent).
+  try {
+    const existing = await query(
+      `SELECT id FROM notifications WHERE type = 'incoming_now_selling' AND related_id = $1 AND read_at IS NULL`, [p.id]);
+    if (!existing.rows.length) {
+      await query(
+        `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+         VALUES ('incoming_now_selling', $1, $2, 'info', 'product', $3)`,
+        [`Now selling as pre-order: ${p.title}`,
+         `${p.sku} has sold out but ${incomingQty} unit(s) are on the way${incomingEta ? ' (ETA ~' + String(incomingEta).slice(0, 10) + ')' : ''}. It's now listed as a pre-order so sales keep coming in.`,
+         p.id]);
+      require('./push').sendToAll({
+        title: 'Now selling as pre-order', body: `${p.title} — sold out, stock incoming`,
+        url: '/', tag: 'incoming-selling-' + p.id, category: 'incoming_now_selling',
+      }).catch(() => {});
+    }
+  } catch (e) { /* notifications optional */ }
 }
 
 // --------- PULL: Shopify orders ---------
@@ -287,6 +357,11 @@ async function pullShopify() {
         if (matched) await recordLowStockIfNeeded(matched.id);
       }
     });
+    // Post-commit (qty now reflects the deduction): any line that sold down to 0
+    // with stock on the way → list as a pre-order.
+    for (const li of order.line_items || []) {
+      try { const m = await resolveProductBySku(null, li.sku); if (m) await handleStockOutIfIncoming(m.id); } catch (_) {}
+    }
     inserted++;
   }
 
@@ -406,6 +481,10 @@ async function pullEbay() {
           if (matched) await recordLowStockIfNeeded(matched.id);
         }
       });
+      // Post-commit: any line that sold down to 0 with stock incoming → pre-order.
+      for (const li of order.lineItems || []) {
+        try { const m = await resolveProductBySku(null, li.sku); if (m) await handleStockOutIfIncoming(m.id); } catch (_) {}
+      }
       inserted++;
     }
     totalOrders += orders.length;
@@ -704,6 +783,7 @@ module.exports = {
   pushAllStockToBoth,
   recordLowStockIfNeeded,
   handlePreorderStockArrival,
+  handleStockOutIfIncoming,
   resolveProductBySku,
   autoMarkDispatched,
 };

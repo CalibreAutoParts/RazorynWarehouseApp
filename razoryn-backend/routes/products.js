@@ -42,6 +42,11 @@ async function ensureProductLocationColumns() {
     //   ebay_prelist_payload— captured AddItem opts so the cron can publish later
     //   ebay_prelist_status — 'scheduled' | 'live' | 'failed' (NULL = n/a)
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS is_prelisted BOOLEAN NOT NULL DEFAULT false`);
+    // preorder_active: currently SOLD as a pre-order on the storefront (true for
+    // pre-listings AND in-stock items that have sold out but have a container on
+    // the way). Drives the revert when stock lands. Distinct from is_prelisted,
+    // which means "created before ever having stock" (excluded from the stock-take).
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS preorder_active BOOLEAN NOT NULL DEFAULT false`);
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS preorder_eta DATE`);
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_scheduled_at TIMESTAMPTZ`);
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_prelist_payload JSONB`);
@@ -733,6 +738,10 @@ router.post('/:id/adjust-stock', requirePermission('inventory'), async (req, res
   if (d > 0 && result.qty_on_hand > 0) {
     setImmediate(() => require('../services/sync').handlePreorderStockArrival(result.id).catch(() => {}));
   }
+  // Sold/adjusted down to 0 with stock on the way → flip to selling-as-pre-order.
+  if (result.qty_on_hand <= 0) {
+    setImmediate(() => require('../services/sync').handleStockOutIfIncoming(result.id).catch(() => {}));
+  }
 
   // Propagate the new quantity to channels (unless explicitly disabled)
   let channelPush = null;
@@ -772,6 +781,9 @@ router.post('/:id/set-quantity', requirePermission('inventory'), async (req, res
   // Stock arrived → flip any pre-listing/pre-orders for this product (best-effort).
   if (result.qty_on_hand > 0) {
     setImmediate(() => require('../services/sync').handlePreorderStockArrival(result.id).catch(() => {}));
+  } else {
+    // Set to 0 with stock on the way → flip to selling-as-pre-order.
+    setImmediate(() => require('../services/sync').handleStockOutIfIncoming(result.id).catch(() => {}));
   }
 
   let channelPush = null;
