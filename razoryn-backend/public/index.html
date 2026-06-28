@@ -3220,6 +3220,7 @@ function channelPill(ch) {
 // ── Incoming / on-order stock ────────────────────────────────────────────────
 const INCOMING_STATUS = { on_order: 'On order', in_transit: 'In transit', arrived: 'Arrived', received: 'Received', cancelled: 'Cancelled' };
 function renderIncoming() {
+  loadSuppliersOnce();
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
@@ -3289,8 +3290,10 @@ async function loadIncomingContainers() {
           <div style="min-width:0">
             <div style="font-weight:600;font-size:13px">${escapeHtml(c.ref)}${c.supplier ? ` <span style="font-weight:400;color:var(--ink-soft)">· ${escapeHtml(c.supplier)}</span>` : ''}</div>
             <div style="font-size:11px;color:var(--ink-soft)">${c.lines} line(s) · ${c.units} units${c.expected ? ' · ETA ' + new Date(c.expected).toLocaleDateString('en-GB') : ''}</div>
+            <div style="font-size:11px;${(c.freight_total_gbp != null || c.duty_gbp != null) ? 'color:var(--green)' : 'color:var(--amber)'}">${(c.freight_total_gbp != null || c.duty_gbp != null) ? `🚢 freight £${(+c.freight_total_gbp||0).toFixed(2)} · duty £${(+c.duty_gbp||0).toFixed(2)}` : '⚠️ freight/duty not entered'}</div>
             ${c.note ? `<div style="font-size:11px;color:var(--ink-soft)">📝 ${escapeHtml(c.note)}</div>` : ''}
           </div>
+          <button class="btn btn-outline btn-sm" onclick="openContainerDetail('${escapeAttr(c.ref)}')" title="Open this container — see what's inside and enter freight + duty">🔎 Open</button>
           <button class="btn btn-primary btn-sm" onclick="receiveContainer('${escapeAttr(c.ref)}')" title="Receive every remaining line on this container and push to Shopify + eBay">📦 Receive all</button>
         </div>`).join('') + `</div>`;
   } catch (e) { wrap.innerHTML = ''; }
@@ -3307,6 +3310,69 @@ async function receiveContainer(ref) {
     Store.refresh('products').catch(() => {});
   } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
+
+// Open one container: header (freight + duty, split across items by value) + its lines
+// with the live landed cost per unit. This is where freight/duty is entered.
+let _ctnRef = null;
+async function openContainerDetail(ref) {
+  _ctnRef = ref;
+  modal({
+    title: 'Container — ' + ref,
+    body: `<div id="ctn-body"><div style="padding:20px;text-align:center;color:var(--ink-soft)">Loading…</div></div>`,
+    actions: [
+      { label: 'Close', onClick: closeModal },
+      { label: 'Save freight & duty', primary: true, onClick: saveContainerCosts },
+    ],
+  });
+  await renderContainerDetail();
+}
+async function renderContainerDetail() {
+  const wrap = el('ctn-body'); if (!wrap) return;
+  let d;
+  try { d = await Api.get('/api/incoming/containers/' + encodeURIComponent(_ctnRef)); }
+  catch (e) { wrap.innerHTML = '<div style="color:var(--red)">Failed to load container.</div>'; return; }
+  const h = d.header || {};
+  const t = d.totals || {};
+  const curOpts = ['GBP','CNY','USD','EUR'].map(c => `<option value="${c}"${(h.freight_currency||'GBP')===c?' selected':''}>${c}</option>`).join('');
+  wrap.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px">
+      <div class="field"><label>Freight total</label><input id="ctn-freight" type="number" step="0.01" min="0" value="${h.freight_total != null ? h.freight_total : ''}" placeholder="e.g. 1200"></div>
+      <div class="field"><label>Duty total</label><input id="ctn-duty" type="number" step="0.01" min="0" value="${h.duty != null ? h.duty : ''}" placeholder="e.g. 800"></div>
+      <div class="field"><label>Currency</label><select id="ctn-cur">${curOpts}</select></div>
+    </div>
+    <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">Freight + duty are split across the items below <strong>by value</strong> to give each one's true landed unit cost. Enter these any time — even weeks after listing, once the shipping invoice arrives.</div>
+    <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:600;margin-bottom:6px">
+      <span>${t.units || 0} units · goods £${(t.goodsValueGbp||0).toFixed(2)}</span>
+      <span>+ freight/duty £${(t.freightDutyGbp||0).toFixed(2)} = landed £${(t.landedValueGbp||0).toFixed(2)}</span>
+    </div>
+    <div class="table-wrap" style="max-height:340px;overflow:auto"><table class="table"><thead><tr>
+      <th>Item</th><th class="num">Qty</th><th class="num">Goods/unit</th><th class="num">Landed/unit</th>
+    </tr></thead><tbody>
+      ${(d.lines||[]).map(l => `<tr>
+        <td><div style="font-weight:500;font-size:13px">${escapeHtml(l.title || '(unnamed)')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || '')}</div></td>
+        <td class="num">${l.qty_ordered}</td>
+        <td class="num">${l.unit_cost_gbp != null ? '£' + (+l.unit_cost_gbp).toFixed(2) : '—'}</td>
+        <td class="num"><strong>${l.landed_unit_cost_gbp != null ? '£' + (+l.landed_unit_cost_gbp).toFixed(2) : (l.unit_cost_gbp != null ? '£' + (+l.unit_cost_gbp).toFixed(2) : '—')}</strong></td>
+      </tr>`).join('')}
+    </tbody></table></div>
+    <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Landed cost is written to each product's cost when the container is received.</div>`;
+}
+async function saveContainerCosts() {
+  const payload = {
+    freightTotal: el('ctn-freight')?.value || null,
+    duty: el('ctn-duty')?.value || null,
+    freightCurrency: el('ctn-cur')?.value || 'GBP',
+  };
+  const taskId = Task.start('Saving container costs…');
+  try {
+    const r = await Api.patch('/api/incoming/containers/' + encodeURIComponent(_ctnRef), payload);
+    Task.done(taskId, 'Saved');
+    toast('✓ Freight & duty saved and split across the items' + (r.fxFailed ? ' (FX lookup failed — entered as given)' : ''), 'success', 6000);
+    await renderContainerDetail();
+    loadIncoming();
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
 function paintIncomingStats(s) {
   const wrap = el('incoming-stats'); if (!wrap) return;
   wrap.innerHTML = `
@@ -3363,7 +3429,7 @@ function incomingModalBody(it) {
       <div class="field"><label>Quantity ordered</label><input id="inc-qty" type="number" min="1" step="1" value="${escapeAttr(it.qty_ordered || '')}"></div>
       <div class="field"><label>Expected date</label><input id="inc-expected" type="date" value="${escapeAttr(it.expected_date ? String(it.expected_date).slice(0,10) : '')}"></div>
       <div class="field"><label>Container / order ref</label><input id="inc-container" value="${escapeAttr(it.container_ref || '')}" placeholder="e.g. CONT-2026-04"></div>
-      <div class="field"><label>Supplier</label><input id="inc-supplier" value="${escapeAttr(it.supplier || '')}"></div>
+      <div class="field"><label>Supplier</label><input id="inc-supplier" list="dl-suppliers" value="${escapeAttr(it.supplier || '')}">${supplierDatalist('dl-suppliers')}</div>
     </div>
     <div class="field"><label>Status</label>
       <select id="inc-status">${Object.entries(INCOMING_STATUS).filter(([k]) => k !== 'cancelled').map(([k, v]) => `<option value="${k}" ${(it.status || 'on_order') === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
@@ -3384,7 +3450,7 @@ function openAddIncoming(prefill) {
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Add a whole container at once. Each line links to a product in your inventory — no need to retype SKUs. Adding goods from several suppliers? Use <strong>Save &amp; add another supplier</strong> to keep the container details and just change the supplier + lines.</div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 0.7fr;gap:10px;margin-bottom:6px">
         <div class="field"><label>Container number / name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— unique, e.g. MSKU1234567</span></label><input id="incb-container" placeholder="Container no. (trackable) or a name" value="${escapeAttr(prefill.containerRef||'')}"></div>
-        <div class="field"><label>Supplier</label><input id="incb-supplier" placeholder="This supplier's name"></div>
+        <div class="field"><label>Supplier</label><input id="incb-supplier" list="dl-suppliers" placeholder="This supplier's name">${supplierDatalist('dl-suppliers')}</div>
         <div class="field"><label>Rough ETA <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(sea freight, approx.)</span></label><input id="incb-expected" type="date" value="${escapeAttr(prefill.expectedDate||'')}"></div>
         <div class="field"><label>Cost currency</label><select id="incb-currency">${curOpts}</select></div>
       </div>
@@ -10305,6 +10371,7 @@ async function pushPrelistingLive(productId) {
 // creates the warehouse product, pushes it to Shopify, then creates the eBay
 // listing using the eBay panel's fields.
 async function renderCreateListing() {
+  loadSuppliersOnce();
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
@@ -10546,7 +10613,7 @@ function clCoreHtml() {
         <div style="font-weight:600;font-size:12px;margin:8px 0 4px">Link to incoming stock</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
           <div class="field"><label>Container ref / name</label><input id="cl-inc-container" list="cl-inc-containers" placeholder="existing or new container"><datalist id="cl-inc-containers"></datalist></div>
-          <div class="field"><label>Supplier</label><input id="cl-inc-supplier"></div>
+          <div class="field"><label>Supplier</label><input id="cl-inc-supplier" list="dl-suppliers"></div>${supplierDatalist('dl-suppliers')}
           <div class="field"><label>Qty on the way</label><input id="cl-inc-qty" type="number" min="0" placeholder="e.g. 50"></div>
           <div class="field"><label>Unit cost</label><div style="display:flex;gap:6px"><input id="cl-inc-cost" type="number" min="0" step="0.01" style="flex:1" placeholder="optional"><select id="cl-inc-currency" style="width:80px">${['CNY','GBP','USD','EUR'].map(c=>`<option value="${c}">${c}</option>`).join('')}</select></div></div>
         </div>
@@ -11887,7 +11954,19 @@ function renderCosts() {
   loadCosts();
 }
 
+// Saved suppliers — cached once, used to fill the supplier dropdowns (datalists)
+// on the cost + incoming entry forms. Suppliers self-populate as you use them.
+function loadSuppliersOnce() {
+  if (State._suppliersLoaded) return Promise.resolve();
+  State._suppliersLoaded = true;
+  return Api.get('/api/suppliers').then(r => { State.suppliers = r.suppliers || []; }).catch(() => {});
+}
+function supplierDatalist(id) {
+  return `<datalist id="${id || 'dl-suppliers'}">${(State.suppliers || []).map(s => `<option value="${escapeAttr(s.name)}">`).join('')}</datalist>`;
+}
+
 async function loadCosts() {
+  loadSuppliersOnce();
   let data;
   try { data = await Api.get('/api/costs/products'); }
   catch (e) { el('ct-list').innerHTML = `<div class="empty" style="padding:24px"><div class="t">Couldn't load costs</div>${escapeHtml(e.data?.message || e.message)}</div>`; return; }
@@ -11937,14 +12016,15 @@ function ctRow(p) {
         <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(p.title || '')}</div>
         <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(p.sku || '')}${p.lastSupplier ? ' · ' + escapeHtml(p.lastSupplier) : ''}${p.lastPurchaseDate ? ' · ' + new Date(p.lastPurchaseDate).toLocaleDateString('en-GB') : ''} ${flag(p.overstock, '📦 ' + p.qtyOnHand, 'var(--amber)')}</div>
       </div>
-      <div style="width:74px;text-align:right"><div style="font-size:10px;color:var(--ink-soft)">Cost</div><div style="font-weight:700;font-size:13px">${p.costPrice == null ? '<span style="color:var(--amber)">add</span>' : ctMoney(p.costPrice)}</div></div>
-      <div style="width:118px;text-align:right">
-        <div style="font-size:10px;color:var(--ink-soft)">eBay floor / price</div>
-        <div style="font-size:12px">${ctMoney(p.floorEbay)} <span style="color:var(--ink-soft)">/</span> <span style="${p.belowFloorEbay ? 'color:var(--red);font-weight:700' : ''}">${ctMoney(p.priceEbay)}</span></div>
-        <div style="font-size:10px;color:${marginCol(p.marginEbayPct)}">${p.marginEbayPct == null ? '' : 'margin ' + ctPct(p.marginEbayPct)}</div>
+      <div style="width:74px;text-align:right"><div style="font-size:10px;color:var(--ink-soft)">Cost (landed)</div><div style="font-weight:700;font-size:13px">${p.costPrice == null ? '<span style="color:var(--amber)">add</span>' : ctMoney(p.costPrice)}</div></div>
+      <div style="width:150px;text-align:right">
+        <div style="font-size:10px;color:var(--ink-soft)">eBay rec / price</div>
+        <div style="font-size:12px"><span title="Recommended price" style="font-weight:600">${ctMoney(p.floorEbay)}</span> <span style="color:var(--ink-soft)">/</span> <span style="${p.belowFloorEbay ? 'color:var(--red);font-weight:700' : ''}">${ctMoney(p.priceEbay)}</span></div>
+        <div style="font-size:10px;color:${marginCol(p.marginEbayPct)}">${p.marginEbayPct == null ? '' : 'margin ' + ctPct(p.marginEbayPct)}${p.breakevenEbay != null ? ` · min ${ctMoney(p.breakevenEbay)}` : ''}</div>
+        ${p.offerEbayPct != null ? `<div style="font-size:10px;color:${p.offerBelowBreakevenEbay ? 'var(--red)' : marginCol(p.offerEbayPct)}">${p.offerBelowBreakevenEbay ? '✗' : '✓'} −${CT.settings?.offerDiscountPct ?? 5}% offer: ${ctPct(p.offerEbayPct)}</div>` : ''}
       </div>
       <div style="width:118px;text-align:right">
-        <div style="font-size:10px;color:var(--ink-soft)">Shopify floor / price</div>
+        <div style="font-size:10px;color:var(--ink-soft)">Shopify rec / price</div>
         <div style="font-size:12px">${ctMoney(p.floorShopify)} <span style="color:var(--ink-soft)">/</span> <span style="${p.belowFloorShopify ? 'color:var(--red);font-weight:700' : ''}">${ctMoney(p.priceShopify)}</span></div>
         <div style="font-size:10px;color:${marginCol(p.marginShopifyPct)}">${p.marginShopifyPct == null ? '' : 'margin ' + ctPct(p.marginShopifyPct)}</div>
       </div>
@@ -11988,7 +12068,7 @@ async function ctOpenEditor(productId) {
     title: 'Cost — ' + (p.title || ('#' + productId)),
     body: `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="field"><label>Supplier</label><input id="ct-supplier" value="${escapeAttr(p.lastSupplier || '')}" placeholder="e.g. Guangzhou XYZ"></div>
+        <div class="field"><label>Supplier <span style="color:var(--ink-soft);font-weight:400">— pick a saved one or type a new</span></label><input id="ct-supplier" list="dl-suppliers" value="${escapeAttr(p.lastSupplier || '')}" placeholder="e.g. Guangzhou XYZ">${supplierDatalist('dl-suppliers')}</div>
         <div class="field"><label>Purchase date</label><input id="ct-date" type="date" value="${ctToday()}"></div>
         <div class="field"><label>Currency</label>
           <select id="ct-cur"><option value="CNY"${(p.lastCurrency || 'CNY') === 'CNY' ? ' selected' : ''}>CNY (RMB)</option><option value="GBP"${p.lastCurrency === 'GBP' ? ' selected' : ''}>GBP</option><option value="USD"${p.lastCurrency === 'USD' ? ' selected' : ''}>USD</option><option value="EUR"${p.lastCurrency === 'EUR' ? ' selected' : ''}>EUR</option></select></div>
@@ -11997,13 +12077,17 @@ async function ctOpenEditor(productId) {
           <div style="display:flex;gap:6px"><input id="ct-rate" type="number" step="0.00001" min="0" placeholder="auto" style="flex:1"><button type="button" class="btn btn-outline btn-sm" onclick="ctFetchRate()">↻</button></div></div>
         <div class="field"><label>= GBP unit cost</label><input id="ct-gbp" disabled style="background:var(--bg-soft);font-weight:700"></div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field"><label>Qty on order <span style="color:var(--ink-soft);font-weight:400">(opt)</span></label><input id="ct-qty" type="number" min="0" placeholder="optional"></div>
-        <div class="field"><label>Container freight £ <span style="color:var(--ink-soft);font-weight:400">(not apportioned yet)</span></label><input id="ct-freight" type="number" step="0.01" min="0" placeholder="optional"></div>
-        <div class="field"><label>Duty £ <span style="color:var(--ink-soft);font-weight:400">(not apportioned)</span></label><input id="ct-duty" type="number" step="0.01" min="0" placeholder="optional"></div>
+        <div class="field"><label>Shipping band <span style="color:var(--ink-soft);font-weight:400">— sets this item's postage</span></label>
+          <select id="ct-band" onchange="ctSaveBand(${productId}, this.value)">
+            <option value="">(default by size)</option>
+            ${(CT.settings?.shippingBands || []).map(bnd => `<option value="${escapeAttr(bnd.code)}"${p.shippingBand === bnd.code ? ' selected' : ''}>${escapeHtml(bnd.label)} · £${(+bnd.cost).toFixed(2)}</option>`).join('')}
+          </select></div>
       </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin:2px 0 6px">This is the <strong>goods</strong> unit cost. Container freight &amp; duty are now entered on the container (Incoming → open a container) and split across its items by value to give the true landed cost.</div>
       <div class="field"><label>Note</label><input id="ct-note" placeholder="optional"></div>
-      <div id="ct-floors-preview" style="font-size:12px;color:var(--ink-soft);margin:4px 0 8px"></div>
+      <div id="ct-floors-preview" style="font-size:12px;margin:4px 0 8px"></div>${ctRecoBox(p)}
       <div id="ct-history" style="border-top:1px solid var(--line);padding-top:10px"><div style="font-size:12px;color:var(--ink-soft)">Loading history…</div></div>`,
     actions: [
       { label: 'Cancel', onClick: closeModal },
@@ -12022,6 +12106,36 @@ function ctUpdateGbpPreview() {
   const rate = cur === 'GBP' ? 1 : parseFloat(el('ct-rate')?.value) || 0;
   const gbp = foreign * rate;
   if (el('ct-gbp')) el('ct-gbp').value = (foreign && rate) ? '£' + gbp.toFixed(2) : '';
+}
+
+// A small "what to charge" box: recommended price, the lowest safe price (breakeven),
+// and how a 5% offer lands — the pricing guidance the screen was missing.
+function ctRecoBox(p) {
+  if (!p || p.costPrice == null) return '<div style="font-size:11px;color:var(--ink-soft);background:var(--bg-soft);border-radius:8px;padding:8px 10px;margin-bottom:8px">Add a cost to see the recommended price and margins.</div>';
+  const off = CT.settings?.offerDiscountPct ?? 5;
+  const row = (label, val, sub) => `<div style="display:flex;justify-content:space-between;gap:10px"><span style="color:var(--ink-soft)">${label}</span><span style="font-weight:600">${val}${sub ? ` <span style="font-weight:400;color:var(--ink-soft)">${sub}</span>` : ''}</span></div>`;
+  return `<div style="font-size:12px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px;display:grid;gap:3px">
+    <div style="font-weight:700;margin-bottom:2px">eBay pricing (landed cost ${ctMoney(p.costPrice)})</div>
+    ${row('✅ Recommended', ctMoney(p.floorEbay), `(${CT.settings?.targetMarginPct ?? 15}% margin)`)}
+    ${row('⚠️ Lowest safe (breakeven)', ctMoney(p.breakevenEbay), 'you make £0 below this')}
+    ${p.priceEbay != null ? row('Current price', ctMoney(p.priceEbay), p.marginEbayPct != null ? `margin ${ctPct(p.marginEbayPct)}` : '') : ''}
+    ${p.offerEbayPct != null ? row(`After −${off}% offer`, ctMoney(p.offerEbayPrice), `${p.offerBelowBreakevenEbay ? '❌ loses money' : '✓ margin ' + ctPct(p.offerEbayPct)}`) : ''}
+    <div style="font-size:10px;color:var(--ink-soft);margin-top:3px">Includes eBay FVF ${CT.settings?.ebayFvfPct ?? 9.5}% + reg ${CT.settings?.ebayRegulatoryPct ?? 0.35}%${(CT.settings?.ebayHighReturnPct) ? ' + high-return ' + CT.settings.ebayHighReturnPct + '%' : ''} + £${(CT.settings?.ebayPerOrderFee ?? 0.40)} per order${CT.settings?.feesVatOnEbay ? ' (+' + (CT.settings?.feesVatPct ?? 20) + '% VAT on fees)' : ''}, postage + packaging, and sale VAT.</div>
+  </div>`;
+}
+
+// Set this item's shipping band live (PATCH product) → recompute floors/margins.
+async function ctSaveBand(productId, band) {
+  try {
+    await Api.patch('/api/products/' + productId, { shippingBand: band || null });
+    await loadCosts();
+    await refreshCostFloors();
+    // Re-render the recommendation box with the updated figures.
+    const p = (CT.items || []).find(x => x.id === productId);
+    const box = el('ct-floors-preview');
+    if (box && p) box.outerHTML = `<div id="ct-floors-preview" style="font-size:12px;margin:4px 0 8px"></div>${ctRecoBox(p)}`;
+    toast('Shipping band updated', 'success');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 async function ctFetchRate() {
@@ -12047,8 +12161,6 @@ async function ctSaveCost(productId) {
     unitCostForeign: foreign || null,
     fxRate: rate || null,
     qty: el('ct-qty')?.value || null,
-    freightTotal: el('ct-freight')?.value || null,
-    duty: el('ct-duty')?.value || null,
     note: el('ct-note')?.value || null,
   };
   try {
@@ -12091,36 +12203,76 @@ async function ctLoadHistory(productId) {
 }
 
 // ---- Cost settings ----
+let _csBands = [];
 async function ctOpenSettings() {
   let s = CT.settings;
   if (!s) { try { s = (await Api.get('/api/costs/settings')).settings; } catch (e) { toast('Failed to load settings', 'error'); return; } }
-  const f = (id, label, val, hint) => `<div class="field"><label>${label}</label><input id="cs-${id}" type="number" step="0.01" value="${val != null ? val : ''}">${hint ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">${hint}</div>` : ''}</div>`;
+  _csBands = (s.shippingBands || []).map(b => ({ ...b }));
+  const f = (id, label, val, hint, step) => `<div class="field"><label>${label}</label><input id="cs-${id}" type="number" step="${step || '0.01'}" value="${val != null ? val : ''}">${hint ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">${hint}</div>` : ''}</div>`;
+  const chk = (id, label, on, hint) => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><input type="checkbox" id="cs-${id}" ${on ? 'checked' : ''}> ${label}</label>${hint ? `<div style="font-size:11px;color:var(--ink-soft);margin:-2px 0 0 24px">${hint}</div>` : ''}`;
   modal({
     title: '⚙️ Cost settings',
     body: `
-      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">These drive the breakeven/floor maths. VAT is taken from your main Settings (${s.vatRegistered ? 'VAT-registered @ ' + s.vatRate + '%' : 'not VAT-registered'}).</div>
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">These drive the recommended price and margins. Sale VAT is taken from your main Settings (${s.vatRegistered ? 'VAT-registered @ ' + s.vatRate + '%' : 'not VAT-registered'}).</div>
+
+      <div style="font-weight:700;font-size:13px;margin:6px 0 4px">📦 Shipping bands</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Each item is assigned a band (in its cost editor) so postage is accurate per size. Editing a band's cost updates every item that uses it.</div>
+      <div id="cs-bands"></div>
+      <button type="button" class="btn btn-outline btn-sm" onclick="csAddBand()" style="margin:4px 0 12px">+ Add band</button>
+
+      <div style="font-weight:700;font-size:13px;margin:6px 0 4px">🟦 eBay fees</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">eBay's fee = final value fee % (by category) + regulatory operating fee % + an account-specific "high return rate" extra % + a per-order fixed fee, then <strong>+20% VAT on the whole fee</strong>. (Vehicle parts FVF is ~9.5% for orders £0–750.)</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        ${f('postageSmall', 'Postage — small item £', s.postageSmall)}
-        ${f('postageLarge', 'Postage — large panel £', s.postageLarge, 'Used when an item is flagged "large panel".')}
-        ${f('packagingCost', 'Packaging £/order', s.packagingCost)}
-        ${f('targetMarginPct', 'Target margin %', s.targetMarginPct, 'Floor = breakeven + this %.')}
-        ${f('ebayFeePct', 'eBay fee %', s.ebayFeePct)}
-        ${f('ebayFixedFee', 'eBay fixed fee £', s.ebayFixedFee)}
-        ${f('shopifyFeePct', 'Shopify fee %', s.shopifyFeePct)}
-        ${f('shopifyFixedFee', 'Shopify fixed fee £', s.shopifyFixedFee)}
+        ${f('ebayFvfPct', 'Final value fee %', s.ebayFvfPct, 'Category rate (vehicle parts ~9.5%).')}
+        ${f('ebayRegulatoryPct', 'Regulatory operating fee %', s.ebayRegulatoryPct, 'Usually 0.35%.')}
+        ${f('ebayHighReturnPct', 'High return-rate extra %', s.ebayHighReturnPct, 'Account-specific penalty (0 if your account is fine; some pay ~4%).')}
+        ${f('ebayPerOrderFee', 'Per-order fixed fee £', s.ebayPerOrderFee, '~£0.40 for orders over £10.')}
         ${f('adRatePct', 'eBay ad rate %', s.adRatePct, 'Promoted-listing rate, if you run ads.')}
-        ${f('overstockThreshold', 'Overstock threshold (units)', s.overstockThreshold)}
+        ${f('feesVatPct', 'VAT on fees %', s.feesVatPct, '20% in the UK.')}
+      </div>
+      <div style="margin:6px 0 12px">${chk('feesVatOnEbay', 'eBay charges VAT on its fees', s.feesVatOnEbay)}</div>
+
+      <div style="font-weight:700;font-size:13px;margin:6px 0 4px">🟩 Shopify fees</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        ${f('shopifyFeePct', 'Shopify fee %', s.shopifyFeePct, 'Payments card rate (~1.9%).')}
+        ${f('shopifyFixedFee', 'Shopify fixed fee £', s.shopifyFixedFee)}
+      </div>
+      <div style="margin:6px 0 12px">${chk('feesVatOnShopify', 'Shopify charges VAT on its fees', s.feesVatOnShopify)}</div>
+
+      <div style="font-weight:700;font-size:13px;margin:6px 0 4px">💷 Pricing</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        ${f('packagingCost', 'Packaging £/order', s.packagingCost)}
+        ${f('targetMarginPct', 'Target margin %', s.targetMarginPct, 'Recommended price = breakeven + this %.')}
+        ${f('offerDiscountPct', 'Offer discount %', s.offerDiscountPct, 'Your standard "send offer" (eBay minimum 5%).')}
+        ${f('overstockThreshold', 'Overstock threshold (units)', s.overstockThreshold, null, '1')}
       </div>`,
     actions: [
       { label: 'Cancel', onClick: closeModal },
       { label: 'Save', primary: true, onClick: ctSaveSettings },
     ],
   });
+  csRenderBands();
 }
+function csRenderBands() {
+  const wrap = el('cs-bands'); if (!wrap) return;
+  wrap.innerHTML = _csBands.map((b, i) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:5px">
+    <input value="${escapeAttr(b.label || '')}" placeholder="Label" onchange="_csBands[${i}].label=this.value" style="flex:1">
+    <input value="${escapeAttr(b.code || '')}" placeholder="code" onchange="_csBands[${i}].code=this.value" style="width:90px;font-family:ui-monospace,monospace;font-size:12px">
+    <span style="color:var(--ink-soft)">£</span><input type="number" step="0.01" min="0" value="${b.cost != null ? b.cost : ''}" onchange="_csBands[${i}].cost=parseFloat(this.value)" style="width:80px">
+    <button class="btn btn-ghost btn-sm" onclick="_csBands.splice(${i},1);csRenderBands()" style="color:var(--red)">×</button>
+  </div>`).join('') || '<div style="font-size:12px;color:var(--ink-soft)">No bands — add one.</div>';
+}
+function csAddBand() { _csBands.push({ code: '', label: '', cost: 0 }); csRenderBands(); }
 async function ctSaveSettings() {
-  const keys = ['postageSmall', 'postageLarge', 'packagingCost', 'targetMarginPct', 'ebayFeePct', 'ebayFixedFee', 'shopifyFeePct', 'shopifyFixedFee', 'adRatePct', 'overstockThreshold'];
+  const numKeys = ['packagingCost', 'targetMarginPct', 'offerDiscountPct', 'overstockThreshold',
+    'ebayFvfPct', 'ebayRegulatoryPct', 'ebayHighReturnPct', 'ebayPerOrderFee', 'adRatePct', 'feesVatPct',
+    'shopifyFeePct', 'shopifyFixedFee'];
   const payload = {};
-  for (const k of keys) { const v = el('cs-' + k)?.value; if (v !== '' && v != null) payload[k] = parseFloat(v); }
+  for (const k of numKeys) { const v = el('cs-' + k)?.value; if (v !== '' && v != null) payload[k] = parseFloat(v); }
+  payload.feesVatOnEbay = !!el('cs-feesVatOnEbay')?.checked;
+  payload.feesVatOnShopify = !!el('cs-feesVatOnShopify')?.checked;
+  payload.shippingBands = _csBands.filter(b => (b.code || '').trim() && !Number.isNaN(parseFloat(b.cost)))
+    .map(b => ({ code: String(b.code).trim(), label: b.label || b.code, cost: parseFloat(b.cost) }));
   try {
     const r = await Api.post('/api/costs/settings', payload);
     CT.settings = r.settings;

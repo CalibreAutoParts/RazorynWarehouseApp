@@ -225,7 +225,8 @@ async function handleStockOutIfIncoming(productId) {
       const full = await shopify.getShopifyProductFull(p.shopify_product_id);
       await shopify.updateProduct(p.shopify_product_id, {
         tags: preorder.addPreorderTag(full.tags),
-        inventoryPolicy: 'continue',
+        // 'deny' so the pre-order is CAPPED to the incoming quantity we push next.
+        inventoryPolicy: 'deny',
         metafields: [
           { namespace: 'custom', key: 'preorder_eta', type: 'date', value: incomingEta ? String(incomingEta).slice(0, 10) : '' },
           { namespace: 'custom', key: 'preorder_ships_note', type: 'single_line_text_field', value: preorder.shipsNote(incomingEta) },
@@ -234,6 +235,8 @@ async function handleStockOutIfIncoming(productId) {
       await shopify.ensurePreorderCollection();
     } catch (e) { console.warn('[preorder] sell-out flip failed for', p.sku, '-', e.message); }
   }
+  // Push the capped available qty (= units on the way − already pre-ordered).
+  try { await require('../routes/products').pushProductStockToChannels(p.id); } catch (_) {}
 
   // Notify staff that an item has flipped to selling-as-pre-order (idempotent).
   try {

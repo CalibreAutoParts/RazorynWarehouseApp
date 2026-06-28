@@ -33,6 +33,10 @@ async function ensureProductLocationColumns() {
     // Price lock: when true, automated price derivation (eBay→Shopify link, bulk
     // price tools) won't overwrite this product's prices — staff keep it manual.
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS price_locked BOOLEAN NOT NULL DEFAULT false`);
+    // Shipping band: which named postage band this item uses (codes defined in
+    // app_settings.data.costs.shippingBands). Null falls back to large/small by
+    // large_panel. Drives accurate per-item postage in the margin maths.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS shipping_band TEXT`);
     // Pre-listing / pre-order: a product created BEFORE its stock arrives. It is
     // listed (Shopify as a pre-order, eBay scheduled to go live) and can be
     // quoted/pre-ordered, but is excluded from the stock-take quantity count.
@@ -536,7 +540,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
                    'low_stock_threshold', 'price_shopify', 'price_ebay', 'cost_price',
                    'location_id', 'active', 'location_note', 'location_photo_data_url',
-                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked'];
+                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked', 'shipping_band'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
@@ -544,7 +548,8 @@ router.patch('/:id', requireAdmin, async (req, res) => {
                 locationNote: 'location_note', locationPhotoDataUrl: 'location_photo_data_url',
                 itemPhotoDataUrl: 'item_photo_data_url',
                 locationPhotoDataUrl2: 'location_photo_data_url_2',
-                primaryPhoto: 'primary_photo', largePanel: 'large_panel', priceLocked: 'price_locked' };
+                primaryPhoto: 'primary_photo', largePanel: 'large_panel', priceLocked: 'price_locked',
+                shippingBand: 'shipping_band' };
   const sets = [], params = [];
   // Always ensure the per-product location/photo columns (incl. updated_at)
   // exist before we touch them — cheap (cached after first run).
@@ -630,18 +635,37 @@ async function pushProductStockToChannels(productId, _opts = {}) {
   const result = { shopify: null, ebay: [] };
   // Load the product + its eBay links
   const pr = await query(
-    `SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id, stock_group_id FROM products WHERE id = $1`,
+    `SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id, stock_group_id, preorder_active, is_prelisted FROM products WHERE id = $1`,
     [productId]
   );
   const product = pr.rows[0];
   if (!product) return result;
 
+  // For a pre-order/incoming item we push an AVAILABLE-TO-PROMISE quantity instead
+  // of qty_on_hand (which is 0): the units still on the way, minus those already
+  // pre-ordered — so the channels list exactly what can still be reserved and stop
+  // selling once it's gone (the listing's inventory_policy is 'deny' for these).
+  let pushQty = product.qty_on_hand;
+  if (product.preorder_active || product.is_prelisted) {
+    try {
+      const inc = await query(
+        `SELECT COALESCE(SUM(GREATEST(qty_ordered - qty_received, 0)),0)::int AS q
+           FROM incoming_stock WHERE product_id = $1 AND status NOT IN ('received','cancelled')`, [productId]);
+      const pre = await query(
+        `SELECT COALESCE(SUM(si.qty),0)::int AS q
+           FROM sale_items si JOIN sales s ON s.id = si.sale_id
+          WHERE si.product_id = $1 AND s.status = 'preorder'`, [productId]);
+      pushQty = Math.max(0, (inc.rows[0]?.q || 0) - (pre.rows[0]?.q || 0));
+    } catch (e) { /* fall back to qty_on_hand */ }
+  }
+  const pushProduct = { ...product, qty_on_hand: pushQty };
+
   // --- Shopify push ---
   try {
     const shopify = require('../services/shopify');
     if (shopify.isConfigured() && product.shopify_inventory_id) {
-      await shopify.pushStockForProduct(product);
-      result.shopify = { ok: true, qty: product.qty_on_hand };
+      await shopify.pushStockForProduct(pushProduct);
+      result.shopify = { ok: true, qty: pushQty };
     } else {
       result.shopify = { skipped: product.shopify_inventory_id ? 'shopify_not_configured' : 'no_inventory_id' };
     }
@@ -670,8 +694,8 @@ async function pushProductStockToChannels(productId, _opts = {}) {
         continue;
       }
       try {
-        await ebay.setQuantityTradingAPI(link.ebay_item_id, product.qty_on_hand, store.code);
-        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true, qty: product.qty_on_hand });
+        await ebay.setQuantityTradingAPI(link.ebay_item_id, pushQty, store.code);
+        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true, qty: pushQty });
       } catch (e) {
         result.ebay.push({ itemId: link.ebay_item_id, store: store.code, error: e.message });
       }

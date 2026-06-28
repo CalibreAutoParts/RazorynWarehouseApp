@@ -1811,7 +1811,10 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
       shopifyProduct = await shopify.createProduct({
         title, sku, price: shopifyPrice, imageUrls, imageData, status, metafields, qty, tags,
         description: b.description || null, taxable, templateSuffix,
-        inventoryPolicy: isPrelisted ? 'continue' : null,
+        // Pre-orders are CAPPED to the incoming quantity (not unlimited): 'deny' so
+        // Shopify won't oversell beyond the available count we push (= units on the
+        // way). The available qty is set just after the incoming line is created.
+        inventoryPolicy: isPrelisted ? 'deny' : null,
       });
       if (isPrelisted) { try { await shopify.ensurePreorderCollection(); } catch (_) {} }
       for (const mf of (shopifyProduct?.__metafieldResults || [])) {
@@ -1897,6 +1900,12 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
          (inc.duty != null && inc.duty !== '') ? parseFloat(inc.duty) : null]);
       result.incomingId = incIns.rows[0].id;
     } catch (e) { result.incomingError = e.message; }
+  }
+
+  // Pre-order: now that the incoming line exists, push the CAPPED available qty
+  // (units on the way) to Shopify so the listing shows a real, limited count.
+  if (isPrelisted) {
+    try { await require('./products').pushProductStockToChannels(productId); } catch (e) { /* best-effort */ }
   }
 
   await audit(req, 'create_listing', 'product', productId, { sku, partNumber, ebayPrice, shopifyPrice, subPartNumbers: subPartNumbers.length, shopify: !!shopifyProduct, pooled: !!result.stockPool, prelisted: isPrelisted });
@@ -3094,6 +3103,9 @@ async function publishPrelisting(product, { req } = {}) {
   try {
     const out = await doCreateEbay(b, { req });
     await query(`UPDATE products SET ebay_prelist_status = 'live', ebay_scheduled_at = NULL WHERE id = $1`, [product.id]);
+    // Cap the freshly-listed eBay quantity to the available-to-promise (units on
+    // the way − already pre-ordered), now that a mirror_link exists.
+    try { await require('./products').pushProductStockToChannels(product.id); } catch (_) {}
     return { ok: true, itemId: out.itemId, url: out.url };
   } catch (e) {
     await query(`UPDATE products SET ebay_prelist_status = 'failed' WHERE id = $1`, [product.id]).catch(() => {});
@@ -3186,12 +3198,13 @@ router.post('/backfill-preorder-presentation', requireAdmin, async (req, res) =>
         title: preorder.stripTitleNotice(full.title),
         description: preorder.stripBodyNotice(full.description),
         tags: preorder.addPreorderTag(full.tags),
-        inventoryPolicy: 'continue',
+        inventoryPolicy: 'deny',   // capped to the incoming quantity
         metafields: [
           { namespace: 'custom', key: 'preorder_eta', type: 'date', value: eta ? String(eta).slice(0, 10) : '' },
           { namespace: 'custom', key: 'preorder_ships_note', type: 'single_line_text_field', value: preorder.shipsNote(eta) },
         ],
       });
+      try { await require('./products').pushProductStockToChannels(p.id); } catch (_) {}
       updated++;
     } catch (e) { errors.push({ sku: p.sku, error: e.message }); }
   }

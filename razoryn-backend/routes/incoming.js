@@ -28,14 +28,19 @@ async function costToGbp(foreign, currency, date, override) {
 // product's current cost. Best-effort — never blocks stock receiving.
 async function recordReceivedCost(row, qtyReceived, userId) {
   try {
-    if (row.unit_cost_gbp == null) return false;
+    // Prefer the LANDED unit cost (goods + apportioned freight/duty); fall back to the
+    // bare goods cost if the container hasn't been costed yet.
+    const landed = (row.landed_unit_cost_gbp != null) ? row.landed_unit_cost_gbp : row.unit_cost_gbp;
+    if (landed == null) return false;
     await query(
       `INSERT INTO product_cost_history (product_id, supplier, purchase_date, currency, unit_cost_foreign, fx_rate, unit_cost_gbp, qty, incoming_id, freight_total, duty, note, created_by)
-       VALUES ($1,$2,COALESCE($3::date, CURRENT_DATE),$4,$5,$6,$7,$8,$9,$10,$11,'Received from incoming',$12)`,
+       VALUES ($1,$2,COALESCE($3::date, CURRENT_DATE),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [row.product_id, row.supplier || null, row.received_at || row.expected_date || null,
-       row.currency || 'CNY', row.unit_cost_foreign, row.fx_rate, row.unit_cost_gbp, qtyReceived,
-       row.id, row.freight_total, row.duty, userId]);
-    await query(`UPDATE products SET cost_price = $1, updated_at = now() WHERE id = $2`, [row.unit_cost_gbp, row.product_id]);
+       row.currency || 'CNY', row.unit_cost_foreign, row.fx_rate, landed, qtyReceived,
+       row.id, row.freight_total, row.duty,
+       (row.landed_unit_cost_gbp != null ? 'Received from incoming (landed)' : 'Received from incoming'),
+       userId]);
+    await query(`UPDATE products SET cost_price = $1, updated_at = now() WHERE id = $2`, [landed, row.product_id]);
     return true;
   } catch (e) { console.warn('[incoming] cost record warning:', e.message); return false; }
 }
@@ -70,9 +75,62 @@ async function ensureTable() {
   await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS unit_cost_gbp     NUMERIC(12,4)`);
   await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS freight_total     NUMERIC(12,2)`);
   await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS duty              NUMERIC(12,2)`);
+  // Landed cost = goods unit cost + the apportioned share of the CONTAINER's freight
+  // + duty per unit (split across lines by value). The single source of truth for the
+  // product's true cost once a container is costed.
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS landed_unit_cost_gbp NUMERIC(12,4)`);
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS supplier_id INTEGER`);
+  // Container-level freight/duty live here (one row per container_ref). Freight +
+  // duty are entered once for the whole container and apportioned across its lines.
+  await query(`CREATE TABLE IF NOT EXISTS incoming_containers (
+    id            SERIAL PRIMARY KEY,
+    container_ref TEXT UNIQUE NOT NULL,
+    freight_total NUMERIC(12,2),
+    duty          NUMERIC(12,2),
+    freight_currency TEXT DEFAULT 'GBP',
+    freight_fx_rate  NUMERIC(14,8),
+    freight_total_gbp NUMERIC(12,2),
+    duty_gbp          NUMERIC(12,2),
+    supplier      TEXT,
+    supplier_id   INTEGER,
+    expected_date DATE,
+    status        TEXT,
+    notes         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
   _ready = true;
 }
 ensureTable();
+
+// Apportion a container's freight + duty (GBP) across its lines BY VALUE
+// (qty × unit_cost_gbp) and write landed_unit_cost_gbp on each line. Lines with no
+// goods cost fall back to an equal-by-qty share so freight/duty is never lost.
+// Returns the per-line landed figures. Best-effort; recomputed whenever the
+// container header or any of its lines change.
+async function reapportionContainer(ref) {
+  if (!ref) return;
+  const hdr = (await query(`SELECT freight_total_gbp, duty_gbp FROM incoming_containers WHERE container_ref = $1`, [ref])).rows[0] || {};
+  const addOn = (parseFloat(hdr.freight_total_gbp) || 0) + (parseFloat(hdr.duty_gbp) || 0);
+  const lines = (await query(
+    `SELECT id, qty_ordered, unit_cost_gbp FROM incoming_stock WHERE container_ref = $1 AND status <> 'cancelled'`, [ref])).rows;
+  if (!lines.length) return;
+  const valueOf = (l) => (parseFloat(l.unit_cost_gbp) || 0) * (parseInt(l.qty_ordered) || 0);
+  const totalValue = lines.reduce((a, l) => a + valueOf(l), 0);
+  const totalQty = lines.reduce((a, l) => a + (parseInt(l.qty_ordered) || 0), 0);
+  for (const l of lines) {
+    const qty = parseInt(l.qty_ordered) || 0;
+    const unit = parseFloat(l.unit_cost_gbp);
+    let share = 0;
+    if (addOn > 0 && qty > 0) {
+      const frac = totalValue > 0 ? (valueOf(l) / totalValue) : (totalQty > 0 ? (qty / totalQty) : 0);
+      share = (addOn * frac) / qty;   // freight+duty per unit for this line
+    }
+    const landed = (unit != null && !Number.isNaN(unit)) ? +(unit + share).toFixed(4)
+                 : (share > 0 ? +share.toFixed(4) : null);
+    await query(`UPDATE incoming_stock SET landed_unit_cost_gbp = $1 WHERE id = $2`, [landed, l.id]);
+  }
+}
 
 // GET /api/incoming?status=&container=&q=
 // Returns incoming rows joined to the live product (current on-hand) + a small
@@ -100,17 +158,74 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   res.json({ items: rows, summary: summary.rows[0] });
 });
 
-// GET /api/incoming/containers — distinct open container refs (for the filter).
+// GET /api/incoming/containers — distinct open container refs (for the filter),
+// joined to the container header so the UI can show which ones still need freight/duty.
 router.get('/containers', requirePermission('inventory'), async (req, res) => {
   await ensureTable();
   const { rows } = await query(`
-    SELECT container_ref AS ref, COUNT(*)::int AS lines,
-           COALESCE(SUM(GREATEST(qty_ordered - qty_received,0)),0)::int AS units, MIN(expected_date) AS expected,
-           MAX(supplier) AS supplier, MAX(notes) AS note
-    FROM incoming_stock
-    WHERE container_ref IS NOT NULL AND container_ref <> '' AND status <> 'cancelled'
-    GROUP BY container_ref ORDER BY MIN(expected_date) NULLS LAST`);
+    SELECT i.container_ref AS ref, COUNT(*)::int AS lines,
+           COALESCE(SUM(GREATEST(i.qty_ordered - i.qty_received,0)),0)::int AS units, MIN(i.expected_date) AS expected,
+           MAX(i.supplier) AS supplier, MAX(i.notes) AS note,
+           c.freight_total, c.duty, c.freight_currency, c.freight_total_gbp, c.duty_gbp
+    FROM incoming_stock i
+    LEFT JOIN incoming_containers c ON c.container_ref = i.container_ref
+    WHERE i.container_ref IS NOT NULL AND i.container_ref <> '' AND i.status <> 'cancelled'
+    GROUP BY i.container_ref, c.freight_total, c.duty, c.freight_currency, c.freight_total_gbp, c.duty_gbp
+    ORDER BY MIN(i.expected_date) NULLS LAST`);
   res.json({ containers: rows });
+});
+
+// GET /api/incoming/containers/:ref — one container: header (freight/duty) + its lines
+// with the live landed cost per unit + a totals summary.
+router.get('/containers/:ref', requirePermission('inventory'), async (req, res) => {
+  await ensureTable();
+  const ref = req.params.ref;
+  const header = (await query(`SELECT * FROM incoming_containers WHERE container_ref = $1`, [ref])).rows[0] || { container_ref: ref };
+  const lines = (await query(`
+    SELECT i.*, p.qty_on_hand AS product_qty_on_hand
+    FROM incoming_stock i LEFT JOIN products p ON p.id = i.product_id
+    WHERE i.container_ref = $1 AND i.status <> 'cancelled'
+    ORDER BY i.title NULLS LAST, i.id`, [ref])).rows;
+  const goods = lines.reduce((a, l) => a + (parseFloat(l.unit_cost_gbp) || 0) * (parseInt(l.qty_ordered) || 0), 0);
+  const addOn = (parseFloat(header.freight_total_gbp) || 0) + (parseFloat(header.duty_gbp) || 0);
+  res.json({ header, lines, totals: {
+    units: lines.reduce((a, l) => a + (parseInt(l.qty_ordered) || 0), 0),
+    goodsValueGbp: +goods.toFixed(2), freightDutyGbp: +addOn.toFixed(2), landedValueGbp: +(goods + addOn).toFixed(2),
+  } });
+});
+
+// PATCH /api/incoming/containers/:ref — set the container's freight + duty (and
+// supplier/eta/notes), convert to GBP, then re-apportion across the lines.
+router.patch('/containers/:ref', requirePermission('inventory'), async (req, res) => {
+  await ensureTable();
+  const ref = req.params.ref;
+  const b = req.body || {};
+  const freightCurrency = String(b.freightCurrency || 'GBP').toUpperCase();
+  // Convert freight + duty (which share the container currency + date) to GBP.
+  const date = b.expectedDate || null;
+  const fConv = await costToGbp(b.freightTotal, freightCurrency, date, b.freightFxRate);
+  const dConv = await costToGbp(b.duty, freightCurrency, date, b.freightFxRate);
+  const num = (v) => (v != null && v !== '') ? parseFloat(v) : null;
+  await query(
+    `INSERT INTO incoming_containers (container_ref, freight_total, duty, freight_currency, freight_fx_rate, freight_total_gbp, duty_gbp, supplier, supplier_id, expected_date, status, notes, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+     ON CONFLICT (container_ref) DO UPDATE SET
+       freight_total = EXCLUDED.freight_total, duty = EXCLUDED.duty,
+       freight_currency = EXCLUDED.freight_currency, freight_fx_rate = EXCLUDED.freight_fx_rate,
+       freight_total_gbp = EXCLUDED.freight_total_gbp, duty_gbp = EXCLUDED.duty_gbp,
+       supplier = COALESCE(EXCLUDED.supplier, incoming_containers.supplier),
+       supplier_id = COALESCE(EXCLUDED.supplier_id, incoming_containers.supplier_id),
+       expected_date = COALESCE(EXCLUDED.expected_date, incoming_containers.expected_date),
+       status = COALESCE(EXCLUDED.status, incoming_containers.status),
+       notes = COALESCE(EXCLUDED.notes, incoming_containers.notes),
+       updated_at = now()`,
+    [ref, num(b.freightTotal), num(b.duty), freightCurrency,
+     fConv.rate != null ? fConv.rate : (b.freightFxRate != null && b.freightFxRate !== '' ? parseFloat(b.freightFxRate) : null),
+     fConv.gbp, dConv.gbp, b.supplier || null, b.supplierId || null, date, b.status || null, b.notes || null]);
+  await reapportionContainer(ref);
+  const header = (await query(`SELECT * FROM incoming_containers WHERE container_ref = $1`, [ref])).rows[0];
+  await audit(req, 'incoming_container_costs', 'incoming', null, { container: ref, freightGbp: fConv.gbp, dutyGbp: dConv.gbp });
+  res.json({ ok: true, header, fxFailed: !!(fConv.failed || dConv.failed) });
 });
 
 // POST /api/incoming  { productId?, sku, title, partNumber, qtyOrdered, containerRef, supplier, expectedDate, notes }
@@ -150,6 +265,8 @@ router.post('/', requirePermission('inventory'), async (req, res) => {
      (b.freightTotal != null && b.freightTotal !== '') ? parseFloat(b.freightTotal) : null,
      (b.duty != null && b.duty !== '') ? parseFloat(b.duty) : null]);
   await audit(req, 'incoming_create', 'incoming', rows[0].id, { qty, container: b.containerRef });
+  if (b.supplier) { try { await require('./suppliers').ensureSupplierByName(b.supplier, { currency }); } catch (_) {} }
+  if (b.containerRef) await reapportionContainer(b.containerRef).catch(() => {});
 
   // If staff linked this line to an existing product AND typed a part number that
   // isn't already the product's master SKU/part number, capture it as a searchable
@@ -237,6 +354,8 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
     created.push({ id: ins.rows[0].id, productId: prod.id, sku: prod.sku, qty });
   }
   await audit(req, 'incoming_bulk_add', 'incoming', null, { created: created.length, unmatched: unmatched.length, container: b.containerRef });
+  if (b.supplier) { try { await require('./suppliers').ensureSupplierByName(b.supplier); } catch (_) {} }
+  if (b.containerRef) await reapportionContainer(b.containerRef).catch(() => {});
   res.json({ ok: true, created: created.length, createdUnits: created.reduce((a, c) => a + c.qty, 0), unmatched });
 });
 
@@ -309,6 +428,8 @@ router.patch('/:id', requirePermission('inventory'), async (req, res) => {
   params.push(req.params.id);
   const { rows } = await query(`UPDATE incoming_stock SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`, params);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+  // Qty or unit cost changed → the container's value split shifts; recompute landed costs.
+  if (rows[0].container_ref) await reapportionContainer(rows[0].container_ref).catch(() => {});
   res.json({ item: rows[0] });
 });
 
