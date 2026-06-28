@@ -12080,10 +12080,18 @@ async function ctOpenEditor(productId) {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field"><label>Qty on order <span style="color:var(--ink-soft);font-weight:400">(opt)</span></label><input id="ct-qty" type="number" min="0" placeholder="optional"></div>
         <div class="field"><label>Shipping band <span style="color:var(--ink-soft);font-weight:400">— sets this item's postage</span></label>
-          <select id="ct-band" onchange="ctSaveBand(${productId}, this.value)">
+          <select id="ct-band" onchange="ctBandChanged(${productId}, this.value)">
             <option value="">(default by size)</option>
             ${(CT.settings?.shippingBands || []).map(bnd => `<option value="${escapeAttr(bnd.code)}"${p.shippingBand === bnd.code ? ' selected' : ''}>${escapeHtml(bnd.label)} · £${(+bnd.cost).toFixed(2)}</option>`).join('')}
-          </select></div>
+            <option value="custom"${p.shippingBand === 'custom' ? ' selected' : ''}>Custom size…</option>
+          </select>
+          <div id="ct-custom-wrap" style="display:${p.shippingBand === 'custom' ? 'flex' : 'none'};gap:6px;align-items:center;margin-top:6px">
+            <span style="color:var(--ink-soft);font-size:12px">Custom postage £</span>
+            <input id="ct-custom-cost" type="number" step="0.01" min="0" value="${p.shippingCost != null ? p.shippingCost : ''}" placeholder="e.g. 14.50" style="width:100px">
+            <button type="button" class="btn btn-outline btn-sm" onclick="ctSaveBand(${productId}, 'custom')">Apply</button>
+          </div>
+          <div style="font-size:10px;color:var(--ink-soft);margin-top:3px">Add/edit standard bands in ⚙️ Cost settings. Use Custom for an odd size until you have a standard box.</div>
+        </div>
       </div>
       <div style="font-size:11px;color:var(--ink-soft);margin:2px 0 6px">This is the <strong>goods</strong> unit cost. Container freight &amp; duty are now entered on the container (Incoming → open a container) and split across its items by value to give the true landed cost.</div>
       <div class="field"><label>Note</label><input id="ct-note" placeholder="optional"></div>
@@ -12097,6 +12105,7 @@ async function ctOpenEditor(productId) {
   // live GBP preview
   ['ct-foreign', 'ct-rate', 'ct-cur'].forEach(id => { const e = el(id); if (e) e.addEventListener('input', ctUpdateGbpPreview); });
   setTimeout(() => { ctFetchRate(); }, 80);
+  ctWireTestPrice(p);     // "test a price" → live fee breakdown
   ctLoadHistory(productId);
 }
 
@@ -12114,28 +12123,109 @@ function ctRecoBox(p) {
   if (!p || p.costPrice == null) return '<div style="font-size:11px;color:var(--ink-soft);background:var(--bg-soft);border-radius:8px;padding:8px 10px;margin-bottom:8px">Add a cost to see the recommended price and margins.</div>';
   const off = CT.settings?.offerDiscountPct ?? 5;
   const row = (label, val, sub) => `<div style="display:flex;justify-content:space-between;gap:10px"><span style="color:var(--ink-soft)">${label}</span><span style="font-weight:600">${val}${sub ? ` <span style="font-weight:400;color:var(--ink-soft)">${sub}</span>` : ''}</span></div>`;
+  const testDefault = (p.priceEbay != null ? p.priceEbay : (p.floorEbay != null ? p.floorEbay : ''));
   return `<div style="font-size:12px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px;display:grid;gap:3px">
-    <div style="font-weight:700;margin-bottom:2px">eBay pricing (landed cost ${ctMoney(p.costPrice)})</div>
+    <div style="font-weight:700;margin-bottom:2px">eBay pricing (landed cost ${ctMoney(p.costPrice)}, postage ${ctMoney(ctPostageFor(p))})</div>
     ${row('✅ Recommended', ctMoney(p.floorEbay), `(${CT.settings?.targetMarginPct ?? 15}% margin)`)}
     ${row('⚠️ Lowest safe (breakeven)', ctMoney(p.breakevenEbay), 'you make £0 below this')}
     ${p.priceEbay != null ? row('Current price', ctMoney(p.priceEbay), p.marginEbayPct != null ? `margin ${ctPct(p.marginEbayPct)}` : '') : ''}
     ${p.offerEbayPct != null ? row(`After −${off}% offer`, ctMoney(p.offerEbayPrice), `${p.offerBelowBreakevenEbay ? '❌ loses money' : '✓ margin ' + ctPct(p.offerEbayPct)}`) : ''}
-    <div style="font-size:10px;color:var(--ink-soft);margin-top:3px">Includes eBay FVF ${CT.settings?.ebayFvfPct ?? 9.5}% + reg ${CT.settings?.ebayRegulatoryPct ?? 0.35}%${(CT.settings?.ebayHighReturnPct) ? ' + high-return ' + CT.settings.ebayHighReturnPct + '%' : ''} + £${(CT.settings?.ebayPerOrderFee ?? 0.40)} per order${CT.settings?.feesVatOnEbay ? ' (+' + (CT.settings?.feesVatPct ?? 20) + '% VAT on fees)' : ''}, postage + packaging, and sale VAT.</div>
+  </div>
+  <div style="font-size:12px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span style="font-weight:700">Test a price</span>
+      <span style="color:var(--ink-soft)">£</span>
+      <input id="ct-testprice" type="number" step="0.01" min="0" value="${testDefault}" style="width:110px" placeholder="price">
+      <span style="font-size:11px;color:var(--ink-soft)">type any price to see the breakdown ↓</span>
+    </div>
+    <div id="ct-breakdown" style="display:grid;gap:2px"></div>
+    <div style="margin-top:8px;font-size:11px;color:var(--ink-soft)">To set the live selling price, open <button type="button" class="btn btn-outline btn-sm" onclick="closeModal();openEditListing(${p.id})">✏️ Edit listing</button> — it pushes the new price to eBay + Shopify.</div>
   </div>`;
 }
 
+// Band dropdown changed: reveal the custom-£ input for 'custom', else save now.
+function ctBandChanged(productId, band) {
+  const wrap = el('ct-custom-wrap');
+  if (wrap) wrap.style.display = (band === 'custom') ? 'flex' : 'none';
+  if (band !== 'custom') ctSaveBand(productId, band);
+}
 // Set this item's shipping band live (PATCH product) → recompute floors/margins.
 async function ctSaveBand(productId, band) {
+  const payload = { shippingBand: band || null };
+  if (band === 'custom') {
+    const c = el('ct-custom-cost')?.value;
+    if (c === '' || c == null || isNaN(parseFloat(c))) { toast('Enter the custom postage £', 'warn'); return; }
+    payload.shippingCost = parseFloat(c);
+  }
   try {
-    await Api.patch('/api/products/' + productId, { shippingBand: band || null });
+    await Api.patch('/api/products/' + productId, payload);
     await loadCosts();
     await refreshCostFloors();
-    // Re-render the recommendation box with the updated figures.
+    // Re-render the recommendation + breakdown with the updated postage.
     const p = (CT.items || []).find(x => x.id === productId);
     const box = el('ct-floors-preview');
-    if (box && p) box.outerHTML = `<div id="ct-floors-preview" style="font-size:12px;margin:4px 0 8px"></div>${ctRecoBox(p)}`;
-    toast('Shipping band updated', 'success');
+    if (box && p) { box.outerHTML = `<div id="ct-floors-preview" style="font-size:12px;margin:4px 0 8px"></div>${ctRecoBox(p)}`; ctWireTestPrice(p); }
+    toast('Shipping updated', 'success');
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// Resolve this item's postage £ from its band/custom (client-side mirror of the server).
+function ctPostageFor(p) {
+  const s = CT.settings || {};
+  if (p.shippingBand === 'custom' && p.shippingCost != null) return parseFloat(p.shippingCost);
+  if (p.shippingBand) { const b = (s.shippingBands || []).find(x => x.code === p.shippingBand); if (b) return parseFloat(b.cost) || 0; }
+  return p.largePanel ? (s.postageLarge ?? 9.5) : (s.postageSmall ?? 3.2);
+}
+
+// Full £ breakdown of an eBay sale at a given price — so you see exactly what each
+// fee costs (and how much a high-return penalty is hurting). Pure client maths from
+// CT.settings, so the "test a price" box updates instantly.
+function ctComputeBreakdown(price, p) {
+  const s = CT.settings || {};
+  const B = parseFloat(price) || 0;
+  const cost = p.costPrice != null ? parseFloat(p.costPrice) : 0;
+  const v = s.vatRegistered ? (s.vatRate / 100) / (1 + s.vatRate / 100) : 0;
+  const postage = ctPostageFor(p);
+  const packaging = s.packagingCost || 0;
+  const fvf = B * (s.ebayFvfPct || 0) / 100;
+  const reg = B * (s.ebayRegulatoryPct || 0) / 100;
+  const hr = B * (s.ebayHighReturnPct || 0) / 100;
+  const ad = B * (s.adRatePct || 0) / 100;
+  const per = s.ebayPerOrderFee || 0;
+  const feeBase = fvf + reg + hr + ad + per;
+  const feeVat = s.feesVatOnEbay ? feeBase * ((s.feesVatPct || 20) / 100) : 0;
+  const saleVat = B * v;
+  const net = B - cost - postage - packaging - feeBase - feeVat - saleVat;
+  const marginPct = B > 0 ? (net / B) * 100 : 0;
+  const rows = [
+    ['Item cost (landed)', cost],
+    ['Postage', postage],
+    ['Packaging', packaging],
+    [`eBay final value fee (${s.ebayFvfPct ?? 9.5}%)`, fvf],
+    [`Regulatory operating fee (${s.ebayRegulatoryPct ?? 0.35}%)`, reg],
+  ];
+  if ((s.ebayHighReturnPct || 0) > 0) rows.push([`High return-rate penalty (${s.ebayHighReturnPct}%)`, hr, true]);
+  if ((s.adRatePct || 0) > 0) rows.push([`Ad rate (${s.adRatePct}%)`, ad]);
+  rows.push(['Per-order fee', per]);
+  if (feeVat > 0) rows.push([`VAT on eBay fees (${s.feesVatPct ?? 20}%)`, feeVat]);
+  if (saleVat > 0) rows.push([`VAT on the sale (${s.vatRate ?? 20}%)`, saleVat]);
+  return { price: B, net, marginPct, rows };
+}
+function ctRenderBreakdown(price, p) {
+  const wrap = el('ct-breakdown'); if (!wrap) return;
+  const b = ctComputeBreakdown(price, p);
+  const col = b.marginPct < 0 ? 'var(--red)' : b.marginPct < 10 ? 'var(--amber)' : 'var(--green)';
+  wrap.innerHTML = `
+    <div style="display:flex;justify-content:space-between;font-weight:700;margin-bottom:4px"><span>Sale price</span><span>${ctMoney(b.price)}</span></div>
+    ${b.rows.map(r => `<div style="display:flex;justify-content:space-between;color:${r[2] ? 'var(--red)' : 'var(--ink-soft)'}"><span>− ${r[0]}</span><span>−${ctMoney(r[1])}</span></div>`).join('')}
+    <div style="display:flex;justify-content:space-between;font-weight:700;border-top:1px solid var(--line);margin-top:5px;padding-top:5px;color:${col}"><span>= Net profit</span><span>${ctMoney(b.net)} · ${ctPct(b.marginPct)}</span></div>`;
+}
+// Attach the "test a price" input handler + initial render.
+function ctWireTestPrice(p) {
+  const inp = el('ct-testprice'); if (!inp) return;
+  const run = () => ctRenderBreakdown(inp.value, p);
+  inp.oninput = run;
+  run();
 }
 
 async function ctFetchRate() {

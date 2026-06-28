@@ -84,10 +84,14 @@ function resolveCostSettings(row) {
 }
 
 // Resolve a product's postage cost from its shipping band (falling back to the
-// large/small defaults when it has no band). `item` = { band, isLarge }.
+// large/small defaults when it has no band). `item` = { band, isLarge, shippingCost }.
+// band 'custom' uses the item's own shippingCost (a one-off box size).
 function postageFor(s, item) {
   item = item || {};
-  if (item.band) {
+  if (item.band === 'custom') {
+    const c = num(item.shippingCost, null);
+    if (c != null) return c;
+  } else if (item.band) {
     const b = (s.shippingBands || []).find(x => x.code === item.band);
     if (b) return num(b.cost, 0);
   }
@@ -119,10 +123,10 @@ function channelParams(channel, item, s) {
 //   B = F / (1 - p - v)  ;  floor = B * (1 + targetMargin)
 // where F = cost + postage + packaging + fixedFee×feeVat, p = (fee%+ad%)/100×feeVat,
 // v = VAT portion of a gross price = (rate/100)/(1+rate/100) (0 if not registered).
-function computeFloor({ costPrice, isLarge, band, channel, settings, vatRegistered }) {
+function computeFloor({ costPrice, isLarge, band, shippingCost, channel, settings, vatRegistered }) {
   const s = settings;
   const cost = num(costPrice, 0);
-  const { postage, feePct, fixedFee, adRatePct, feeVatMult } = channelParams(channel, { band, isLarge }, s);
+  const { postage, feePct, fixedFee, adRatePct, feeVatMult } = channelParams(channel, { band, isLarge, shippingCost }, s);
   const F = cost + postage + s.packagingCost + fixedFee * feeVatMult;
   const p = ((feePct + adRatePct) / 100) * feeVatMult;
   const vr = vatRegistered != null ? vatRegistered : s.vatRegistered;
@@ -140,12 +144,12 @@ function computeFloor({ costPrice, isLarge, band, channel, settings, vatRegister
 }
 
 // Net profit + margin% retained at an actual sale price (same cost model).
-function marginAtPrice({ price, costPrice, isLarge, band, channel, settings, vatRegistered }) {
+function marginAtPrice({ price, costPrice, isLarge, band, shippingCost, channel, settings, vatRegistered }) {
   const s = settings;
   const B = num(price, 0);
   if (B <= 0) return { net: null, marginPct: null };
   const cost = num(costPrice, 0);
-  const { postage, feePct, fixedFee, adRatePct, feeVatMult } = channelParams(channel, { band, isLarge }, s);
+  const { postage, feePct, fixedFee, adRatePct, feeVatMult } = channelParams(channel, { band, isLarge, shippingCost }, s);
   const vr = vatRegistered != null ? vatRegistered : s.vatRegistered;
   const v = vr ? (s.vatRate / 100) / (1 + s.vatRate / 100) : 0;
   const F = cost + postage + s.packagingCost + fixedFee * feeVatMult;

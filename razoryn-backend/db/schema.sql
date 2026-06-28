@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS products (
   is_prelisted       BOOLEAN NOT NULL DEFAULT false,
   preorder_active    BOOLEAN NOT NULL DEFAULT false,  -- currently sold as a pre-order
   shipping_band      TEXT,                  -- named postage band (costs.shippingBands)
+  shipping_cost      NUMERIC(10,2),         -- custom per-item postage £ (band='custom')
   preorder_eta       DATE,                  -- expected availability date
   ebay_scheduled_at  TIMESTAMPTZ,           -- warehouse-held eBay go-live time
   ebay_prelist_payload JSONB,               -- captured AddItem opts for the cron
