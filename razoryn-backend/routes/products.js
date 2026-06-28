@@ -37,6 +37,9 @@ async function ensureProductLocationColumns() {
     // app_settings.data.costs.shippingBands). Null falls back to large/small by
     // large_panel. Drives accurate per-item postage in the margin maths.
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS shipping_band TEXT`);
+    // Custom per-item postage £ — used when shipping_band = 'custom' (an item that
+    // doesn't fit a standard box yet). Overrides the band cost in the margin maths.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS shipping_cost NUMERIC(10,2)`);
     // Pre-listing / pre-order: a product created BEFORE its stock arrives. It is
     // listed (Shopify as a pre-order, eBay scheduled to go live) and can be
     // quoted/pre-ordered, but is excluded from the stock-take quantity count.
@@ -540,7 +543,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
                    'low_stock_threshold', 'price_shopify', 'price_ebay', 'cost_price',
                    'location_id', 'active', 'location_note', 'location_photo_data_url',
-                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked', 'shipping_band'];
+                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked', 'shipping_band', 'shipping_cost'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
