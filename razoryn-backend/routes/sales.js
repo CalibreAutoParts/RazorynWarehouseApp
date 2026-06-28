@@ -599,6 +599,15 @@ router.post('/', requireAdmin, async (req, res) => {
         if (it.productId) sync.handleStockOutIfIncoming(it.productId).catch(() => {});
       }
     });
+  } else if (isPreorder) {
+    // A pre-order was placed → the available-to-promise drops; re-push the capped
+    // count to the channels so the listing shows fewer units remaining.
+    setImmediate(() => {
+      const { pushProductStockToChannels } = require('./products');
+      for (const it of result.items) {
+        if (it.productId) pushProductStockToChannels(it.productId).catch(() => {});
+      }
+    });
   }
   // Forward our own direct bank/cash sales to the Invoice Hub (best-effort).
   // Only paid, non-estimate, in-scope sales — eBay/Shopify/card are excluded
