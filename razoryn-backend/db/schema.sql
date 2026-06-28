@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS products (
   -- excluded from the stock-take count until the incoming container lands.
   is_prelisted       BOOLEAN NOT NULL DEFAULT false,
   preorder_active    BOOLEAN NOT NULL DEFAULT false,  -- currently sold as a pre-order
+  shipping_band      TEXT,                  -- named postage band (costs.shippingBands)
   preorder_eta       DATE,                  -- expected availability date
   ebay_scheduled_at  TIMESTAMPTZ,           -- warehouse-held eBay go-live time
   ebay_prelist_payload JSONB,               -- captured AddItem opts for the cron

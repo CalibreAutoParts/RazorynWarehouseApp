@@ -6,7 +6,7 @@ const { query, withTx } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 const fx = require('../lib/fx');
-const { computeFloor, marginAtPrice, resolveCostSettings } = require('../lib/pricing-floor');
+const { computeFloor, marginAtPrice, marginAtOffer, resolveCostSettings } = require('../lib/pricing-floor');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -56,7 +56,7 @@ router.get('/products', requireAdmin, async (req, res) => {
   if (search) { params.push(`%${search}%`); const i = params.length; where.push(`(p.title ILIKE $${i} OR p.sku ILIKE $${i} OR p.part_number ILIKE $${i})`); }
   if (brand) { params.push(brand); where.push(`p.brand = $${params.length}`); }
   const { rows } = await query(`
-    SELECT p.id, p.sku, p.title, p.brand, p.model, p.qty_on_hand, p.large_panel,
+    SELECT p.id, p.sku, p.title, p.brand, p.model, p.qty_on_hand, p.large_panel, p.shipping_band,
            p.cost_price, p.price_ebay, p.price_shopify, p.image_url,
            lc.supplier AS last_supplier, lc.purchase_date AS last_purchase_date,
            lc.currency AS last_currency, lc.unit_cost_foreign AS last_unit_cost_foreign
@@ -73,21 +73,28 @@ router.get('/products', requireAdmin, async (req, res) => {
   const items = rows.map(r => {
     const cost = r.cost_price != null ? parseFloat(r.cost_price) : null;
     const isLarge = !!r.large_panel;
-    const fe = cost != null ? computeFloor({ costPrice: cost, isLarge, channel: 'ebay', settings: S }) : null;
-    const fs = cost != null ? computeFloor({ costPrice: cost, isLarge, channel: 'shopify', settings: S }) : null;
+    const band = r.shipping_band || null;
+    const fe = cost != null ? computeFloor({ costPrice: cost, isLarge, band, channel: 'ebay', settings: S }) : null;
+    const fs = cost != null ? computeFloor({ costPrice: cost, isLarge, band, channel: 'shopify', settings: S }) : null;
     const pe = r.price_ebay != null ? parseFloat(r.price_ebay) : null;
     const ps = r.price_shopify != null ? parseFloat(r.price_shopify) : null;
-    const me = (cost != null && pe) ? marginAtPrice({ price: pe, costPrice: cost, isLarge, channel: 'ebay', settings: S }) : { net: null, marginPct: null };
-    const ms = (cost != null && ps) ? marginAtPrice({ price: ps, costPrice: cost, isLarge, channel: 'shopify', settings: S }) : { net: null, marginPct: null };
+    const me = (cost != null && pe) ? marginAtPrice({ price: pe, costPrice: cost, isLarge, band, channel: 'ebay', settings: S }) : { net: null, marginPct: null };
+    const ms = (cost != null && ps) ? marginAtPrice({ price: ps, costPrice: cost, isLarge, band, channel: 'shopify', settings: S }) : { net: null, marginPct: null };
+    // Margin if we drop the eBay price by the standard "send offer" discount.
+    const moe = (cost != null && pe) ? marginAtOffer({ price: pe, costPrice: cost, isLarge, band, channel: 'ebay', settings: S }) : { net: null, marginPct: null, offerPrice: null };
     return {
       id: r.id, sku: r.sku, title: r.title, brand: r.brand, model: r.model,
-      qtyOnHand: r.qty_on_hand, largePanel: isLarge, imageUrl: r.image_url,
+      qtyOnHand: r.qty_on_hand, largePanel: isLarge, shippingBand: band, imageUrl: r.image_url,
       costPrice: cost, priceEbay: pe, priceShopify: ps,
       lastSupplier: r.last_supplier, lastPurchaseDate: r.last_purchase_date,
       lastCurrency: r.last_currency, lastUnitCostForeign: r.last_unit_cost_foreign != null ? parseFloat(r.last_unit_cost_foreign) : null,
+      // floor = recommended price (breakeven + target margin); breakeven = lowest safe price.
       floorEbay: fe ? fe.floor : null, floorShopify: fs ? fs.floor : null,
       breakevenEbay: fe ? fe.breakeven : null, breakevenShopify: fs ? fs.breakeven : null,
       marginEbayPct: me.marginPct, marginShopifyPct: ms.marginPct, netEbay: me.net, netShopify: ms.net,
+      offerEbayPct: moe.marginPct, offerEbayPrice: moe.offerPrice, offerEbayNet: moe.net,
+      // Would a 5% offer dip below the breakeven (i.e. you'd lose money on it)?
+      offerBelowBreakevenEbay: !!(fe && fe.breakeven != null && moe.offerPrice != null && moe.offerPrice < fe.breakeven),
       belowFloorEbay: !!(fe && fe.floor != null && pe != null && pe < fe.floor),
       belowFloorShopify: !!(fs && fs.floor != null && ps != null && ps < fs.floor),
       overstock: !!(cost != null && r.qty_on_hand >= S.overstockThreshold),
@@ -134,7 +141,7 @@ router.get('/products/:id/history', requireAdmin, async (req, res) => {
 router.post('/products/:id/cost', requireAdmin, async (req, res) => {
   await ensureCostSchema();
   const id = parseInt(req.params.id);
-  const pr = await query(`SELECT id, large_panel FROM products WHERE id = $1`, [id]);
+  const pr = await query(`SELECT id, large_panel, shipping_band FROM products WHERE id = $1`, [id]);
   if (!pr.rows[0]) return res.status(404).json({ error: 'not_found' });
   const b = req.body || {};
   const currency = String(b.currency || 'CNY').toUpperCase();
@@ -164,11 +171,12 @@ router.post('/products/:id/cost', requireAdmin, async (req, res) => {
   await audit(req, 'cost_set', 'product', id, { gbp, currency, foreign, fxRate });
   const S = resolveCostSettings(await settingsRow());
   const isLarge = !!pr.rows[0].large_panel;
+  const band = pr.rows[0].shipping_band || null;
   res.json({
     ok: true, costPrice: gbp, history,
     floors: {
-      ebay: computeFloor({ costPrice: gbp, isLarge, channel: 'ebay', settings: S }),
-      shopify: computeFloor({ costPrice: gbp, isLarge, channel: 'shopify', settings: S }),
+      ebay: computeFloor({ costPrice: gbp, isLarge, band, channel: 'ebay', settings: S }),
+      shopify: computeFloor({ costPrice: gbp, isLarge, band, channel: 'shopify', settings: S }),
     },
   });
 });
@@ -176,18 +184,19 @@ router.post('/products/:id/cost', requireAdmin, async (req, res) => {
 // GET /api/costs/products/:id — one product: cost, floors + components, recent history.
 router.get('/products/:id', requireAdmin, async (req, res) => {
   await ensureCostSchema();
-  const pr = await query(`SELECT id, sku, title, brand, model, qty_on_hand, large_panel, cost_price, price_ebay, price_shopify FROM products WHERE id = $1`, [req.params.id]);
+  const pr = await query(`SELECT id, sku, title, brand, model, qty_on_hand, large_panel, shipping_band, cost_price, price_ebay, price_shopify FROM products WHERE id = $1`, [req.params.id]);
   if (!pr.rows[0]) return res.status(404).json({ error: 'not_found' });
   const p = pr.rows[0];
   const S = resolveCostSettings(await settingsRow());
   const cost = p.cost_price != null ? parseFloat(p.cost_price) : null;
   const isLarge = !!p.large_panel;
+  const band = p.shipping_band || null;
   const history = (await query(`SELECT * FROM product_cost_history WHERE product_id = $1 ORDER BY purchase_date DESC, id DESC LIMIT 20`, [p.id])).rows;
   res.json({
     product: { ...p, cost_price: cost },
     floors: cost != null ? {
-      ebay: computeFloor({ costPrice: cost, isLarge, channel: 'ebay', settings: S }),
-      shopify: computeFloor({ costPrice: cost, isLarge, channel: 'shopify', settings: S }),
+      ebay: computeFloor({ costPrice: cost, isLarge, band, channel: 'ebay', settings: S }),
+      shopify: computeFloor({ costPrice: cost, isLarge, band, channel: 'shopify', settings: S }),
     } : null,
     history,
   });
@@ -199,13 +208,26 @@ router.get('/settings', requireAdmin, async (req, res) => {
 });
 router.post('/settings', requireAdmin, async (req, res) => {
   const b = req.body || {};
-  const keys = ['postageSmall', 'postageLarge', 'packagingCost', 'ebayFeePct', 'ebayFixedFee', 'shopifyFeePct', 'shopifyFixedFee', 'adRatePct', 'targetMarginPct', 'overstockThreshold'];
+  // Numeric knobs (incl. the new eBay fee components + offer discount). Old keys
+  // (ebayFeePct/ebayFixedFee) still accepted for back-compat.
+  const numKeys = ['postageSmall', 'postageLarge', 'packagingCost',
+    'ebayFvfPct', 'ebayRegulatoryPct', 'ebayHighReturnPct', 'ebayPerOrderFee', 'feesVatPct',
+    'ebayFeePct', 'ebayFixedFee', 'shopifyFeePct', 'shopifyFixedFee',
+    'adRatePct', 'targetMarginPct', 'offerDiscountPct', 'overstockThreshold'];
+  const boolKeys = ['feesVatOnEbay', 'feesVatOnShopify'];
   await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
   const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
   const costs = { ...(cur.costs || {}) };
-  for (const k of keys) { if (b[k] != null && b[k] !== '') { const n = parseFloat(b[k]); if (!Number.isNaN(n)) costs[k] = n; } }
+  for (const k of numKeys) { if (b[k] != null && b[k] !== '') { const n = parseFloat(b[k]); if (!Number.isNaN(n)) costs[k] = n; } }
+  for (const k of boolKeys) { if (b[k] != null) costs[k] = !!b[k]; }
+  // Shipping bands: array of { code, label, cost }. Replace wholesale when provided.
+  if (Array.isArray(b.shippingBands)) {
+    costs.shippingBands = b.shippingBands
+      .map(x => ({ code: String(x.code || '').trim(), label: String(x.label || x.code || '').trim(), cost: parseFloat(x.cost) }))
+      .filter(x => x.code && !Number.isNaN(x.cost));
+  }
   await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify({ ...cur, costs })]);
-  await audit(req, 'cost_settings', null, null, costs);
+  await audit(req, 'cost_settings', null, null, { keys: Object.keys(costs) });
   res.json({ ok: true, settings: resolveCostSettings(await settingsRow()) });
 });
 
@@ -223,12 +245,12 @@ router.get('/overstock', requireAdmin, async (req, res) => {
   await ensureCostSchema();
   const S = resolveCostSettings(await settingsRow());
   const { rows } = await query(
-    `SELECT id, sku, title, brand, qty_on_hand, large_panel, cost_price, price_ebay
+    `SELECT id, sku, title, brand, qty_on_hand, large_panel, shipping_band, cost_price, price_ebay
      FROM products WHERE active=true AND cost_price IS NOT NULL AND qty_on_hand >= $1
      ORDER BY qty_on_hand * cost_price DESC LIMIT 500`, [S.overstockThreshold]);
   const items = rows.map(r => {
     const cost = parseFloat(r.cost_price);
-    const fe = computeFloor({ costPrice: cost, isLarge: !!r.large_panel, channel: 'ebay', settings: S });
+    const fe = computeFloor({ costPrice: cost, isLarge: !!r.large_panel, band: r.shipping_band || null, channel: 'ebay', settings: S });
     return {
       id: r.id, sku: r.sku, title: r.title, brand: r.brand, qtyOnHand: r.qty_on_hand,
       costPrice: cost, capitalTied: +(r.qty_on_hand * cost).toFixed(2),
@@ -259,13 +281,13 @@ router.get('/valuation', requireAdmin, async (req, res) => {
 router.get('/floors', requireAdmin, async (req, res) => {
   await ensureCostSchema();
   const S = resolveCostSettings(await settingsRow());
-  const { rows } = await query(`SELECT id, large_panel, cost_price FROM products WHERE active=true AND cost_price IS NOT NULL`);
+  const { rows } = await query(`SELECT id, large_panel, shipping_band, cost_price FROM products WHERE active=true AND cost_price IS NOT NULL`);
   const floors = {};
   for (const r of rows) {
-    const cost = parseFloat(r.cost_price); const isLarge = !!r.large_panel;
-    const fe = computeFloor({ costPrice: cost, isLarge, channel: 'ebay', settings: S });
-    const fs = computeFloor({ costPrice: cost, isLarge, channel: 'shopify', settings: S });
-    const fd = computeFloor({ costPrice: cost, isLarge, channel: 'direct', settings: S });
+    const cost = parseFloat(r.cost_price); const isLarge = !!r.large_panel; const band = r.shipping_band || null;
+    const fe = computeFloor({ costPrice: cost, isLarge, band, channel: 'ebay', settings: S });
+    const fs = computeFloor({ costPrice: cost, isLarge, band, channel: 'shopify', settings: S });
+    const fd = computeFloor({ costPrice: cost, isLarge, band, channel: 'direct', settings: S });
     floors[r.id] = {
       costPrice: cost,
       floorEbay: fe.floor, floorShopify: fs.floor, floorDirect: fd.floor,

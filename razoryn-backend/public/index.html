@@ -12002,14 +12002,15 @@ function ctRow(p) {
         <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(p.title || '')}</div>
         <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(p.sku || '')}${p.lastSupplier ? ' · ' + escapeHtml(p.lastSupplier) : ''}${p.lastPurchaseDate ? ' · ' + new Date(p.lastPurchaseDate).toLocaleDateString('en-GB') : ''} ${flag(p.overstock, '📦 ' + p.qtyOnHand, 'var(--amber)')}</div>
       </div>
-      <div style="width:74px;text-align:right"><div style="font-size:10px;color:var(--ink-soft)">Cost</div><div style="font-weight:700;font-size:13px">${p.costPrice == null ? '<span style="color:var(--amber)">add</span>' : ctMoney(p.costPrice)}</div></div>
-      <div style="width:118px;text-align:right">
-        <div style="font-size:10px;color:var(--ink-soft)">eBay floor / price</div>
-        <div style="font-size:12px">${ctMoney(p.floorEbay)} <span style="color:var(--ink-soft)">/</span> <span style="${p.belowFloorEbay ? 'color:var(--red);font-weight:700' : ''}">${ctMoney(p.priceEbay)}</span></div>
-        <div style="font-size:10px;color:${marginCol(p.marginEbayPct)}">${p.marginEbayPct == null ? '' : 'margin ' + ctPct(p.marginEbayPct)}</div>
+      <div style="width:74px;text-align:right"><div style="font-size:10px;color:var(--ink-soft)">Cost (landed)</div><div style="font-weight:700;font-size:13px">${p.costPrice == null ? '<span style="color:var(--amber)">add</span>' : ctMoney(p.costPrice)}</div></div>
+      <div style="width:150px;text-align:right">
+        <div style="font-size:10px;color:var(--ink-soft)">eBay rec / price</div>
+        <div style="font-size:12px"><span title="Recommended price" style="font-weight:600">${ctMoney(p.floorEbay)}</span> <span style="color:var(--ink-soft)">/</span> <span style="${p.belowFloorEbay ? 'color:var(--red);font-weight:700' : ''}">${ctMoney(p.priceEbay)}</span></div>
+        <div style="font-size:10px;color:${marginCol(p.marginEbayPct)}">${p.marginEbayPct == null ? '' : 'margin ' + ctPct(p.marginEbayPct)}${p.breakevenEbay != null ? ` · min ${ctMoney(p.breakevenEbay)}` : ''}</div>
+        ${p.offerEbayPct != null ? `<div style="font-size:10px;color:${p.offerBelowBreakevenEbay ? 'var(--red)' : marginCol(p.offerEbayPct)}">${p.offerBelowBreakevenEbay ? '✗' : '✓'} −${CT.settings?.offerDiscountPct ?? 5}% offer: ${ctPct(p.offerEbayPct)}</div>` : ''}
       </div>
       <div style="width:118px;text-align:right">
-        <div style="font-size:10px;color:var(--ink-soft)">Shopify floor / price</div>
+        <div style="font-size:10px;color:var(--ink-soft)">Shopify rec / price</div>
         <div style="font-size:12px">${ctMoney(p.floorShopify)} <span style="color:var(--ink-soft)">/</span> <span style="${p.belowFloorShopify ? 'color:var(--red);font-weight:700' : ''}">${ctMoney(p.priceShopify)}</span></div>
         <div style="font-size:10px;color:${marginCol(p.marginShopifyPct)}">${p.marginShopifyPct == null ? '' : 'margin ' + ctPct(p.marginShopifyPct)}</div>
       </div>
@@ -12062,12 +12063,17 @@ async function ctOpenEditor(productId) {
           <div style="display:flex;gap:6px"><input id="ct-rate" type="number" step="0.00001" min="0" placeholder="auto" style="flex:1"><button type="button" class="btn btn-outline btn-sm" onclick="ctFetchRate()">↻</button></div></div>
         <div class="field"><label>= GBP unit cost</label><input id="ct-gbp" disabled style="background:var(--bg-soft);font-weight:700"></div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr;gap:10px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field"><label>Qty on order <span style="color:var(--ink-soft);font-weight:400">(opt)</span></label><input id="ct-qty" type="number" min="0" placeholder="optional"></div>
+        <div class="field"><label>Shipping band <span style="color:var(--ink-soft);font-weight:400">— sets this item's postage</span></label>
+          <select id="ct-band" onchange="ctSaveBand(${productId}, this.value)">
+            <option value="">(default by size)</option>
+            ${(CT.settings?.shippingBands || []).map(bnd => `<option value="${escapeAttr(bnd.code)}"${p.shippingBand === bnd.code ? ' selected' : ''}>${escapeHtml(bnd.label)} · £${(+bnd.cost).toFixed(2)}</option>`).join('')}
+          </select></div>
       </div>
       <div style="font-size:11px;color:var(--ink-soft);margin:2px 0 6px">This is the <strong>goods</strong> unit cost. Container freight &amp; duty are now entered on the container (Incoming → open a container) and split across its items by value to give the true landed cost.</div>
       <div class="field"><label>Note</label><input id="ct-note" placeholder="optional"></div>
-      <div id="ct-floors-preview" style="font-size:12px;color:var(--ink-soft);margin:4px 0 8px"></div>
+      <div id="ct-floors-preview" style="font-size:12px;margin:4px 0 8px"></div>${ctRecoBox(p)}
       <div id="ct-history" style="border-top:1px solid var(--line);padding-top:10px"><div style="font-size:12px;color:var(--ink-soft)">Loading history…</div></div>`,
     actions: [
       { label: 'Cancel', onClick: closeModal },
@@ -12086,6 +12092,36 @@ function ctUpdateGbpPreview() {
   const rate = cur === 'GBP' ? 1 : parseFloat(el('ct-rate')?.value) || 0;
   const gbp = foreign * rate;
   if (el('ct-gbp')) el('ct-gbp').value = (foreign && rate) ? '£' + gbp.toFixed(2) : '';
+}
+
+// A small "what to charge" box: recommended price, the lowest safe price (breakeven),
+// and how a 5% offer lands — the pricing guidance the screen was missing.
+function ctRecoBox(p) {
+  if (!p || p.costPrice == null) return '<div style="font-size:11px;color:var(--ink-soft);background:var(--bg-soft);border-radius:8px;padding:8px 10px;margin-bottom:8px">Add a cost to see the recommended price and margins.</div>';
+  const off = CT.settings?.offerDiscountPct ?? 5;
+  const row = (label, val, sub) => `<div style="display:flex;justify-content:space-between;gap:10px"><span style="color:var(--ink-soft)">${label}</span><span style="font-weight:600">${val}${sub ? ` <span style="font-weight:400;color:var(--ink-soft)">${sub}</span>` : ''}</span></div>`;
+  return `<div style="font-size:12px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px;display:grid;gap:3px">
+    <div style="font-weight:700;margin-bottom:2px">eBay pricing (landed cost ${ctMoney(p.costPrice)})</div>
+    ${row('✅ Recommended', ctMoney(p.floorEbay), `(${CT.settings?.targetMarginPct ?? 15}% margin)`)}
+    ${row('⚠️ Lowest safe (breakeven)', ctMoney(p.breakevenEbay), 'you make £0 below this')}
+    ${p.priceEbay != null ? row('Current price', ctMoney(p.priceEbay), p.marginEbayPct != null ? `margin ${ctPct(p.marginEbayPct)}` : '') : ''}
+    ${p.offerEbayPct != null ? row(`After −${off}% offer`, ctMoney(p.offerEbayPrice), `${p.offerBelowBreakevenEbay ? '❌ loses money' : '✓ margin ' + ctPct(p.offerEbayPct)}`) : ''}
+    <div style="font-size:10px;color:var(--ink-soft);margin-top:3px">Includes eBay FVF ${CT.settings?.ebayFvfPct ?? 9.5}% + reg ${CT.settings?.ebayRegulatoryPct ?? 0.35}%${(CT.settings?.ebayHighReturnPct) ? ' + high-return ' + CT.settings.ebayHighReturnPct + '%' : ''} + £${(CT.settings?.ebayPerOrderFee ?? 0.40)} per order${CT.settings?.feesVatOnEbay ? ' (+' + (CT.settings?.feesVatPct ?? 20) + '% VAT on fees)' : ''}, postage + packaging, and sale VAT.</div>
+  </div>`;
+}
+
+// Set this item's shipping band live (PATCH product) → recompute floors/margins.
+async function ctSaveBand(productId, band) {
+  try {
+    await Api.patch('/api/products/' + productId, { shippingBand: band || null });
+    await loadCosts();
+    await refreshCostFloors();
+    // Re-render the recommendation box with the updated figures.
+    const p = (CT.items || []).find(x => x.id === productId);
+    const box = el('ct-floors-preview');
+    if (box && p) box.outerHTML = `<div id="ct-floors-preview" style="font-size:12px;margin:4px 0 8px"></div>${ctRecoBox(p)}`;
+    toast('Shipping band updated', 'success');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 async function ctFetchRate() {
@@ -12153,36 +12189,76 @@ async function ctLoadHistory(productId) {
 }
 
 // ---- Cost settings ----
+let _csBands = [];
 async function ctOpenSettings() {
   let s = CT.settings;
   if (!s) { try { s = (await Api.get('/api/costs/settings')).settings; } catch (e) { toast('Failed to load settings', 'error'); return; } }
-  const f = (id, label, val, hint) => `<div class="field"><label>${label}</label><input id="cs-${id}" type="number" step="0.01" value="${val != null ? val : ''}">${hint ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">${hint}</div>` : ''}</div>`;
+  _csBands = (s.shippingBands || []).map(b => ({ ...b }));
+  const f = (id, label, val, hint, step) => `<div class="field"><label>${label}</label><input id="cs-${id}" type="number" step="${step || '0.01'}" value="${val != null ? val : ''}">${hint ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">${hint}</div>` : ''}</div>`;
+  const chk = (id, label, on, hint) => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><input type="checkbox" id="cs-${id}" ${on ? 'checked' : ''}> ${label}</label>${hint ? `<div style="font-size:11px;color:var(--ink-soft);margin:-2px 0 0 24px">${hint}</div>` : ''}`;
   modal({
     title: '⚙️ Cost settings',
     body: `
-      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">These drive the breakeven/floor maths. VAT is taken from your main Settings (${s.vatRegistered ? 'VAT-registered @ ' + s.vatRate + '%' : 'not VAT-registered'}).</div>
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">These drive the recommended price and margins. Sale VAT is taken from your main Settings (${s.vatRegistered ? 'VAT-registered @ ' + s.vatRate + '%' : 'not VAT-registered'}).</div>
+
+      <div style="font-weight:700;font-size:13px;margin:6px 0 4px">📦 Shipping bands</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Each item is assigned a band (in its cost editor) so postage is accurate per size. Editing a band's cost updates every item that uses it.</div>
+      <div id="cs-bands"></div>
+      <button type="button" class="btn btn-outline btn-sm" onclick="csAddBand()" style="margin:4px 0 12px">+ Add band</button>
+
+      <div style="font-weight:700;font-size:13px;margin:6px 0 4px">🟦 eBay fees</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">eBay's fee = final value fee % (by category) + regulatory operating fee % + an account-specific "high return rate" extra % + a per-order fixed fee, then <strong>+20% VAT on the whole fee</strong>. (Vehicle parts FVF is ~9.5% for orders £0–750.)</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        ${f('postageSmall', 'Postage — small item £', s.postageSmall)}
-        ${f('postageLarge', 'Postage — large panel £', s.postageLarge, 'Used when an item is flagged "large panel".')}
-        ${f('packagingCost', 'Packaging £/order', s.packagingCost)}
-        ${f('targetMarginPct', 'Target margin %', s.targetMarginPct, 'Floor = breakeven + this %.')}
-        ${f('ebayFeePct', 'eBay fee %', s.ebayFeePct)}
-        ${f('ebayFixedFee', 'eBay fixed fee £', s.ebayFixedFee)}
-        ${f('shopifyFeePct', 'Shopify fee %', s.shopifyFeePct)}
-        ${f('shopifyFixedFee', 'Shopify fixed fee £', s.shopifyFixedFee)}
+        ${f('ebayFvfPct', 'Final value fee %', s.ebayFvfPct, 'Category rate (vehicle parts ~9.5%).')}
+        ${f('ebayRegulatoryPct', 'Regulatory operating fee %', s.ebayRegulatoryPct, 'Usually 0.35%.')}
+        ${f('ebayHighReturnPct', 'High return-rate extra %', s.ebayHighReturnPct, 'Account-specific penalty (0 if your account is fine; some pay ~4%).')}
+        ${f('ebayPerOrderFee', 'Per-order fixed fee £', s.ebayPerOrderFee, '~£0.40 for orders over £10.')}
         ${f('adRatePct', 'eBay ad rate %', s.adRatePct, 'Promoted-listing rate, if you run ads.')}
-        ${f('overstockThreshold', 'Overstock threshold (units)', s.overstockThreshold)}
+        ${f('feesVatPct', 'VAT on fees %', s.feesVatPct, '20% in the UK.')}
+      </div>
+      <div style="margin:6px 0 12px">${chk('feesVatOnEbay', 'eBay charges VAT on its fees', s.feesVatOnEbay)}</div>
+
+      <div style="font-weight:700;font-size:13px;margin:6px 0 4px">🟩 Shopify fees</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        ${f('shopifyFeePct', 'Shopify fee %', s.shopifyFeePct, 'Payments card rate (~1.9%).')}
+        ${f('shopifyFixedFee', 'Shopify fixed fee £', s.shopifyFixedFee)}
+      </div>
+      <div style="margin:6px 0 12px">${chk('feesVatOnShopify', 'Shopify charges VAT on its fees', s.feesVatOnShopify)}</div>
+
+      <div style="font-weight:700;font-size:13px;margin:6px 0 4px">💷 Pricing</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        ${f('packagingCost', 'Packaging £/order', s.packagingCost)}
+        ${f('targetMarginPct', 'Target margin %', s.targetMarginPct, 'Recommended price = breakeven + this %.')}
+        ${f('offerDiscountPct', 'Offer discount %', s.offerDiscountPct, 'Your standard "send offer" (eBay minimum 5%).')}
+        ${f('overstockThreshold', 'Overstock threshold (units)', s.overstockThreshold, null, '1')}
       </div>`,
     actions: [
       { label: 'Cancel', onClick: closeModal },
       { label: 'Save', primary: true, onClick: ctSaveSettings },
     ],
   });
+  csRenderBands();
 }
+function csRenderBands() {
+  const wrap = el('cs-bands'); if (!wrap) return;
+  wrap.innerHTML = _csBands.map((b, i) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:5px">
+    <input value="${escapeAttr(b.label || '')}" placeholder="Label" onchange="_csBands[${i}].label=this.value" style="flex:1">
+    <input value="${escapeAttr(b.code || '')}" placeholder="code" onchange="_csBands[${i}].code=this.value" style="width:90px;font-family:ui-monospace,monospace;font-size:12px">
+    <span style="color:var(--ink-soft)">£</span><input type="number" step="0.01" min="0" value="${b.cost != null ? b.cost : ''}" onchange="_csBands[${i}].cost=parseFloat(this.value)" style="width:80px">
+    <button class="btn btn-ghost btn-sm" onclick="_csBands.splice(${i},1);csRenderBands()" style="color:var(--red)">×</button>
+  </div>`).join('') || '<div style="font-size:12px;color:var(--ink-soft)">No bands — add one.</div>';
+}
+function csAddBand() { _csBands.push({ code: '', label: '', cost: 0 }); csRenderBands(); }
 async function ctSaveSettings() {
-  const keys = ['postageSmall', 'postageLarge', 'packagingCost', 'targetMarginPct', 'ebayFeePct', 'ebayFixedFee', 'shopifyFeePct', 'shopifyFixedFee', 'adRatePct', 'overstockThreshold'];
+  const numKeys = ['packagingCost', 'targetMarginPct', 'offerDiscountPct', 'overstockThreshold',
+    'ebayFvfPct', 'ebayRegulatoryPct', 'ebayHighReturnPct', 'ebayPerOrderFee', 'adRatePct', 'feesVatPct',
+    'shopifyFeePct', 'shopifyFixedFee'];
   const payload = {};
-  for (const k of keys) { const v = el('cs-' + k)?.value; if (v !== '' && v != null) payload[k] = parseFloat(v); }
+  for (const k of numKeys) { const v = el('cs-' + k)?.value; if (v !== '' && v != null) payload[k] = parseFloat(v); }
+  payload.feesVatOnEbay = !!el('cs-feesVatOnEbay')?.checked;
+  payload.feesVatOnShopify = !!el('cs-feesVatOnShopify')?.checked;
+  payload.shippingBands = _csBands.filter(b => (b.code || '').trim() && !Number.isNaN(parseFloat(b.cost)))
+    .map(b => ({ code: String(b.code).trim(), label: b.label || b.code, cost: parseFloat(b.cost) }));
   try {
     const r = await Api.post('/api/costs/settings', payload);
     CT.settings = r.settings;

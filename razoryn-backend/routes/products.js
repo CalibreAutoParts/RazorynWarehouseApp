@@ -33,6 +33,10 @@ async function ensureProductLocationColumns() {
     // Price lock: when true, automated price derivation (eBay→Shopify link, bulk
     // price tools) won't overwrite this product's prices — staff keep it manual.
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS price_locked BOOLEAN NOT NULL DEFAULT false`);
+    // Shipping band: which named postage band this item uses (codes defined in
+    // app_settings.data.costs.shippingBands). Null falls back to large/small by
+    // large_panel. Drives accurate per-item postage in the margin maths.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS shipping_band TEXT`);
     // Pre-listing / pre-order: a product created BEFORE its stock arrives. It is
     // listed (Shopify as a pre-order, eBay scheduled to go live) and can be
     // quoted/pre-ordered, but is excluded from the stock-take quantity count.
@@ -536,7 +540,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
                    'low_stock_threshold', 'price_shopify', 'price_ebay', 'cost_price',
                    'location_id', 'active', 'location_note', 'location_photo_data_url',
-                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked'];
+                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked', 'shipping_band'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
@@ -544,7 +548,8 @@ router.patch('/:id', requireAdmin, async (req, res) => {
                 locationNote: 'location_note', locationPhotoDataUrl: 'location_photo_data_url',
                 itemPhotoDataUrl: 'item_photo_data_url',
                 locationPhotoDataUrl2: 'location_photo_data_url_2',
-                primaryPhoto: 'primary_photo', largePanel: 'large_panel', priceLocked: 'price_locked' };
+                primaryPhoto: 'primary_photo', largePanel: 'large_panel', priceLocked: 'price_locked',
+                shippingBand: 'shipping_band' };
   const sets = [], params = [];
   // Always ensure the per-product location/photo columns (incl. updated_at)
   // exist before we touch them — cheap (cached after first run).
