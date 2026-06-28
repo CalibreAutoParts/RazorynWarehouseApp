@@ -12016,7 +12016,7 @@ function ctRow(p) {
         <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(p.title || '')}</div>
         <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(p.sku || '')}${p.lastSupplier ? ' · ' + escapeHtml(p.lastSupplier) : ''}${p.lastPurchaseDate ? ' · ' + new Date(p.lastPurchaseDate).toLocaleDateString('en-GB') : ''} ${flag(p.overstock, '📦 ' + p.qtyOnHand, 'var(--amber)')}</div>
       </div>
-      <div style="width:74px;text-align:right"><div style="font-size:10px;color:var(--ink-soft)">Cost (landed)</div><div style="font-weight:700;font-size:13px">${p.costPrice == null ? '<span style="color:var(--amber)">add</span>' : ctMoney(p.costPrice)}</div></div>
+      <div style="width:80px;text-align:right"><div style="font-size:10px;color:var(--ink-soft)">Cost ${p.costPrice == null ? '' : (p.landedKnown ? '(landed)' : '(est.)')}</div><div style="font-weight:700;font-size:13px">${p.costPrice == null ? '<span style="color:var(--amber)">add</span>' : ctMoney(p.effectiveCost != null ? p.effectiveCost : p.costPrice)}</div></div>
       <div style="width:150px;text-align:right">
         <div style="font-size:10px;color:var(--ink-soft)">eBay rec / price</div>
         <div style="font-size:12px"><span title="Recommended price" style="font-weight:600">${ctMoney(p.floorEbay)}</span> <span style="color:var(--ink-soft)">/</span> <span style="${p.belowFloorEbay ? 'color:var(--red);font-weight:700' : ''}">${ctMoney(p.priceEbay)}</span></div>
@@ -12091,6 +12091,8 @@ async function ctOpenEditor(productId) {
             <button type="button" class="btn btn-outline btn-sm" onclick="ctSaveBand(${productId}, 'custom')">Apply</button>
           </div>
           <div style="font-size:10px;color:var(--ink-soft);margin-top:3px">Add/edit standard bands in ⚙️ Cost settings. Use Custom for an odd size until you have a standard box.</div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-top:8px;cursor:pointer"><input type="checkbox" id="ct-postage-in-price" ${p.postageInPrice ? 'checked' : ''} onchange="ctSavePostageInPrice(${productId}, this.checked)"> Postage is inside the selling price</label>
+          <div style="font-size:10px;color:var(--ink-soft);margin-top:2px">Untick for items where the buyer pays postage separately (e.g. most large panels) — postage is then left out of the margin.</div>
         </div>
       </div>
       <div style="font-size:11px;color:var(--ink-soft);margin:2px 0 6px">This is the <strong>goods</strong> unit cost. Container freight &amp; duty are now entered on the container (Incoming → open a container) and split across its items by value to give the true landed cost.</div>
@@ -12124,8 +12126,12 @@ function ctRecoBox(p) {
   const off = CT.settings?.offerDiscountPct ?? 5;
   const row = (label, val, sub) => `<div style="display:flex;justify-content:space-between;gap:10px"><span style="color:var(--ink-soft)">${label}</span><span style="font-weight:600">${val}${sub ? ` <span style="font-weight:400;color:var(--ink-soft)">${sub}</span>` : ''}</span></div>`;
   const testDefault = (p.priceEbay != null ? p.priceEbay : (p.floorEbay != null ? p.floorEbay : ''));
+  const eff = p.effectiveCost != null ? p.effectiveCost : p.costPrice;
+  const costNote = p.landedKnown ? 'landed, actual'
+    : (CT.settings?.landedUpliftPct ? `est. incl. +${CT.settings.landedUpliftPct}% freight/duty` : 'goods cost');
+  const postNote = ((p.postageInPrice == null) ? !p.largePanel : !!p.postageInPrice) ? `postage ${ctMoney(ctPostageFor(p))}` : 'postage charged separately';
   return `<div style="font-size:12px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px;display:grid;gap:3px">
-    <div style="font-weight:700;margin-bottom:2px">eBay pricing (landed cost ${ctMoney(p.costPrice)}, postage ${ctMoney(ctPostageFor(p))})</div>
+    <div style="font-weight:700;margin-bottom:2px">eBay pricing (cost ${ctMoney(eff)} · ${costNote} · ${postNote})</div>
     ${row('✅ Recommended', ctMoney(p.floorEbay), `(${CT.settings?.targetMarginPct ?? 15}% margin)`)}
     ${row('⚠️ Lowest safe (breakeven)', ctMoney(p.breakevenEbay), 'you make £0 below this')}
     ${p.priceEbay != null ? row('Current price', ctMoney(p.priceEbay), p.marginEbayPct != null ? `margin ${ctPct(p.marginEbayPct)}` : '') : ''}
@@ -12169,6 +12175,18 @@ async function ctSaveBand(productId, band) {
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
+// Toggle whether postage is inside the selling price (PATCH product) → recompute.
+async function ctSavePostageInPrice(productId, checked) {
+  try {
+    await Api.patch('/api/products/' + productId, { postageInPrice: !!checked });
+    await loadCosts();
+    await refreshCostFloors();
+    const p = (CT.items || []).find(x => x.id === productId);
+    const box = el('ct-floors-preview');
+    if (box && p) { box.outerHTML = `<div id="ct-floors-preview" style="font-size:12px;margin:4px 0 8px"></div>${ctRecoBox(p)}`; ctWireTestPrice(p); }
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
 // Resolve this item's postage £ from its band/custom (client-side mirror of the server).
 function ctPostageFor(p) {
   const s = CT.settings || {};
@@ -12183,9 +12201,13 @@ function ctPostageFor(p) {
 function ctComputeBreakdown(price, p) {
   const s = CT.settings || {};
   const B = parseFloat(price) || 0;
-  const cost = p.costPrice != null ? parseFloat(p.costPrice) : 0;
+  const goods = p.costPrice != null ? parseFloat(p.costPrice) : 0;
+  // Effective cost: real landed if we have it, else goods grossed up by the uplift %.
+  const uplift = s.landedUpliftPct || 0;
   const v = s.vatRegistered ? (s.vatRate / 100) / (1 + s.vatRate / 100) : 0;
-  const postage = ctPostageFor(p);
+  const inPrice = (p.postageInPrice == null) ? !p.largePanel : !!p.postageInPrice;
+  const postageVal = ctPostageFor(p);
+  const postage = inPrice ? postageVal : 0;
   const packaging = s.packagingCost || 0;
   const fvf = B * (s.ebayFvfPct || 0) / 100;
   const reg = B * (s.ebayRegulatoryPct || 0) / 100;
@@ -12195,20 +12217,29 @@ function ctComputeBreakdown(price, p) {
   const feeBase = fvf + reg + hr + ad + per;
   const feeVat = s.feesVatOnEbay ? feeBase * ((s.feesVatPct || 20) / 100) : 0;
   const saleVat = B * v;
-  const net = B - cost - postage - packaging - feeBase - feeVat - saleVat;
-  const marginPct = B > 0 ? (net / B) * 100 : 0;
-  const rows = [
-    ['Item cost (landed)', cost],
-    ['Postage', postage],
-    ['Packaging', packaging],
-    [`eBay final value fee (${s.ebayFvfPct ?? 9.5}%)`, fvf],
-    [`Regulatory operating fee (${s.ebayRegulatoryPct ?? 0.35}%)`, reg],
-  ];
+  // Cost rows: actual landed (one line) or goods + estimated freight/duty (two lines).
+  const rows = [];
+  let costTotal;
+  if (p.landedKnown && p.landedCost != null) {
+    costTotal = parseFloat(p.landedCost);
+    rows.push(['Item cost (landed, actual)', costTotal]);
+  } else {
+    const freight = goods * uplift / 100;
+    costTotal = goods + freight;
+    rows.push(['Item cost (goods)', goods]);
+    if (uplift > 0) rows.push([`Freight/duty (est. +${uplift}%)`, freight]);
+  }
+  rows.push(inPrice ? ['Postage', postage] : ['Postage (buyer pays separately)', 0, false, true]);
+  rows.push(['Packaging', packaging]);
+  rows.push([`eBay final value fee (${s.ebayFvfPct ?? 9.5}%)`, fvf]);
+  rows.push([`Regulatory operating fee (${s.ebayRegulatoryPct ?? 0.35}%)`, reg]);
   if ((s.ebayHighReturnPct || 0) > 0) rows.push([`High return-rate penalty (${s.ebayHighReturnPct}%)`, hr, true]);
   if ((s.adRatePct || 0) > 0) rows.push([`Ad rate (${s.adRatePct}%)`, ad]);
   rows.push(['Per-order fee', per]);
   if (feeVat > 0) rows.push([`VAT on eBay fees (${s.feesVatPct ?? 20}%)`, feeVat]);
   if (saleVat > 0) rows.push([`VAT on the sale (${s.vatRate ?? 20}%)`, saleVat]);
+  const net = B - costTotal - postage - packaging - feeBase - feeVat - saleVat;
+  const marginPct = B > 0 ? (net / B) * 100 : 0;
   return { price: B, net, marginPct, rows };
 }
 function ctRenderBreakdown(price, p) {
@@ -12217,7 +12248,12 @@ function ctRenderBreakdown(price, p) {
   const col = b.marginPct < 0 ? 'var(--red)' : b.marginPct < 10 ? 'var(--amber)' : 'var(--green)';
   wrap.innerHTML = `
     <div style="display:flex;justify-content:space-between;font-weight:700;margin-bottom:4px"><span>Sale price</span><span>${ctMoney(b.price)}</span></div>
-    ${b.rows.map(r => `<div style="display:flex;justify-content:space-between;color:${r[2] ? 'var(--red)' : 'var(--ink-soft)'}"><span>− ${r[0]}</span><span>−${ctMoney(r[1])}</span></div>`).join('')}
+    ${b.rows.map(r => {
+      const muted = r[3];               // informational row (e.g. buyer pays postage)
+      const colr = r[2] ? 'var(--red)' : 'var(--ink-soft)';
+      const amt = muted ? '<span style="opacity:.7">n/a</span>' : ('−' + ctMoney(r[1]));
+      return `<div style="display:flex;justify-content:space-between;color:${colr}"><span>${muted ? '' : '− '}${r[0]}</span><span>${amt}</span></div>`;
+    }).join('')}
     <div style="display:flex;justify-content:space-between;font-weight:700;border-top:1px solid var(--line);margin-top:5px;padding-top:5px;color:${col}"><span>= Net profit</span><span>${ctMoney(b.net)} · ${ctPct(b.marginPct)}</span></div>`;
 }
 // Attach the "test a price" input handler + initial render.
@@ -12334,6 +12370,7 @@ async function ctOpenSettings() {
         ${f('packagingCost', 'Packaging £/order', s.packagingCost)}
         ${f('targetMarginPct', 'Target margin %', s.targetMarginPct, 'Recommended price = breakeven + this %.')}
         ${f('offerDiscountPct', 'Offer discount %', s.offerDiscountPct, 'Your standard "send offer" (eBay minimum 5%).')}
+        ${f('landedUpliftPct', 'Freight/duty uplift %', s.landedUpliftPct, 'Adds this % of the goods cost to estimate freight + import VAT/duty, for items with no real landed cost yet. Items with an actual landed cost ignore it.')}
         ${f('overstockThreshold', 'Overstock threshold (units)', s.overstockThreshold, null, '1')}
       </div>`,
     actions: [
@@ -12354,7 +12391,7 @@ function csRenderBands() {
 }
 function csAddBand() { _csBands.push({ code: '', label: '', cost: 0 }); csRenderBands(); }
 async function ctSaveSettings() {
-  const numKeys = ['packagingCost', 'targetMarginPct', 'offerDiscountPct', 'overstockThreshold',
+  const numKeys = ['packagingCost', 'targetMarginPct', 'offerDiscountPct', 'landedUpliftPct', 'overstockThreshold',
     'ebayFvfPct', 'ebayRegulatoryPct', 'ebayHighReturnPct', 'ebayPerOrderFee', 'adRatePct', 'feesVatPct',
     'shopifyFeePct', 'shopifyFixedFee'];
   const payload = {};

@@ -40,6 +40,12 @@ async function ensureProductLocationColumns() {
     // Custom per-item postage £ — used when shipping_band = 'custom' (an item that
     // doesn't fit a standard box yet). Overrides the band cost in the margin maths.
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS shipping_cost NUMERIC(10,2)`);
+    // Actual landed cost (goods + apportioned container freight/duty). Set when a
+    // container is received; null = estimate landed via the global uplift %.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS landed_cost NUMERIC(12,4)`);
+    // Is postage inside the selling price? null → derived (large panels = no, the
+    // buyer pays postage separately; everything else = yes). Overridable per item.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS postage_in_price BOOLEAN`);
     // Pre-listing / pre-order: a product created BEFORE its stock arrives. It is
     // listed (Shopify as a pre-order, eBay scheduled to go live) and can be
     // quoted/pre-ordered, but is excluded from the stock-take quantity count.
@@ -543,7 +549,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
                    'low_stock_threshold', 'price_shopify', 'price_ebay', 'cost_price',
                    'location_id', 'active', 'location_note', 'location_photo_data_url',
-                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked', 'shipping_band', 'shipping_cost'];
+                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked', 'shipping_band', 'shipping_cost', 'postage_in_price'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
@@ -552,7 +558,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
                 itemPhotoDataUrl: 'item_photo_data_url',
                 locationPhotoDataUrl2: 'location_photo_data_url_2',
                 primaryPhoto: 'primary_photo', largePanel: 'large_panel', priceLocked: 'price_locked',
-                shippingBand: 'shipping_band' };
+                shippingBand: 'shipping_band', shippingCost: 'shipping_cost', postageInPrice: 'postage_in_price' };
   const sets = [], params = [];
   // Always ensure the per-product location/photo columns (incl. updated_at)
   // exist before we touch them — cheap (cached after first run).
