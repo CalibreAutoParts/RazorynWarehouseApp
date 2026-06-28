@@ -40,7 +40,10 @@ async function recordReceivedCost(row, qtyReceived, userId) {
        row.id, row.freight_total, row.duty,
        (row.landed_unit_cost_gbp != null ? 'Received from incoming (landed)' : 'Received from incoming'),
        userId]);
-    await query(`UPDATE products SET cost_price = $1, updated_at = now() WHERE id = $2`, [landed, row.product_id]);
+    // cost_price + the explicit landed_cost (so the margin tool uses the REAL landed
+    // figure rather than the global uplift estimate).
+    await query(`UPDATE products SET cost_price = $1, landed_cost = $2, updated_at = now() WHERE id = $3`,
+      [landed, (row.landed_unit_cost_gbp != null ? landed : null), row.product_id]);
     return true;
   } catch (e) { console.warn('[incoming] cost record warning:', e.message); return false; }
 }

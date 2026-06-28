@@ -40,6 +40,10 @@ const DEFAULTS = {
   adRatePct: 0,         // promoted-listing ad rate % of gross (eBay only)
   targetMarginPct: 15,  // uplift over breakeven → recommended floor
   offerDiscountPct: 5,  // the standard eBay "send offer" discount (min 5%)
+  // Global estimate: when an item has NO actual freight/duty captured (container
+  // not costed yet), add this % of the goods cost to approximate the landed cost
+  // (average freight + import VAT/duty). Items WITH a real landed cost use that.
+  landedUpliftPct: 0,
   overstockThreshold: 25,
   shippingBands: DEFAULT_BANDS,
 };
@@ -75,6 +79,7 @@ function resolveCostSettings(row) {
     adRatePct:         num(c.adRatePct, DEFAULTS.adRatePct),
     targetMarginPct:   num(c.targetMarginPct, DEFAULTS.targetMarginPct),
     offerDiscountPct:  num(c.offerDiscountPct, DEFAULTS.offerDiscountPct),
+    landedUpliftPct:   num(c.landedUpliftPct, DEFAULTS.landedUpliftPct),
     overstockThreshold: num(c.overstockThreshold, DEFAULTS.overstockThreshold),
     shippingBands:     bands,
     vatRate:           num(row.vat_rate, 20),
@@ -96,6 +101,14 @@ function postageFor(s, item) {
     if (b) return num(b.cost, 0);
   }
   return item.isLarge ? s.postageLarge : s.postageSmall;
+}
+
+// The cost to use in the maths: the ACTUAL landed cost if we have it, otherwise the
+// goods cost grossed up by the global freight/duty uplift %.
+function effectiveCost(costPrice, landedCost, s) {
+  const lc = num(landedCost, null);
+  if (lc != null) return lc;
+  return num(costPrice, 0) * (1 + num(s.landedUpliftPct, 0) / 100);
 }
 
 // Resolve the per-channel selling-cost parameters used by both floor + margin.
@@ -123,17 +136,21 @@ function channelParams(channel, item, s) {
 //   B = F / (1 - p - v)  ;  floor = B * (1 + targetMargin)
 // where F = cost + postage + packaging + fixedFee×feeVat, p = (fee%+ad%)/100×feeVat,
 // v = VAT portion of a gross price = (rate/100)/(1+rate/100) (0 if not registered).
-function computeFloor({ costPrice, isLarge, band, shippingCost, channel, settings, vatRegistered }) {
+function computeFloor({ costPrice, landedCost, isLarge, band, shippingCost, postageInPrice, channel, settings, vatRegistered }) {
   const s = settings;
-  const cost = num(costPrice, 0);
+  const cost = effectiveCost(costPrice, landedCost, s);
   const { postage, feePct, fixedFee, adRatePct, feeVatMult } = channelParams(channel, { band, isLarge, shippingCost }, s);
-  const F = cost + postage + s.packagingCost + fixedFee * feeVatMult;
+  // Postage only counts against margin when it's INSIDE the selling price. If the
+  // buyer pays postage separately (common for large panels) it's not absorbed here.
+  const inPrice = (postageInPrice == null) ? !isLarge : !!postageInPrice;
+  const postageCost = inPrice ? postage : 0;
+  const F = cost + postageCost + s.packagingCost + fixedFee * feeVatMult;
   const p = ((feePct + adRatePct) / 100) * feeVatMult;
   const vr = vatRegistered != null ? vatRegistered : s.vatRegistered;
   const v = vr ? (s.vatRate / 100) / (1 + s.vatRate / 100) : 0;
   const divisor = 1 - p - v;
   const components = {
-    costPrice: +cost.toFixed(2), postage, packaging: s.packagingCost, fixedFee: +(fixedFee * feeVatMult).toFixed(2),
+    costPrice: +cost.toFixed(2), postage: postageCost, postageInPrice: inPrice, packaging: s.packagingCost, fixedFee: +(fixedFee * feeVatMult).toFixed(2),
     feePct, adRatePct, feeVatMult, vatPortionRate: +v.toFixed(4), divisor: +divisor.toFixed(4),
     fixedCosts: +F.toFixed(2), targetMarginPct: s.targetMarginPct,
   };
@@ -144,15 +161,16 @@ function computeFloor({ costPrice, isLarge, band, shippingCost, channel, setting
 }
 
 // Net profit + margin% retained at an actual sale price (same cost model).
-function marginAtPrice({ price, costPrice, isLarge, band, shippingCost, channel, settings, vatRegistered }) {
+function marginAtPrice({ price, costPrice, landedCost, isLarge, band, shippingCost, postageInPrice, channel, settings, vatRegistered }) {
   const s = settings;
   const B = num(price, 0);
   if (B <= 0) return { net: null, marginPct: null };
-  const cost = num(costPrice, 0);
+  const cost = effectiveCost(costPrice, landedCost, s);
   const { postage, feePct, fixedFee, adRatePct, feeVatMult } = channelParams(channel, { band, isLarge, shippingCost }, s);
+  const inPrice = (postageInPrice == null) ? !isLarge : !!postageInPrice;
   const vr = vatRegistered != null ? vatRegistered : s.vatRegistered;
   const v = vr ? (s.vatRate / 100) / (1 + s.vatRate / 100) : 0;
-  const F = cost + postage + s.packagingCost + fixedFee * feeVatMult;
+  const F = cost + (inPrice ? postage : 0) + s.packagingCost + fixedFee * feeVatMult;
   const net = +(B * (1 - ((feePct + adRatePct) / 100) * feeVatMult - v) - F).toFixed(2);
   const marginPct = +((net / B) * 100).toFixed(1);
   return { net, marginPct };
@@ -166,4 +184,4 @@ function marginAtOffer(args) {
   return { ...marginAtPrice({ ...args, price }), offerPrice: +price.toFixed(2), offerDiscountPct: disc };
 }
 
-module.exports = { DEFAULTS, DEFAULT_BANDS, resolveCostSettings, channelParams, postageFor, computeFloor, marginAtPrice, marginAtOffer };
+module.exports = { DEFAULTS, DEFAULT_BANDS, resolveCostSettings, channelParams, postageFor, effectiveCost, computeFloor, marginAtPrice, marginAtOffer };

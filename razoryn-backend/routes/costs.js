@@ -6,7 +6,7 @@ const { query, withTx } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 const fx = require('../lib/fx');
-const { computeFloor, marginAtPrice, marginAtOffer, resolveCostSettings } = require('../lib/pricing-floor');
+const { computeFloor, marginAtPrice, marginAtOffer, effectiveCost, resolveCostSettings } = require('../lib/pricing-floor');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -57,6 +57,7 @@ router.get('/products', requireAdmin, async (req, res) => {
   if (brand) { params.push(brand); where.push(`p.brand = $${params.length}`); }
   const { rows } = await query(`
     SELECT p.id, p.sku, p.title, p.brand, p.model, p.qty_on_hand, p.large_panel, p.shipping_band, p.shipping_cost,
+           p.landed_cost, p.postage_in_price,
            p.cost_price, p.price_ebay, p.price_shopify, p.image_url,
            lc.supplier AS last_supplier, lc.purchase_date AS last_purchase_date,
            lc.currency AS last_currency, lc.unit_cost_foreign AS last_unit_cost_foreign
@@ -75,17 +76,24 @@ router.get('/products', requireAdmin, async (req, res) => {
     const isLarge = !!r.large_panel;
     const band = r.shipping_band || null;
     const shippingCost = r.shipping_cost != null ? parseFloat(r.shipping_cost) : null;
-    const fe = cost != null ? computeFloor({ costPrice: cost, isLarge, band, shippingCost, channel: 'ebay', settings: S }) : null;
-    const fs = cost != null ? computeFloor({ costPrice: cost, isLarge, band, shippingCost, channel: 'shopify', settings: S }) : null;
+    const landedCost = r.landed_cost != null ? parseFloat(r.landed_cost) : null;
+    const postageInPrice = (r.postage_in_price == null) ? !isLarge : !!r.postage_in_price;
+    const fargs = { isLarge, band, shippingCost, landedCost, postageInPrice, settings: S };
+    const fe = cost != null ? computeFloor({ costPrice: cost, channel: 'ebay', ...fargs }) : null;
+    const fs = cost != null ? computeFloor({ costPrice: cost, channel: 'shopify', ...fargs }) : null;
     const pe = r.price_ebay != null ? parseFloat(r.price_ebay) : null;
     const ps = r.price_shopify != null ? parseFloat(r.price_shopify) : null;
-    const me = (cost != null && pe) ? marginAtPrice({ price: pe, costPrice: cost, isLarge, band, shippingCost, channel: 'ebay', settings: S }) : { net: null, marginPct: null };
-    const ms = (cost != null && ps) ? marginAtPrice({ price: ps, costPrice: cost, isLarge, band, shippingCost, channel: 'shopify', settings: S }) : { net: null, marginPct: null };
+    const me = (cost != null && pe) ? marginAtPrice({ price: pe, costPrice: cost, channel: 'ebay', ...fargs }) : { net: null, marginPct: null };
+    const ms = (cost != null && ps) ? marginAtPrice({ price: ps, costPrice: cost, channel: 'shopify', ...fargs }) : { net: null, marginPct: null };
     // Margin if we drop the eBay price by the standard "send offer" discount.
-    const moe = (cost != null && pe) ? marginAtOffer({ price: pe, costPrice: cost, isLarge, band, shippingCost, channel: 'ebay', settings: S }) : { net: null, marginPct: null, offerPrice: null };
+    const moe = (cost != null && pe) ? marginAtOffer({ price: pe, costPrice: cost, channel: 'ebay', ...fargs }) : { net: null, marginPct: null, offerPrice: null };
+    // The cost actually used in the maths (real landed, or goods grossed up by uplift).
+    const effCost = cost != null ? effectiveCost(cost, landedCost, S) : null;
     return {
       id: r.id, sku: r.sku, title: r.title, brand: r.brand, model: r.model,
       qtyOnHand: r.qty_on_hand, largePanel: isLarge, shippingBand: band, shippingCost, imageUrl: r.image_url,
+      landedCost, landedKnown: landedCost != null, postageInPrice,
+      effectiveCost: effCost != null ? +effCost.toFixed(2) : null,
       costPrice: cost, priceEbay: pe, priceShopify: ps,
       lastSupplier: r.last_supplier, lastPurchaseDate: r.last_purchase_date,
       lastCurrency: r.last_currency, lastUnitCostForeign: r.last_unit_cost_foreign != null ? parseFloat(r.last_unit_cost_foreign) : null,
@@ -142,7 +150,7 @@ router.get('/products/:id/history', requireAdmin, async (req, res) => {
 router.post('/products/:id/cost', requireAdmin, async (req, res) => {
   await ensureCostSchema();
   const id = parseInt(req.params.id);
-  const pr = await query(`SELECT id, large_panel, shipping_band, shipping_cost FROM products WHERE id = $1`, [id]);
+  const pr = await query(`SELECT id, large_panel, shipping_band, shipping_cost, postage_in_price FROM products WHERE id = $1`, [id]);
   if (!pr.rows[0]) return res.status(404).json({ error: 'not_found' });
   const b = req.body || {};
   const currency = String(b.currency || 'CNY').toUpperCase();
@@ -166,7 +174,9 @@ router.post('/products/:id/cost', requireAdmin, async (req, res) => {
        b.qty != null ? (parseInt(b.qty) || null) : null,
        b.freightTotal != null && b.freightTotal !== '' ? parseFloat(b.freightTotal) : null,
        b.duty != null && b.duty !== '' ? parseFloat(b.duty) : null, b.note || null, req.user.id]);
-    await c.query(`UPDATE products SET cost_price = $1, updated_at = now() WHERE id = $2`, [gbp, id]);
+    // A manually-entered cost is the GOODS cost → clear any stale actual landed_cost
+    // so freight/duty is estimated via the global uplift % until a container costs it.
+    await c.query(`UPDATE products SET cost_price = $1, landed_cost = NULL, updated_at = now() WHERE id = $2`, [gbp, id]);
     return ins.rows[0];
   });
   await audit(req, 'cost_set', 'product', id, { gbp, currency, foreign, fxRate });
@@ -175,11 +185,13 @@ router.post('/products/:id/cost', requireAdmin, async (req, res) => {
   const isLarge = !!pr.rows[0].large_panel;
   const band = pr.rows[0].shipping_band || null;
   const shippingCost = pr.rows[0].shipping_cost != null ? parseFloat(pr.rows[0].shipping_cost) : null;
+  const postageInPrice = (pr.rows[0].postage_in_price == null) ? !isLarge : !!pr.rows[0].postage_in_price;
+  // A manual cost just cleared landed_cost, so freight/duty is estimated via uplift.
   res.json({
     ok: true, costPrice: gbp, history,
     floors: {
-      ebay: computeFloor({ costPrice: gbp, isLarge, band, shippingCost, channel: 'ebay', settings: S }),
-      shopify: computeFloor({ costPrice: gbp, isLarge, band, shippingCost, channel: 'shopify', settings: S }),
+      ebay: computeFloor({ costPrice: gbp, isLarge, band, shippingCost, postageInPrice, channel: 'ebay', settings: S }),
+      shopify: computeFloor({ costPrice: gbp, isLarge, band, shippingCost, postageInPrice, channel: 'shopify', settings: S }),
     },
   });
 });
@@ -217,7 +229,7 @@ router.post('/settings', requireAdmin, async (req, res) => {
   const numKeys = ['postageSmall', 'postageLarge', 'packagingCost',
     'ebayFvfPct', 'ebayRegulatoryPct', 'ebayHighReturnPct', 'ebayPerOrderFee', 'feesVatPct',
     'ebayFeePct', 'ebayFixedFee', 'shopifyFeePct', 'shopifyFixedFee',
-    'adRatePct', 'targetMarginPct', 'offerDiscountPct', 'overstockThreshold'];
+    'adRatePct', 'targetMarginPct', 'offerDiscountPct', 'landedUpliftPct', 'overstockThreshold'];
   const boolKeys = ['feesVatOnEbay', 'feesVatOnShopify'];
   await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
   const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
@@ -249,12 +261,16 @@ router.get('/overstock', requireAdmin, async (req, res) => {
   await ensureCostSchema();
   const S = resolveCostSettings(await settingsRow());
   const { rows } = await query(
-    `SELECT id, sku, title, brand, qty_on_hand, large_panel, shipping_band, cost_price, price_ebay
+    `SELECT id, sku, title, brand, qty_on_hand, large_panel, shipping_band, shipping_cost, landed_cost, postage_in_price, cost_price, price_ebay
      FROM products WHERE active=true AND cost_price IS NOT NULL AND qty_on_hand >= $1
      ORDER BY qty_on_hand * cost_price DESC LIMIT 500`, [S.overstockThreshold]);
   const items = rows.map(r => {
     const cost = parseFloat(r.cost_price);
-    const fe = computeFloor({ costPrice: cost, isLarge: !!r.large_panel, band: r.shipping_band || null, channel: 'ebay', settings: S });
+    const fe = computeFloor({ costPrice: cost, isLarge: !!r.large_panel, band: r.shipping_band || null,
+      shippingCost: r.shipping_cost != null ? parseFloat(r.shipping_cost) : null,
+      landedCost: r.landed_cost != null ? parseFloat(r.landed_cost) : null,
+      postageInPrice: (r.postage_in_price == null) ? !r.large_panel : !!r.postage_in_price,
+      channel: 'ebay', settings: S });
     return {
       id: r.id, sku: r.sku, title: r.title, brand: r.brand, qtyOnHand: r.qty_on_hand,
       costPrice: cost, capitalTied: +(r.qty_on_hand * cost).toFixed(2),
@@ -285,14 +301,17 @@ router.get('/valuation', requireAdmin, async (req, res) => {
 router.get('/floors', requireAdmin, async (req, res) => {
   await ensureCostSchema();
   const S = resolveCostSettings(await settingsRow());
-  const { rows } = await query(`SELECT id, large_panel, shipping_band, shipping_cost, cost_price FROM products WHERE active=true AND cost_price IS NOT NULL`);
+  const { rows } = await query(`SELECT id, large_panel, shipping_band, shipping_cost, landed_cost, postage_in_price, cost_price FROM products WHERE active=true AND cost_price IS NOT NULL`);
   const floors = {};
   for (const r of rows) {
     const cost = parseFloat(r.cost_price); const isLarge = !!r.large_panel; const band = r.shipping_band || null;
     const shippingCost = r.shipping_cost != null ? parseFloat(r.shipping_cost) : null;
-    const fe = computeFloor({ costPrice: cost, isLarge, band, shippingCost, channel: 'ebay', settings: S });
-    const fs = computeFloor({ costPrice: cost, isLarge, band, shippingCost, channel: 'shopify', settings: S });
-    const fd = computeFloor({ costPrice: cost, isLarge, band, shippingCost, channel: 'direct', settings: S });
+    const landedCost = r.landed_cost != null ? parseFloat(r.landed_cost) : null;
+    const postageInPrice = (r.postage_in_price == null) ? !isLarge : !!r.postage_in_price;
+    const fa = { isLarge, band, shippingCost, landedCost, postageInPrice, settings: S };
+    const fe = computeFloor({ costPrice: cost, channel: 'ebay', ...fa });
+    const fs = computeFloor({ costPrice: cost, channel: 'shopify', ...fa });
+    const fd = computeFloor({ costPrice: cost, channel: 'direct', ...fa });
     floors[r.id] = {
       costPrice: cost,
       floorEbay: fe.floor, floorShopify: fs.floor, floorDirect: fd.floor,
