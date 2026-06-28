@@ -3289,8 +3289,10 @@ async function loadIncomingContainers() {
           <div style="min-width:0">
             <div style="font-weight:600;font-size:13px">${escapeHtml(c.ref)}${c.supplier ? ` <span style="font-weight:400;color:var(--ink-soft)">· ${escapeHtml(c.supplier)}</span>` : ''}</div>
             <div style="font-size:11px;color:var(--ink-soft)">${c.lines} line(s) · ${c.units} units${c.expected ? ' · ETA ' + new Date(c.expected).toLocaleDateString('en-GB') : ''}</div>
+            <div style="font-size:11px;${(c.freight_total_gbp != null || c.duty_gbp != null) ? 'color:var(--green)' : 'color:var(--amber)'}">${(c.freight_total_gbp != null || c.duty_gbp != null) ? `🚢 freight £${(+c.freight_total_gbp||0).toFixed(2)} · duty £${(+c.duty_gbp||0).toFixed(2)}` : '⚠️ freight/duty not entered'}</div>
             ${c.note ? `<div style="font-size:11px;color:var(--ink-soft)">📝 ${escapeHtml(c.note)}</div>` : ''}
           </div>
+          <button class="btn btn-outline btn-sm" onclick="openContainerDetail('${escapeAttr(c.ref)}')" title="Open this container — see what's inside and enter freight + duty">🔎 Open</button>
           <button class="btn btn-primary btn-sm" onclick="receiveContainer('${escapeAttr(c.ref)}')" title="Receive every remaining line on this container and push to Shopify + eBay">📦 Receive all</button>
         </div>`).join('') + `</div>`;
   } catch (e) { wrap.innerHTML = ''; }
@@ -3307,6 +3309,69 @@ async function receiveContainer(ref) {
     Store.refresh('products').catch(() => {});
   } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
+
+// Open one container: header (freight + duty, split across items by value) + its lines
+// with the live landed cost per unit. This is where freight/duty is entered.
+let _ctnRef = null;
+async function openContainerDetail(ref) {
+  _ctnRef = ref;
+  modal({
+    title: 'Container — ' + ref,
+    body: `<div id="ctn-body"><div style="padding:20px;text-align:center;color:var(--ink-soft)">Loading…</div></div>`,
+    actions: [
+      { label: 'Close', onClick: closeModal },
+      { label: 'Save freight & duty', primary: true, onClick: saveContainerCosts },
+    ],
+  });
+  await renderContainerDetail();
+}
+async function renderContainerDetail() {
+  const wrap = el('ctn-body'); if (!wrap) return;
+  let d;
+  try { d = await Api.get('/api/incoming/containers/' + encodeURIComponent(_ctnRef)); }
+  catch (e) { wrap.innerHTML = '<div style="color:var(--red)">Failed to load container.</div>'; return; }
+  const h = d.header || {};
+  const t = d.totals || {};
+  const curOpts = ['GBP','CNY','USD','EUR'].map(c => `<option value="${c}"${(h.freight_currency||'GBP')===c?' selected':''}>${c}</option>`).join('');
+  wrap.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px">
+      <div class="field"><label>Freight total</label><input id="ctn-freight" type="number" step="0.01" min="0" value="${h.freight_total != null ? h.freight_total : ''}" placeholder="e.g. 1200"></div>
+      <div class="field"><label>Duty total</label><input id="ctn-duty" type="number" step="0.01" min="0" value="${h.duty != null ? h.duty : ''}" placeholder="e.g. 800"></div>
+      <div class="field"><label>Currency</label><select id="ctn-cur">${curOpts}</select></div>
+    </div>
+    <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">Freight + duty are split across the items below <strong>by value</strong> to give each one's true landed unit cost. Enter these any time — even weeks after listing, once the shipping invoice arrives.</div>
+    <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:600;margin-bottom:6px">
+      <span>${t.units || 0} units · goods £${(t.goodsValueGbp||0).toFixed(2)}</span>
+      <span>+ freight/duty £${(t.freightDutyGbp||0).toFixed(2)} = landed £${(t.landedValueGbp||0).toFixed(2)}</span>
+    </div>
+    <div class="table-wrap" style="max-height:340px;overflow:auto"><table class="table"><thead><tr>
+      <th>Item</th><th class="num">Qty</th><th class="num">Goods/unit</th><th class="num">Landed/unit</th>
+    </tr></thead><tbody>
+      ${(d.lines||[]).map(l => `<tr>
+        <td><div style="font-weight:500;font-size:13px">${escapeHtml(l.title || '(unnamed)')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || '')}</div></td>
+        <td class="num">${l.qty_ordered}</td>
+        <td class="num">${l.unit_cost_gbp != null ? '£' + (+l.unit_cost_gbp).toFixed(2) : '—'}</td>
+        <td class="num"><strong>${l.landed_unit_cost_gbp != null ? '£' + (+l.landed_unit_cost_gbp).toFixed(2) : (l.unit_cost_gbp != null ? '£' + (+l.unit_cost_gbp).toFixed(2) : '—')}</strong></td>
+      </tr>`).join('')}
+    </tbody></table></div>
+    <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Landed cost is written to each product's cost when the container is received.</div>`;
+}
+async function saveContainerCosts() {
+  const payload = {
+    freightTotal: el('ctn-freight')?.value || null,
+    duty: el('ctn-duty')?.value || null,
+    freightCurrency: el('ctn-cur')?.value || 'GBP',
+  };
+  const taskId = Task.start('Saving container costs…');
+  try {
+    const r = await Api.patch('/api/incoming/containers/' + encodeURIComponent(_ctnRef), payload);
+    Task.done(taskId, 'Saved');
+    toast('✓ Freight & duty saved and split across the items' + (r.fxFailed ? ' (FX lookup failed — entered as given)' : ''), 'success', 6000);
+    await renderContainerDetail();
+    loadIncoming();
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
 function paintIncomingStats(s) {
   const wrap = el('incoming-stats'); if (!wrap) return;
   wrap.innerHTML = `
@@ -11997,11 +12062,10 @@ async function ctOpenEditor(productId) {
           <div style="display:flex;gap:6px"><input id="ct-rate" type="number" step="0.00001" min="0" placeholder="auto" style="flex:1"><button type="button" class="btn btn-outline btn-sm" onclick="ctFetchRate()">↻</button></div></div>
         <div class="field"><label>= GBP unit cost</label><input id="ct-gbp" disabled style="background:var(--bg-soft);font-weight:700"></div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      <div style="display:grid;grid-template-columns:1fr;gap:10px">
         <div class="field"><label>Qty on order <span style="color:var(--ink-soft);font-weight:400">(opt)</span></label><input id="ct-qty" type="number" min="0" placeholder="optional"></div>
-        <div class="field"><label>Container freight £ <span style="color:var(--ink-soft);font-weight:400">(not apportioned yet)</span></label><input id="ct-freight" type="number" step="0.01" min="0" placeholder="optional"></div>
-        <div class="field"><label>Duty £ <span style="color:var(--ink-soft);font-weight:400">(not apportioned)</span></label><input id="ct-duty" type="number" step="0.01" min="0" placeholder="optional"></div>
       </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin:2px 0 6px">This is the <strong>goods</strong> unit cost. Container freight &amp; duty are now entered on the container (Incoming → open a container) and split across its items by value to give the true landed cost.</div>
       <div class="field"><label>Note</label><input id="ct-note" placeholder="optional"></div>
       <div id="ct-floors-preview" style="font-size:12px;color:var(--ink-soft);margin:4px 0 8px"></div>
       <div id="ct-history" style="border-top:1px solid var(--line);padding-top:10px"><div style="font-size:12px;color:var(--ink-soft)">Loading history…</div></div>`,
@@ -12047,8 +12111,6 @@ async function ctSaveCost(productId) {
     unitCostForeign: foreign || null,
     fxRate: rate || null,
     qty: el('ct-qty')?.value || null,
-    freightTotal: el('ct-freight')?.value || null,
-    duty: el('ct-duty')?.value || null,
     note: el('ct-note')?.value || null,
   };
   try {

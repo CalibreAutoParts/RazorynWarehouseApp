@@ -158,10 +158,33 @@ CREATE TABLE IF NOT EXISTS incoming_stock (
   fx_rate           NUMERIC(14,8),
   unit_cost_gbp     NUMERIC(12,4),
   freight_total     NUMERIC(12,2),
-  duty              NUMERIC(12,2)
+  duty              NUMERIC(12,2),
+  landed_unit_cost_gbp NUMERIC(12,4),   -- goods + apportioned container freight/duty per unit
+  supplier_id       INTEGER
 );
 CREATE INDEX IF NOT EXISTS incoming_status_idx ON incoming_stock (status);
 CREATE INDEX IF NOT EXISTS incoming_product_idx ON incoming_stock (product_id);
+
+-- Container-level freight + duty (one row per container_ref). Entered once for the
+-- whole container and apportioned across its lines BY VALUE to give each item its
+-- true landed cost (routes/incoming.js also self-heals this at runtime).
+CREATE TABLE IF NOT EXISTS incoming_containers (
+  id                SERIAL PRIMARY KEY,
+  container_ref     TEXT UNIQUE NOT NULL,
+  freight_total     NUMERIC(12,2),
+  duty              NUMERIC(12,2),
+  freight_currency  TEXT DEFAULT 'GBP',
+  freight_fx_rate   NUMERIC(14,8),
+  freight_total_gbp NUMERIC(12,2),
+  duty_gbp          NUMERIC(12,2),
+  supplier          TEXT,
+  supplier_id       INTEGER,
+  expected_date     DATE,
+  status            TEXT,
+  notes             TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- ---------- Cost tracking (the "Costs & margins" backroom) ----------
 -- products.cost_price holds the CURRENT landed unit cost in GBP. This table is
