@@ -265,6 +265,7 @@ router.post('/', requirePermission('inventory'), async (req, res) => {
      (b.freightTotal != null && b.freightTotal !== '') ? parseFloat(b.freightTotal) : null,
      (b.duty != null && b.duty !== '') ? parseFloat(b.duty) : null]);
   await audit(req, 'incoming_create', 'incoming', rows[0].id, { qty, container: b.containerRef });
+  if (b.supplier) { try { await require('./suppliers').ensureSupplierByName(b.supplier, { currency }); } catch (_) {} }
   if (b.containerRef) await reapportionContainer(b.containerRef).catch(() => {});
 
   // If staff linked this line to an existing product AND typed a part number that
@@ -353,6 +354,7 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
     created.push({ id: ins.rows[0].id, productId: prod.id, sku: prod.sku, qty });
   }
   await audit(req, 'incoming_bulk_add', 'incoming', null, { created: created.length, unmatched: unmatched.length, container: b.containerRef });
+  if (b.supplier) { try { await require('./suppliers').ensureSupplierByName(b.supplier); } catch (_) {} }
   if (b.containerRef) await reapportionContainer(b.containerRef).catch(() => {});
   res.json({ ok: true, created: created.length, createdUnits: created.reduce((a, c) => a + c.qty, 0), unmatched });
 });

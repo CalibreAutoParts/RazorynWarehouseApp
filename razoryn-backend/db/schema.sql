@@ -187,6 +187,20 @@ CREATE TABLE IF NOT EXISTS incoming_containers (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Saved suppliers (load from when re-ordering). routes/suppliers.js self-heals this;
+-- suppliers self-populate from supplier names typed on cost/incoming entries.
+CREATE TABLE IF NOT EXISTS suppliers (
+  id               SERIAL PRIMARY KEY,
+  name             TEXT NOT NULL,
+  default_currency TEXT,
+  contact          TEXT,
+  lead_time_days   INTEGER,
+  notes            TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS suppliers_name_lower_uq ON suppliers (LOWER(name));
+
 -- ---------- Cost tracking (the "Costs & margins" backroom) ----------
 -- products.cost_price holds the CURRENT landed unit cost in GBP. This table is
 -- the audit trail of every purchase cost, so supplier price trends are visible.

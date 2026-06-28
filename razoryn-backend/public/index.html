@@ -3220,6 +3220,7 @@ function channelPill(ch) {
 // ── Incoming / on-order stock ────────────────────────────────────────────────
 const INCOMING_STATUS = { on_order: 'On order', in_transit: 'In transit', arrived: 'Arrived', received: 'Received', cancelled: 'Cancelled' };
 function renderIncoming() {
+  loadSuppliersOnce();
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
@@ -3428,7 +3429,7 @@ function incomingModalBody(it) {
       <div class="field"><label>Quantity ordered</label><input id="inc-qty" type="number" min="1" step="1" value="${escapeAttr(it.qty_ordered || '')}"></div>
       <div class="field"><label>Expected date</label><input id="inc-expected" type="date" value="${escapeAttr(it.expected_date ? String(it.expected_date).slice(0,10) : '')}"></div>
       <div class="field"><label>Container / order ref</label><input id="inc-container" value="${escapeAttr(it.container_ref || '')}" placeholder="e.g. CONT-2026-04"></div>
-      <div class="field"><label>Supplier</label><input id="inc-supplier" value="${escapeAttr(it.supplier || '')}"></div>
+      <div class="field"><label>Supplier</label><input id="inc-supplier" list="dl-suppliers" value="${escapeAttr(it.supplier || '')}">${supplierDatalist('dl-suppliers')}</div>
     </div>
     <div class="field"><label>Status</label>
       <select id="inc-status">${Object.entries(INCOMING_STATUS).filter(([k]) => k !== 'cancelled').map(([k, v]) => `<option value="${k}" ${(it.status || 'on_order') === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
@@ -3449,7 +3450,7 @@ function openAddIncoming(prefill) {
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Add a whole container at once. Each line links to a product in your inventory — no need to retype SKUs. Adding goods from several suppliers? Use <strong>Save &amp; add another supplier</strong> to keep the container details and just change the supplier + lines.</div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 0.7fr;gap:10px;margin-bottom:6px">
         <div class="field"><label>Container number / name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— unique, e.g. MSKU1234567</span></label><input id="incb-container" placeholder="Container no. (trackable) or a name" value="${escapeAttr(prefill.containerRef||'')}"></div>
-        <div class="field"><label>Supplier</label><input id="incb-supplier" placeholder="This supplier's name"></div>
+        <div class="field"><label>Supplier</label><input id="incb-supplier" list="dl-suppliers" placeholder="This supplier's name">${supplierDatalist('dl-suppliers')}</div>
         <div class="field"><label>Rough ETA <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(sea freight, approx.)</span></label><input id="incb-expected" type="date" value="${escapeAttr(prefill.expectedDate||'')}"></div>
         <div class="field"><label>Cost currency</label><select id="incb-currency">${curOpts}</select></div>
       </div>
@@ -10370,6 +10371,7 @@ async function pushPrelistingLive(productId) {
 // creates the warehouse product, pushes it to Shopify, then creates the eBay
 // listing using the eBay panel's fields.
 async function renderCreateListing() {
+  loadSuppliersOnce();
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
@@ -10611,7 +10613,7 @@ function clCoreHtml() {
         <div style="font-weight:600;font-size:12px;margin:8px 0 4px">Link to incoming stock</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
           <div class="field"><label>Container ref / name</label><input id="cl-inc-container" list="cl-inc-containers" placeholder="existing or new container"><datalist id="cl-inc-containers"></datalist></div>
-          <div class="field"><label>Supplier</label><input id="cl-inc-supplier"></div>
+          <div class="field"><label>Supplier</label><input id="cl-inc-supplier" list="dl-suppliers"></div>${supplierDatalist('dl-suppliers')}
           <div class="field"><label>Qty on the way</label><input id="cl-inc-qty" type="number" min="0" placeholder="e.g. 50"></div>
           <div class="field"><label>Unit cost</label><div style="display:flex;gap:6px"><input id="cl-inc-cost" type="number" min="0" step="0.01" style="flex:1" placeholder="optional"><select id="cl-inc-currency" style="width:80px">${['CNY','GBP','USD','EUR'].map(c=>`<option value="${c}">${c}</option>`).join('')}</select></div></div>
         </div>
@@ -11952,7 +11954,19 @@ function renderCosts() {
   loadCosts();
 }
 
+// Saved suppliers — cached once, used to fill the supplier dropdowns (datalists)
+// on the cost + incoming entry forms. Suppliers self-populate as you use them.
+function loadSuppliersOnce() {
+  if (State._suppliersLoaded) return Promise.resolve();
+  State._suppliersLoaded = true;
+  return Api.get('/api/suppliers').then(r => { State.suppliers = r.suppliers || []; }).catch(() => {});
+}
+function supplierDatalist(id) {
+  return `<datalist id="${id || 'dl-suppliers'}">${(State.suppliers || []).map(s => `<option value="${escapeAttr(s.name)}">`).join('')}</datalist>`;
+}
+
 async function loadCosts() {
+  loadSuppliersOnce();
   let data;
   try { data = await Api.get('/api/costs/products'); }
   catch (e) { el('ct-list').innerHTML = `<div class="empty" style="padding:24px"><div class="t">Couldn't load costs</div>${escapeHtml(e.data?.message || e.message)}</div>`; return; }
@@ -12054,7 +12068,7 @@ async function ctOpenEditor(productId) {
     title: 'Cost — ' + (p.title || ('#' + productId)),
     body: `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="field"><label>Supplier</label><input id="ct-supplier" value="${escapeAttr(p.lastSupplier || '')}" placeholder="e.g. Guangzhou XYZ"></div>
+        <div class="field"><label>Supplier <span style="color:var(--ink-soft);font-weight:400">— pick a saved one or type a new</span></label><input id="ct-supplier" list="dl-suppliers" value="${escapeAttr(p.lastSupplier || '')}" placeholder="e.g. Guangzhou XYZ">${supplierDatalist('dl-suppliers')}</div>
         <div class="field"><label>Purchase date</label><input id="ct-date" type="date" value="${ctToday()}"></div>
         <div class="field"><label>Currency</label>
           <select id="ct-cur"><option value="CNY"${(p.lastCurrency || 'CNY') === 'CNY' ? ' selected' : ''}>CNY (RMB)</option><option value="GBP"${p.lastCurrency === 'GBP' ? ' selected' : ''}>GBP</option><option value="USD"${p.lastCurrency === 'USD' ? ' selected' : ''}>USD</option><option value="EUR"${p.lastCurrency === 'EUR' ? ' selected' : ''}>EUR</option></select></div>

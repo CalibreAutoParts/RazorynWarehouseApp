@@ -169,6 +169,7 @@ router.post('/products/:id/cost', requireAdmin, async (req, res) => {
     return ins.rows[0];
   });
   await audit(req, 'cost_set', 'product', id, { gbp, currency, foreign, fxRate });
+  if (b.supplier) { try { await require('./suppliers').ensureSupplierByName(b.supplier, { currency }); } catch (_) {} }
   const S = resolveCostSettings(await settingsRow());
   const isLarge = !!pr.rows[0].large_panel;
   const band = pr.rows[0].shipping_band || null;
