@@ -6149,6 +6149,7 @@ function renderShipmentRow(s) {
     <td style="white-space:nowrap;font-size:12px">${when}${transit}</td>
     <td style="${st.css}">${st.label}</td>
     <td style="white-space:nowrap">
+      <button class="btn btn-ghost btn-sm" onclick="openSaleDetail('${s.id}')" title="Preview what's in this order">🧾</button>
       ${s.delivery_state !== 'delivered' ? `<button class="btn btn-ghost btn-sm" onclick="markDelivered('${s.id}')" title="Mark delivered">✓</button>` : `<button class="btn btn-ghost btn-sm" onclick="setShipStatus('${s.id}','clear')" title="Undo delivered">↺</button>`}
       ${s.delivery_state === 'booked_in' ? '' : `<button class="btn btn-ghost btn-sm" onclick="setShipStatus('${s.id}','booked_in')" title="Mark booked in (collection slot scheduled)">📅</button>`}
       ${s.delivery_state !== 'lost' ? `<button class="btn btn-ghost btn-sm" onclick="setShipStatus('${s.id}','lost')" title="Flag as lost / exception" style="color:var(--red)">🔴</button>` : ''}
@@ -6340,6 +6341,7 @@ function renderDispatchRow(s, kind) {
         <td class="num"><strong>${gbp(s.total)}</strong></td>
         <td>${ageBadge}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
+          <button class="btn btn-ghost btn-sm" onclick="openSaleDetail('${s.id}')" title="Preview what's in this order">🧾</button>
           <button class="btn btn-primary btn-sm" onclick="openDispatchModal('${s.id}')">📦 Mark dispatched</button>
           <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','collect');return false" style="color:var(--ink-soft)">↪ It's a collection</a></div>
         </td>
@@ -6361,6 +6363,7 @@ function renderDispatchRow(s, kind) {
         <td class="num"><strong>${gbp(s.total)}</strong></td>
         <td>${ageBadge}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
+          <button class="btn btn-ghost btn-sm" onclick="openSaleDetail('${s.id}')" title="Preview what's in this order">🧾</button>
           <button class="btn btn-primary btn-sm" onclick="openCollectModal('${s.id}')">✓ Mark collected</button>
           ${isDirect && s.customer_email ? `<button class="btn btn-ghost btn-sm" onclick="notifyReady('${s.id}',this)" title="Email the customer that their order is ready to collect">📧 Notify ready</button>` : ''}
           <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','ship');return false" style="color:var(--ink-soft)">↪ It's a delivery</a></div>
