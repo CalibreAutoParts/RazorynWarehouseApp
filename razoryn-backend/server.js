@@ -276,6 +276,11 @@ if (cron.validate(dispatchCronExpr)) {
         const result = await dispatch.syncEbayDispatchCore({ days: 14 });
         if (result.dispatched) console.log(`[cron dispatch] auto-dispatched ${result.dispatched} eBay order(s)`);
       }
+      // Pull real delivery status from the carrier APIs (Royal Mail/FedEx/DHL).
+      if (typeof dispatch.refreshTrackingStatuses === 'function') {
+        const t = await dispatch.refreshTrackingStatuses({ limit: 150 });
+        if (t.delivered || t.exceptions) console.log(`[cron dispatch] tracking: ${t.delivered} delivered, ${t.exceptions} exception(s)`);
+      }
       // Flag shipments overdue for delivery so staff can chase the courier.
       if (typeof dispatch.flagStaleShipments === 'function') {
         const f = await dispatch.flagStaleShipments();
