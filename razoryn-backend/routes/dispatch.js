@@ -501,6 +501,7 @@ router.get('/shipments', requireAdmin, async (req, res) => {
     FROM sales s
     WHERE s.is_estimate = false
       AND s.dispatched_at IS NOT NULL
+      AND s.status NOT IN ('refunded', 'cancelled')
       AND COALESCE(s.fulfillment_method, CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
       AND s.dispatched_at >= now() - ($1 || ' days')::interval
     ORDER BY s.dispatched_at DESC

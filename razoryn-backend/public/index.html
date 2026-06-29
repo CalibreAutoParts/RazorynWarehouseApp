@@ -7045,6 +7045,7 @@ function renderSales() {
           ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Mark payment received → decrements stock, generates paid invoice using locked payment method" style="color:var(--green)">✓ Mark paid</button>` : ''}
           ${s.unpaid ? `<button class="btn btn-ghost btn-sm" onclick="markSalePaid('${s.id}')" title="Record that payment has now been received (stock already given)" style="color:var(--green)">✓ Mark paid</button>` : ''}
           ${dispatchBtn}
+          ${(['cash', 'bank', 'card'].includes(s.channel) && !s.isEstimate && !s.isPreorder && s.status !== 'refunded') ? `<button class="btn btn-ghost btn-sm" onclick="openReturnFromSale('${s.id}')" title="Book a return / refund — restocks the item and corrects the cash book so revenue isn't over-stated" style="color:var(--amber)">↩ Return</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="deleteSale('${s.id}', ${s.isEstimate})" title="Delete this ${s.isEstimate ? 'estimate' : 'invoice'} ${!s.isEstimate ? '(restores stock)' : ''}" style="color:var(--red)">🗑</button>
         </td>
       </tr>
@@ -17554,6 +17555,74 @@ async function submitEditSale(id) {
     } else {
       toast('Save failed: ' + (e.data?.message || e.message), 'error');
     }
+  }
+}
+
+// Book a return / refund against a cash/bank/card sale. Reuses the existing
+// /api/returns/from-sale endpoint, which restocks (optional), marks the sale
+// refunded (optional) and nets the refund off the cash/bank revenue figures so
+// the takings aren't over-stated.
+async function openReturnFromSale(saleId) {
+  let data;
+  try { data = await Api.get('/api/sales/' + saleId); }
+  catch (e) { toast('Could not load order: ' + (e.data?.message || e.message), 'error'); return; }
+  const sale = data.sale || {}; const items = data.items || [];
+  const ref = sale.invoice_number || sale.payment_reference || ('#' + sale.id);
+  const rows = items.map((it, i) => `
+    <tr>
+      <td style="padding:4px"><input type="checkbox" class="rfs-pick" data-i="${i}" checked></td>
+      <td style="padding:4px"><div style="font-weight:500;font-size:13px">${escapeHtml(it.title)}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')}</div></td>
+      <td style="padding:4px"><input type="number" class="rfs-qty" data-i="${i}" value="${it.qty}" min="1" max="${it.qty}" style="width:56px"></td>
+      <td style="padding:4px"><span style="color:var(--ink-soft)">£</span><input type="number" class="rfs-ref" data-i="${i}" value="${(+it.line_total).toFixed(2)}" step="0.01" min="0" style="width:80px"></td>
+    </tr>`).join('');
+  window._rfsItems = items;
+  modal({
+    title: 'Book return — ' + ref,
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">${escapeHtml(sale.customer_name || '')} · ${channelPill(sale.channel === 'direct_cash' ? 'direct_cash' : sale.channel)} · refunding reduces the cash/bank takings so revenue isn't over-stated.</div>
+      <table class="table" style="margin-bottom:12px"><thead><tr><th></th><th>Item</th><th>Qty</th><th>Refund £</th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="field"><label>Reason</label>
+        <select id="rfs-reason"><option>Customer changed mind</option><option>Faulty / damaged</option><option>Wrong part</option><option>Didn't fit</option><option>Other</option></select></div>
+      <div class="field"><label>Notes (optional)</label><input id="rfs-notes" placeholder="e.g. refunded in cash, part back on shelf"></div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:6px"><input type="checkbox" id="rfs-restock" checked> Put the item(s) back into stock</label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:6px"><input type="checkbox" id="rfs-refunded" checked> Mark the whole invoice as refunded</label>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '↩ Book return', primary: true, onClick: () => submitReturnFromSale(saleId) },
+    ],
+  });
+}
+async function submitReturnFromSale(saleId) {
+  const items = (window._rfsItems || []).map((it, i) => {
+    const picked = document.querySelector(`.rfs-pick[data-i="${i}"]`)?.checked;
+    if (!picked) return null;
+    return {
+      productId: it.product_id,
+      qty: parseInt(document.querySelector(`.rfs-qty[data-i="${i}"]`)?.value) || it.qty,
+      refundAmount: parseFloat(document.querySelector(`.rfs-ref[data-i="${i}"]`)?.value) || 0,
+    };
+  }).filter(Boolean);
+  if (!items.length) { toast('Pick at least one item to return', 'warn'); return; }
+  const taskId = Task.start('Booking return');
+  try {
+    const r = await Api.post('/api/returns/from-sale', {
+      saleId,
+      items,
+      restock: el('rfs-restock')?.checked,
+      markSaleRefunded: el('rfs-refunded')?.checked,
+      reason: el('rfs-reason')?.value || 'Customer return',
+      notes: el('rfs-notes')?.value || null,
+    });
+    Task.done(taskId, 'Returned');
+    toast(`Return booked · £${Number(r.totalRefund || 0).toFixed(2)} refunded${r.restocked ? ' · stock restored' : ''}`, 'success', 6000);
+    closeModal();
+    await Store.refresh('sales');
+    await Store.refresh('products').catch(() => {});
+    if (typeof renderSales === 'function' && State.page === 'sales') renderSales();
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Return failed: ' + (e.data?.message || e.message), 'error');
   }
 }
 
