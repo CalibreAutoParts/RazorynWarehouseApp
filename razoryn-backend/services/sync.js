@@ -12,6 +12,16 @@ const shopify = require('./shopify');
 const ebay = require('./ebay');
 const bundles = require('./bundles');
 
+// True if a channel order was deliberately deleted (tombstoned) so it must NOT be
+// re-imported. Best-effort — if the table doesn't exist yet, nothing is suppressed.
+async function isExternalOrderSuppressed(externalId) {
+  if (!externalId) return false;
+  try {
+    const r = await query(`SELECT 1 FROM deleted_external_orders WHERE external_order_id = $1`, [String(externalId)]);
+    return r.rows.length > 0;
+  } catch (_) { return false; }
+}
+
 // Try to find a warehouse product for an order's SKU.
 // Many sales channels send SKUs in slightly different formats. This helper
 // tries exact match first, then progressively looser matches:
@@ -270,7 +280,9 @@ async function pullShopify() {
   let inserted = 0;
 
   for (const order of orders) {
-    // Skip if we already have it
+    // Skip if we already have it, or if it was deliberately deleted (tombstoned)
+    // so a wiped order doesn't silently resurrect.
+    if (await isExternalOrderSuppressed(String(order.id))) continue;
     const existing = await query(
       `SELECT id FROM sales WHERE channel = 'shopify' AND external_order_id = $1`,
       [String(order.id)]
@@ -411,6 +423,7 @@ async function pullEbay() {
     let inserted = 0;
 
     for (const order of orders) {
+      if (await isExternalOrderSuppressed(order.orderId)) continue;
       const existing = await query(
         `SELECT id FROM sales WHERE external_order_id = $1`,
         [order.orderId]

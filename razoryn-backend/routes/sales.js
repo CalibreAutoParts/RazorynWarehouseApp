@@ -39,6 +39,16 @@ async function ensurePaidColumn() {
       await query(`ALTER TABLE sales DROP CONSTRAINT IF EXISTS sales_channel_check`);
       await query(`ALTER TABLE sales ADD CONSTRAINT sales_channel_check CHECK (channel IN ('shopify','ebay_em','ebay_cl','direct_cash','direct_bank','direct_card'))`);
     } catch (e) { console.warn('[sales] channel constraint widen:', e.message); }
+    // When a CHANNEL order is deleted, remember its external order id so the
+    // eBay/Shopify sync doesn't silently re-import it (the "deleted but it came
+    // back in Dispatch" bug). Tombstone table; the pulls skip anything listed here.
+    await query(`CREATE TABLE IF NOT EXISTS deleted_external_orders (
+      channel           TEXT,
+      external_order_id TEXT NOT NULL,
+      deleted_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+      deleted_by        INTEGER,
+      PRIMARY KEY (external_order_id)
+    )`);
     _paidColReady = true;
   } catch (e) { console.warn('[sales] ensurePaidColumn:', e.message); }
 }
@@ -1973,6 +1983,16 @@ router.delete('/:id', requireAdmin, async (req, res) => {
         }
       }
     }
+    // For a channel order, tombstone its external id so the sync won't re-import it.
+    if (sale.external_order_id && /^(shopify|ebay_)/.test(sale.channel || '')) {
+      await c.query(
+        `INSERT INTO deleted_external_orders (channel, external_order_id, deleted_by)
+         VALUES ($1,$2,$3) ON CONFLICT (external_order_id) DO NOTHING`,
+        [sale.channel, sale.external_order_id, req.user.id]);
+    }
+    // Remove any notifications that pointed at this sale (dispatch/shipment/etc.)
+    // so nothing lingers in the bell after a full wipe.
+    await c.query(`DELETE FROM notifications WHERE related_type = 'sale' AND related_id = $1`, [sale.id]).catch(() => {});
     // sale_items cascades on sale delete
     await c.query(`DELETE FROM sales WHERE id = $1`, [req.params.id]);
     return { ok: true, deleted: sale.id, stockRestored: restoreStock && !sale.is_estimate && sale.status === 'paid' };
