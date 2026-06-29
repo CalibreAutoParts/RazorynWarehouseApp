@@ -5967,19 +5967,45 @@ function openReturnModal() {
    — if those service helpers don't exist yet, the backend records the dispatch
    locally and surfaces "channel push not implemented" as a non-fatal warning.
 */
+// Channel groups for the filter chips (mirror of the backend channelGroup()).
+const DISPATCH_CHANNELS = [
+  { key: 'all', label: 'All' }, { key: 'ebay', label: 'eBay' }, { key: 'store', label: 'Store' },
+  { key: 'bank', label: 'Bank' }, { key: 'cash', label: 'Cash' }, { key: 'card', label: 'Card' },
+];
+function dispatchChannelGroup(channel) {
+  const c = (channel || '').toLowerCase();
+  if (c.startsWith('ebay')) return 'ebay';
+  if (c === 'shopify') return 'store';
+  if (c === 'direct_bank') return 'bank';
+  if (c === 'direct_cash') return 'cash';
+  if (c === 'direct_card') return 'card';
+  return 'other';
+}
+function dispatchChannelMatch(channel) {
+  const f = State.dispatchChannel || 'all';
+  return f === 'all' || dispatchChannelGroup(channel) === f;
+}
+function setDispatchChannel(key) {
+  State.dispatchChannel = key;
+  document.querySelectorAll('.dispatch-chip').forEach(c => c.classList.toggle('active', c.dataset.k === key));
+  paintDispatch();
+  loadShipments();
+}
+
 function renderDispatch() {
   if (!State.dispatchSelected) State.dispatchSelected = new Set();
+  if (!State.dispatchChannel) State.dispatchChannel = 'all';
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
         <div>
-          <h1>Dispatch</h1>
-          <div class="desc">Outstanding orders waiting to ship or be collected. Oldest first — clear them in order.</div>
+          <h1>Dispatch &amp; shipping</h1>
+          <div class="desc">Deliveries to post, collections to hand over, and live tracking of everything shipped.</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <label style="font-size:12px;color:var(--ink-soft);display:flex;align-items:center;gap:6px">
             Show last
-            <select id="dispatch-days" onchange="loadDispatch()" style="padding:4px 8px;font-size:12px">
+            <select id="dispatch-days" onchange="loadDispatch();loadShipments()" style="padding:4px 8px;font-size:12px">
               <option value="3">3 days</option>
               <option value="7">7 days</option>
               <option value="10" selected>10 days</option>
@@ -5989,15 +6015,21 @@ function renderDispatch() {
             </select>
           </label>
           <button class="btn btn-outline btn-sm" onclick="syncDispatchFromEbay(this)" title="Check eBay for orders already marked dispatched there (tracking uploaded) and clear them from this worklist. Runs automatically every 30 min.">⟳ Sync from eBay</button>
-          <button class="btn btn-outline btn-sm" onclick="loadDispatch()" title="Refresh">↻ Refresh</button>
+          <button class="btn btn-outline btn-sm" onclick="loadDispatch();loadShipments()" title="Refresh">↻ Refresh</button>
         </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">
+        ${DISPATCH_CHANNELS.map(c => `<button class="dispatch-chip${(State.dispatchChannel === c.key) ? ' active' : ''}" data-k="${c.key}" onclick="setDispatchChannel('${c.key}')" style="border:1px solid var(--line);background:var(--white);padding:5px 12px;border-radius:16px;font-size:12px;font-weight:600;cursor:pointer">${c.label}</button>`).join('')}
       </div>
       <div id="dispatch-content">
         <div class="empty"><div class="t">Loading…</div></div>
       </div>
+      <div id="dispatch-shipments" style="margin-top:18px"></div>
     </div>
+    <style>.dispatch-chip.active{background:var(--brand-primary)!important;color:#fff;border-color:var(--brand-primary)!important}</style>
   `;
   loadDispatch();
+  loadShipments();
 }
 
 // Fetch the worklist and re-render. Called on page open, after every action,
@@ -6020,6 +6052,106 @@ async function syncDispatchFromEbay(btn) {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = orig; }
   }
+}
+
+// Move an order between Deliveries and Collections (fixes a mis-bucketed order).
+async function reclassifyOrder(saleId, method) {
+  try {
+    await Api.post(`/api/dispatch/${saleId}/set-fulfillment`, { method });
+    toast(method === 'collect' ? 'Moved to Collections' : 'Moved to Deliveries', 'success');
+    await loadDispatch();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// Email a collection customer that their order is ready to pick up.
+async function notifyReady(saleId, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await Api.post(`/api/dispatch/${saleId}/notify-ready`, {});
+    toast('✓ "Ready to collect" email sent', 'success');
+  } catch (e) { toast('Email failed: ' + (e.data?.message || e.message), 'error', 6000); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+// ── Shipments tracking hub ──────────────────────────────────────────────────
+async function loadShipments() {
+  const wrap = el('dispatch-shipments'); if (!wrap) return;
+  const days = el('dispatch-days') ? parseInt(el('dispatch-days').value, 10) : 10;
+  const status = State.shipmentStatus || 'all';
+  const channel = State.dispatchChannel || 'all';
+  try {
+    const d = await Api.get(`/api/dispatch/shipments?days=${Math.max(days, 60)}&status=${status}&channel=${channel}`);
+    State.shipments = d;
+    paintShipments();
+  } catch (e) { wrap.innerHTML = ''; }
+}
+const SHIP_STATES = {
+  in_transit: { label: 'In transit', css: 'color:var(--ink-soft)' },
+  delayed:    { label: '⚠ Delayed', css: 'color:var(--amber);font-weight:600' },
+  delivered:  { label: '✓ Delivered', css: 'color:var(--green);font-weight:600' },
+  lost:       { label: '🔴 Lost', css: 'color:var(--red);font-weight:600' },
+  issue:      { label: '⚑ Issue', css: 'color:var(--red);font-weight:600' },
+};
+function paintShipments() {
+  const wrap = el('dispatch-shipments'); if (!wrap) return;
+  const d = State.shipments || {}; const sum = d.summary || {}; const rows = d.shipments || [];
+  const status = State.shipmentStatus || 'all';
+  const filters = [
+    ['all', `All (${sum.total || 0})`], ['needs_followup', `⚠ Needs follow-up (${sum.needsFollowup || 0})`],
+    ['in_transit', `In transit (${sum.inTransit || 0})`], ['delivered', `Delivered (${sum.delivered || 0})`],
+    ['lost', `Lost (${sum.lost || 0})`],
+  ];
+  wrap.innerHTML = `
+    <div class="card">
+      <div class="card-head" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <h3>🚚 Shipments (tracking)</h3>
+        <div style="display:flex;gap:5px;flex-wrap:wrap">
+          ${filters.map(([k, lbl]) => `<button onclick="State.shipmentStatus='${k}';loadShipments()" style="border:1px solid var(--line);background:${status === k ? 'var(--brand-primary)' : 'var(--white)'};color:${status === k ? '#fff' : 'var(--ink)'};padding:4px 10px;border-radius:14px;font-size:11px;font-weight:600;cursor:pointer">${lbl}</button>`).join('')}
+        </div>
+      </div>
+      <div class="card-body" style="padding:0">
+        ${rows.length === 0
+          ? '<div class="empty" style="padding:24px 16px"><div class="t">Nothing here</div><div style="font-size:12px;color:var(--ink-soft)">Dispatched deliveries show up here with their tracking + delivery status.</div></div>'
+          : `<table class="table"><thead><tr>
+              <th>Order</th><th>Channel</th><th>Customer</th><th>Carrier / tracking</th><th>Dispatched</th><th>Status</th><th></th>
+            </tr></thead><tbody>${rows.map(renderShipmentRow).join('')}</tbody></table>`}
+      </div>
+    </div>`;
+}
+function renderShipmentRow(s) {
+  const ref = s.invoice_number || s.payment_reference || s.external_order_id || '#' + s.id;
+  const st = SHIP_STATES[s.delivery_state] || SHIP_STATES.in_transit;
+  const track = s.tracking_number
+    ? (s.tracking_url ? `<a href="${escapeAttr(s.tracking_url)}" target="_blank" rel="noopener" style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(s.tracking_number)} ↗</a>` : `<span style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(s.tracking_number)}</span>`)
+    : '<span style="color:var(--ink-soft);font-size:11px">no tracking</span>';
+  const when = s.dispatched_at ? new Date(s.dispatched_at).toLocaleDateString('en-GB') : '—';
+  const transit = (s.delivery_state === 'delivered') ? '' : ` <span style="color:var(--ink-soft)">· ${s.days_in_transit}d</span>`;
+  const pushWarn = s.channel_push_state === 'error' ? `<div style="font-size:10px;color:var(--red)">⚠ channel push failed <a href="#" onclick="retryPush('${s.id}');return false">retry</a></div>` : '';
+  return `<tr>
+    <td><div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div><div style="font-size:11px;color:var(--ink-soft);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(s.first_item_title || '')}</div></td>
+    <td>${channelPill(s.channel)}</td>
+    <td>${escapeHtml(s.customer_name || '—')}</td>
+    <td><div>${escapeHtml(s.carrier || '—')}</div><div>${track}</div>${pushWarn}</td>
+    <td style="white-space:nowrap;font-size:12px">${when}${transit}</td>
+    <td style="${st.css}">${st.label}</td>
+    <td style="white-space:nowrap">
+      ${s.delivery_state !== 'delivered' ? `<button class="btn btn-ghost btn-sm" onclick="markDelivered('${s.id}')" title="Mark delivered">✓</button>` : ''}
+      ${s.delivery_state !== 'lost' ? `<button class="btn btn-ghost btn-sm" onclick="setShipStatus('${s.id}','lost')" title="Flag as lost" style="color:var(--red)">🔴</button>` : `<button class="btn btn-ghost btn-sm" onclick="setShipStatus('${s.id}','clear')" title="Clear lost flag">↺</button>`}
+      <button class="btn btn-ghost btn-sm" onclick="openEditDispatch('${s.id}')" title="Edit carrier/tracking">✏️</button>
+    </td>
+  </tr>`;
+}
+async function markDelivered(saleId) {
+  try { await Api.post(`/api/dispatch/${saleId}/mark-delivered`, {}); toast('Marked delivered', 'success'); await loadShipments(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function setShipStatus(saleId, status) {
+  try { await Api.post(`/api/dispatch/${saleId}/shipping-status`, { status }); toast('Updated', 'success'); await loadShipments(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function retryPush(saleId) {
+  try { await Api.post(`/api/dispatch/${saleId}/retry-push`, {}); toast('Retrying channel push…', 'info'); setTimeout(loadShipments, 2500); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 async function loadDispatch() {
@@ -6047,9 +6179,9 @@ async function loadDispatch() {
 // channel pill, age, customer, items, total, action button.
 function paintDispatch() {
   const data = State.dispatch || {};
-  const toShip = data.toShip || [];
-  const toCollect = data.toCollect || [];
-  const recent = data.recent || [];
+  const toShip = (data.toShip || []).filter(s => dispatchChannelMatch(s.channel));
+  const toCollect = (data.toCollect || []).filter(s => dispatchChannelMatch(s.channel));
+  const recent = (data.recent || []).filter(s => dispatchChannelMatch(s.channel));
   const cutoffDays = data.cutoffDays || 10;
   // Clear stale selections (items that were dispatched in a previous action)
   const validIds = new Set([...toShip, ...toCollect].map(s => String(s.id)));
@@ -6101,7 +6233,7 @@ function paintDispatch() {
     <!-- AWAITING DISPATCH -->
     <div class="card" style="margin-bottom:16px">
       <div class="card-head" style="display:flex;justify-content:space-between;align-items:center">
-        <h3>📦 Awaiting dispatch (${toShip.length})</h3>
+        <h3>📦 Deliveries to ship (${toShip.length})</h3>
         ${toShip.length ? `<div style="font-size:12px;color:var(--ink-soft)">Tick to bulk-select · click row for single action</div>` : ''}
       </div>
       <div class="card-body" style="padding:0">
@@ -6119,12 +6251,12 @@ function paintDispatch() {
       </div>
     </div>
 
-    <!-- AWAITING COLLECTION -->
+    <!-- COLLECTIONS -->
     ${toCollect.length > 0 ? `
     <div class="card" style="margin-bottom:16px">
       <div class="card-head" style="display:flex;justify-content:space-between;align-items:center">
-        <h3>💰 Awaiting collection (${toCollect.length})</h3>
-        <div style="font-size:12px;color:var(--ink-soft)">Cash-on-collection orders — mark when customer collects</div>
+        <h3>🤝 Collections to hand over (${toCollect.length})</h3>
+        <div style="font-size:12px;color:var(--ink-soft)">Cash, bank or card pickups — mark when the customer collects</div>
       </div>
       <div class="card-body" style="padding:0">
         <table class="table">
@@ -6183,17 +6315,20 @@ function renderDispatchRow(s, kind) {
         <td>${ageBadge}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
           <button class="btn btn-primary btn-sm" onclick="openDispatchModal('${s.id}')">📦 Mark dispatched</button>
+          <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','collect');return false" style="color:var(--ink-soft)">↪ It's a collection</a></div>
         </td>
       </tr>
     `;
   } else {
     // collect
+    const isDirect = !(s.channel || '').match(/^(shopify|ebay_)/);
     return `
-      <tr style="cursor:pointer" onclick="if(!event.target.closest('button,input'))openCollectModal('${s.id}')">
+      <tr style="cursor:pointer" onclick="if(!event.target.closest('button,input,a'))openCollectModal('${s.id}')">
         ${checkboxCell}
         <td>
           <div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div>
           ${s.order_number && s.order_number !== ref ? `<div style="font-size:10px;color:var(--ink-soft)">${escapeHtml(s.order_number)}</div>` : ''}
+          <div style="margin-top:2px">${channelPill(s.channel)}</div>
         </td>
         <td>${escapeHtml(s.customer_name || '—')}<div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(s.customer_phone || '')}</div></td>
         <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div></td>
@@ -6201,6 +6336,8 @@ function renderDispatchRow(s, kind) {
         <td>${ageBadge}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
           <button class="btn btn-primary btn-sm" onclick="openCollectModal('${s.id}')">✓ Mark collected</button>
+          ${isDirect && s.customer_email ? `<button class="btn btn-ghost btn-sm" onclick="notifyReady('${s.id}',this)" title="Email the customer that their order is ready to collect">📧 Notify ready</button>` : ''}
+          <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','ship');return false" style="color:var(--ink-soft)">↪ It's a delivery</a></div>
         </td>
       </tr>
     `;
@@ -6529,7 +6666,8 @@ async function submitCollect(saleId) {
 // Edit tracking on an already-dispatched order. Same modal shape as dispatch
 // but pre-fills with current values and the action calls edit-tracking.
 function openEditDispatch(saleId) {
-  const sale = (State.dispatch?.recent || []).find(s => String(s.id) === String(saleId));
+  const sale = (State.dispatch?.recent || []).find(s => String(s.id) === String(saleId))
+            || (State.shipments?.shipments || []).find(s => String(s.id) === String(saleId));
   if (!sale) { toast('Order not found', 'error'); return; }
   if (sale.collected_at) {
     // Collected orders just allow undo + notes — no tracking applicable
@@ -6592,6 +6730,7 @@ async function submitEditDispatch(saleId, isExternalChannel) {
     toast(`Tracking updated${repushToChannel ? ' · re-pushing to channel' : ''}`, 'success');
     closeModal();
     await loadDispatch();
+    await loadShipments();
   } catch (e) {
     Task.fail(taskId, 'Update failed');
     toast('Failed: ' + (e.data?.message || e.message), 'error');

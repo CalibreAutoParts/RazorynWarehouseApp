@@ -36,6 +36,12 @@ async function ensureDispatchColumns() {
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS channel_push_error TEXT`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS collected_at       TIMESTAMPTZ`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS collected_by       INTEGER REFERENCES users(id) ON DELETE SET NULL`);
+    // Shipping/tracking layer: when a delivery actually arrived, a manual status
+    // override ('delivered'|'lost'|'issue'; in-transit/delayed are derived from age),
+    // and the guard for our own customer dispatch/collection email.
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS delivered_at       TIMESTAMPTZ`);
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS shipping_status    TEXT`);
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS customer_notified_at TIMESTAMPTZ`);
     // Index for the worklist query — paid sales ordered by oldest unshipped first.
     await query(`CREATE INDEX IF NOT EXISTS sales_dispatch_idx ON sales (occurred_at) WHERE is_estimate = false AND dispatched_at IS NULL AND collected_at IS NULL`);
     _migrationDone = true;
@@ -48,25 +54,70 @@ ensureDispatchColumns();
 // Carriers we know about. Keys map to tracking-URL templates so the UI can
 // generate clickable "track parcel" links for the customer-facing receipt.
 // {tracking} is replaced with the tracking number at render time.
+// The couriers we actually use. RM/Evri/FedEx/DHL are eBay-native (eBay updates the
+// buyer + reports tracking back); Proovia + Dropfleet are URL-tracked specialists for
+// large panels. {tracking} is substituted at render time; null = no clickable link.
 const CARRIERS = {
   'Royal Mail':   'https://www.royalmail.com/track-your-item#/tracking-results/{tracking}',
-  'Parcelforce':  'https://www.parcelforce.com/portal/pw/track?trackNumber={tracking}',
-  'DPD':          'https://www.dpd.co.uk/apps/tracking/?reference={tracking}',
   'Evri':         'https://www.evri.com/track/parcel/{tracking}',
-  'UPS':          'https://www.ups.com/track?tracknum={tracking}',
-  'DHL':          'https://www.dhl.com/gb-en/home/tracking.html?tracking-id={tracking}',
   'FedEx':        'https://www.fedex.com/fedextrack/?trknbr={tracking}',
-  'Tuffnells':    'https://www.tuffnells.co.uk/track-a-parcel?consignment={tracking}',
-  'Yodel':        'https://www.yodel.co.uk/tracking/{tracking}',
-  'APC Overnight': 'https://apc-overnight.com/customers/tracking-customer-portal?jobref={tracking}',
+  'DHL':          'https://www.dhl.com/gb-en/home/tracking.html?tracking-id={tracking}',
+  // Proovia + Dropfleet: URL tracking pages (owner to confirm the exact {tracking}
+  // deep-link; left as null until then so we just show the number to type on their site).
+  'Proovia':      null,
+  'Dropfleet':    null,
   'Other / custom courier': null,  // free text, no auto-track link
 };
+// Carriers eBay recognises natively (so we send the real name); others map to 'Other'
+// on the marketplace side. Used by services/ebay.js + services/shopify.js carrier maps.
+const EBAY_NATIVE_CARRIERS = new Set(['Royal Mail', 'Evri', 'FedEx', 'DHL']);
 
 function trackingUrlFor(carrier, trackingNumber) {
   if (!carrier || !trackingNumber) return null;
   const tpl = CARRIERS[carrier];
   if (!tpl) return null;
   return tpl.replace('{tracking}', encodeURIComponent(trackingNumber));
+}
+
+// Follow-up thresholds (days): flag a shipment "delayed" then "likely lost" after
+// these many days in transit without delivery. Configurable in app_settings.data.dispatch.
+async function dispatchThresholds() {
+  try {
+    const r = await query(`SELECT data FROM app_settings WHERE id = 1`);
+    const d = (r.rows[0]?.data?.dispatch) || {};
+    return {
+      delayDays: Number.isFinite(+d.delayDays) && +d.delayDays > 0 ? +d.delayDays : 7,
+      lostDays: Number.isFinite(+d.lostDays) && +d.lostDays > 0 ? +d.lostDays : 21,
+    };
+  } catch (_) { return { delayDays: 7, lostDays: 21 }; }
+}
+
+async function getCompany() {
+  try { return (await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {}; }
+  catch (_) { return {}; }
+}
+
+// Email a direct (bank/card) customer that their order shipped or is ready to
+// collect. eBay/Shopify orders are skipped (the marketplace notifies the buyer).
+// kind: 'dispatch' | 'collection'. Best-effort; sets customer_notified_at on success.
+async function sendCustomerShippingEmail(saleId, kind) {
+  try {
+    const email = require('../services/email');
+    if (!email.isConfigured()) return { ok: false, error: 'email_not_configured' };
+    const sr = await query(`SELECT * FROM sales WHERE id = $1`, [saleId]);
+    const sale = sr.rows[0];
+    if (!sale || !sale.customer_email) return { ok: false, error: 'no_email_address' };
+    if ((sale.channel || '').match(/^(shopify|ebay_)/)) return { ok: false, error: 'channel_handles_email' };
+    const items = (await query(`SELECT title, qty FROM sale_items WHERE sale_id = $1 ORDER BY id`, [saleId])).rows;
+    const company = await getCompany();
+    const tmpl = require('../lib/dispatch-emails');
+    const built = kind === 'collection'
+      ? tmpl.buildCollectionEmail({ sale, items, company })
+      : tmpl.buildDispatchEmail({ sale, items, company, carrier: sale.carrier, trackingUrl: trackingUrlFor(sale.carrier, sale.tracking_number) });
+    const out = await email.sendEmail({ to: sale.customer_email, subject: built.subject, html: built.html, replyTo: company.company_email || undefined });
+    if (out.ok) await query(`UPDATE sales SET customer_notified_at = now() WHERE id = $1`, [saleId]);
+    return out;
+  } catch (e) { console.warn('[dispatch.email]', e.message); return { ok: false, error: e.message }; }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -288,11 +339,29 @@ router.post('/:saleId/mark-dispatched', requireAdmin, async (req, res) => {
     await query(`UPDATE sales SET channel_push_state = 'na' WHERE id = $1 AND channel_push_state = 'pending'`, [result.sale.id]);
   }
 
+  // Email OUR direct (bank/card) delivery customers their "on its way" notice with
+  // the tracking link. eBay/Shopify buyers are notified by the marketplace.
+  let emailed = false;
+  if (['direct_bank', 'direct_card'].includes(result.sale.channel) && result.sale.customer_email && !result.sale.customer_notified_at) {
+    emailed = true;
+    setImmediate(() => sendCustomerShippingEmail(result.sale.id, 'dispatch').catch(e => console.warn('[dispatch.email]', e.message)));
+  }
+
   res.json({
     ok: true,
     sale: result.sale,
     trackingUrl: trackingUrlFor(carrier, trackingClean),
+    customerEmailQueued: emailed,
   });
+});
+
+// POST /api/dispatch/:saleId/notify-ready — email a collection customer that their
+// order is ready to collect. Direct (bank/cash/card) collections only.
+router.post('/:saleId/notify-ready', requireAdmin, async (req, res) => {
+  await ensureDispatchColumns();
+  const out = await sendCustomerShippingEmail(req.params.saleId, 'collection');
+  if (out.ok) { await audit(req, 'notify_ready_collect', 'sale', req.params.saleId, {}); return res.json({ ok: true }); }
+  res.status(400).json({ error: out.error || 'send_failed', message: out.error });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -344,6 +413,7 @@ router.post('/:saleId/undo', requireAdmin, async (req, res) => {
       collected_at = NULL, collected_by = NULL,
       tracking_number = NULL, carrier = NULL, dispatch_notes = NULL,
       channel_push_state = NULL, channel_push_error = NULL,
+      delivered_at = NULL, shipping_status = NULL,
       status = 'paid'
     WHERE id = $1 AND is_estimate = false
     RETURNING *
@@ -351,6 +421,126 @@ router.post('/:saleId/undo', requireAdmin, async (req, res) => {
   if (!result.rows[0]) return res.status(404).json({ error: 'not_found' });
   await audit(req, 'undo_dispatch', 'sale', result.rows[0].id, {});
   res.json({ ok: true, sale: result.rows[0] });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Map a sale's channel to a coarse group used by the dispatch filter chips.
+function channelGroup(channel) {
+  const c = (channel || '').toLowerCase();
+  if (c.startsWith('ebay')) return 'ebay';
+  if (c === 'shopify') return 'store';
+  if (c === 'direct_bank') return 'bank';
+  if (c === 'direct_cash') return 'cash';
+  if (c === 'direct_card') return 'card';
+  return 'other';
+}
+
+// POST /api/dispatch/:saleId/set-fulfillment  { method: 'ship'|'collect' }
+// Re-classify an order between Deliveries and Collections. Fixes a mis-bucketed
+// order (e.g. a bank pickup that defaulted to "ship" and was demanding a carrier).
+router.post('/:saleId/set-fulfillment', requireAdmin, async (req, res) => {
+  await ensureDispatchColumns();
+  const method = req.body?.method === 'collect' ? 'collect' : req.body?.method === 'ship' ? 'ship' : null;
+  if (!method) return res.status(400).json({ error: 'method_required', message: "method must be 'ship' or 'collect'." });
+  const r = await query(
+    `UPDATE sales SET fulfillment_method = $1 WHERE id = $2 AND is_estimate = false RETURNING *`,
+    [method, req.params.saleId]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  await audit(req, 'set_fulfillment', 'sale', r.rows[0].id, { method });
+  res.json({ ok: true, sale: r.rows[0] });
+});
+
+// POST /api/dispatch/:saleId/mark-delivered  { date? }
+// Records that a shipped delivery has arrived.
+router.post('/:saleId/mark-delivered', requireAdmin, async (req, res) => {
+  await ensureDispatchColumns();
+  const when = req.body?.date ? new Date(req.body.date) : new Date();
+  const r = await query(
+    `UPDATE sales SET delivered_at = $1, shipping_status = 'delivered'
+       WHERE id = $2 AND dispatched_at IS NOT NULL RETURNING *`,
+    [when, req.params.saleId]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found', message: 'Order not found or not dispatched yet.' });
+  await audit(req, 'mark_delivered', 'sale', r.rows[0].id, {});
+  res.json({ ok: true, sale: r.rows[0] });
+});
+
+// POST /api/dispatch/:saleId/shipping-status  { status: 'lost'|'issue'|'delivered'|'clear' }
+// Manual override of a shipment's delivery state (for chasing/flagging).
+router.post('/:saleId/shipping-status', requireAdmin, async (req, res) => {
+  await ensureDispatchColumns();
+  const raw = String(req.body?.status || '').toLowerCase();
+  const status = ['lost', 'issue', 'delivered'].includes(raw) ? raw : (raw === 'clear' || raw === '' ? null : null);
+  if (raw && status === null && raw !== 'clear') return res.status(400).json({ error: 'bad_status' });
+  const r = await query(
+    `UPDATE sales SET shipping_status = $1,
+        delivered_at = CASE WHEN $1 = 'delivered' THEN COALESCE(delivered_at, now()) ELSE delivered_at END
+       WHERE id = $2 AND dispatched_at IS NOT NULL RETURNING *`,
+    [status, req.params.saleId]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  await audit(req, 'shipping_status', 'sale', r.rows[0].id, { status });
+  res.json({ ok: true, sale: r.rows[0] });
+});
+
+// GET /api/dispatch/shipments?status=&channel=&days=
+// The tracking hub: dispatched DELIVERIES with a derived delivery state +
+// days-in-transit, filterable by delivery status and channel group.
+//   status: all | needs_followup | in_transit | delivered | delayed | lost
+//   channel: all | ebay | store | bank | cash | card
+router.get('/shipments', requireAdmin, async (req, res) => {
+  await ensureDispatchColumns();
+  const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 60));
+  const { delayDays, lostDays } = await dispatchThresholds();
+  const rows = (await query(`
+    SELECT s.*,
+      (SELECT title FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_title,
+      (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS item_count,
+      EXTRACT(EPOCH FROM (now() - s.dispatched_at)) / 86400.0 AS days_in_transit
+    FROM sales s
+    WHERE s.is_estimate = false
+      AND s.dispatched_at IS NOT NULL
+      AND COALESCE(s.fulfillment_method, CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
+      AND s.dispatched_at >= now() - ($1 || ' days')::interval
+    ORDER BY s.dispatched_at DESC
+    LIMIT 1000`, [String(days)])).rows;
+
+  const wantStatus = String(req.query.status || 'all').toLowerCase();
+  const wantChannel = String(req.query.channel || 'all').toLowerCase();
+  const items = rows.map(s => {
+    const dit = Math.floor(parseFloat(s.days_in_transit) || 0);
+    // Derived state: explicit override wins, else delivered_at, else age thresholds.
+    let state;
+    if (s.shipping_status) state = s.shipping_status;
+    else if (s.delivered_at) state = 'delivered';
+    else if (dit >= lostDays) state = 'lost';
+    else if (dit >= delayDays) state = 'delayed';
+    else state = 'in_transit';
+    return {
+      ...s,
+      days_in_transit: dit,
+      delivery_state: state,
+      channel_group: channelGroup(s.channel),
+      tracking_url: trackingUrlFor(s.carrier, s.tracking_number),
+      needs_followup: (state === 'delayed' || state === 'lost' || state === 'issue'),
+    };
+  }).filter(s => {
+    if (wantChannel !== 'all' && s.channel_group !== wantChannel) return false;
+    if (wantStatus === 'all') return true;
+    if (wantStatus === 'needs_followup') return s.needs_followup;
+    return s.delivery_state === wantStatus;
+  });
+
+  res.json({
+    shipments: items,
+    thresholds: { delayDays, lostDays },
+    summary: {
+      total: items.length,
+      inTransit: items.filter(s => s.delivery_state === 'in_transit').length,
+      delayed: items.filter(s => s.delivery_state === 'delayed').length,
+      delivered: items.filter(s => s.delivery_state === 'delivered').length,
+      lost: items.filter(s => s.delivery_state === 'lost').length,
+      needsFollowup: items.filter(s => s.needs_followup).length,
+    },
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -537,6 +727,44 @@ async function syncEbayDispatchCore({ days = 14 } = {}) {
   return { checked: rows.length, dispatched, shippedReported: fulfilledIds.size, matched: rows.length };
 }
 
+// Flag shipments that have been in transit too long, so staff chase them. For each
+// dispatched, undelivered delivery: age ≥ lostDays → 'shipment_lost_risk', else
+// age ≥ delayDays → 'shipment_delayed'. Deduped (one unread notification per sale per
+// type). Best-effort; run from the daily cron. Returns counts.
+async function flagStaleShipments() {
+  await ensureDispatchColumns();
+  const { delayDays, lostDays } = await dispatchThresholds();
+  let delayed = 0, lost = 0;
+  try {
+    const { rows } = await query(`
+      SELECT s.id, s.invoice_number, s.payment_reference, s.customer_name,
+             EXTRACT(EPOCH FROM (now() - s.dispatched_at)) / 86400.0 AS days_in_transit,
+             (SELECT title FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_title
+      FROM sales s
+      WHERE s.is_estimate = false AND s.dispatched_at IS NOT NULL
+        AND s.delivered_at IS NULL AND (s.shipping_status IS NULL OR s.shipping_status NOT IN ('delivered','lost','issue'))
+        AND COALESCE(s.fulfillment_method, CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
+        AND s.dispatched_at >= now() - INTERVAL '120 days'`);
+    for (const s of rows) {
+      const dit = Math.floor(parseFloat(s.days_in_transit) || 0);
+      const ref = s.invoice_number || s.payment_reference || ('#' + s.id);
+      const type = dit >= lostDays ? 'shipment_lost_risk' : dit >= delayDays ? 'shipment_delayed' : null;
+      if (!type) continue;
+      // One unread notification of this (escalating) type per sale.
+      const exists = await query(`SELECT id FROM notifications WHERE type = $1 AND related_id = $2 AND read_at IS NULL`, [type, s.id]);
+      if (exists.rows.length) continue;
+      const title = type === 'shipment_lost_risk' ? `Possible lost parcel: ${ref}` : `Shipment delayed: ${ref}`;
+      const body = `${s.first_item_title || 'Order'}${s.customer_name ? ' for ' + s.customer_name : ''} has been in transit ${dit} days with no delivery confirmed. ${type === 'shipment_lost_risk' ? 'Open a courier claim / investigate.' : 'Chase the courier.'}`;
+      await query(
+        `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+         VALUES ($1, $2, $3, $4, 'sale', $5)`,
+        [type, title, body, type === 'shipment_lost_risk' ? 'error' : 'warn', s.id]);
+      if (type === 'shipment_lost_risk') lost++; else delayed++;
+    }
+  } catch (e) { console.warn('[dispatch.flagStale]', e.message); }
+  return { delayed, lost };
+}
+
 // POST /api/dispatch/sync-ebay — manual trigger for the auto-dispatch sync.
 router.post('/sync-ebay', requireAdmin, async (req, res) => {
   try {
@@ -552,4 +780,6 @@ router.post('/sync-ebay', requireAdmin, async (req, res) => {
 module.exports = router;
 module.exports.trackingUrlFor = trackingUrlFor;
 module.exports.CARRIERS = CARRIERS;
+module.exports.EBAY_NATIVE_CARRIERS = EBAY_NATIVE_CARRIERS;
 module.exports.syncEbayDispatchCore = syncEbayDispatchCore;
+module.exports.flagStaleShipments = flagStaleShipments;

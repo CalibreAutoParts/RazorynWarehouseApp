@@ -1014,6 +1014,9 @@ async function completeSale(storeArg, opts = {}) {
     'Tuffnells':             'Tuffnells',
     'Yodel':                 'Yodel',
     'APC Overnight':         'APC Overnight',
+    // URL-tracked specialists eBay doesn't list natively → send as 'Other'.
+    'Proovia':               'Other',
+    'Dropfleet':             'Other',
     'Other / custom courier': 'Other',
     'Already shipped (channel)': null,  // shouldn't get here — dispatch route filters this
   };

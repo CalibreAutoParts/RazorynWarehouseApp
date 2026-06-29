@@ -271,10 +271,16 @@ const dispatchCronExpr = (process.env.DISPATCH_SYNC_CRON || '*/30 * * * *').trim
 if (cron.validate(dispatchCronExpr)) {
   cron.schedule(dispatchCronExpr, async () => {
     try {
-      const { syncEbayDispatchCore } = require('./routes/dispatch');
-      if (typeof syncEbayDispatchCore !== 'function') return;
-      const result = await syncEbayDispatchCore({ days: 14 });
-      if (result.dispatched) console.log(`[cron dispatch] auto-dispatched ${result.dispatched} eBay order(s)`);
+      const dispatch = require('./routes/dispatch');
+      if (typeof dispatch.syncEbayDispatchCore === 'function') {
+        const result = await dispatch.syncEbayDispatchCore({ days: 14 });
+        if (result.dispatched) console.log(`[cron dispatch] auto-dispatched ${result.dispatched} eBay order(s)`);
+      }
+      // Flag shipments overdue for delivery so staff can chase the courier.
+      if (typeof dispatch.flagStaleShipments === 'function') {
+        const f = await dispatch.flagStaleShipments();
+        if (f.delayed || f.lost) console.log(`[cron dispatch] flagged ${f.delayed} delayed, ${f.lost} possible-lost shipment(s)`);
+      }
     } catch (e) {
       if (!/ebay_not_configured/.test(e.message)) console.error('[cron dispatch] failed:', e.message);
     }
