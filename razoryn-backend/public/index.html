@@ -6114,7 +6114,10 @@ function paintShipments() {
       <div class="card-head" style="display:block">
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
           <h3>🚚 Shipments (tracking)</h3>
-          <input type="search" value="${escapeAttr(State.shipmentQ || '')}" oninput="shipmentSearch(this.value)" placeholder="Search order #, tracking #, name…" style="padding:6px 10px;font-size:13px;min-width:240px;border:1px solid var(--line);border-radius:8px">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-outline btn-sm" onclick="refreshTracking(this)" title="Check Royal Mail / FedEx / DHL for delivery updates now (runs automatically too)">⟳ Refresh tracking</button>
+            <input type="search" value="${escapeAttr(State.shipmentQ || '')}" oninput="shipmentSearch(this.value)" placeholder="Search order #, tracking #, name…" style="padding:6px 10px;font-size:13px;min-width:240px;border:1px solid var(--line);border-radius:8px">
+          </div>
         </div>
         <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:10px">
           ${filters.map(([k, lbl]) => `<button onclick="State.shipmentStatus='${k}';loadShipments()" style="border:1px solid var(--line);background:${status === k ? 'var(--brand-primary)' : 'var(--white)'};color:${status === k ? '#fff' : 'var(--ink)'};padding:4px 10px;border-radius:14px;font-size:11px;font-weight:600;cursor:pointer">${lbl}</button>`).join('')}
@@ -6156,6 +6159,17 @@ function renderShipmentRow(s) {
 async function markDelivered(saleId) {
   try { await Api.post(`/api/dispatch/${saleId}/mark-delivered`, {}); toast('Marked delivered', 'success'); await loadShipments(); }
   catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+// Poll the carrier APIs now (Royal Mail / FedEx / DHL).
+async function refreshTracking(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  try {
+    const r = await Api.post('/api/dispatch/refresh-tracking', {});
+    if (r.skipped === 'no_carrier_api_configured') toast('No carrier tracking API keys set yet (Royal Mail / FedEx / DHL).', 'warn', 7000);
+    else toast(`Checked ${r.checked} parcel(s) · ${r.delivered} delivered · ${r.exceptions} exception(s)`, 'success', 6000);
+    await loadShipments();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = '⟳ Refresh tracking'; } }
 }
 async function setShipStatus(saleId, status) {
   try { await Api.post(`/api/dispatch/${saleId}/shipping-status`, { status }); toast('Updated', 'success'); await loadShipments(); }

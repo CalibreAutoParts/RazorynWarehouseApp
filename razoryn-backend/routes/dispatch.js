@@ -778,6 +778,56 @@ async function flagStaleShipments() {
   return { delayed, lost };
 }
 
+// Poll the carrier tracking APIs (Royal Mail / FedEx / DHL) for in-transit
+// deliveries and update their status. Carriers without an API (Evri / Proovia /
+// Dropfleet) are skipped — they stay manual. Best-effort, capped per run so we
+// stay within API limits. Returns counts.
+async function refreshTrackingStatuses({ limit = 120 } = {}) {
+  await ensureDispatchColumns();
+  const tracking = require('../services/tracking');
+  if (!tracking.anyConfigured()) return { checked: 0, delivered: 0, exceptions: 0, skipped: 'no_carrier_api_configured' };
+  const carriers = [...tracking.SUPPORTED].filter(c => tracking.supports(c));
+  if (!carriers.length) return { checked: 0, delivered: 0, exceptions: 0 };
+  let rows;
+  try {
+    rows = (await query(`
+      SELECT id, carrier, tracking_number FROM sales
+       WHERE is_estimate = false AND dispatched_at IS NOT NULL
+         AND tracking_number IS NOT NULL AND carrier = ANY($1)
+         AND delivered_at IS NULL
+         AND (shipping_status IS NULL OR shipping_status NOT IN ('delivered','lost'))
+         AND dispatched_at >= now() - INTERVAL '90 days'
+       ORDER BY dispatched_at ASC
+       LIMIT $2`, [carriers, limit])).rows;
+  } catch (e) { console.warn('[tracking.refresh]', e.message); return { checked: 0, delivered: 0, exceptions: 0 }; }
+
+  let checked = 0, delivered = 0, exceptions = 0;
+  for (const s of rows) {
+    const res = await tracking.lookup(s.carrier, s.tracking_number);
+    checked++;
+    if (!res || !res.state) continue;
+    if (res.state === 'delivered') {
+      await query(`UPDATE sales SET shipping_status = 'delivered', delivered_at = COALESCE($1::timestamptz, delivered_at, now()) WHERE id = $2`,
+        [res.deliveredAt || null, s.id]).catch(() => {});
+      delivered++;
+    } else if (res.state === 'exception') {
+      // Don't override a manual 'issue'/'booked_in'; only flag a clean in-transit one.
+      await query(`UPDATE sales SET shipping_status = 'issue' WHERE id = $1 AND (shipping_status IS NULL OR shipping_status = 'delivered')`, [s.id]).catch(() => {});
+      exceptions++;
+    }
+  }
+  return { checked, delivered, exceptions };
+}
+
+// POST /api/dispatch/refresh-tracking — manual trigger for the carrier-API poll.
+router.post('/refresh-tracking', requireAdmin, async (req, res) => {
+  try {
+    const out = await refreshTrackingStatuses({ limit: Math.min(300, Math.max(1, parseInt(req.body?.limit) || 120)) });
+    if (out.delivered || out.exceptions) await audit(req, 'tracking_refresh', null, null, out);
+    res.json({ ok: true, ...out });
+  } catch (e) { res.status(500).json({ error: 'refresh_failed', message: e.message }); }
+});
+
 // POST /api/dispatch/sync-ebay — manual trigger for the auto-dispatch sync.
 router.post('/sync-ebay', requireAdmin, async (req, res) => {
   try {
@@ -796,3 +846,4 @@ module.exports.CARRIERS = CARRIERS;
 module.exports.EBAY_NATIVE_CARRIERS = EBAY_NATIVE_CARRIERS;
 module.exports.syncEbayDispatchCore = syncEbayDispatchCore;
 module.exports.flagStaleShipments = flagStaleShipments;
+module.exports.refreshTrackingStatuses = refreshTrackingStatuses;
