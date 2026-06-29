@@ -6079,39 +6079,50 @@ async function loadShipments() {
   const days = el('dispatch-days') ? parseInt(el('dispatch-days').value, 10) : 10;
   const status = State.shipmentStatus || 'all';
   const channel = State.dispatchChannel || 'all';
+  const q = encodeURIComponent(State.shipmentQ || '');
   try {
-    const d = await Api.get(`/api/dispatch/shipments?days=${Math.max(days, 60)}&status=${status}&channel=${channel}`);
+    const d = await Api.get(`/api/dispatch/shipments?days=${Math.max(days, 60)}&status=${status}&channel=${channel}&q=${q}`);
     State.shipments = d;
     paintShipments();
   } catch (e) { wrap.innerHTML = ''; }
 }
+// Debounced search so typing doesn't spam the API.
+function shipmentSearch(v) {
+  State.shipmentQ = v;
+  clearTimeout(window._shipQT);
+  window._shipQT = setTimeout(loadShipments, 250);
+}
 const SHIP_STATES = {
+  booked_in:  { label: '📅 Booked in', css: 'color:var(--ink-soft)' },
   in_transit: { label: 'In transit', css: 'color:var(--ink-soft)' },
   delayed:    { label: '⚠ Delayed', css: 'color:var(--amber);font-weight:600' },
   delivered:  { label: '✓ Delivered', css: 'color:var(--green);font-weight:600' },
   lost:       { label: '🔴 Lost', css: 'color:var(--red);font-weight:600' },
-  issue:      { label: '⚑ Issue', css: 'color:var(--red);font-weight:600' },
+  issue:      { label: '⚑ Exception', css: 'color:var(--red);font-weight:600' },
 };
 function paintShipments() {
   const wrap = el('dispatch-shipments'); if (!wrap) return;
   const d = State.shipments || {}; const sum = d.summary || {}; const rows = d.shipments || [];
   const status = State.shipmentStatus || 'all';
   const filters = [
-    ['all', `All (${sum.total || 0})`], ['needs_followup', `⚠ Needs follow-up (${sum.needsFollowup || 0})`],
-    ['in_transit', `In transit (${sum.inTransit || 0})`], ['delivered', `Delivered (${sum.delivered || 0})`],
-    ['lost', `Lost (${sum.lost || 0})`],
+    ['all', `All (${sum.total || 0})`], ['booked_in', `📅 Booked in (${sum.bookedIn || 0})`],
+    ['in_transit', `In transit (${sum.inTransit || 0})`], ['delivered', `✓ Delivered (${sum.delivered || 0})`],
+    ['exception', `⚠ Delay / exception (${sum.exception || 0})`],
   ];
   wrap.innerHTML = `
     <div class="card">
-      <div class="card-head" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-        <h3>🚚 Shipments (tracking)</h3>
-        <div style="display:flex;gap:5px;flex-wrap:wrap">
+      <div class="card-head" style="display:block">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <h3>🚚 Shipments (tracking)</h3>
+          <input type="search" value="${escapeAttr(State.shipmentQ || '')}" oninput="shipmentSearch(this.value)" placeholder="Search order #, tracking #, name…" style="padding:6px 10px;font-size:13px;min-width:240px;border:1px solid var(--line);border-radius:8px">
+        </div>
+        <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:10px">
           ${filters.map(([k, lbl]) => `<button onclick="State.shipmentStatus='${k}';loadShipments()" style="border:1px solid var(--line);background:${status === k ? 'var(--brand-primary)' : 'var(--white)'};color:${status === k ? '#fff' : 'var(--ink)'};padding:4px 10px;border-radius:14px;font-size:11px;font-weight:600;cursor:pointer">${lbl}</button>`).join('')}
         </div>
       </div>
       <div class="card-body" style="padding:0">
         ${rows.length === 0
-          ? '<div class="empty" style="padding:24px 16px"><div class="t">Nothing here</div><div style="font-size:12px;color:var(--ink-soft)">Dispatched deliveries show up here with their tracking + delivery status.</div></div>'
+          ? `<div class="empty" style="padding:24px 16px"><div class="t">${State.shipmentQ ? 'No matches' : 'Nothing here'}</div><div style="font-size:12px;color:var(--ink-soft)">Dispatched deliveries show up here with their tracking + delivery status.</div></div>`
           : `<table class="table"><thead><tr>
               <th>Order</th><th>Channel</th><th>Customer</th><th>Carrier / tracking</th><th>Dispatched</th><th>Status</th><th></th>
             </tr></thead><tbody>${rows.map(renderShipmentRow).join('')}</tbody></table>`}
@@ -6135,8 +6146,9 @@ function renderShipmentRow(s) {
     <td style="white-space:nowrap;font-size:12px">${when}${transit}</td>
     <td style="${st.css}">${st.label}</td>
     <td style="white-space:nowrap">
-      ${s.delivery_state !== 'delivered' ? `<button class="btn btn-ghost btn-sm" onclick="markDelivered('${s.id}')" title="Mark delivered">✓</button>` : ''}
-      ${s.delivery_state !== 'lost' ? `<button class="btn btn-ghost btn-sm" onclick="setShipStatus('${s.id}','lost')" title="Flag as lost" style="color:var(--red)">🔴</button>` : `<button class="btn btn-ghost btn-sm" onclick="setShipStatus('${s.id}','clear')" title="Clear lost flag">↺</button>`}
+      ${s.delivery_state !== 'delivered' ? `<button class="btn btn-ghost btn-sm" onclick="markDelivered('${s.id}')" title="Mark delivered">✓</button>` : `<button class="btn btn-ghost btn-sm" onclick="setShipStatus('${s.id}','clear')" title="Undo delivered">↺</button>`}
+      ${s.delivery_state === 'booked_in' ? '' : `<button class="btn btn-ghost btn-sm" onclick="setShipStatus('${s.id}','booked_in')" title="Mark booked in (collection slot scheduled)">📅</button>`}
+      ${s.delivery_state !== 'lost' ? `<button class="btn btn-ghost btn-sm" onclick="setShipStatus('${s.id}','lost')" title="Flag as lost / exception" style="color:var(--red)">🔴</button>` : ''}
       <button class="btn btn-ghost btn-sm" onclick="openEditDispatch('${s.id}')" title="Edit carrier/tracking">✏️</button>
     </td>
   </tr>`;
@@ -6559,46 +6571,81 @@ function openDispatchModal(saleId) {
   const isExternalChannel = (sale.channel || '').match(/^(shopify|ebay_)/);
 
   modal({
-    title: 'Mark order dispatched',
+    title: 'Complete order',
     body: `
       <div style="background:var(--bg-soft);padding:12px;border-radius:8px;margin-bottom:14px">
         <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Order</div>
         <div style="font-family:ui-monospace,monospace;font-size:13px;margin-bottom:4px">${escapeHtml(ref)}</div>
         <div style="font-size:13px">${escapeHtml(sale.customer_name || '—')} · ${gbp(sale.total)} · ${channelPill(sale.channel)}</div>
-        ${sale.shipping_address ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:6px;white-space:pre-line;line-height:1.5">${escapeHtml(sale.shipping_address)}</div>` : '<div style="font-size:11px;color:var(--amber);margin-top:6px">⚠ No shipping address on file — check this before posting</div>'}
+        ${sale.shipping_address ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:6px;white-space:pre-line;line-height:1.5">${escapeHtml(sale.shipping_address)}</div>` : ''}
       </div>
-      <div class="field"><label>Carrier *</label>
-        <select id="d-carrier" style="font-size:14px">
-          <option value="">— Select carrier —</option>
-          ${carriers.map(c => `<option value="${escapeAttr(c)}">${escapeHtml(c)}</option>`).join('')}
-        </select>
+      <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">How did it leave?</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px">
+        <label class="d-mode-opt" style="border:1px solid var(--line);border-radius:8px;padding:10px;cursor:pointer;display:flex;gap:8px;align-items:center">
+          <input type="radio" name="d-mode" value="ship" checked onchange="dDispatchMode()"><div><div style="font-weight:600;font-size:13px">📦 Posted / courier</div><div style="font-size:11px;color:var(--ink-soft)">Needs a carrier + tracking</div></div>
+        </label>
+        <label class="d-mode-opt" style="border:1px solid var(--line);border-radius:8px;padding:10px;cursor:pointer;display:flex;gap:8px;align-items:center">
+          <input type="radio" name="d-mode" value="collect" onchange="dDispatchMode()"><div><div style="font-weight:600;font-size:13px">🤝 Customer collected</div><div style="font-size:11px;color:var(--ink-soft)">Picked up in person — no carrier</div></div>
+        </label>
       </div>
-      <div class="field"><label>Tracking number</label>
-        <input id="d-tracking" placeholder="Optional for some courier collections" autofocus>
-        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Type or scan the tracking number. Leave blank if your courier hasn't generated one yet.</div>
+      <div id="d-ship-fields">
+        <div class="field"><label>Carrier *</label>
+          <select id="d-carrier" style="font-size:14px">
+            <option value="">— Select carrier —</option>
+            ${carriers.map(c => `<option value="${escapeAttr(c)}">${escapeHtml(c)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field"><label>Tracking number</label>
+          <input id="d-tracking" placeholder="Optional for some courier collections">
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Type or scan the tracking number. Leave blank if your courier hasn't generated one yet.</div>
+        </div>
+        ${isExternalChannel ? `
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:8px">
+            <input type="checkbox" id="d-push" checked>
+            <span>Push tracking to ${sale.channel.startsWith('ebay') ? 'eBay' : 'Shopify'} so the customer gets the "shipped" notification</span>
+          </label>
+        ` : ''}
       </div>
       <div class="field"><label>Notes (optional)</label>
         <input id="d-notes" placeholder="e.g. 'Posted with bumper protected by 2x bubble layers'">
       </div>
-      ${isExternalChannel ? `
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:8px">
-          <input type="checkbox" id="d-push" checked>
-          <span>Push tracking to ${sale.channel.startsWith('ebay') ? 'eBay' : 'Shopify'} so the customer gets the "shipped" notification</span>
-        </label>
-      ` : ''}
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
       { label: '📦 Mark dispatched', primary: true, onClick: () => submitDispatch(saleId, isExternalChannel) },
     ],
   });
+  dDispatchMode();
+}
+
+// Toggle the dispatch modal between posted (carrier) and collected (no carrier).
+function dDispatchMode() {
+  const mode = document.querySelector('input[name="d-mode"]:checked')?.value || 'ship';
+  const ship = el('d-ship-fields'); if (ship) ship.style.display = mode === 'collect' ? 'none' : '';
+  const btn = document.querySelector('#modal-foot .btn-primary'); if (btn) btn.textContent = mode === 'collect' ? '🤝 Mark collected' : '📦 Mark dispatched';
 }
 
 async function submitDispatch(saleId, isExternalChannel) {
+  const mode = document.querySelector('input[name="d-mode"]:checked')?.value || 'ship';
+  const notes = el('d-notes').value.trim();
+
+  // Customer collected: reclassify to a collection and mark it collected — no carrier.
+  if (mode === 'collect') {
+    const taskId = Task.start('Marking collected');
+    try {
+      await Api.post(`/api/dispatch/${saleId}/set-fulfillment`, { method: 'collect' });
+      await Api.post(`/api/dispatch/${saleId}/mark-collected`, { notes });
+      Task.done(taskId, 'Collected');
+      toast('Order marked as collected', 'success');
+      closeModal();
+      await loadDispatch(); await loadShipments(); await Store.refresh('sales');
+    } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+    return;
+  }
+
   const carrier = el('d-carrier').value;
   const trackingNumber = el('d-tracking').value.trim();
-  const notes = el('d-notes').value.trim();
-  if (!carrier) { toast('Carrier is required', 'warn'); return; }
+  if (!carrier) { toast('Carrier is required — or choose "Customer collected"', 'warn'); return; }
   const pushToChannel = isExternalChannel ? el('d-push').checked : false;
 
   const taskId = Task.start('Marking dispatched');
@@ -6609,10 +6656,10 @@ async function submitDispatch(saleId, isExternalChannel) {
     Task.done(taskId, 'Dispatched');
     let toastMsg = 'Order marked dispatched';
     if (pushToChannel) toastMsg += ' · pushing tracking to channel in background';
-    if (r.trackingUrl) toastMsg += '\n🔗 ' + r.trackingUrl;
+    if (r.customerEmailQueued) toastMsg += ' · emailing customer';
     toast(toastMsg, 'success', 6000);
     closeModal();
-    await loadDispatch();
+    await loadDispatch(); await loadShipments();
     await Store.refresh('sales');
   } catch (e) {
     Task.fail(taskId, 'Failed');

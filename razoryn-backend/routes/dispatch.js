@@ -469,7 +469,7 @@ router.post('/:saleId/mark-delivered', requireAdmin, async (req, res) => {
 router.post('/:saleId/shipping-status', requireAdmin, async (req, res) => {
   await ensureDispatchColumns();
   const raw = String(req.body?.status || '').toLowerCase();
-  const status = ['lost', 'issue', 'delivered'].includes(raw) ? raw : (raw === 'clear' || raw === '' ? null : null);
+  const status = ['lost', 'issue', 'delivered', 'booked_in'].includes(raw) ? raw : (raw === 'clear' || raw === '' ? null : null);
   if (raw && status === null && raw !== 'clear') return res.status(400).json({ error: 'bad_status' });
   const r = await query(
     `UPDATE sales SET shipping_status = $1,
@@ -481,14 +481,17 @@ router.post('/:saleId/shipping-status', requireAdmin, async (req, res) => {
   res.json({ ok: true, sale: r.rows[0] });
 });
 
-// GET /api/dispatch/shipments?status=&channel=&days=
+// GET /api/dispatch/shipments?status=&channel=&days=&q=
 // The tracking hub: dispatched DELIVERIES with a derived delivery state +
-// days-in-transit, filterable by delivery status and channel group.
-//   status: all | needs_followup | in_transit | delivered | delayed | lost
+// days-in-transit, filterable by delivery status, channel group, and a free-text
+// search (order ref / tracking number / customer). A search widens the date window
+// so an old parcel can be found by its number.
+//   status: all | needs_followup | booked_in | in_transit | delivered | exception
 //   channel: all | ebay | store | bank | cash | card
 router.get('/shipments', requireAdmin, async (req, res) => {
   await ensureDispatchColumns();
-  const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 60));
+  const q = String(req.query.q || '').trim();
+  const days = q ? 365 : Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 60));
   const { delayDays, lostDays } = await dispatchThresholds();
   const rows = (await query(`
     SELECT s.*,
@@ -501,31 +504,41 @@ router.get('/shipments', requireAdmin, async (req, res) => {
       AND COALESCE(s.fulfillment_method, CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
       AND s.dispatched_at >= now() - ($1 || ' days')::interval
     ORDER BY s.dispatched_at DESC
-    LIMIT 1000`, [String(days)])).rows;
+    LIMIT 2000`, [String(days)])).rows;
 
   const wantStatus = String(req.query.status || 'all').toLowerCase();
   const wantChannel = String(req.query.channel || 'all').toLowerCase();
+  const ql = q.toLowerCase();
   const items = rows.map(s => {
     const dit = Math.floor(parseFloat(s.days_in_transit) || 0);
-    // Derived state: explicit override wins, else delivered_at, else age thresholds.
+    // Derived state: explicit override (booked_in/delivered/lost/issue) wins, else
+    // delivered_at, else the age thresholds (in_transit → delayed → lost).
     let state;
     if (s.shipping_status) state = s.shipping_status;
     else if (s.delivered_at) state = 'delivered';
     else if (dit >= lostDays) state = 'lost';
     else if (dit >= delayDays) state = 'delayed';
     else state = 'in_transit';
+    const isException = (state === 'delayed' || state === 'lost' || state === 'issue');
     return {
       ...s,
       days_in_transit: dit,
       delivery_state: state,
       channel_group: channelGroup(s.channel),
       tracking_url: trackingUrlFor(s.carrier, s.tracking_number),
-      needs_followup: (state === 'delayed' || state === 'lost' || state === 'issue'),
+      needs_followup: isException,
+      is_exception: isException,
     };
   }).filter(s => {
     if (wantChannel !== 'all' && s.channel_group !== wantChannel) return false;
+    if (ql) {
+      const hay = [s.invoice_number, s.payment_reference, s.order_number, s.external_order_id, s.tracking_number, s.customer_name, s.first_item_title]
+        .filter(Boolean).join(' ').toLowerCase();
+      if (!hay.includes(ql)) return false;
+    }
     if (wantStatus === 'all') return true;
     if (wantStatus === 'needs_followup') return s.needs_followup;
+    if (wantStatus === 'exception') return s.is_exception;
     return s.delivery_state === wantStatus;
   });
 
@@ -534,10 +547,10 @@ router.get('/shipments', requireAdmin, async (req, res) => {
     thresholds: { delayDays, lostDays },
     summary: {
       total: items.length,
+      bookedIn: items.filter(s => s.delivery_state === 'booked_in').length,
       inTransit: items.filter(s => s.delivery_state === 'in_transit').length,
-      delayed: items.filter(s => s.delivery_state === 'delayed').length,
       delivered: items.filter(s => s.delivery_state === 'delivered').length,
-      lost: items.filter(s => s.delivery_state === 'lost').length,
+      exception: items.filter(s => s.is_exception).length,
       needsFollowup: items.filter(s => s.needs_followup).length,
     },
   });
