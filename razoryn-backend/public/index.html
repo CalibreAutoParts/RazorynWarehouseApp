@@ -5364,18 +5364,22 @@ function labelsPrint(itemsArg) {
   // Other sizes have fixed orientation (50x25 is always landscape, 25x50 is always portrait).
   const orient = size === '100x150' ? (el('lab-orient').value || 'landscape') : (size === '25x50' ? 'portrait' : 'landscape');
 
-  // Build size config — for 4x6 we swap w/h based on orientation.
+  // Build size config. pageW/pageH = the PHYSICAL media fed to the printer; w/h =
+  // the label content box. For 4×6 landscape the media is still 4"×6" portrait
+  // (101.6×152.4) — we lay the content out landscape (152.4×101.6) and rotate it
+  // 90° onto the portrait page at print time, so the printer never sees a 6×4 page
+  // it can't feed (which was cropping/scaling the print).
   let s;
   if (size === '50x25') {
-    s = { w: 50, h: 25, name: '50×25 mm', barW: 1.4, barH: 22, fontTitle: 7, fontSku: 6.5, fontBar: 7, layout: 'small' };
+    s = { w: 50, h: 25, pageW: 50, pageH: 25, rotate: false, name: '50×25 mm', barW: 1.4, barH: 22, fontTitle: 7, fontSku: 6.5, fontBar: 7, layout: 'small' };
   } else if (size === '25x50') {
-    s = { w: 25, h: 50, name: '25×50 mm', barW: 1.1, barH: 46, fontTitle: 6, fontSku: 5.5, fontBar: 6, layout: 'tall' };
+    s = { w: 25, h: 50, pageW: 25, pageH: 50, rotate: false, name: '25×50 mm', barW: 1.1, barH: 46, fontTitle: 6, fontSku: 5.5, fontBar: 6, layout: 'tall' };
   } else {
-    // 4×6 inch = 101.6×152.4 mm. Use exact 4x6 inch dimensions for thermal printers.
+    // 4×6 inch = 101.6×152.4 mm. The media is always 4×6 portrait.
     if (orient === 'landscape') {
-      s = { w: 152.4, h: 101.6, name: '4×6 inch (landscape)', barW: 3, barH: 92, fontTitle: 22, fontSku: 16, fontBar: 13, layout: 'large-landscape', logoSize: '34mm' };
+      s = { w: 152.4, h: 101.6, pageW: 101.6, pageH: 152.4, rotate: true, name: '4×6 inch (landscape)', barW: 3, barH: 92, fontTitle: 22, fontSku: 16, fontBar: 13, layout: 'large-landscape', logoSize: '34mm' };
     } else {
-      s = { w: 101.6, h: 152.4, name: '4×6 inch (portrait)', barW: 2.6, barH: 108, fontTitle: 20, fontSku: 15, fontBar: 12, layout: 'large-portrait', logoSize: '28mm' };
+      s = { w: 101.6, h: 152.4, pageW: 101.6, pageH: 152.4, rotate: false, name: '4×6 inch (portrait)', barW: 2.6, barH: 108, fontTitle: 20, fontSku: 15, fontBar: 12, layout: 'large-portrait', logoSize: '28mm' };
     }
   }
 
@@ -5463,7 +5467,11 @@ function labelsPrint(itemsArg) {
       </div>`;
   }
 
-  const labelHtml = expanded.map(labelTemplate).join('');
+  // For rotated (4×6 landscape) media, each label sits inside a portrait page wrapper
+  // so it occupies exactly one 4×6 page and the rotation has a fixed frame to fill.
+  const labelHtml = expanded
+    .map((it, idx) => s.rotate ? `<div class="page-wrap">${labelTemplate(it, idx)}</div>` : labelTemplate(it, idx))
+    .join('');
 
   w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title></title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -5471,13 +5479,29 @@ function labelsPrint(itemsArg) {
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>
 <style>
-  @page { size: ${s.w}mm ${s.h}mm; margin: 0; }
+  @page { size: ${s.pageW}mm ${s.pageH}mm; margin: 0; }
   @media print {
     body { -webkit-print-color-adjust: exact; print-color-adjust: exact; margin: 0; background: white; }
-    .label { page-break-after: always; margin: 0 !important; border: none !important; box-shadow: none !important; }
-    .label:last-child { page-break-after: auto; }
+    ${s.rotate
+      ? `.page-wrap { page-break-after: always; margin: 0 !important; box-shadow: none !important; }
+         .page-wrap:last-child { page-break-after: auto; }
+         .label { margin: 0 !important; border: none !important; box-shadow: none !important; }`
+      : `.label { page-break-after: always; margin: 0 !important; border: none !important; box-shadow: none !important; }
+         .label:last-child { page-break-after: auto; }`}
     .actions { display: none; }
   }
+  ${s.rotate ? `
+  /* 4×6 landscape onto 4×6 portrait media: a portrait page frame holding the
+     landscape label rotated 90°. transform-origin top-left; rotate(90deg) sends the
+     content to negative-x, the translateX(pageW) brings it back to fill the page. */
+  .page-wrap {
+    width: ${s.pageW}mm; height: ${s.pageH}mm; position: relative; overflow: hidden;
+    background: white; margin: 10px auto; box-shadow: 0 1px 4px rgba(0,0,0,.15);
+  }
+  .page-wrap .label {
+    position: absolute; top: 0; left: 0; margin: 0; box-shadow: none;
+    transform-origin: top left; transform: translateX(${s.pageW}mm) rotate(90deg);
+  }` : ''}
   * { box-sizing: border-box; }
   body { margin: 0; padding: 0; font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif; background: #ddd; }
   .actions { padding: 12px; text-align: center; background: white; border-bottom: 1px solid #ccc; position: sticky; top: 0; z-index: 10; }
