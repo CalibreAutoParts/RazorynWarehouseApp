@@ -74,6 +74,8 @@ async function ensureSocialColumns() {
     // month. Day stored 1-31; empty/null = disabled. The actual "did the user
     // dismiss it this month" tracking lives in localStorage per-device.
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS stock_check_day INTEGER`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS stock_check_interval_months INTEGER DEFAULT 1`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS stock_check_period_start TIMESTAMPTZ`);
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS stock_check_enabled BOOLEAN DEFAULT false`);
     // Per-store policy overrides — created lazily on read/write. The brand
     // service exposes brand.stores so we can pre-create columns for every store.
@@ -369,6 +371,16 @@ router.get('/pricing-config', async (req, res) => {
     // Disabled when stock_check_enabled is false OR day is null.
     stockCheckDay:     r.stock_check_day || null,
     stockCheckEnabled: !!r.stock_check_enabled,
+    // Cadence: run a full stock check every N months (1/2/3/6/12). nextDue =
+    // current cycle start + interval; dueNow flags when a fresh check is overdue.
+    stockCheckIntervalMonths: (() => Math.max(1, parseInt(r.stock_check_interval_months) || 1))(),
+    ...(() => {
+      const months = Math.max(1, parseInt(r.stock_check_interval_months) || 1);
+      const start = r.stock_check_period_start ? new Date(r.stock_check_period_start)
+        : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+      const next = new Date(start); next.setMonth(next.getMonth() + months);
+      return { stockCheckNextDue: next.toISOString(), stockCheckDueNow: Date.now() >= next.getTime() };
+    })(),
     // Auto-email proformas / paid invoices to the customer (lives in data JSONB).
     // Defaults ON — only ever fires when Resend is configured + there's an email.
     autoEmailDocuments: (r.data?.autoEmailDocuments !== false),
@@ -450,9 +462,10 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       priceLinkPct:               'price_link_pct',
       ebayPromoteDefault:         'ebay_promote_default',
       ebayPromotePercent:         'ebay_promote_percent',
-      // Stock-check reminder
+      // Stock-check reminder + cadence
       stockCheckDay:          'stock_check_day',
       stockCheckEnabled:      'stock_check_enabled',
+      stockCheckIntervalMonths: 'stock_check_interval_months',
     };
     const updates = [], params = [];
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
@@ -465,6 +478,11 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
       if (dbCol === 'stock_check_day') {
         const n = parseInt(val);
         val = (Number.isFinite(n) && n >= 1 && n <= 31) ? n : null;
+      }
+      // Cadence months → clamp to a sensible 1..24.
+      if (dbCol === 'stock_check_interval_months') {
+        const n = parseInt(val);
+        val = (Number.isFinite(n) && n >= 1 && n <= 24) ? n : 1;
       }
       // Booleans
       if (dbCol === 'stock_check_enabled' || dbCol === 'ebay_promote_default') {
