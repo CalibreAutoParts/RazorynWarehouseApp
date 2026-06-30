@@ -1,11 +1,48 @@
 // routes/stock-checks.js — feature 2: employee stock-check workflow
 const express = require('express');
 const { query, withTx } = require('../db');
-const { requireAuth, requirePermission } = require('../middleware/auth');
+const { requireAuth, requirePermission, requireAdmin } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 
 const router = express.Router();
 router.use(requireAuth);
+
+// Self-healing: the stock-check CADENCE lives on app_settings.
+//   stock_check_interval_months — run a full check every N months (1/2/3/6/12)
+//   stock_check_period_start     — when the CURRENT check cycle began; "counted"
+//                                  means counted since this time. Reset bumps it.
+let _scReady = false;
+async function ensureCadenceColumns() {
+  if (_scReady) return;
+  try {
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS stock_check_interval_months INTEGER DEFAULT 1`);
+    await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS stock_check_period_start TIMESTAMPTZ`);
+    _scReady = true;
+  } catch (e) { console.warn('[stock-checks] cadence migration:', e.message); }
+}
+ensureCadenceColumns();
+
+// Resolve the current check cycle. periodStart defaults to the start of this
+// calendar month (preserving the old "this month" behaviour) until a reset sets it.
+async function getCheckPeriod() {
+  await ensureCadenceColumns();
+  const r = await query(`SELECT stock_check_interval_months, stock_check_period_start, stock_check_enabled FROM app_settings WHERE id = 1`);
+  const row = r.rows[0] || {};
+  const intervalMonths = Math.max(1, parseInt(row.stock_check_interval_months) || 1);
+  const ps = await query(
+    `SELECT COALESCE(stock_check_period_start, date_trunc('month', now())) AS period_start,
+            COALESCE(stock_check_period_start, date_trunc('month', now())) + ($1 || ' months')::interval AS next_due,
+            now() >= COALESCE(stock_check_period_start, date_trunc('month', now())) + ($1 || ' months')::interval AS due_now
+       FROM app_settings WHERE id = 1`, [String(intervalMonths)]);
+  const p = ps.rows[0] || {};
+  return {
+    intervalMonths,
+    enabled: !!row.stock_check_enabled,
+    periodStart: p.period_start,
+    nextDue: p.next_due,
+    dueNow: !!p.due_now,
+  };
+}
 
 // POST /api/stock-checks  { productId, actualQty, reason, notes, photoPath }
 // Records a stock check. If actualQty != expected, applies the variance and
@@ -81,14 +118,34 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   res.json({ checks: rows });
 });
 
-// GET /api/stock-checks/this-month — product IDs counted in the current calendar
-// month, for the monthly stock-take checklist (progress + resume across devices).
-router.get('/this-month', requirePermission('scan'), async (req, res) => {
+// GET /api/stock-checks/progress — product IDs counted SINCE the current check
+// cycle started, plus the cycle/cadence info (period start, interval, next due).
+// Drives the stock-take checklist progress + the "check due" reminder.
+router.get('/progress', requirePermission('scan'), async (req, res) => {
+  const period = await getCheckPeriod();
   const { rows } = await query(
-    `SELECT DISTINCT product_id FROM stock_checks
-     WHERE created_at >= date_trunc('month', now())`
-  );
+    `SELECT DISTINCT product_id FROM stock_checks WHERE created_at >= $1`, [period.periodStart]);
+  res.json({ productIds: rows.map(r => r.product_id), ...period });
+});
+
+// Back-compat alias for older clients.
+router.get('/this-month', requirePermission('scan'), async (req, res) => {
+  const period = await getCheckPeriod();
+  const { rows } = await query(
+    `SELECT DISTINCT product_id FROM stock_checks WHERE created_at >= $1`, [period.periodStart]);
   res.json({ productIds: rows.map(r => r.product_id) });
+});
+
+// POST /api/stock-checks/reset — start a NEW check cycle: everything counted
+// before now() drops back to "left to check". History rows are kept (audit); only
+// the cycle's start moves. Admin-only.
+router.post('/reset', requireAdmin, async (req, res) => {
+  await ensureCadenceColumns();
+  await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+  await query(`UPDATE app_settings SET stock_check_period_start = now() WHERE id = 1`);
+  await audit(req, 'stock_check_reset', null, null, {});
+  const period = await getCheckPeriod();
+  res.json({ ok: true, ...period });
 });
 
 module.exports = router;

@@ -2584,7 +2584,9 @@ function renderStockTake() {
       <div class="page-head">
         <div><h1>Monthly stock-take</h1><div class="desc">Walk the warehouse and tick off each item as you count it — progress is saved.</div></div>
         <div class="actions">
-          <button class="btn btn-primary admin-only" onclick="pushAllStock(this, true)" title="Push the current warehouse quantity of every item COUNTED this month to Shopify and eBay. Uses far fewer API calls than a full reconcile.">⇪ Push counted stock to channels</button>
+          <button class="btn btn-outline" onclick="stPrintForm()" title="Print a paper count sheet of the items currently shown (use the filters to choose 'remaining', 'all', or a location)">🖨 Print form</button>
+          <button class="btn btn-outline admin-only" onclick="stResetCheck(this)" title="Start a brand-new stock check — everything goes back to 'left to check'. History is kept.">🔄 Start new check</button>
+          <button class="btn btn-primary admin-only" onclick="pushAllStock(this, true)" title="Push the current warehouse quantity of every item COUNTED this period to Shopify and eBay. Uses far fewer API calls than a full reconcile.">⇪ Push counted stock to channels</button>
           <button class="btn btn-outline admin-only" onclick="pushAllStock(this, false)" title="Force-push EVERY linked product (full reconcile). Heavier on API credits.">⇪ Push all</button>
           <button class="btn btn-outline" onclick="routeTo('scan')">← Stock Check</button>
         </div>
@@ -2629,8 +2631,8 @@ function renderStockTake() {
   el('st-progress-text') && (el('st-progress-text').textContent = 'Loading latest items…');
   Promise.all([
     Store.refreshIfStale('products').catch(() => {}),
-    Api.get('/api/stock-checks/this-month')
-      .then(r => { State._stChecked = new Set((r.productIds || []).map(String)); })
+    Api.get('/api/stock-checks/progress')
+      .then(r => { State._stChecked = new Set((r.productIds || []).map(String)); State._stPeriod = r; })
       .catch(() => {}),
   ]).then(() => { stPopulateFilters(); stPaint(); }).catch(stPaint);
 
@@ -2711,9 +2713,87 @@ function stProgress() {
   const total = countable.length;
   const done = countable.filter(p => State._stChecked.has(String(p.id))).length;
   const pct = total ? Math.round(done / total * 100) : 0;
-  if (el('st-progress-text')) el('st-progress-text').textContent = `${done} of ${total} items counted`;
+  // Cadence context: when the next full check is due.
+  let due = '';
+  const per = State._stPeriod;
+  if (per && per.nextDue) {
+    const d = new Date(per.nextDue);
+    due = per.dueNow ? ` · ⚠ next check due now` : ` · next check due ${d.toLocaleDateString('en-GB')}`;
+  }
+  if (el('st-progress-text')) el('st-progress-text').textContent = `${done} of ${total} items counted${due}`;
   if (el('st-progress-pct')) el('st-progress-pct').textContent = pct + '%';
   if (el('st-progress-bar')) el('st-progress-bar').style.width = pct + '%';
+}
+
+// Reset / start a brand-new stock check — everything back to "left to check".
+async function stResetCheck(btn) {
+  if (!confirm('Start a new stock check?\n\nEvery item goes back to "left to check". Past counts stay in history — this only resets the progress for a fresh count.')) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/stock-checks/reset', {});
+    State._stChecked = new Set();
+    State._stPeriod = r;
+    toast('New stock check started — everything is left to check', 'success');
+    stPaint();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+// Print a paper count sheet of the items currently shown (the filters decide the
+// scope: Remaining to count / All items / a location). Grouped by location with
+// blank "Counted" + "Notes" columns to fill in by hand.
+function stPrintForm() {
+  const items = stFiltered();
+  if (!items.length) { toast('No items in the current view to print', 'warn'); return; }
+  const filterLabel = el('st-filter')?.selectedOptions[0]?.textContent || 'All items';
+  const locLabel = el('st-location')?.value ? (el('st-location').selectedOptions[0].textContent) : 'All locations';
+  const makeLabel = el('st-make')?.value || '';
+  // Group by location.
+  const groups = {};
+  for (const p of items) { const k = p.location || 'Unassigned location'; (groups[k] = groups[k] || []).push(p); }
+  const locKeys = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+  const brand = State.brand || {};
+  const today = new Date().toLocaleDateString('en-GB');
+  const rowsHtml = locKeys.map(loc => `
+    <h2>${escapeHtml(loc)} <span class="muted">(${groups[loc].length})</span></h2>
+    <table>
+      <thead><tr><th style="width:46%">Item</th><th>SKU / Part</th><th class="num">System qty</th><th class="cnt">Counted</th><th class="note">Notes</th></tr></thead>
+      <tbody>${groups[loc].map(p => `
+        <tr>
+          <td>${escapeHtml(p.title || '')}</td>
+          <td class="mono">${escapeHtml(p.sku || p.partNumber || '')}</td>
+          <td class="num">${totalQty(p)}</td>
+          <td class="cnt"></td><td class="note"></td>
+        </tr>`).join('')}</tbody>
+    </table>`).join('');
+  const w = window.open('', '_blank');
+  if (!w) { toast('Pop-up blocked — allow pop-ups to print', 'error'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Stock check — ${escapeHtml(today)}</title>
+  <style>
+    *{box-sizing:border-box} body{font-family:-apple-system,Segoe UI,Arial,sans-serif;color:#111;margin:24px;font-size:12px}
+    .head{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #c8202d;padding-bottom:8px;margin-bottom:6px}
+    .head .t{font-size:20px;font-weight:800}
+    .meta{font-size:12px;color:#555;margin-bottom:14px}
+    h2{font-size:14px;margin:16px 0 4px;border-bottom:1px solid #ccc;padding-bottom:3px;page-break-after:avoid}
+    .muted{color:#999;font-weight:400}
+    table{width:100%;border-collapse:collapse;margin-bottom:8px}
+    th,td{border:1px solid #bbb;padding:5px 7px;text-align:left;vertical-align:top}
+    th{background:#f3f3f3;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+    td.num,th.num{text-align:right;width:70px}
+    td.cnt,th.cnt{width:80px}
+    td.note,th.note{width:130px}
+    .mono{font-family:ui-monospace,monospace;font-size:11px}
+    tr,tbody,table{page-break-inside:auto}
+    @media print{ .noprint{display:none} body{margin:10mm} }
+    .noprint{margin-bottom:12px}
+  </style></head><body>
+    <div class="noprint"><button onclick="window.print()" style="padding:8px 16px;font-size:13px;cursor:pointer">🖨 Print</button></div>
+    <div class="head"><div class="t">${escapeHtml(brand.name || 'Warehouse')} — Stock check</div><div>${escapeHtml(today)}</div></div>
+    <div class="meta">Scope: <strong>${escapeHtml(filterLabel)}</strong>${makeLabel ? ' · Make: ' + escapeHtml(makeLabel) : ''} · ${escapeHtml(locLabel)} · ${items.length} item(s) · Counted by: ____________________</div>
+    ${rowsHtml}
+    <div style="margin-top:18px;font-size:11px;color:#666">Tick / write the physical count next to each item. Enter the figures into the app afterwards.</div>
+  </body></html>`);
+  w.document.close();
 }
 function stRowHtml(p) {
   const checked = State._stChecked.has(String(p.id));
@@ -12366,15 +12446,39 @@ function ctRecoBox(p) {
     ${p.offerEbayPct != null ? row(`After −${off}% offer`, ctMoney(p.offerEbayPrice), `${p.offerBelowBreakevenEbay ? '❌ loses money' : '✓ margin ' + ctPct(p.offerEbayPct)}`) : ''}
   </div>
   <div style="font-size:12px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px">
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
       <span style="font-weight:700">Test a price</span>
       <span style="color:var(--ink-soft)">£</span>
       <input id="ct-testprice" type="number" step="0.01" min="0" value="${testDefault}" style="width:110px" placeholder="price">
-      <span style="font-size:11px;color:var(--ink-soft)">type any price to see the breakdown ↓</span>
+      ${p.floorEbay != null ? `<button type="button" class="btn btn-ghost btn-sm" onclick="el('ct-testprice').value='${p.floorEbay}';ctRenderBreakdown('${p.floorEbay}',CT.items.find(x=>x.id===${p.id}))" title="Fill with the recommended price">use recommended</button>` : ''}
     </div>
     <div id="ct-breakdown" style="display:grid;gap:2px"></div>
-    <div style="margin-top:8px;font-size:11px;color:var(--ink-soft)">To set the live selling price, open <button type="button" class="btn btn-outline btn-sm" onclick="closeModal();openEditListing(${p.id})">✏️ Edit listing</button> — it pushes the new price to eBay + Shopify.</div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button type="button" class="btn btn-primary btn-sm" onclick="ctApplyPrice(${p.id})" title="Set this as the eBay price and push it live — Shopify is derived from your eBay→Shopify link % and pushed too">💷 Apply to eBay + Shopify</button>
+      <button type="button" class="btn btn-outline btn-sm" onclick="closeModal();openEditListing(${p.id})" title="Open the full listing editor">✏️ Edit listing</button>
+    </div>
+    <div style="margin-top:4px;font-size:10px;color:var(--ink-soft)">Apply sets the eBay price (master) live and derives the Shopify price from your link %. Price-locked items are skipped.</div>
   </div>`;
+}
+
+// Push the tested/recommended price to the channels from the cost editor — reuses
+// the pricing engine's eBay-master setter (which also derives + pushes Shopify).
+async function ctApplyPrice(productId) {
+  const v = parseFloat(el('ct-testprice')?.value);
+  if (!Number.isFinite(v) || v <= 0) { toast('Enter a price first', 'warn'); return; }
+  if (!confirm(`Set the eBay price to £${v.toFixed(2)} and push it live to eBay + Shopify?`)) return;
+  const taskId = Task.start('Pushing price to channels');
+  try {
+    const r = await Api.post('/api/pricing/set-ebay-price', { productId, ebayPrice: v });
+    Task.done(taskId, 'Price pushed');
+    const sp = r.shopifyPrice != null ? ` · Shopify £${Number(r.shopifyPrice).toFixed(2)}` : '';
+    toast(`Price live: eBay £${v.toFixed(2)}${sp}`, 'success', 6000);
+    await loadCosts(); await refreshCostFloors();
+    Store.refresh('products').catch(() => {});
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Push failed: ' + (e.data?.message || e.message), 'error', 8000);
+  }
 }
 
 // Band dropdown changed: reveal the custom-£ input for 'custom', else save now.
@@ -16061,24 +16165,26 @@ function renderSettings() {
       <!-- Monthly stock-check reminder -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-head">
-          <h3>📋 Monthly stock-take reminder</h3>
-          <div class="card-desc">Pops a sticky banner on the dashboard once a month on the day you pick, so a physical stock-take doesn't get forgotten. Dismiss it once and it won't show again until next month.</div>
+          <h3>📋 Stock-take reminder</h3>
+          <div class="card-desc">Choose how often a full stock check should be done. A banner nags on the dashboard once the next check is due. The clock starts whenever you press "Start new check" on the stock-take page.</div>
         </div>
         <div class="card-body">
           <label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:10px">
             <input type="checkbox" id="set-stockcheck-enabled">
-            Enable monthly stock-take reminder
+            Enable stock-take reminder
           </label>
-          <div class="field" style="max-width:240px">
-            <label>Day of month</label>
-            <select id="set-stockcheck-day">
-              <option value="">— pick a day —</option>
-              ${Array.from({length: 31}, (_, i) => i + 1).map(d => `<option value="${d}">${d}${['st','nd','rd'][d-1] || (d>=4&&d<=20?'th':['st','nd','rd'][((d%10)-1)] || 'th')} of the month</option>`).join('')}
+          <div class="field" style="max-width:280px">
+            <label>Run a full stock check every</label>
+            <select id="set-stockcheck-interval">
+              <option value="1">Month</option>
+              <option value="2">2 months</option>
+              <option value="3">3 months (quarterly)</option>
+              <option value="6">6 months</option>
+              <option value="12">12 months (yearly)</option>
             </select>
-            <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">For months without that day (e.g. picking the 31st in February), the banner fires on the last day of that month instead.</div>
           </div>
           <div style="margin-top:14px">
-            <button class="btn btn-primary btn-sm" onclick="saveStockCheckReminder()">Save reminder</button>
+            <button class="btn btn-primary btn-sm" onclick="saveStockCheckReminder()">Save</button>
           </div>
         </div>
       </div>
@@ -16919,24 +17025,20 @@ async function deleteUploadedLogo(variant) {
 // ──────────────────────────────────────────────────────────────────────────
 function hydrateStockCheckUI(cfg) {
   const cb = el('set-stockcheck-enabled');
-  const day = el('set-stockcheck-day');
+  const iv = el('set-stockcheck-interval');
   if (cb) cb.checked = !!cfg.stockCheckEnabled;
-  if (day) day.value = cfg.stockCheckDay ? String(cfg.stockCheckDay) : '';
+  if (iv) iv.value = String(cfg.stockCheckIntervalMonths || 1);
 }
 
 async function saveStockCheckReminder() {
   const enabled = !!el('set-stockcheck-enabled')?.checked;
-  const dayStr = (el('set-stockcheck-day')?.value || '').trim();
-  const day = parseInt(dayStr);
-  if (enabled && (!Number.isFinite(day) || day < 1 || day > 31)) {
-    toast('Pick a day of the month (1–31) before enabling', 'warn'); return;
-  }
+  const months = parseInt(el('set-stockcheck-interval')?.value) || 1;
   try {
     await Api.post('/api/settings/pricing-config', {
       stockCheckEnabled: enabled,
-      stockCheckDay: enabled ? day : null,
+      stockCheckIntervalMonths: months,
     });
-    toast(enabled ? `Stock-take reminder set for day ${day} of each month` : 'Stock-take reminder disabled', 'success');
+    toast(enabled ? `Stock check scheduled every ${months === 1 ? 'month' : months + ' months'}` : 'Stock-take reminder disabled', 'success');
     State.pricingConfig = await Api.get('/api/settings/pricing-config');
   } catch (e) {
     toast('Save failed: ' + (e.data?.message || e.message), 'error');
@@ -16953,23 +17055,16 @@ async function saveStockCheckReminder() {
 // "always on the 31st" reminder still hits every month.
 function checkStockTakeReminder() {
   const cfg = State.pricingConfig;
-  if (!cfg?.stockCheckEnabled || !cfg.stockCheckDay) return;
-  const now = new Date();
-  const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const dismissedKey = `rwh_stockcheck_dismissed_${monthKey}`;
+  if (!cfg?.stockCheckEnabled || !cfg.stockCheckDueNow) return;
+  // Dismissal is keyed to the current due date, so once a new check is started
+  // (which moves the due date) the reminder can fire again next cycle.
+  const dueKey = (cfg.stockCheckNextDue || '').slice(0, 10);
+  const dismissedKey = `rwh_stockcheck_dismissed_${dueKey}`;
   if (localStorage.getItem(dismissedKey)) return;
-  // Days in current month — last-day-of-month trick using day 0 of the next month
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  // Effective trigger day = min(configured day, days-in-month)
-  const triggerDay = Math.min(cfg.stockCheckDay, daysInMonth);
-  if (now.getDate() < triggerDay) return;
-  // Today is on or past the trigger day for this month — show the banner.
-  // (We show on or past, not just exactly equal, so a person who only opens
-  // the app a few times a week doesn't miss the reminder if they skip the day.)
-  showStockTakeBanner(cfg.stockCheckDay, monthKey, dismissedKey);
+  showStockTakeBanner(cfg.stockCheckIntervalMonths, dismissedKey);
 }
 
-function showStockTakeBanner(day, monthKey, dismissedKey) {
+function showStockTakeBanner(months, dismissedKey) {
   // Avoid duplicate banners if already rendered
   if (document.getElementById('stocktake-banner')) return;
   const banner = document.createElement('div');
@@ -16978,11 +17073,11 @@ function showStockTakeBanner(day, monthKey, dismissedKey) {
   banner.innerHTML = `
     <div style="font-size:22px">📋</div>
     <div style="flex:1;min-width:200px">
-      <strong>Monthly stock-take reminder</strong>
-      <div style="font-size:12px;margin-top:2px;color:var(--amber)">You scheduled a physical stock check for day ${day} of each month. Start the guided checklist and tick off each item as you count it.</div>
+      <strong>Stock check due</strong>
+      <div style="font-size:12px;margin-top:2px;color:var(--amber)">It's been ${months === 1 ? 'a month' : months + ' months'} — time for a physical stock check. Open the guided checklist (or press "Start new check" there for a fresh count) and tick off each item.</div>
     </div>
     <button class="btn btn-primary btn-sm" onclick="routeTo('stocktake'); dismissStockTakeBanner('${dismissedKey}');" style="background:var(--amber);color:#fff;border:0">Start stock-take</button>
-    <button class="btn btn-ghost btn-sm" onclick="dismissStockTakeBanner('${dismissedKey}')" style="color:var(--amber)">Dismiss for this month</button>
+    <button class="btn btn-ghost btn-sm" onclick="dismissStockTakeBanner('${dismissedKey}')" style="color:var(--amber)">Dismiss</button>
   `;
   // Insert at the top of the main content area. The dashboard has an outer
   // container — we just prepend.
