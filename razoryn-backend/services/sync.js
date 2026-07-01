@@ -408,6 +408,16 @@ async function pullEbay() {
     return { channel: 'ebay', orders: 0, inserted: 0, stores: [] };
   }
 
+  // VAT settings — eBay reports tax=0, so we split the VAT-inclusive total ourselves
+  // for domestic orders (exports via the GSP hub stay zero-rated).
+  const ukVat = require('../lib/uk-vat');
+  let vatRegistered = false, vatRate = 20;
+  try {
+    const vr = await query(`SELECT vat_rate, vat_registered FROM app_settings WHERE id = 1`);
+    vatRegistered = !!vr.rows[0]?.vat_registered;
+    vatRate = parseFloat(vr.rows[0]?.vat_rate || 20);
+  } catch (_) {}
+
   let totalOrders = 0, totalInserted = 0;
   const perStore = [];
 
@@ -432,9 +442,11 @@ async function pullEbay() {
 
       await withTx(async (c) => {
         const subtotal = parseFloat(order.pricingSummary?.priceSubtotal?.value || 0);
-        const vat = parseFloat(order.pricingSummary?.tax?.value || 0);
         const shipping = parseFloat(order.pricingSummary?.deliveryCost?.value || 0);
         const total = parseFloat(order.pricingSummary?.total?.value || 0);
+        // eBay's tax field is 0 for a standard UK sale — compute the inclusive VAT
+        // portion ourselves for domestic orders; GSP-hub exports are zero-rated.
+        const vat = ukVat.orderVat({ subtotal, shipping, shippingAddress: order.shippingAddress, vatRegistered, vatRate }).vat;
 
         // Unified reference: <PREFIX>-E-<eBay order #>. Same value in
         // invoice_number and payment_reference.

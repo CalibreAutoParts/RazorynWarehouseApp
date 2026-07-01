@@ -17938,12 +17938,12 @@ async function backfillEbayAddresses() {
 // model. Use after the VAT-bug fix is deployed so historical sales reflect the
 // new policy (cash = VAT-free, others = VAT portion of gross, never added on top).
 async function backfillVat() {
-  if (!confirm('Recompute VAT and totals on ALL existing sales.\n\nThe corrected model:\n• Cash sales: zero VAT, total = subtotal + shipping\n• Bank/card/online sales: VAT is the *portion* of the gross subtotal, never added on top\n\nSafe to re-run. Existing line items are not touched.\n\nContinue?')) return;
+  if (!confirm('Recompute VAT and totals on ALL existing sales.\n\nThe corrected model:\n• Cash sales: zero VAT\n• eBay/Shopify/bank/card DOMESTIC sales: VAT is the *portion* of the gross (never added on top)\n• eBay Global/International Shipping exports (GSP hub): zero-rated, no VAT\n\nSafe to re-run. Existing line items are not touched.\n\nContinue?')) return;
   const taskId = Task.start('Recomputing VAT on existing sales');
   try {
     const r = await Api.post('/api/sales/backfill-vat');
     Task.done(taskId, `${r.fixed} fixed, ${r.alreadyOk} OK`);
-    toast(`Recompute done — fixed ${r.fixed} of ${r.total} sales (${r.alreadyOk} already correct).`, 'success', 6000);
+    toast(`Recompute done — fixed ${r.fixed} of ${r.total} sales (${r.alreadyOk} already correct${r.exports ? `, ${r.exports} zero-rated exports` : ''}).`, 'success', 7000);
     await Store.refresh('sales');
     if (typeof renderSales === 'function' && State.page === 'sales') renderSales();
   } catch (e) {
