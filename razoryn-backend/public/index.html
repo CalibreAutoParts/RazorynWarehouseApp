@@ -16313,8 +16313,8 @@ function renderSettings() {
             <button class="btn btn-outline" onclick="backfillEbayAddresses()">🏠 Backfill missing eBay addresses</button>
           </div>
           <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
-            <div style="font-size:13px;font-weight:600;margin-bottom:4px">Old sales showing wrong totals?</div>
-            <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Recomputes VAT and totals on all existing sales using the corrected gross-inclusive model: total = subtotal + shipping, cash sales are VAT-free. Idempotent — safe to re-run.</div>
+            <div style="font-size:13px;font-weight:600;margin-bottom:4px">Old eBay invoices missing VAT / wrong totals?</div>
+            <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Recomputes VAT on all existing sales: eBay/Shopify/bank/card domestic orders get the VAT portion of the gross, eBay Global-Shipping exports (WS13 8UR hub) are zero-rated, cash is VAT-free. Run this once to fix historical eBay invoices. Idempotent — safe to re-run.</div>
             <button class="btn btn-outline" onclick="backfillVat()">🧮 Recompute VAT on existing sales</button>
           </div>
           <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
