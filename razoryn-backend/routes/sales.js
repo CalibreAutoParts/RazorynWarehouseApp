@@ -2083,13 +2083,17 @@ router.post('/backfill-vat', requireAdmin, async (req, res) => {
   const vatRegistered = !!setRow.vat_registered;
   const vatRate = vatRegistered ? (parseFloat(setRow.vat_rate || 20) / 100) : 0;
 
-  const all = await query(`SELECT id, subtotal, shipping, vat, total, payment_method FROM sales`);
-  let fixed = 0, alreadyOk = 0;
+  const ukVat = require('../lib/uk-vat');
+  const all = await query(`SELECT id, subtotal, shipping, vat, total, payment_method, shipping_address FROM sales`);
+  let fixed = 0, alreadyOk = 0, exports = 0;
   for (const s of all.rows) {
     const subtotal = parseFloat(s.subtotal || 0);
     const shipping = parseFloat(s.shipping || 0);
     const isCashSale = s.payment_method === 'cash';
-    const vatChargeable = !isCashSale && vatRegistered;
+    // Exports routed via eBay's Global/International Shipping hub are zero-rated.
+    const isExport = ukVat.isGspExport(s.shipping_address);
+    if (isExport) exports++;
+    const vatChargeable = !isCashSale && vatRegistered && !isExport;
     const grossForVat = subtotal + shipping;   // delivery is taxable income too
     const correctVat = vatChargeable ? +(grossForVat - grossForVat / (1 + vatRate)).toFixed(2) : 0;
     const correctTotal = +(subtotal + shipping).toFixed(2);
@@ -2104,8 +2108,8 @@ router.post('/backfill-vat', requireAdmin, async (req, res) => {
     );
     fixed++;
   }
-  await audit(req, 'backfill_vat', null, null, { fixed, alreadyOk });
-  res.json({ ok: true, fixed, alreadyOk, total: all.rows.length });
+  await audit(req, 'backfill_vat', null, null, { fixed, alreadyOk, exports });
+  res.json({ ok: true, fixed, alreadyOk, exports, total: all.rows.length });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
