@@ -1498,7 +1498,7 @@ const Store = {
     // dashboard renderers can call .filter/.length without crashing.
     const calls = [
       ['products',      () => loadAllProducts()],
-      ['sales',         () => Api.get('/api/sales?pageSize=200').then(r => { State.salesRefundsByChannel = r.refundsByChannel || {}; State.salesRefundsTotal = r.refundsTotal || 0; return (r.sales || []).map(adaptSale); })],
+      ['sales',         () => Api.get('/api/sales?pageSize=200&includeUnpaid=1').then(r => { State.salesRefundsByChannel = r.refundsByChannel || {}; State.salesRefundsTotal = r.refundsTotal || 0; return (r.sales || []).map(adaptSale); })],
       ['returns',       () => Api.get('/api/returns').then(r => (r.returns || []).map(adaptReturn))],
       ['schedule',      () => Api.get('/api/schedule').then(r => (r.tasks || []).map(adaptTask))],
       ['videos',        () => Api.get('/api/videos').then(r => (r.videos || []).map(adaptVideo))],
@@ -1532,7 +1532,7 @@ const Store = {
   async refresh(key) {
     const map = {
       products:      () => loadAllProducts(),
-      sales:         () => Api.get('/api/sales?pageSize=200').then(r => { State.salesRefundsByChannel = r.refundsByChannel || {}; State.salesRefundsTotal = r.refundsTotal || 0; return (r.sales || []).map(adaptSale); }),
+      sales:         () => Api.get('/api/sales?pageSize=200&includeUnpaid=1').then(r => { State.salesRefundsByChannel = r.refundsByChannel || {}; State.salesRefundsTotal = r.refundsTotal || 0; return (r.sales || []).map(adaptSale); }),
       returns:       () => Api.get('/api/returns').then(r => (r.returns || []).map(adaptReturn)),
       schedule:      () => Api.get('/api/schedule').then(r => (r.tasks || []).map(adaptTask)),
       videos:        () => Api.get('/api/videos').then(r => (r.videos || []).map(adaptVideo)),
@@ -7089,7 +7089,15 @@ function renderSales() {
       const dispatchBadge = !s.isEstimate && (s.dispatchedAt || s.collectedAt)
         ? ` <span class="pill green" style="font-size:10px;margin-left:4px" title="${s.collectedAt ? 'Collected ' + new Date(s.collectedAt).toLocaleDateString() : 'Dispatched ' + new Date(s.dispatchedAt).toLocaleDateString()}">${s.collectedAt ? '✓ Collected' : '✓ Shipped'}</span>`
         : '';
-      const unpaidBadge = s.unpaid ? ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="Parts given, payment not received yet">⏳ Unpaid</span>` : '';
+      // Unpaid invoices never hide — and after 30 days they escalate to a red
+      // "long overdue" warning so they get chased.
+      const unpaidDays = s.unpaid ? Math.floor((Date.now() - new Date(s.date).getTime()) / 86400000) : 0;
+      const unpaidOverdue = s.unpaid && unpaidDays >= 30;
+      const unpaidBadge = s.unpaid
+        ? (unpaidOverdue
+            ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--red-light);color:var(--red);font-weight:700" title="Unpaid for ${unpaidDays} days — chase payment">🔴 Unpaid ${unpaidDays}d</span>`
+            : ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="Parts given, payment not received yet (${unpaidDays}d)">⏳ Unpaid</span>`)
+        : '';
       const preorderBadge = s.isPreorder ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--amber-light);color:var(--amber)" title="Item not in stock yet — you'll be notified to ship when it arrives">📦 Pre-order</span>` : '';
       // Fitment + large-panel flags (auto-parts ops). Only meaningful on live orders.
       const fitmentBadge = (!s.isEstimate && s.needsFitment && !s.dispatchedAt && !s.collectedAt)
@@ -7112,7 +7120,7 @@ function renderSales() {
             : `<button class="btn btn-ghost btn-sm" onclick="openDispatchModalShortcut('${s.id}')" title="Mark dispatched — record carrier + tracking" style="color:var(--green)">📦</button>`)
         : '';
       return `
-      <tr style="cursor:pointer" onclick="if(!event.target.closest('button,input,a'))openSaleDetail('${s.id}')">
+      <tr style="cursor:pointer${unpaidOverdue ? ';background:var(--red-light);box-shadow:inset 3px 0 0 var(--red)' : (s.unpaid ? ';background:var(--amber-light)' : '')}" onclick="if(!event.target.closest('button,input,a'))openSaleDetail('${s.id}')">
         <td onclick="event.stopPropagation()"><input type="checkbox" class="sale-row-check" data-sid="${s.id}" ${State.salesSelected.has(s.id)?'checked':''} onchange="salesToggleRow('${s.id}',this.checked)"></td>
         <td>${fmtDate(s.date)}</td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${s.invoice||'—'}</td>
@@ -7179,7 +7187,7 @@ function salesPeriodRange() {
 }
 async function salesReload() {
   const { from, to } = salesPeriodRange();
-  const qs = new URLSearchParams({ pageSize: '2000' });
+  const qs = new URLSearchParams({ pageSize: '2000', includeUnpaid: '1' });
   if (from) qs.set('from', from);
   if (to) qs.set('to', to);
   try {
