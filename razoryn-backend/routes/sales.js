@@ -133,6 +133,17 @@ router.get('/', requireAdmin, async (req, res) => {
   if (to)      { params.push(to); where.push(`s.occurred_at <= $${params.length}`); }
   if (status)  { params.push(status); where.push(`s.status = $${params.length}`); }
   const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  // UNPAID direct invoices (cash/bank/card, parts given, awaiting payment) must
+  // never drop off the list just because they're older than the date window — they
+  // need chasing until paid. When the caller asks (includeUnpaid) and isn't filtered
+  // to a specific channel, union them in regardless of age. Revenue summary stays on
+  // the date window (unpaid rows aren't revenue), so figures are unaffected.
+  let rowsWhere = w;
+  if (req.query.includeUnpaid === '1' && !channel) {
+    const base = where.length ? where.join(' AND ') : 'TRUE';
+    rowsWhere = `WHERE (${base}) OR (s.is_estimate = false AND s.is_paid = false
+      AND s.channel IN ('direct_cash','direct_bank','direct_card') AND s.status NOT IN ('refunded','cancelled'))`;
+  }
   // Join with sale_items so we can show a meaningful item label (first item title)
   // and an item count, instead of generic "(multi-item sale)".
   const { rows } = await query(
@@ -140,10 +151,10 @@ router.get('/', requireAdmin, async (req, res) => {
        (SELECT title FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_title,
        (SELECT sku FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_sku,
        (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS item_count
-     FROM sales s ${w} ORDER BY s.occurred_at DESC LIMIT ${pageSize} OFFSET ${(page-1)*pageSize}`,
+     FROM sales s ${rowsWhere} ORDER BY s.occurred_at DESC LIMIT ${pageSize} OFFSET ${(page-1)*pageSize}`,
     params
   );
-  const tot = await query(`SELECT COUNT(*)::int AS n FROM sales s ${w}`, params);
+  const tot = await query(`SELECT COUNT(*)::int AS n FROM sales s ${rowsWhere}`, params);
   const summary = await query(`
     SELECT channel, COUNT(*)::int AS count, COALESCE(SUM(total),0) AS revenue
     FROM sales s ${w} GROUP BY channel`, params);
