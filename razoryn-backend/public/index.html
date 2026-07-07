@@ -984,6 +984,11 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
           Dashboard
         </button>
+        <button class="nav-item" data-page="clock">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
+          Clock
+          <span class="ct" id="nav-clock-dot" style="display:none;background:var(--green)">●</span>
+        </button>
         <button class="nav-item" data-page="inventory">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
           Inventory
@@ -1968,6 +1973,7 @@ function enterApp() {
   initTableLabeller();
   routeTo(State.kiosk && !KIOSK_PAGES.has('dashboard') ? 'inventory' : 'dashboard');
   refreshNavCounts();
+  refreshClockDot();
   refreshCostFloors();   // admin-only cost floors for app-wide price warnings
 
   toast('Welcome, ' + State.user.name + ' 👋', 'success');
@@ -2508,6 +2514,99 @@ function initKiosk() {
   applyKioskClass();
 }
 
+// ── Clock in/out (staff work hours) ─────────────────────────────────────────
+function clockFmt(mins) { mins = Math.max(0, Math.round(mins || 0)); const h = Math.floor(mins / 60), m = mins % 60; return (h ? h + 'h ' : '') + m + 'm'; }
+function clockTime(iso) { return iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '—'; }
+function clockDate(iso) { return iso ? new Date(iso).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }) : ''; }
+function clockPeriodRange(v) {
+  const now = new Date(); const d = new Date(now);
+  if (v === 'week') { const day = (now.getDay() + 6) % 7; d.setDate(now.getDate() - day); d.setHours(0, 0, 0, 0); return { from: d.toISOString(), to: null }; }
+  if (v === 'lastweek') { const day = (now.getDay() + 6) % 7; const end = new Date(now); end.setDate(now.getDate() - day); end.setHours(0, 0, 0, 0); const start = new Date(end); start.setDate(end.getDate() - 7); return { from: start.toISOString(), to: end.toISOString() }; }
+  if (v === 'month') { const m = new Date(now.getFullYear(), now.getMonth(), 1); return { from: m.toISOString(), to: null }; }
+  return { from: new Date(Date.now() - 14 * 86400000).toISOString(), to: null };
+}
+// Small green dot on the Clock nav item while the user is clocked in.
+async function refreshClockDot() {
+  try { const s = await Api.get('/api/timeclock/status'); State._clockedIn = s.clockedIn; const d = el('nav-clock-dot'); if (d) d.style.display = s.clockedIn ? '' : 'none'; } catch (_) {}
+}
+let _clockTimer = null;
+function renderClock() {
+  if (!State.clockPeriod) State.clockPeriod = 'week';
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Clock in / out</h1><div class="desc">Clock in when you start, out when you finish — your hours are totted up for pay.</div></div>
+        <div class="actions">
+          <select id="clock-period" onchange="State.clockPeriod=this.value;paintClock()" style="padding:6px 10px;font-size:13px">
+            <option value="week">This week</option><option value="lastweek">Last week</option>
+            <option value="month">This month</option><option value="14d">Last 14 days</option>
+          </select>
+        </div>
+      </div>
+      <div id="clock-body"><div class="empty"><div class="t">Loading…</div></div></div>
+    </div>`;
+  const sel = el('clock-period'); if (sel) sel.value = State.clockPeriod;
+  paintClock();
+}
+async function paintClock() {
+  if (_clockTimer) { clearInterval(_clockTimer); _clockTimer = null; }
+  const body = el('clock-body'); if (!body) return;
+  const range = clockPeriodRange(State.clockPeriod);
+  const q = new URLSearchParams(); if (range.from) q.set('from', range.from); if (range.to) q.set('to', range.to);
+  let st, me, report = null;
+  try {
+    [st, me] = await Promise.all([Api.get('/api/timeclock/status'), Api.get('/api/timeclock/me?' + q.toString())]);
+    if (State.user?.role === 'admin') report = await Api.get('/api/timeclock/report?' + q.toString()).catch(() => null);
+  } catch (e) { body.innerHTML = `<div class="empty"><div class="t">Failed to load</div>${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  State._clockedIn = st.clockedIn;
+  const inCard = st.clockedIn
+    ? `<div class="card" style="border:2px solid var(--green);margin-bottom:16px"><div class="card-body" style="text-align:center;padding:22px">
+         <div style="font-size:13px;color:var(--ink-soft)">Clocked in since <strong>${clockTime(st.session.clock_in)}</strong></div>
+         <div style="font-size:34px;font-weight:800;margin:6px 0" id="clock-elapsed">${clockFmt(st.sinceMinutes)}</div>
+         <button class="btn btn-primary" style="background:var(--red);border-color:var(--red)" onclick="clockOut(this)">■ Clock out</button>
+       </div></div>`
+    : `<div class="card" style="margin-bottom:16px"><div class="card-body" style="text-align:center;padding:22px">
+         <div style="font-size:13px;color:var(--ink-soft);margin-bottom:10px">You're not clocked in.</div>
+         <button class="btn btn-primary" onclick="clockIn(this)">▶ Clock in</button>
+       </div></div>`;
+  const myRows = (me.sessions || []).map(s => `
+    <tr><td>${clockDate(s.clock_in)}</td><td>${clockTime(s.clock_in)}</td><td>${s.open ? '<span style="color:var(--green)">in progress</span>' : clockTime(s.clock_out)}</td>
+    <td class="num"><strong>${clockFmt(s.minutes)}</strong></td></tr>`).join('') || '<tr><td colspan="4"><div class="empty" style="padding:16px">No sessions in this period</div></td></tr>';
+  const myCard = `<div class="card" style="margin-bottom:16px"><div class="card-head" style="display:flex;justify-content:space-between;align-items:center">
+      <h3>Your hours</h3><div style="font-weight:700">${clockFmt(me.totalMinutes)} total</div></div>
+      <div class="table-wrap"><table class="table"><thead><tr><th>Day</th><th>In</th><th>Out</th><th class="num">Hours</th></tr></thead><tbody>${myRows}</tbody></table></div></div>`;
+  let teamCard = '';
+  if (report) {
+    const rows = (report.staff || []).map(u => `
+      <tr><td>${escapeHtml(u.name)}</td><td class="num"><strong>${clockFmt(u.totalMinutes)}</strong></td>
+      <td class="num" style="color:var(--ink-soft)">${u.sessions.length} session(s)${u.sessions.some(x => x.open) ? ' · <span style="color:var(--green)">on now</span>' : ''}</td></tr>`).join('')
+      || '<tr><td colspan="3"><div class="empty" style="padding:16px">No hours logged in this period</div></td></tr>';
+    teamCard = `<div class="card admin-only"><div class="card-head"><h3>👥 Team hours (for pay)</h3><div class="card-desc">Everyone's total for the selected period.</div></div>
+      <div class="table-wrap"><table class="table"><thead><tr><th>Staff</th><th class="num">Total hours</th><th class="num">Sessions</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }
+  body.innerHTML = inCard + myCard + teamCard;
+  // Live elapsed timer while clocked in + on this page.
+  if (st.clockedIn) {
+    _clockTimer = setInterval(() => {
+      const eEl = el('clock-elapsed'); if (!eEl) { clearInterval(_clockTimer); _clockTimer = null; return; }
+      eEl.textContent = clockFmt(Math.round((Date.now() - new Date(st.session.clock_in).getTime()) / 60000));
+    }, 30000);
+  }
+}
+async function clockIn(btn) {
+  if (btn) btn.disabled = true;
+  try { await Api.post('/api/timeclock/clock-in', {}); toast('Clocked in ✓', 'success'); await paintClock(); refreshClockDot(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
+}
+async function clockOut(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/timeclock/clock-out', {});
+    toast(`Clocked out ✓ · ${clockFmt(r.minutes)} this session`, 'success', 4000);
+    await paintClock(); refreshClockDot();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
+}
+
 function hasPerm(page) {
   if (!State.user) return false;
   // Kiosk view locks the app to a small, customer-safe set of pages regardless of role.
@@ -2524,6 +2623,7 @@ function hasPerm(page) {
   //   <permission-key>→ check user.permissions[key] === true
   const map = {
     dashboard:     true,
+    clock:         true,
     inventory:    'inventory',
     incoming:     'inventory',
     scan:         'scan',
@@ -2589,7 +2689,7 @@ function routeTo(page) {
 
   const pages = {
     dashboard: renderDashboard, inventory: renderInventory, scan: renderScan,
-    incoming: renderIncoming,
+    incoming: renderIncoming, clock: renderClock,
     stocktake: renderStockTake,
     locations: renderLocations, returns: renderReturns, sales: renderSales,
     pricing: renderQuoteBuilder, schedule: renderSchedule, videos: renderVideos,
