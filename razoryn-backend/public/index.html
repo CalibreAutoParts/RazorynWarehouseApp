@@ -808,6 +808,16 @@
   .admin-only { display: none; }
   body.is-admin .admin-only { display: initial; }
   body.is-admin .nav-item.admin-only { display: flex; }
+  /* Kiosk view — a stripped-back, customer-safe mode. Hides all money/admin info
+     (even for an admin) and limits the nav to a few operational pages. Marked
+     nav items (kiosk-ok) stay; everything else + section labels + revenue tiles
+     are hidden. Toggled by the header logo button. */
+  body.is-kiosk .nav-item[data-page] { display: none !important; }
+  body.is-kiosk .nav-item.kiosk-ok  { display: flex !important; }
+  body.is-kiosk .nav-label { display: none; }
+  body.is-kiosk .kiosk-hide { display: none !important; }
+  body.is-kiosk .user-chip .role { display: none; }
+  #kiosk-toggle.active { background: var(--brand-primary); color: #fff; }
   /* Competitors page — visible to admins and warehouse staff with the perm. */
   .nav-item.competitors-only { display: none; }
   body.can-competitors .nav-item.competitors-only { display: flex; }
@@ -936,6 +946,9 @@
       <img class="brand-logo dark" src="/logo-dark.png" alt="" data-brand-logo-dark>
       <span class="sub">Warehouse Hub</span>
     </div>
+    <button class="icon-btn" id="kiosk-toggle" title="Kiosk view" aria-label="Kiosk view" style="margin-left:6px">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+    </button>
     <div class="spacer"></div>
     <div class="topbar-actions">
       <button class="icon-btn" id="quick-scan-btn" title="Quick scan" aria-label="Quick scan">
@@ -1950,9 +1963,10 @@ function enterApp() {
 
   bindNav();
   bindHeader();
+  initKiosk();
   initEditingTracker();
   initTableLabeller();
-  routeTo('dashboard');
+  routeTo(State.kiosk && !KIOSK_PAGES.has('dashboard') ? 'inventory' : 'dashboard');
   refreshNavCounts();
   refreshCostFloors();   // admin-only cost floors for app-wide price warnings
 
@@ -2472,8 +2486,32 @@ function initTableLabeller() {
   labelizeTables(content);
 }
 
+// Kiosk view — the few operational pages a customer-facing / shared device may use.
+// Everything money/admin stays out of reach while kiosk is on.
+const KIOSK_PAGES = new Set(['dashboard', 'inventory', 'scan', 'stocktake', 'locations', 'labels', 'createlisting', 'pricing', 'notifications']);
+function applyKioskClass() {
+  document.body.classList.toggle('is-kiosk', !!State.kiosk);
+  const b = el('kiosk-toggle'); if (b) b.classList.toggle('active', !!State.kiosk);
+}
+function toggleKiosk() {
+  State.kiosk = !State.kiosk;
+  try { localStorage.setItem('rzn_kiosk', State.kiosk ? '1' : '0'); } catch (_) {}
+  applyKioskClass();
+  const target = (State.kiosk && !KIOSK_PAGES.has(State.page)) ? 'inventory' : (State.page || 'dashboard');
+  routeTo(target);
+  toast(State.kiosk ? '👁 Kiosk view on — sales figures hidden' : 'Full view restored', 'info', 2000);
+}
+function initKiosk() {
+  try { State.kiosk = localStorage.getItem('rzn_kiosk') === '1'; } catch (_) { State.kiosk = false; }
+  document.querySelectorAll('.nav-item[data-page]').forEach(b => { if (KIOSK_PAGES.has(b.dataset.page)) b.classList.add('kiosk-ok'); });
+  const b = el('kiosk-toggle'); if (b) b.onclick = toggleKiosk;
+  applyKioskClass();
+}
+
 function hasPerm(page) {
   if (!State.user) return false;
+  // Kiosk view locks the app to a small, customer-safe set of pages regardless of role.
+  if (State.kiosk && !KIOSK_PAGES.has(page)) return false;
   if (State.user.role === 'admin') return true;
   // Warehouse role: explicitly allow only the operational pages the user needs.
   // Sales / pricing / KB / videos / schedule / notes / labels / mirror / staff /
@@ -3197,7 +3235,7 @@ function renderDashboard() {
       </div>
 
       <div class="grid-4" style="margin-bottom:20px">
-        ${State.user?.role === 'admin' ? `
+        ${(State.user?.role === 'admin' && !State.kiosk) ? `
         <div class="stat stat-clickable" onclick="routeTo('sales')" role="button" tabindex="0">
           <div class="icon-wrap"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 7c0-5.333-8-5.333-8 0"/><path d="M10 7v6h-4"/><path d="M6 13h9"/><path d="M6 19h12"/></svg></div>
           <div class="label">Today's revenue</div>
@@ -3270,7 +3308,7 @@ function renderDashboard() {
         </div>
       </div>
 
-      ${State.user?.role === 'admin' ? `
+      ${(State.user?.role === 'admin' && !State.kiosk) ? `
       <div style="height:16px"></div>
 
       <div class="card">
@@ -7380,6 +7418,28 @@ function printSingleInvoice(id) {
   if (!w) toast('Pop-up blocked. Allow pop-ups to print invoices.', 'error');
 }
 
+// Handheld / installed-app detection — a new tab yanks the user out of the PWA and
+// is hard to get back from on a phone/tablet.
+function isHandheldApp() {
+  try {
+    return window.matchMedia('(display-mode: standalone)').matches
+        || window.navigator.standalone === true
+        || (window.matchMedia('(max-width: 900px)').matches && (navigator.maxTouchPoints || 0) > 0);
+  } catch (_) { return false; }
+}
+// After creating/converting a document: auto-open the invoice on desktop only. On a
+// phone/tablet (or the installed app) DON'T force a new tab — it breaks navigation;
+// instead tell staff it's ready and reachable from the Sales list (🖨).
+function autoOpenInvoice(id) {
+  const url = '/api/sales/' + id + '/invoice.html';
+  if (isHandheldApp()) {
+    toast('Document ready ✓ — open it from the Sales list (🖨) when you need to print', 'success', 5000);
+    return;
+  }
+  const w = window.open(url, '_blank');
+  if (!w) toast('Pop-up blocked — open the document from the Sales list (🖨)', 'warn', 5000);
+}
+
 // #7 — log a return against an existing sale: pick items, refund amount, restock.
 async function openReturnFromSale(saleId) {
   let data;
@@ -7802,7 +7862,7 @@ async function convertEstimateToInvoice(id) {
     await Store.refresh('sales');
     await Store.refresh('products');
     renderSales();
-    setTimeout(() => window.open('/api/sales/' + id + '/invoice.html', '_blank'), 200);
+    setTimeout(() => autoOpenInvoice(id), 200);
   } catch (e) {
     if (e.data?.error === 'insufficient_stock') toast('Cannot convert: insufficient stock for ' + e.data.sku, 'error');
     else toast('Convert failed: ' + (e.data?.message || e.message), 'error');
@@ -8216,10 +8276,7 @@ async function submitManualSale() {
     await Store.refresh('sales');
     await Store.refresh('products');
     renderSales();
-    setTimeout(() => {
-      const w = window.open('/api/sales/' + r.sale.id + '/invoice.html', '_blank');
-      if (!w) toast('Pop-up blocked — find document in Sales tab', 'warn');
-    }, 200);
+    setTimeout(() => autoOpenInvoice(r.sale.id), 200);
   } catch (e) {
     if (e.data?.error === 'insufficient_stock') {
       // Name every offending line so staff don't have to scroll the modal hunting for it.
