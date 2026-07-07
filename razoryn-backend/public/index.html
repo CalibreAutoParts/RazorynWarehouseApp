@@ -2585,6 +2585,7 @@ function renderStockTake() {
         <div><h1>Monthly stock-take</h1><div class="desc">Walk the warehouse and tick off each item as you count it — progress is saved.</div></div>
         <div class="actions">
           <button class="btn btn-outline" onclick="stPrintForm()" title="Print a paper count sheet of the items currently shown (use the filters to choose 'remaining', 'all', or a location)">🖨 Print form</button>
+          <button class="btn btn-outline admin-only" onclick="stOpenRestore()" title="Fix items whose stock was wrongly re-inflated by a stock-take (e.g. sold-out items showing stock again)">⚠️ Fix inflated counts</button>
           <button class="btn btn-outline admin-only" onclick="stResetCheck(this)" title="Start a brand-new stock check — everything goes back to 'left to check'. History is kept.">🔄 Start new check</button>
           <button class="btn btn-primary admin-only" onclick="pushAllStock(this, true)" title="Push the current warehouse quantity of every item COUNTED this period to Shopify and eBay. Uses far fewer API calls than a full reconcile.">⇪ Push counted stock to channels</button>
           <button class="btn btn-outline admin-only" onclick="pushAllStock(this, false)" title="Force-push EVERY linked product (full reconcile). Heavier on API credits.">⇪ Push all</button>
@@ -2630,7 +2631,9 @@ function renderStockTake() {
   // every new warehouse item appears in the take without a manual push.
   el('st-progress-text') && (el('st-progress-text').textContent = 'Loading latest items…');
   Promise.all([
-    Store.refreshIfStale('products').catch(() => {}),
+    // Force a fresh catalogue (not "if stale") so the system quantities shown are
+    // live — a stale snapshot is what let counts reinflate sold-out items.
+    Store.refresh('products').catch(() => {}),
     Api.get('/api/stock-checks/progress')
       .then(r => { State._stChecked = new Set((r.productIds || []).map(String)); State._stPeriod = r; })
       .catch(() => {}),
@@ -2723,6 +2726,46 @@ function stProgress() {
   if (el('st-progress-text')) el('st-progress-text').textContent = `${done} of ${total} items counted${due}`;
   if (el('st-progress-pct')) el('st-progress-pct').textContent = pct + '%';
   if (el('st-progress-bar')) el('st-progress-bar').style.width = pct + '%';
+}
+
+// Recovery: find + fix items whose stock was wrongly re-inflated during a stock-take
+// (the confirm-count bug). Restores each to its quantity at the start of the take.
+async function stOpenRestore() {
+  let d;
+  try { d = await Api.get('/api/stock-checks/restore-preview'); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); return; }
+  const items = d.items || [];
+  if (!items.length) { toast('No inflated counts found for the current check — nothing to fix ✓', 'success', 5000); return; }
+  const rows = items.map(it => `
+    <tr>
+      <td style="padding:4px"><input type="checkbox" class="rst-pick" data-id="${it.product_id}" checked></td>
+      <td style="padding:4px"><div style="font-weight:500;font-size:13px">${escapeHtml(it.title || '')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')}</div></td>
+      <td style="padding:4px;text-align:right;color:var(--red);font-weight:600">${it.current_qty}</td>
+      <td style="padding:4px;text-align:right;color:var(--green);font-weight:700">${it.suggested_qty}</td>
+    </tr>`).join('');
+  modal({
+    title: '⚠️ Fix inflated stock-take counts',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">These items are showing MORE stock than they had when this check started — a sign a stale count re-inflated them. Restoring sets each back to its start-of-check quantity and re-pushes to eBay + Shopify. Review and untick any you know are genuinely correct.</div>
+      <div class="table-wrap" style="max-height:340px;overflow:auto"><table class="table"><thead><tr><th></th><th>Item</th><th style="text-align:right">Now</th><th style="text-align:right">Restore to</th></tr></thead><tbody>${rows}</tbody></table></div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: `Restore ${items.length} item(s)`, primary: true, onClick: () => stApplyRestore(d.since) },
+    ],
+  });
+}
+async function stApplyRestore(since) {
+  const ids = Array.from(document.querySelectorAll('.rst-pick:checked')).map(c => c.dataset.id);
+  if (!ids.length) { toast('Nothing selected', 'warn'); return; }
+  const taskId = Task.start('Restoring stock…');
+  try {
+    const r = await Api.post('/api/stock-checks/restore-apply', { since, productIds: ids });
+    Task.done(taskId, `${r.fixed} fixed`);
+    toast(`Restored ${r.fixed} item(s) and re-pushed to channels`, 'success', 6000);
+    closeModal();
+    await Store.refresh('products');
+    stPaint();
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 // Reset / start a brand-new stock check — everything back to "left to check".
@@ -2840,24 +2883,26 @@ function stPaint() {
 async function stCount(pid, adjust) {
   const p = (State.products || []).find(x => String(x.id) === String(pid));
   if (!p) return;
-  let actualQty = totalQty(p);
+  // Build the request. A plain "✓ Count" is a CONFIRM — it verifies the item
+  // without touching stock (so a stale on-screen number can never overwrite the
+  // live server quantity and bring a sold-out item back). Only "Adjust" writes a
+  // number the person physically counted.
+  let payload = { productId: pid, reason: 'stock_take', forcePush: true, confirm: true };
+  let adjustedTo = null;
   if (adjust) {
-    const v = await promptInput({ title: 'Stock count', label: `Counted quantity for "${p.title}"`, type: 'number', value: String(actualQty), help: `The system currently shows ${actualQty}.`, okLabel: 'Save count' });
+    const v = await promptInput({ title: 'Stock count', label: `Counted quantity for "${p.title}"`, type: 'number', value: String(totalQty(p)), help: `System currently shows ${totalQty(p)}. Enter the number you physically counted.`, okLabel: 'Save count' });
     if (v === null) return;
     const n = parseInt(v, 10);
     if (isNaN(n) || n < 0) { toast('Enter a valid quantity', 'error'); return; }
-    actualQty = n;
+    payload = { productId: pid, actualQty: n, reason: 'stock_take', forcePush: true };
+    adjustedTo = n;
   }
-  const changed = actualQty !== totalQty(p);
   try {
-    // forcePush: always reconcile this item to Shopify + eBay after counting —
-    // even when the count matched — so channel drift can't leave a sold-out item
-    // listed for sale.
-    const res = await Api.post('/api/stock-checks', { productId: pid, actualQty, reason: 'stock_take', forcePush: true });
+    const res = await Api.post('/api/stock-checks', payload);
     State._stChecked.add(String(pid));
-    if (changed) await Store.refresh('products');
+    if (res && res.variance) await Store.refresh('products');
     stPaint();
-    const base = adjust && changed ? `Counted — adjusted to ${actualQty}` : 'Counted ✓';
+    const base = (adjustedTo != null && res && res.variance) ? `Counted — adjusted to ${adjustedTo}` : 'Counted ✓';
     toast(`${base} · ${summarizeChannelPush(res && res.channelPush)}`, 'success', 2600);
   } catch (e) {
     toast('Failed: ' + (e.data?.message || e.message), 'error');

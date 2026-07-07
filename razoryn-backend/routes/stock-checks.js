@@ -49,8 +49,18 @@ async function getCheckPeriod() {
 // logs a stock movement so the audit trail stays complete.
 router.post('/', requirePermission('scan'), async (req, res) => {
   const { productId, actualQty, reason, notes, photoPath, forcePush } = req.body || {};
-  if (!productId || actualQty == null) {
-    return res.status(400).json({ error: 'productId_and_actualQty_required' });
+  if (!productId) return res.status(400).json({ error: 'productId_required' });
+
+  // CONFIRM vs ADJUST — the critical safety distinction:
+  //  • Confirm (`confirm:true` or no actualQty): staff verified the item; DO NOT
+  //    change stock. It only records that it was checked. This stops a stale
+  //    on-screen quantity from overwriting the server's live figure (e.g. an item
+  //    that sold on eBay/Shopify since the page loaded) and re-inflating stock.
+  //  • Adjust (an explicit numeric actualQty): staff physically counted N → set it.
+  const isConfirm = req.body.confirm === true || actualQty == null || actualQty === '';
+  const counted = isConfirm ? null : parseInt(actualQty, 10);
+  if (!isConfirm && (!Number.isFinite(counted) || counted < 0)) {
+    return res.status(400).json({ error: 'invalid_actualQty' });
   }
 
   const result = await withTx(async (c) => {
@@ -60,18 +70,20 @@ router.post('/', requirePermission('scan'), async (req, res) => {
     );
     if (!p.rows[0]) return { error: 'product_not_found' };
     const expected = p.rows[0].qty_on_hand;
-    const variance = actualQty - expected;
+    // On a confirm we record the check at the CURRENT server qty (variance 0).
+    const recordedActual = isConfirm ? expected : counted;
+    const variance = recordedActual - expected;
 
     const sc = await c.query(
       `INSERT INTO stock_checks (product_id, expected_qty, actual_qty, reason, notes, photo_path, performed_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [productId, expected, actualQty, reason || null, notes || null, photoPath || null, req.user.id]
+      [productId, expected, recordedActual, reason || null, notes || null, photoPath || null, req.user.id]
     );
 
     if (variance !== 0) {
       await c.query(
         `UPDATE products SET qty_on_hand = $1 WHERE id = $2`,
-        [actualQty, productId]
+        [recordedActual, productId]
       );
       await c.query(
         `INSERT INTO stock_movements (product_id, delta, reason, reference_id, notes, performed_by)
@@ -79,7 +91,7 @@ router.post('/', requirePermission('scan'), async (req, res) => {
         [productId, variance, sc.rows[0].id, reason || null, req.user.id]
       );
     }
-    return { check: sc.rows[0], variance };
+    return { check: sc.rows[0], variance, confirmed: isConfirm };
   });
 
   if (result.error) return res.status(404).json({ error: result.error });
@@ -134,6 +146,68 @@ router.get('/this-month', requirePermission('scan'), async (req, res) => {
   const { rows } = await query(
     `SELECT DISTINCT product_id FROM stock_checks WHERE created_at >= $1`, [period.periodStart]);
   res.json({ productIds: rows.map(r => r.product_id) });
+});
+
+// GET /api/stock-checks/restore-preview?since=ISO
+// Recovery for the "confirm re-inflated sold-out items" bug: for each product that
+// had an INFLATING stock check since `since` (defaults to the current cycle start),
+// the correct figure is its quantity at the START of the take — the expected_qty of
+// the first stock-check in the window (before any bad confirm touched it). Lists the
+// items whose current qty is now HIGHER than that, i.e. wrongly inflated.
+router.get('/restore-preview', requireAdmin, async (req, res) => {
+  const period = await getCheckPeriod();
+  const since = req.query.since ? new Date(req.query.since) : period.periodStart;
+  const { rows } = await query(`
+    SELECT p.id AS product_id, p.title, p.sku, p.qty_on_hand AS current_qty,
+           first.expected_qty AS suggested_qty
+    FROM products p
+    JOIN LATERAL (
+      SELECT expected_qty FROM stock_checks sc
+       WHERE sc.product_id = p.id AND sc.created_at >= $1
+       ORDER BY sc.created_at ASC, sc.id ASC LIMIT 1
+    ) first ON true
+    WHERE EXISTS (SELECT 1 FROM stock_checks sc2
+                    WHERE sc2.product_id = p.id AND sc2.created_at >= $1
+                      AND sc2.actual_qty > sc2.expected_qty)
+      AND p.qty_on_hand > first.expected_qty
+    ORDER BY (p.qty_on_hand - first.expected_qty) DESC`, [since]);
+  res.json({ since, items: rows.map(r => ({ ...r, inflatedBy: r.current_qty - r.suggested_qty })) });
+});
+
+// POST /api/stock-checks/restore-apply  { since?, productIds? }
+// Set each affected product back to its start-of-take quantity, log a compensating
+// movement, and re-push to the channels. Admin-only.
+router.post('/restore-apply', requireAdmin, async (req, res) => {
+  const period = await getCheckPeriod();
+  const since = req.body?.since ? new Date(req.body.since) : period.periodStart;
+  const only = Array.isArray(req.body?.productIds) ? req.body.productIds.map(String) : null;
+  const { rows } = await query(`
+    SELECT p.id AS product_id, p.qty_on_hand AS current_qty, first.expected_qty AS suggested_qty
+    FROM products p
+    JOIN LATERAL (
+      SELECT expected_qty FROM stock_checks sc
+       WHERE sc.product_id = p.id AND sc.created_at >= $1
+       ORDER BY sc.created_at ASC, sc.id ASC LIMIT 1
+    ) first ON true
+    WHERE EXISTS (SELECT 1 FROM stock_checks sc2 WHERE sc2.product_id = p.id AND sc2.created_at >= $1 AND sc2.actual_qty > sc2.expected_qty)
+      AND p.qty_on_hand > first.expected_qty`, [since]);
+  let fixed = 0; const done = [];
+  for (const r of rows) {
+    if (only && !only.includes(String(r.product_id))) continue;
+    const delta = r.suggested_qty - r.current_qty;   // negative (lowering)
+    try {
+      await query(`UPDATE products SET qty_on_hand = $1, updated_at = now() WHERE id = $2`, [r.suggested_qty, r.product_id]);
+      await query(
+        `INSERT INTO stock_movements (product_id, delta, reason, notes, performed_by)
+         VALUES ($1,$2,'stock_check_revert','Reverted inflated stock-take count',$3)`,
+        [r.product_id, delta, req.user.id]);
+      try { await require('./products').pushProductStockToChannels(r.product_id); } catch (_) {}
+      done.push({ productId: r.product_id, from: r.current_qty, to: r.suggested_qty });
+      fixed++;
+    } catch (e) { /* skip on error */ }
+  }
+  await audit(req, 'stock_check_restore', null, null, { fixed, since });
+  res.json({ ok: true, fixed, done });
 });
 
 // POST /api/stock-checks/reset — start a NEW check cycle: everything counted
