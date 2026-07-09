@@ -130,22 +130,39 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   res.json({ checks: rows });
 });
 
+// Products "counted" since a time — an item counts if it got a stock-take check
+// OR a HUMAN quantity adjustment (from the Stock Check / scan page or Inventory
+// adjust) in the window. This means it doesn't matter which screen staff use to
+// count on: adjusting an item's quantity marks it done in the monthly stock-take.
+// Sales, returns, incoming receipts and the revert tool are NOT counts.
+async function countedProductIdsSince(since) {
+  const { rows } = await query(`
+    SELECT DISTINCT product_id FROM (
+      SELECT product_id FROM stock_checks WHERE created_at >= $1
+      UNION
+      SELECT product_id FROM stock_movements
+        WHERE created_at >= $1 AND product_id IS NOT NULL AND performed_by IS NOT NULL
+          AND reason IS NOT NULL
+          AND reason NOT ILIKE 'sale%'
+          AND reason NOT IN ('return_restock','incoming_received','stock_check_revert','sale_deleted_restore')
+    ) t`, [since]);
+  return rows.map(r => r.product_id);
+}
+
 // GET /api/stock-checks/progress — product IDs counted SINCE the current check
 // cycle started, plus the cycle/cadence info (period start, interval, next due).
 // Drives the stock-take checklist progress + the "check due" reminder.
 router.get('/progress', requirePermission('scan'), async (req, res) => {
   const period = await getCheckPeriod();
-  const { rows } = await query(
-    `SELECT DISTINCT product_id FROM stock_checks WHERE created_at >= $1`, [period.periodStart]);
-  res.json({ productIds: rows.map(r => r.product_id), ...period });
+  const productIds = await countedProductIdsSince(period.periodStart);
+  res.json({ productIds, ...period });
 });
 
 // Back-compat alias for older clients.
 router.get('/this-month', requirePermission('scan'), async (req, res) => {
   const period = await getCheckPeriod();
-  const { rows } = await query(
-    `SELECT DISTINCT product_id FROM stock_checks WHERE created_at >= $1`, [period.periodStart]);
-  res.json({ productIds: rows.map(r => r.product_id) });
+  const productIds = await countedProductIdsSince(period.periodStart);
+  res.json({ productIds });
 });
 
 // GET /api/stock-checks/restore-preview?since=ISO
