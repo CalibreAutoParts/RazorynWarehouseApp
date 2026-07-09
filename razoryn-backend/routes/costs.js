@@ -57,7 +57,7 @@ router.get('/products', requireAdmin, async (req, res) => {
   if (brand) { params.push(brand); where.push(`p.brand = $${params.length}`); }
   const { rows } = await query(`
     SELECT p.id, p.sku, p.title, p.brand, p.model, p.qty_on_hand, p.large_panel, p.shipping_band, p.shipping_cost,
-           p.landed_cost, p.postage_in_price,
+           p.landed_cost, p.postage_in_price, p.stock_group_id, p.part_number,
            p.cost_price, p.price_ebay, p.price_shopify, p.image_url,
            lc.supplier AS last_supplier, lc.purchase_date AS last_purchase_date,
            lc.currency AS last_currency, lc.unit_cost_foreign AS last_unit_cost_foreign
@@ -91,6 +91,7 @@ router.get('/products', requireAdmin, async (req, res) => {
     const effCost = cost != null ? effectiveCost(cost, landedCost, S) : null;
     return {
       id: r.id, sku: r.sku, title: r.title, brand: r.brand, model: r.model,
+      stockGroupId: r.stock_group_id || null, partNumber: r.part_number || null,
       qtyOnHand: r.qty_on_hand, largePanel: isLarge, shippingBand: band, shippingCost, imageUrl: r.image_url,
       landedCost, landedKnown: landedCost != null, postageInPrice,
       effectiveCost: effCost != null ? +effCost.toFixed(2) : null,
@@ -110,19 +111,41 @@ router.get('/products', requireAdmin, async (req, res) => {
     };
   });
 
-  let filtered = items;
+  // Collapse shared-stock siblings (same part number, one pool) into ONE row so a
+  // pooled part is counted once — the pool qty is shared across members, not
+  // multiplied. The representative row carries the pool qty + how many SKUs share
+  // it + the models it fits, so inventory count + value aren't inflated.
+  const groups = new Map(); const singles = [];
+  for (const it of items) {
+    if (it.stockGroupId) { const arr = groups.get(it.stockGroupId) || []; arr.push(it); groups.set(it.stockGroupId, arr); }
+    else singles.push(it);
+  }
+  const collapsedGroups = [];
+  for (const [, mem] of groups) {
+    const rep = mem.find(m => m.costPrice != null) || mem[0];
+    rep.shared = true;
+    rep.memberCount = mem.length;
+    rep.sharedSkus = mem.map(m => m.sku);
+    rep.fitsModels = [...new Set(mem.map(m => [m.brand, m.model].filter(Boolean).join(' ')).filter(Boolean))];
+    collapsedGroups.push(rep);
+  }
+  let collapsed = [...singles, ...collapsedGroups].sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
+
+  let filtered = collapsed;
   if (belowFloor === '1') filtered = filtered.filter(x => x.belowFloorEbay || x.belowFloorShopify);
   if (overstock === '1') filtered = filtered.filter(x => x.overstock);
 
-  const val = await query(`SELECT COALESCE(SUM(qty_on_hand * cost_price),0) AS v FROM products WHERE active=true AND cost_price IS NOT NULL`);
+  // Value each (collapsed) item once, using the effective landed cost.
+  const inventoryValueAtCost = collapsed.reduce((a, x) => a + ((x.effectiveCost != null ? x.effectiveCost : x.costPrice) || 0) * (x.qtyOnHand || 0), 0);
   res.json({
     items: filtered, settings: S,
     summary: {
-      count: items.length,
-      withCost: items.filter(x => x.costPrice != null).length,
-      belowFloor: items.filter(x => x.belowFloorEbay || x.belowFloorShopify).length,
-      overstockCount: items.filter(x => x.overstock).length,
-      inventoryValueAtCost: +parseFloat(val.rows[0].v || 0).toFixed(2),
+      count: collapsed.length,
+      withCost: collapsed.filter(x => x.costPrice != null).length,
+      belowFloor: collapsed.filter(x => x.belowFloorEbay || x.belowFloorShopify).length,
+      overstockCount: collapsed.filter(x => x.overstock).length,
+      inventoryValueAtCost: +inventoryValueAtCost.toFixed(2),
+      sharedGroups: collapsedGroups.length,
     },
   });
 });
@@ -261,10 +284,13 @@ router.get('/overstock', requireAdmin, async (req, res) => {
   await ensureCostSchema();
   const S = resolveCostSettings(await settingsRow());
   const { rows } = await query(
-    `SELECT id, sku, title, brand, qty_on_hand, large_panel, shipping_band, shipping_cost, landed_cost, postage_in_price, cost_price, price_ebay
+    `SELECT id, sku, title, brand, qty_on_hand, large_panel, shipping_band, shipping_cost, landed_cost, postage_in_price, cost_price, price_ebay, stock_group_id
      FROM products WHERE active=true AND cost_price IS NOT NULL AND qty_on_hand >= $1
-     ORDER BY qty_on_hand * cost_price DESC LIMIT 500`, [S.overstockThreshold]);
-  const items = rows.map(r => {
+     ORDER BY qty_on_hand * cost_price DESC LIMIT 800`, [S.overstockThreshold]);
+  // One row per shared pool (the pool qty is the same on every member).
+  const seenGroup = new Set();
+  const deduped = rows.filter(r => { if (!r.stock_group_id) return true; if (seenGroup.has(r.stock_group_id)) return false; seenGroup.add(r.stock_group_id); return true; }).slice(0, 500);
+  const items = deduped.map(r => {
     const cost = parseFloat(r.cost_price);
     const fe = computeFloor({ costPrice: cost, isLarge: !!r.large_panel, band: r.shipping_band || null,
       shippingCost: r.shipping_cost != null ? parseFloat(r.shipping_cost) : null,
@@ -282,14 +308,24 @@ router.get('/overstock', requireAdmin, async (req, res) => {
 });
 
 // GET /api/costs/valuation — stock value at cost, overall + by brand.
+// Shared-pool members are counted ONCE (DISTINCT ON the group) so the pooled qty
+// isn't multiplied across sibling listings.
 router.get('/valuation', requireAdmin, async (req, res) => {
-  const t = await query(`SELECT COALESCE(SUM(qty_on_hand*cost_price),0) AS v,
-      COUNT(*) FILTER (WHERE cost_price IS NOT NULL) AS priced,
-      COUNT(*) FILTER (WHERE cost_price IS NULL) AS missing
-    FROM products WHERE active=true`);
+  const t = await query(`SELECT COALESCE(SUM(qty*cost),0) AS v,
+      COUNT(*) FILTER (WHERE cost IS NOT NULL) AS priced,
+      COUNT(*) FILTER (WHERE cost IS NULL) AS missing
+    FROM (
+      SELECT DISTINCT ON (COALESCE(stock_group_id, -id)) qty_on_hand AS qty, cost_price AS cost
+      FROM products WHERE active=true
+      ORDER BY COALESCE(stock_group_id, -id), (cost_price IS NULL), id
+    ) u`);
   const byBrand = await query(`SELECT COALESCE(brand,'(none)') AS brand,
-      COALESCE(SUM(qty_on_hand*cost_price),0) AS value, COALESCE(SUM(qty_on_hand),0) AS units
-    FROM products WHERE active=true AND cost_price IS NOT NULL GROUP BY brand ORDER BY value DESC`);
+      COALESCE(SUM(qty*cost),0) AS value, COALESCE(SUM(qty),0) AS units
+    FROM (
+      SELECT DISTINCT ON (COALESCE(stock_group_id, -id)) brand, qty_on_hand AS qty, cost_price AS cost
+      FROM products WHERE active=true AND cost_price IS NOT NULL
+      ORDER BY COALESCE(stock_group_id, -id), id
+    ) u GROUP BY brand ORDER BY value DESC`);
   res.json({
     totalAtCost: +parseFloat(t.rows[0].v || 0).toFixed(2),
     pricedProducts: parseInt(t.rows[0].priced), missingCost: parseInt(t.rows[0].missing),
