@@ -12401,9 +12401,12 @@ function sgMemberRow(gid, m) {
 function sharedStockHtml(groups, suggestions) {
   const sugHtml = (suggestions || []).length ? `
     <div class="card" style="margin-bottom:16px;border-left:3px solid var(--amber)">
-      <div class="card-head"><h3>⚠ Listings that share a part number (need fixing)</h3></div>
+      <div class="card-head" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <h3>⚠ Listings that share a part number (need fixing)</h3>
+        <button class="btn btn-primary btn-sm" onclick="sgPoolAll(${suggestions.length})" title="Turn every set below into a shared pool in one go">🔗 Link all ${suggestions.length} set${suggestions.length === 1 ? '' : 's'}</button>
+      </div>
       <div class="card-body">
-        <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">These separate listings already use the same part number but aren't pooled yet, so their stock can drift apart. Link each set into one shared pool.</div>
+        <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">These separate listings already use the same part number but aren't pooled yet, so their stock can drift apart. Link each set into one shared pool — or “Link all” to do them all at once.</div>
         ${suggestions.map(s => `
           <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line-2)">
             <div style="flex:1;min-width:0">
@@ -12437,6 +12440,15 @@ function sharedStockHtml(groups, suggestions) {
     </div>`).join('') : `<div class="empty" style="padding:24px;text-align:center"><div class="t">No shared pools yet</div>Link the listings above, or create a pool with “+ New shared pool”.</div>`;
 
   return sugHtml + groupsHtml;
+}
+async function sgPoolAll(count) {
+  if (!confirm(`Link all ${count} set${count === 1 ? '' : 's'} into shared pools?\n\nEach set's listings will share one stock pool, seeded from the highest current quantity in the set, and pushed to the sales channels.`)) return;
+  try {
+    const r = await Api.post('/api/products/stock-groups/pool-all', {});
+    toast(`Linked ${r.listingsLinked} listing${r.listingsLinked === 1 ? '' : 's'} into ${r.poolsCreated} shared pool${r.poolsCreated === 1 ? '' : 's'}`, 'success', 6000);
+    await Store.refresh('products').catch(() => {});
+    loadSharedStock();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function sgCreateFromSuggestion(code, productIds) {
   try {

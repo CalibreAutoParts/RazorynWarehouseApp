@@ -367,6 +367,43 @@ router.post('/stock-groups', requireAdmin, async (req, res) => {
   res.json({ ok: true, groupId: out.gid, qty: out.qty });
 });
 
+// POST /api/products/stock-groups/pool-all — one-click backfill: every set of
+// ungrouped listings that already share a part number becomes a shared pool.
+// Each new pool seeds from the highest member qty (never undercounts), then the
+// synced qty is pushed to all members' channels. Idempotent — already-pooled
+// listings are skipped, so it's safe to re-run.
+router.post('/stock-groups/pool-all', requireAdmin, async (req, res) => {
+  await ensureStockGroupsSchema();
+  const { rows } = await query(
+    `SELECT id, part_number, qty_on_hand FROM products
+     WHERE active = true AND stock_group_id IS NULL AND part_number IS NOT NULL AND part_number <> ''`);
+  const byCode = new Map();
+  for (const p of rows) {
+    const k = sgNorm(p.part_number);
+    if (!k) continue;
+    if (!byCode.has(k)) byCode.set(k, { code: p.part_number, products: [] });
+    byCode.get(k).products.push(p);
+  }
+  const sets = [...byCode.values()].filter(g => g.products.length > 1);
+  let poolsCreated = 0, listingsLinked = 0; const memberIds = [];
+  for (const set of sets) {
+    const ids = set.products.map(p => p.id);
+    const qty = set.products.reduce((mx, p) => Math.max(mx, p.qty_on_hand || 0), 0);
+    try {
+      await withTx(async (c) => {
+        const g = await c.query(`INSERT INTO stock_groups (code, qty_on_hand) VALUES ($1, $2) RETURNING id`, [set.code, qty]);
+        const gid = g.rows[0].id;
+        await c.query(`UPDATE products SET stock_group_id = $1, qty_on_hand = $2 WHERE id = ANY($3)`, [gid, qty, ids]);
+      });
+      poolsCreated++; listingsLinked += ids.length; memberIds.push(...ids);
+    } catch (e) { /* skip a set that fails, keep going */ }
+  }
+  // Push the synced qty to every newly-pooled member's channels (best-effort).
+  for (const id of memberIds) { try { await pushProductStockToChannels(id, { skipGroup: true }); } catch (_) {} }
+  await audit(req, 'pool_all_stock_groups', 'stock_group', null, { poolsCreated, listingsLinked });
+  res.json({ ok: true, poolsCreated, listingsLinked });
+});
+
 // PATCH /api/products/stock-groups/:gid — update the shared qty and/or note.
 router.patch('/stock-groups/:gid', requireAdmin, async (req, res) => {
   await ensureStockGroupsSchema();
