@@ -5616,12 +5616,89 @@ function paintLabelsList() {
   `;
 }
 
+// Ordered most-specific → least, so "bonnet hinge" wins over "bonnet" and
+// "daytime running light" over a generic light. First match is the item TYPE
+// printed on the label (helps staff sort parts by kind on the shelf).
+const LABEL_TYPE_RULES = [
+  [/day\s*time\s*running|\bdrl\b/i, 'DRL'],
+  [/fog\s*(light|lamp)/i, 'Fog Light'],
+  [/head\s*(light|lamp)/i, 'Headlight'],
+  [/(tail|rear)\s*(light|lamp)/i, 'Tail Light'],
+  [/indicator|repeater/i, 'Indicator'],
+  [/reflector/i, 'Reflector'],
+  [/bumper/i, 'Bumper'],
+  [/(bonnet|hood)\s*hinge/i, 'Bonnet Hinge'],
+  [/bonnet|hood/i, 'Bonnet'],
+  [/tailgate|boot\s*lid/i, 'Tailgate'],
+  [/\bwing\b|fender/i, 'Wing'],
+  [/quarter\s*panel/i, 'Quarter Panel'],
+  [/slam\s*panel/i, 'Slam Panel'],
+  [/(radiator|rad)\s*support/i, 'Rad Support'],
+  [/grille|grill/i, 'Grille'],
+  [/\bmirror\b/i, 'Mirror'],
+  [/radiator/i, 'Radiator'],
+  [/condenser/i, 'Condenser'],
+  [/intercooler/i, 'Intercooler'],
+  [/windscreen|windshield/i, 'Windscreen'],
+  [/\bdoor\b/i, 'Door'],
+  [/spoiler/i, 'Spoiler'],
+  [/splitter/i, 'Splitter'],
+  [/\bpanel\b/i, 'Panel'],
+  [/\bglass\b/i, 'Glass'],
+  [/sensor/i, 'Sensor'],
+  [/alloy|\bwheel\b/i, 'Wheel'],
+  [/\barch\b/i, 'Arch'],
+];
+function labelItemType(title) {
+  const t = String(title || '');
+  for (const [re, label] of LABEL_TYPE_RULES) if (re.test(t)) return label;
+  return '';
+}
+// Fallback side/end parse when a product has no stored `position`.
+function labelPositionFromTitle(title) {
+  const t = String(title || '');
+  const end = /\bfront\b/i.test(t) ? 'Front' : /\brear\b/i.test(t) ? 'Rear' : '';
+  const side = /\b(rh|right|o\/?s|off\s?side|driver'?s?)\b/i.test(t) ? 'RH'
+             : /\b(lh|left|n\/?s|near\s?side|passenger'?s?)\b/i.test(t) ? 'LH' : '';
+  return [end, side].filter(Boolean).join(' ');
+}
+const _labNorm = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+// Every vehicle a part fits = the distinct "Brand Model" of every product that
+// shares this part number. A shared part fits several models, so the label lists
+// them all rather than implying the one listing it was printed from.
+function labelFitsModels(it, prod) {
+  const key = _labNorm(it.partNumber || prod?.partNumber);
+  let models = [];
+  if (key) {
+    models = (State.products || [])
+      .filter(x => _labNorm(x.partNumber) === key)
+      .map(x => [x.brand, x.model].filter(Boolean).join(' ').trim())
+      .filter(Boolean);
+  }
+  models = [...new Set(models)];
+  if (!models.length && prod) {
+    const bm = [prod.brand, prod.model].filter(Boolean).join(' ').trim();
+    if (bm) models = [bm];
+  }
+  return models;
+}
+
 function labelsPrint(itemsArg) {
   // itemsArg lets other features (e.g. Listing Mirror "Print label") print a
   // one-off label set without touching the Labels page list. Each item:
   // { sku, title, partNumber, barcode, qty }.
-  const items = Array.isArray(itemsArg) && itemsArg.length ? itemsArg : (State.labels || []);
-  if (!items.length) { toast('Add at least one product first', 'warn'); return; }
+  const rawItems = Array.isArray(itemsArg) && itemsArg.length ? itemsArg : (State.labels || []);
+  if (!rawItems.length) { toast('Add at least one product first', 'warn'); return; }
+  // Enrich each label with the item TYPE and the models it fits, so a label
+  // designed for a part shared across several vehicles reads correctly.
+  const items = rawItems.map(it => {
+    const prod = it.productId ? (State.products || []).find(x => x.id === it.productId)
+      : (it.partNumber ? (State.products || []).find(x => _labNorm(x.partNumber) === _labNorm(it.partNumber)) : null);
+    const type = labelItemType(it.title || prod?.title || '');
+    const position = (prod?.position || labelPositionFromTitle(it.title || '')).trim();
+    const fitsModels = labelFitsModels(it, prod);
+    return { ...it, type, position, fitsModels };
+  });
   const size = el('lab-size').value;
   // For 4x6 the user can choose landscape (default) or portrait.
   // Other sizes have fixed orientation (50x25 is always landscape, 25x50 is always portrait).
@@ -5667,13 +5744,35 @@ function labelsPrint(itemsArg) {
   // Fallback wordmark text (shown only if the logo image fails to load).
   const wordmark = escapeHtml(brandName);
 
-  // Identifier block: show the OEM part number prominently (helps staff find the
-  // item on the shelf) AND the SKU underneath when they differ (system matching).
+  // Identifier block: show the OEM PART NUMBER prominently (the shelf identity,
+  // shared across every model the part fits) AND the SKU underneath when they
+  // differ (for system matching).
   const idBlock = (it) => {
     const pn = (it.partNumber || '').trim();
     const sku = (it.sku || '').trim();
-    if (pn && sku && pn !== sku) return `<div class="sku">${escapeHtml(pn)}</div><div class="sku-sub">${escapeHtml(sku)}</div>`;
-    return `<div class="sku">${escapeHtml(pn || sku)}</div>`;
+    const main = pn || sku;
+    const sub = (pn && sku && pn !== sku) ? sku : '';
+    return `<div class="pn">${escapeHtml(main)}</div>${sub ? `<div class="sku-sub">${escapeHtml(sub)}</div>` : ''}`;
+  };
+  // Type chip: the kind of part (Headlight / Bumper …) + its side/end, so staff
+  // can sort by type at a glance.
+  const typeChip = (it) => {
+    const label = [it.type, it.position].filter(Boolean).join(' · ');
+    return label ? `<div class="type">${escapeHtml(label)}</div>` : '';
+  };
+  // Fitment line: a part shared across models lists every vehicle it fits; a
+  // single-model part just shows its descriptive title. Uses .title so the
+  // auto-fitter shrinks it to fit the label.
+  const fitsBlock = (it) => {
+    const models = it.fitsModels || [];
+    if (models.length > 1) return `<div class="title fits"><span class="fits-lbl">Fits ${models.length} models:</span> ${escapeHtml(models.join(' · '))}</div>`;
+    const one = it.title || models[0] || '';
+    return one ? `<div class="title">${escapeHtml(one)}</div>` : '';
+  };
+  // Compact single-line description for the tiny thermal labels.
+  const smallTitle = (it) => {
+    const typed = [it.type, it.position].filter(Boolean).join(' ');
+    return escapeHtml(typed || it.title || '');
   };
 
   // Per-layout label HTML
@@ -5688,8 +5787,9 @@ function labelsPrint(itemsArg) {
           ${brandTagline || brandDomain ? `<div class="tagline">${escapeHtml(brandTagline)}${brandTagline && brandDomain ? ' · ' : ''}${escapeHtml(brandDomain)}</div>` : ''}
         </div>
         <div class="body">
-          <div class="title">${escapeHtml(it.title)}</div>
+          ${typeChip(it)}
           ${idBlock(it)}
+          ${fitsBlock(it)}
         </div>
         <div class="barcode-wrap">
           <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
@@ -5704,8 +5804,9 @@ function labelsPrint(itemsArg) {
           <div class="logo-text" style="display:none">${wordmark}</div>
         </div>
         <div class="body">
-          <div class="title">${escapeHtml(it.title)}</div>
+          ${typeChip(it)}
           ${idBlock(it)}
+          ${fitsBlock(it)}
         </div>
         <div class="barcode-wrap">
           <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
@@ -5716,7 +5817,7 @@ function labelsPrint(itemsArg) {
     // 25×50 portrait small thermal — minimal layout
     labelTemplate = (it, idx) => `
       <div class="label tall">
-        <div class="title">${escapeHtml(it.title)}</div>
+        <div class="title">${smallTitle(it)}</div>
         ${idBlock(it)}
         <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
       </div>`;
@@ -5724,7 +5825,7 @@ function labelsPrint(itemsArg) {
     // 50×25 small landscape thermal — minimal
     labelTemplate = (it, idx) => `
       <div class="label small">
-        <div class="title">${escapeHtml(it.title)}</div>
+        <div class="title">${smallTitle(it)}</div>
         ${idBlock(it)}
         <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
       </div>`;
@@ -5784,18 +5885,18 @@ function labelsPrint(itemsArg) {
      it takes the leftover space above the barcode and its font is auto-shrunk by
      the fitter (fitAll) so the FULL title shows — never truncated/clamped. */
   .label.small { padding: 2mm; justify-content: space-between; }
-  .label.small .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.12;
+  .label.small .title { font-size: ${s.fontTitle}pt; font-weight: 700; line-height: 1.12;
     overflow: hidden; flex: 0 1 auto; min-height: 0; }
-  .label.small .sku { font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace; color: #444; margin-top: 0.5mm; flex-shrink: 0; }
+  .label.small .pn { font-size: ${s.fontSku}pt; font-weight: 700; font-family: ui-monospace, Menlo, monospace; color: #111; margin-top: 0.5mm; flex-shrink: 0; }
   .label.small .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 0.5mm; flex-shrink: 0; }
   /* Secondary identifier (SKU shown under the part number) — smaller + muted. */
   .label .sku-sub { font-size: ${Math.max(6, (s.fontSku || 9) - 2)}pt; font-family: ui-monospace, Menlo, monospace; color: #777; flex-shrink: 0; }
 
   /* ============ TALL 25×50 mm thermal ============ */
   .label.tall { padding: 2mm; justify-content: space-between; text-align: center; }
-  .label.tall .title { font-size: ${s.fontTitle}pt; font-weight: 600; line-height: 1.12;
+  .label.tall .title { font-size: ${s.fontTitle}pt; font-weight: 700; line-height: 1.12;
     overflow: hidden; flex: 0 1 auto; min-height: 0; }
-  .label.tall .sku { font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace; color: #444; margin-top: 1mm; flex-shrink: 0; }
+  .label.tall .pn { font-size: ${s.fontSku}pt; font-weight: 700; font-family: ui-monospace, Menlo, monospace; color: #111; margin-top: 1mm; flex-shrink: 0; }
   .label.tall .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 1mm; flex-shrink: 0; }
 
   /* ============ LARGE 4×6 landscape — logo top, title middle, barcode bottom ============ */
@@ -5814,16 +5915,20 @@ function labelsPrint(itemsArg) {
     flex: 1 1 auto; min-height: 0; overflow: hidden;
     padding: 6mm 0 4mm; display: flex; flex-direction: column; justify-content: center;
   }
+  .label.large-landscape .type {
+    font-size: 13pt; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em;
+    color: ${brandColor}; margin-bottom: 2mm; align-self: flex-start;
+  }
+  .label.large-landscape .pn {
+    font-size: ${s.fontTitle}pt; font-weight: 800; font-family: ui-monospace, Menlo, monospace;
+    line-height: 1.05; color: #111; letter-spacing: -0.01em; word-break: break-all;
+  }
+  .label.large-landscape .sku-sub { margin-bottom: 2mm; }
   .label.large-landscape .title {
-    font-size: ${s.fontTitle}pt; font-weight: 700; line-height: 1.15; color: #111;
-    overflow: hidden; flex: 0 1 auto; min-height: 0;
+    font-size: ${Math.round(s.fontTitle * 0.62)}pt; font-weight: 600; line-height: 1.2; color: #333;
+    overflow: hidden; flex: 0 1 auto; min-height: 0; margin-top: 1mm;
   }
-  .label.large-landscape .sku {
-    font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace;
-    font-weight: 600; color: ${brandColor}; margin-top: 3mm;
-    padding: 2mm 4mm; background: ${brandColor}14; border-radius: 2mm; display: inline-block;
-    align-self: flex-start;
-  }
+  .label.large-landscape .fits .fits-lbl { font-weight: 700; color: ${brandColor}; text-transform: uppercase; font-size: 0.8em; letter-spacing: 0.03em; }
   .label.large-landscape .barcode-wrap {
     border-top: 1px solid #ddd; padding-top: 4mm; margin-top: auto; flex-shrink: 0;
   }
@@ -5836,16 +5941,21 @@ function labelsPrint(itemsArg) {
   }
   .label.large-portrait .logo { height: 16mm; max-width: 70mm; object-fit: contain; }
   .label.large-portrait .logo-text { font-size: 20pt; font-weight: 800; letter-spacing: -0.02em; }
-  .label.large-portrait .body { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: center; padding: 4mm 0; }
+  .label.large-portrait .body { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 4mm 0; }
+  .label.large-portrait .type {
+    font-size: 12pt; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em;
+    color: ${brandColor}; margin-bottom: 2mm;
+  }
+  .label.large-portrait .pn {
+    font-size: ${s.fontTitle}pt; font-weight: 800; font-family: ui-monospace, Menlo, monospace;
+    line-height: 1.05; color: #111; letter-spacing: -0.01em; word-break: break-all;
+  }
+  .label.large-portrait .sku-sub { margin-bottom: 2mm; }
   .label.large-portrait .title {
-    font-size: ${s.fontTitle}pt; font-weight: 700; line-height: 1.15;
-    overflow: hidden; flex: 0 1 auto; min-height: 0;
+    font-size: ${Math.round(s.fontTitle * 0.6)}pt; font-weight: 600; line-height: 1.2; color: #333;
+    overflow: hidden; flex: 0 1 auto; min-height: 0; margin-top: 1mm;
   }
-  .label.large-portrait .sku {
-    font-size: ${s.fontSku}pt; font-family: ui-monospace, Menlo, monospace;
-    font-weight: 600; color: ${brandColor}; margin-top: 4mm;
-    padding: 2mm 4mm; background: ${brandColor}14; border-radius: 2mm; display: inline-block;
-  }
+  .label.large-portrait .fits .fits-lbl { font-weight: 700; color: ${brandColor}; text-transform: uppercase; font-size: 0.8em; letter-spacing: 0.03em; }
   .label.large-portrait .barcode-wrap { padding-top: 4mm; flex-shrink: 0; }
   .label.large-portrait .bc { width: 100%; height: ${s.barH}px; display: block; }
   .label.large-portrait .footer {
