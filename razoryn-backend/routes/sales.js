@@ -53,6 +53,9 @@ async function ensurePaidColumn() {
   } catch (e) { console.warn('[sales] ensurePaidColumn:', e.message); }
 }
 ensurePaidColumn();
+// Refund tracking columns (refunded_amount / channel_refunded_amount / refunded_at)
+// so refunds — full or partial, from any channel — net off revenue + dispatch.
+require('../lib/refunds').ensureRefundColumns();
 // GDPR: sales/invoices carry customer PII — never let a browser or proxy cache
 // these responses.
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
@@ -159,25 +162,27 @@ router.get('/', requireAdmin, async (req, res) => {
     SELECT channel, COUNT(*)::int AS count, COALESCE(SUM(total),0) AS revenue
     FROM sales s ${w} GROUP BY channel`, params);
 
-  // Refunds in the same window (so revenue can be shown net of returns, #1).
-  // Returns carry refund_amount once a return is processed/closed; grouped by
-  // the originating sale's channel (fall back to the return's own channel).
+  // Refunds in the same window, so revenue shows net of refunds (#1). The
+  // authoritative figure lives on the sale itself (sales.refunded_amount), folded
+  // from every source — Shopify/eBay channel refunds AND local return cases — by
+  // lib/refunds.reconcileSaleRefund. A fully-refunded order (status='refunded')
+  // nets its whole total even if the itemised amount under-recorded. Grouped by the
+  // sale's own channel and constrained to the SAME window as the revenue summary.
   let refundsByChannel = {}, refundsTotal = 0;
   try {
-    const rWhere = [`r.status IN ('processed','closed')`, `r.refund_amount IS NOT NULL`];
-    const rParams = [];
-    if (from) { rParams.push(from); rWhere.push(`r.created_at >= $${rParams.length}`); }
-    if (to)   { rParams.push(to);   rWhere.push(`r.created_at <= $${rParams.length}`); }
+    const refWhere = where.slice();
+    refWhere.push(`(s.refunded_amount > 0 OR s.status = 'refunded')`);
     const rRows = (await query(`
-      SELECT COALESCE(s.channel, r.channel) AS channel, COALESCE(SUM(r.refund_amount),0)::numeric AS refunds
-      FROM returns r LEFT JOIN sales s ON s.id = r.sale_id
-      WHERE ${rWhere.join(' AND ')} GROUP BY COALESCE(s.channel, r.channel)`, rParams)).rows;
+      SELECT s.channel,
+             COALESCE(SUM(CASE WHEN s.status = 'refunded' THEN s.total
+                               ELSE s.refunded_amount END),0)::numeric AS refunds
+      FROM sales s WHERE ${refWhere.join(' AND ')} GROUP BY s.channel`, params)).rows;
     for (const row of rRows) {
       const amt = parseFloat(row.refunds) || 0;
       refundsByChannel[row.channel] = amt;
       refundsTotal += amt;
     }
-  } catch (e) { /* returns table not ready — ignore */ }
+  } catch (e) { /* refunded_amount column not ready — ignore */ }
 
   res.json({ sales: rows, total: tot.rows[0].n, summary: summary.rows, refundsByChannel, refundsTotal });
 });
@@ -769,7 +774,8 @@ async function vatReportData(win, basis) {
   const paidClause = basis === 'paid' ? 'AND s.is_paid = true' : '';
   const rows = await query(`
     SELECT s.id, s.${dateCol} AS date, s.invoice_number, s.payment_reference, s.payment_method,
-           s.customer_name, s.subtotal, s.vat, s.shipping, s.total, s.is_paid, s.paid_at, s.occurred_at
+           s.customer_name, s.subtotal, s.vat, s.shipping, s.total, s.is_paid, s.paid_at, s.occurred_at,
+           COALESCE(s.refunded_amount, 0) AS refunded_amount
       FROM sales s
      WHERE s.is_estimate = false
        AND s.status NOT IN ('refunded','cancelled')
@@ -778,18 +784,27 @@ async function vatReportData(win, basis) {
        ${paidClause}
      ORDER BY s.${dateCol} ASC
   `, [win.from, win.toExclusive]);
+  // Cash total is net of partial refunds too (fully-refunded rows already excluded
+  // by status). SUM(total - refunded) so a part-refunded order counts at what was kept.
   const cash = await query(`
-    SELECT COALESCE(SUM(total),0)::numeric AS total, COUNT(*)::int AS n
+    SELECT COALESCE(SUM(GREATEST(total - COALESCE(refunded_amount,0), 0)),0)::numeric AS total, COUNT(*)::int AS n
       FROM sales s
      WHERE s.is_estimate = false AND s.status NOT IN ('refunded','cancelled')
        AND s.payment_method = 'cash'
        AND s.${dateCol} >= $1 AND s.${dateCol} < $2 ${paidClause}
   `, [win.from, win.toExclusive]);
+  // Partial refunds reduce the VATable figures proportionally: a £120 order (£20 VAT)
+  // refunded £60 keeps £60 gross / £10 VAT. Fully-refunded orders are excluded above.
   const sum = rows.rows.reduce((a, r) => {
-    a.gross += parseFloat(r.total || 0);
-    a.vat += parseFloat(r.vat || 0);
-    a.net += parseFloat(r.total || 0) - parseFloat(r.vat || 0);
-    a[r.payment_method] = (a[r.payment_method] || 0) + parseFloat(r.total || 0);
+    const total = parseFloat(r.total || 0);
+    const refunded = Math.min(total, parseFloat(r.refunded_amount || 0));
+    const keep = Math.max(0, total - refunded);
+    const frac = total > 0 ? keep / total : 1;
+    const vatKept = parseFloat(r.vat || 0) * frac;
+    a.gross += keep;
+    a.vat += vatKept;
+    a.net += keep - vatKept;
+    a[r.payment_method] = (a[r.payment_method] || 0) + keep;
     return a;
   }, { gross: 0, vat: 0, net: 0 });
   return {

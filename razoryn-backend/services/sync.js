@@ -11,6 +11,7 @@ const { query, withTx } = require('../db');
 const shopify = require('./shopify');
 const ebay = require('./ebay');
 const bundles = require('./bundles');
+const { reconcileSaleRefund } = require('../lib/refunds');
 
 // True if a channel order was deliberately deleted (tombstoned) so it must NOT be
 // re-imported. Best-effort — if the table doesn't exist yet, nothing is suppressed.
@@ -287,7 +288,17 @@ async function pullShopify() {
       `SELECT id FROM sales WHERE channel = 'shopify' AND external_order_id = $1`,
       [String(order.id)]
     );
-    if (existing.rows.length) continue;
+    if (existing.rows.length) {
+      // Already imported. A re-sync (the feed returns orders by updated_at, so a
+      // refunded order reappears) may carry a NEW refund — net it off revenue and,
+      // if fully refunded, drop it from dispatch. This is the only mutation we make
+      // to an existing order on re-sync.
+      try {
+        const info = shopify.orderRefundInfo(order);
+        if (info.amount > 0) await reconcileSaleRefund(existing.rows[0].id, { channelRefund: info.amount });
+      } catch (e) { console.warn('[sync.pullShopify] refund reconcile:', e.message); }
+      continue;
+    }
 
     await withTx(async (c) => {
       const subtotal = parseFloat(order.subtotal_price || 0);
@@ -377,6 +388,14 @@ async function pullShopify() {
     for (const li of order.line_items || []) {
       try { const m = await resolveProductBySku(null, li.sku); if (m) await handleStockOutIfIncoming(m.id); } catch (_) {}
     }
+    // An order can already be (partially) refunded at first import — net it now.
+    try {
+      const info = shopify.orderRefundInfo(order);
+      if (info.amount > 0) {
+        const s = await query(`SELECT id FROM sales WHERE channel = 'shopify' AND external_order_id = $1`, [String(order.id)]);
+        if (s.rows[0]) await reconcileSaleRefund(s.rows[0].id, { channelRefund: info.amount });
+      }
+    } catch (_) {}
     inserted++;
   }
 
@@ -438,7 +457,16 @@ async function pullEbay() {
         `SELECT id FROM sales WHERE external_order_id = $1`,
         [order.orderId]
       );
-      if (existing.rows.length) continue;
+      if (existing.rows.length) {
+        // Already imported — net any refund/cancellation the order now reports.
+        // (The Post-Order returns pipeline is the durable source for older orders;
+        // this catches refunds on recently-created ones the order feed still lists.)
+        try {
+          const info = ebay.orderRefundInfo(order);
+          if (info.amount > 0) await reconcileSaleRefund(existing.rows[0].id, { channelRefund: info.amount });
+        } catch (e) { console.warn('[sync.pullEbay] refund reconcile:', e.message); }
+        continue;
+      }
 
       await withTx(async (c) => {
         const subtotal = parseFloat(order.pricingSummary?.priceSubtotal?.value || 0);
@@ -513,6 +541,14 @@ async function pullEbay() {
       for (const li of order.lineItems || []) {
         try { const m = await resolveProductBySku(null, li.sku); if (m) await handleStockOutIfIncoming(m.id); } catch (_) {}
       }
+      // Net any refund/cancellation present at first import.
+      try {
+        const info = ebay.orderRefundInfo(order);
+        if (info.amount > 0) {
+          const s = await query(`SELECT id FROM sales WHERE external_order_id = $1`, [order.orderId]);
+          if (s.rows[0]) await reconcileSaleRefund(s.rows[0].id, { channelRefund: info.amount });
+        }
+      } catch (_) {}
       inserted++;
     }
     totalOrders += orders.length;

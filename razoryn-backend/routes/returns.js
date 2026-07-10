@@ -6,6 +6,7 @@ const fs = require('fs');
 const { query, withTx } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
+const { reconcileSaleRefund } = require('../lib/refunds');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -144,6 +145,9 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
     return { created, restocked, totalRefund: +totalRefund.toFixed(2) };
   });
   await audit(req, 'return_from_sale', 'sale', b.saleId, result);
+  // Fold this refund onto the sale so it drops out of revenue/sales totals (and
+  // Dispatch, once fully refunded). Best-effort — never fail the return.
+  try { await reconcileSaleRefund(sale.id); } catch (e) { console.warn('[returns] reconcile:', e.message); }
   // Forward refunds of our own direct bank/cash sales to the Invoice Hub so its
   // books and VAT stay correct (cash refunds, like cash sales, stay internal /
   // owner-only on the Hub side). Out-of-scope sales (eBay/Shopify/card) are a
@@ -225,6 +229,11 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
   });
   if (!result) return res.status(404).json({ error: 'not_found' });
   await audit(req, 'update_return', 'return', result.id, b);
+  // A status/refund-amount change alters how much of the sale is refunded — refold
+  // it onto the sale so revenue/dispatch stay correct. Best-effort.
+  if (result.sale_id && (b.status !== undefined || b.refundAmount !== undefined)) {
+    try { await reconcileSaleRefund(result.sale_id); } catch (e) { console.warn('[returns] reconcile:', e.message); }
+  }
   res.json({ return: result });
 });
 
@@ -239,13 +248,15 @@ router.post('/resync-statuses', requirePermission('returns'), async (req, res) =
     'DELIVERED': 'received',
     'CLOSED': 'closed', 'RETURN_CLOSED': 'closed', 'CLOSED_REFUNDED': 'processed', 'CLOSED_DENIED': 'closed',
   };
-  const { rows } = await query(`SELECT id, external_state, status FROM returns WHERE external_state IS NOT NULL`);
+  const { rows } = await query(`SELECT id, external_state, status, sale_id FROM returns WHERE external_state IS NOT NULL`);
   let updated = 0;
   for (const r of rows) {
     const correct = statusMap[r.external_state] || (String(r.external_state).includes('CLOSED') ? 'closed' : r.status);
     if (correct !== r.status) {
       await query(`UPDATE returns SET status = $1 WHERE id = $2`, [correct, r.id]);
       updated++;
+      // The status change may flip this return into/out of the netted set — refold.
+      if (r.sale_id) { try { await reconcileSaleRefund(r.sale_id); } catch (_) {} }
     }
   }
   await audit(req, 'resync_return_statuses', null, null, { scanned: rows.length, updated });
@@ -618,6 +629,9 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
         url: '/', tag: 'return-' + returnId, category: 'return',
       }).catch(() => {});
     }
+    // Fold the eBay refund onto the matched sale so a refunded/closed-refunded
+    // order stops counting toward revenue and drops out of Dispatch. Best-effort.
+    if (saleId) { try { await reconcileSaleRefund(saleId); } catch (_) {} }
     }  // end per-return for loop
     perStore.push({ code: store.code, fetched: returns.length, created: storeCreated, updated: storeUpdated });
   }  // end per-store for loop

@@ -139,6 +139,30 @@ async function getRecentOrders(updatedAtMin) {
   return { orders: r.data.orders || [] };
 }
 
+// Cumulative amount refunded on a Shopify order. The REST order carries a
+// `refunds[]` array (each with `transactions[]` money movements); we sum the
+// successful 'refund' transactions. `financial_status` is the safety net: a
+// 'refunded'/'voided' order with no parseable transactions is treated as a full
+// refund of the order total. Returns { amount, fullyRefunded }.
+function orderRefundInfo(order) {
+  if (!order) return { amount: 0, fullyRefunded: false };
+  let amount = 0;
+  for (const rf of (order.refunds || [])) {
+    for (const t of (rf.transactions || [])) {
+      const kind = t.kind || '';
+      const ok = !t.status || t.status === 'success';
+      if (ok && (kind === 'refund')) amount += parseFloat(t.amount || 0) || 0;
+    }
+  }
+  amount = Math.round(amount * 100) / 100;
+  const fin = String(order.financial_status || '').toLowerCase();
+  const total = parseFloat(order.total_price || 0) || 0;
+  // Full refund / void with nothing itemised → net the whole order.
+  if (amount === 0 && (fin === 'refunded' || fin === 'voided') && total > 0) amount = total;
+  const fullyRefunded = fin === 'refunded' || fin === 'voided' || (total > 0 && amount >= total - 0.005);
+  return { amount, fullyRefunded };
+}
+
 // ---------- IMPORT: paginate full catalogue ----------
 async function* iterateAllProductsAndVariants() {
   if (!isConfigured()) throw new Error('shopify_not_configured');
@@ -1155,6 +1179,7 @@ module.exports = {
   getLocations,
   setInventoryLevel,
   getRecentOrders,
+  orderRefundInfo,
   pushStockForProduct,
   iterateAllProductsAndVariants,
   findProductBySku,

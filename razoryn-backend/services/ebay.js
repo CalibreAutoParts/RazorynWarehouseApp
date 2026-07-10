@@ -339,12 +339,42 @@ async function getRecentOrders(sinceISO, storeArg) {
         buyer: o.buyer,
         pricingSummary: o.pricingSummary,
         lineItems: o.lineItems,
+        // Refund / cancellation signals (kept so sync can net them off revenue
+        // + drop them from dispatch). paymentSummary.refunds[] carries the money;
+        // orderPaymentStatus / cancelStatus flag a fully-reversed order.
+        paymentSummary: o.paymentSummary,
+        orderPaymentStatus: o.orderPaymentStatus,
+        cancelStatus: o.cancelStatus,
       }));
     } catch (e) {
       console.warn('[ebay] Sell Fulfillment API failed, falling back to Trading API:', e.message);
     }
   }
   return getRecentOrdersTrading(sinceISO, storeArg);
+}
+
+// Cumulative refund on an eBay Sell-Fulfillment order object (from
+// getRecentOrders). paymentSummary.refunds[] holds the money; orderPaymentStatus
+// = FULLY_REFUNDED / PARTIALLY_REFUNDED and cancelStatus flag reversals. A fully
+// refunded / cancelled order with no itemised refund nets the whole total.
+// NOTE: the order feed is keyed by CREATION date, so this only catches refunds on
+// recently-created orders — the Post-Order returns pipeline (getAllRecentReturns)
+// is the durable eBay refund source for older orders.
+function orderRefundInfo(order) {
+  if (!order) return { amount: 0, fullyRefunded: false };
+  let amount = 0;
+  const refs = (order.paymentSummary && order.paymentSummary.refunds) || [];
+  for (const rf of refs) {
+    const v = rf && rf.amount && parseFloat(rf.amount.value || 0);
+    if (v) amount += v;
+  }
+  amount = Math.round(amount * 100) / 100;
+  const ps = String(order.orderPaymentStatus || '').toUpperCase();
+  const cancelled = !!(order.cancelStatus && String(order.cancelStatus.cancelState || '').toUpperCase() === 'CANCELED');
+  const total = parseFloat((order.pricingSummary && order.pricingSummary.total && order.pricingSummary.total.value) || 0) || 0;
+  if (amount === 0 && (ps === 'FULLY_REFUNDED' || cancelled) && total > 0) amount = total;
+  const fullyRefunded = ps === 'FULLY_REFUNDED' || cancelled || (total > 0 && amount >= total - 0.005);
+  return { amount, fullyRefunded };
 }
 
 // Trading API GetOrders — per-store token
@@ -1814,6 +1844,7 @@ module.exports = {
   getAccessToken,
   setInventoryQty,
   getRecentOrders,
+  orderRefundInfo,
   getOrderDetail,
   dumpOrderXml,
   getOpenReturns,
