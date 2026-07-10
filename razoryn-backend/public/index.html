@@ -1357,6 +1357,14 @@ function adaptSale(s) {
     vehicleReg: s.vehicle_reg || '',
     paymentReference: s.payment_reference,
     status: s.status,
+    // Refunds (full or partial) from any channel are folded onto the sale by the
+    // backend. refundedAmount = amount refunded; isRefunded = whole order reversed
+    // (dropped from dispatch + not a live sale); netAmount = what actually counts
+    // toward revenue (0 when fully refunded).
+    refundedAmount: parseFloat(s.refunded_amount || 0),
+    isRefunded: s.status === 'refunded',
+    isPartlyRefunded: s.status !== 'refunded' && parseFloat(s.refunded_amount || 0) > 0,
+    netAmount: s.status === 'refunded' ? 0 : Math.max(0, parseFloat(s.total || 0) - parseFloat(s.refunded_amount || 0)),
     // Pre-order — item not in stock yet; kept out of revenue + dispatch until the
     // stock arrives and the sale auto-flips to 'pending' (see the stock-in hook).
     isPreorder: s.status === 'preorder',
@@ -3309,8 +3317,11 @@ function renderDashboard() {
   // Revenue counts only PAID, non-estimate, non-preorder sales — an issued-but-
   // unpaid invoice (parts given, payment not yet received) is NOT counted until
   // marked paid, and a pre-order is NOT counted until the stock arrives & ships.
-  const todayPaid = sales.filter(s => s && isToday(s.date) && !s.isEstimate && !s.isPreorder && s.isPaid !== false);
-  const todayRev = todayPaid.reduce((a,b)=>a+(b.amount||0),0);
+  // A fully refunded order is not a live sale; a partial refund still counts but
+  // only for what was kept (netAmount). So refunds — same-day or later — never
+  // inflate today's revenue.
+  const todayPaid = sales.filter(s => s && isToday(s.date) && !s.isEstimate && !s.isPreorder && s.isPaid !== false && !s.isRefunded);
+  const todayRev = todayPaid.reduce((a,b)=>a+(b.netAmount != null ? b.netAmount : (b.amount||0)),0);
   const totalUnits = products.reduce((a,b)=>a+totalQty(b),0);
   const todaySales = sales.filter(s => s && isToday(s.date));
   const pendingReturns = returns.filter(r => r && (r.status === 'open' || r.status === 'pending')).length;
@@ -7337,15 +7348,23 @@ function renderSales() {
     // payment not yet received) are excluded until marked paid. They still show in
     // the table and under the "Unpaid" tab.
     const allPaid = State.sales.filter(s => !s.isEstimate && !s.isPreorder && s.isPaid !== false);
-    // #1 — refunds (from completed returns) net off the revenue figures.
+    // Fully-refunded orders aren't live sales, so they don't count toward the
+    // order COUNTS. Their money is still netted out below (their whole total sits
+    // in refTotal), so gross−refTotal already reflects them as £0.
+    const livePaid = allPaid.filter(s => !s.isRefunded);
+    // #1 — refunds (channel refunds + completed returns, folded onto the sale by
+    // the backend) net off the revenue figures.
     const rbc = State.salesRefundsByChannel || {};
     const refShop = rbc.shopify || 0;
     const refEby = Object.keys(rbc).filter(k => k.startsWith('ebay')).reduce((a,k)=>a+rbc[k],0);
+    // Only cash + bank — this tile's gross filters to those two channels, so its
+    // refund figure must match (card sales live under their own channel and aren't
+    // in this gross; their refunds still net off the Net-revenue tile via refTotal).
     const refDirect = (rbc.direct_cash || 0) + (rbc.direct_bank || 0);
     const refTotal = State.salesRefundsTotal || 0;
     const totalShop = allPaid.filter(s=>s.channel==='shopify').reduce((a,b)=>a+b.amount,0) - refShop;
     const totalEby = allPaid.filter(s=>(s.channel||'').startsWith('ebay')).reduce((a,b)=>a+b.amount,0) - refEby;
-    const ebyCount = allPaid.filter(s=>(s.channel||'').startsWith('ebay')).length;
+    const ebyCount = livePaid.filter(s=>(s.channel||'').startsWith('ebay')).length;
     const totalDirect = allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').reduce((a,b)=>a+b.amount,0) - refDirect;
     const grossTotal = allPaid.reduce((a,b)=>a+b.amount,0);
     const netTotal = grossTotal - refTotal;
@@ -7356,10 +7375,10 @@ function renderSales() {
       ? `<div class="stat"><div class="label">Estimates</div><div class="value">${estimatesCount}</div><div class="delta">open quotes</div></div>`
       : filter === 'preorders'
       ? `<div class="stat"><div class="label">Pre-orders</div><div class="value">${preorders.length}</div><div class="delta">${gbp(preorderValue)} reserved · not yet revenue</div></div>`
-      : `<div class="stat"><div class="label">Direct (cash + bank)</div><div class="value">${gbp(totalDirect)}</div><div class="delta">${allPaid.filter(s=>s.channel==='cash'||s.channel==='bank').length} orders${refDirect ? ` · −${gbp(refDirect)}` : ''}</div></div>`;
+      : `<div class="stat"><div class="label">Direct (cash + bank)</div><div class="value">${gbp(totalDirect)}</div><div class="delta">${livePaid.filter(s=>s.channel==='cash'||s.channel==='bank').length} orders${refDirect ? ` · −${gbp(refDirect)}` : ''}</div></div>`;
     el('sales-stats').innerHTML = `
-      <div class="stat"><div class="label">Net revenue</div><div class="value">${gbp(netTotal)}</div><div class="delta">${allPaid.length} sales${refTotal ? ` · −${gbp(refTotal)} refunded` : ''}</div></div>
-      <div class="stat"><div class="label">Store</div><div class="value">${gbp(totalShop)}</div><div class="delta">${allPaid.filter(s=>s.channel==='shopify').length} orders${refShop ? ` · −${gbp(refShop)}` : ''}</div></div>
+      <div class="stat"><div class="label">Net revenue</div><div class="value">${gbp(netTotal)}</div><div class="delta">${livePaid.length} sales${refTotal ? ` · −${gbp(refTotal)} refunded` : ''}</div></div>
+      <div class="stat"><div class="label">Store</div><div class="value">${gbp(totalShop)}</div><div class="delta">${livePaid.filter(s=>s.channel==='shopify').length} orders${refShop ? ` · −${gbp(refShop)}` : ''}</div></div>
       <div class="stat"><div class="label">eBay${(State.brand?.stores||[]).length > 1 ? ' (all)' : ''}</div><div class="value">${gbp(totalEby)}</div><div class="delta">${ebyCount} orders${refEby ? ` · −${gbp(refEby)}` : ''}</div></div>
       ${fourthTile}
     `;
@@ -7397,6 +7416,14 @@ function renderSales() {
         ? ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="No vehicle reg captured — confirm fitment before dispatch">🔧 Confirm fitment</span>` : '';
       const lpBadge = (!s.isEstimate && s.largePanel)
         ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--amber-light);color:var(--amber)" title="Contains a large panel — route to the special courier">📦 Large panel</span>` : '';
+      // Refund state — full (order reversed, excluded everywhere) or partial (nets off revenue).
+      const refundBadge = s.isRefunded
+        ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--red-light);color:var(--red);font-weight:700" title="Order fully refunded — excluded from revenue, sales count and dispatch">↩ Refunded</span>`
+        : (s.isPartlyRefunded ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--amber-light);color:var(--amber)" title="Partially refunded ${gbp(s.refundedAmount)} — the refund is netted off revenue">↩ −${gbp(s.refundedAmount)}</span>` : '');
+      // Amount cell: show what actually counts (net); strike the gross when refunded.
+      const amountCell = (s.isRefunded || s.isPartlyRefunded)
+        ? `<div><strong>${gbp(s.netAmount)}</strong></div><div style="color:var(--ink-soft);font-size:11px;text-decoration:line-through">${gbp(s.amount)}</div>`
+        : `<strong>${gbp(s.amount)}</strong>`;
       // Quick "Mark dispatched" shortcut: shows for paid non-cash orders that haven't shipped yet
       // AND fall within the dispatch worklist's 10-day cutoff. Older orders are assumed to have
       // been handled on the source channel before this app's dispatch tracking existed.
@@ -7417,10 +7444,10 @@ function renderSales() {
         <td onclick="event.stopPropagation()"><input type="checkbox" class="sale-row-check" data-sid="${s.id}" ${State.salesSelected.has(s.id)?'checked':''} onchange="salesToggleRow('${s.id}',this.checked)"></td>
         <td>${fmtDate(s.date)}</td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${s.invoice||'—'}</td>
-        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}${unpaidBadge}${preorderBadge}${fitmentBadge}${lpBadge}</td>
+        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}${unpaidBadge}${preorderBadge}${fitmentBadge}${lpBadge}${refundBadge}</td>
         <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
         <td>${s.customer}</td>
-        <td class="num"><strong>${gbp(s.amount)}</strong></td>
+        <td class="num">${amountCell}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
           <button class="btn btn-ghost btn-sm" onclick="printSingleInvoice('${s.id}')" title="Open invoice in new tab to print or save as PDF">🖨</button>
           <button class="btn btn-ghost btn-sm" onclick="emailSingleInvoice('${s.id}')" title="Email this invoice to the customer">✉</button>

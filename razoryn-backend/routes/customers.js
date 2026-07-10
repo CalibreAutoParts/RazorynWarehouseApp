@@ -92,8 +92,8 @@ router.get('/', async (req, res) => {
   // estimates / pro-formas from the spend total since those aren't realised yet.
   const r = await query(`
     SELECT c.*,
-      (SELECT COUNT(*)::int FROM sales s WHERE s.customer_id = c.id AND s.status != 'cancelled')               AS order_count,
-      (SELECT COALESCE(SUM(s.total), 0) FROM sales s WHERE s.customer_id = c.id AND s.status NOT IN ('cancelled') AND s.invoice_number IS NOT NULL) AS lifetime_value,
+      (SELECT COUNT(*)::int FROM sales s WHERE s.customer_id = c.id AND s.status NOT IN ('cancelled','refunded')) AS order_count,
+      (SELECT COALESCE(SUM(GREATEST(s.total - COALESCE(s.refunded_amount,0), 0)), 0) FROM sales s WHERE s.customer_id = c.id AND s.status NOT IN ('cancelled','refunded') AND s.invoice_number IS NOT NULL) AS lifetime_value,
       (SELECT MAX(s.occurred_at) FROM sales s WHERE s.customer_id = c.id)                                       AS last_order_at
     FROM customers c
     WHERE ${where}

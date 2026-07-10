@@ -330,6 +330,18 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'shipping_address') THEN
     ALTER TABLE sales ADD COLUMN shipping_address TEXT;
   END IF;
+  -- Refund tracking (full + partial, from any channel). refunded_amount is the
+  -- authoritative amount netted off revenue; channel_refunded_amount is the
+  -- cumulative refund the channel last reported. See lib/refunds.js.
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'refunded_amount') THEN
+    ALTER TABLE sales ADD COLUMN refunded_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'channel_refunded_amount') THEN
+    ALTER TABLE sales ADD COLUMN channel_refunded_amount NUMERIC(10,2);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'refunded_at') THEN
+    ALTER TABLE sales ADD COLUMN refunded_at TIMESTAMPTZ;
+  END IF;
 END $$;
 
 -- Settings: VAT registration toggle + company details — see migration block below
