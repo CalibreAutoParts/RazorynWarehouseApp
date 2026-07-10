@@ -840,22 +840,29 @@ router.get('/vat-report.csv', requireAdmin, async (req, res) => {
     const lines = [];
     lines.push(`VAT report — ${data.window.label} (${data.window.basis} basis)`);
     lines.push('');
-    lines.push(['Date', 'Invoice/Ref', 'Customer', 'Payment', 'Gross (incl VAT)', 'Net', 'VAT', 'Paid', 'Paid date'].join(','));
+    lines.push(['Date', 'Invoice/Ref', 'Customer', 'Payment', 'Refunded', 'Gross (incl VAT)', 'Net', 'VAT', 'Paid', 'Paid date'].join(','));
     for (const r of data.rows) {
-      const gross = parseFloat(r.total || 0), vat = parseFloat(r.vat || 0);
+      // Net each row by any partial refund so the Gross/Net/VAT columns foot to the
+      // TOTALS line (which is refund-netted). Refund reduces VAT proportionally.
+      const total = parseFloat(r.total || 0), vat0 = parseFloat(r.vat || 0);
+      const refunded = Math.min(total, parseFloat(r.refunded_amount || 0));
+      const keep = Math.max(0, total - refunded);
+      const frac = total > 0 ? keep / total : 1;
+      const vatKept = vat0 * frac;
       lines.push([
         esc(new Date(r.date).toLocaleDateString('en-GB')),
         esc(r.invoice_number || r.payment_reference || ''),
         esc(r.customer_name || ''),
         esc((r.payment_method || '').toUpperCase()),
-        gross.toFixed(2), (gross - vat).toFixed(2), vat.toFixed(2),
+        refunded.toFixed(2),
+        keep.toFixed(2), (keep - vatKept).toFixed(2), vatKept.toFixed(2),
         r.is_paid ? 'Yes' : 'No',
         esc(r.paid_at ? new Date(r.paid_at).toLocaleDateString('en-GB') : ''),
       ].join(','));
     }
     lines.push('');
-    lines.push(['TOTALS (VATable: bank + card)', '', '', '', data.vatable.gross.toFixed(2), data.vatable.net.toFixed(2), data.vatable.vat.toFixed(2), '', ''].join(','));
-    lines.push([`Cash (non-VAT) ${data.cash.count} sale(s)`, '', '', '', data.cash.total.toFixed(2), '', '0.00', '', ''].join(','));
+    lines.push(['TOTALS (VATable: bank + card)', '', '', '', '', data.vatable.gross.toFixed(2), data.vatable.net.toFixed(2), data.vatable.vat.toFixed(2), '', ''].join(','));
+    lines.push([`Cash (non-VAT) ${data.cash.count} sale(s)`, '', '', '', '', data.cash.total.toFixed(2), '', '0.00', '', ''].join(','));
     res.set('Content-Type', 'text/csv; charset=utf-8');
     res.set('Content-Disposition', `attachment; filename="vat-${(data.window.label).replace(/[^\w-]+/g, '_')}.csv"`);
     res.send('﻿' + lines.join('\n'));

@@ -7357,7 +7357,10 @@ function renderSales() {
     const rbc = State.salesRefundsByChannel || {};
     const refShop = rbc.shopify || 0;
     const refEby = Object.keys(rbc).filter(k => k.startsWith('ebay')).reduce((a,k)=>a+rbc[k],0);
-    const refDirect = (rbc.direct_cash || 0) + (rbc.direct_bank || 0) + (rbc.direct_card || 0);
+    // Only cash + bank — this tile's gross filters to those two channels, so its
+    // refund figure must match (card sales live under their own channel and aren't
+    // in this gross; their refunds still net off the Net-revenue tile via refTotal).
+    const refDirect = (rbc.direct_cash || 0) + (rbc.direct_bank || 0);
     const refTotal = State.salesRefundsTotal || 0;
     const totalShop = allPaid.filter(s=>s.channel==='shopify').reduce((a,b)=>a+b.amount,0) - refShop;
     const totalEby = allPaid.filter(s=>(s.channel||'').startsWith('ebay')).reduce((a,b)=>a+b.amount,0) - refEby;
