@@ -269,13 +269,16 @@ async function handleStockOutIfIncoming(productId) {
 }
 
 // --------- PULL: Shopify orders ---------
-async function pullShopify() {
+async function pullShopify(opts = {}) {
   if (!shopify.isConfigured()) return { skipped: 'not_configured' };
 
   const state = await getCursor('shopify');
-  const since = (state && state.last_synced_at)
+  // sinceOverride lets a manual "re-pull last N days" widen the window past the
+  // saved cursor, so orders missed while the cursor jumped ahead (e.g. during a
+  // token outage) are recovered. Dedup on external_order_id keeps it idempotent.
+  const since = opts.sinceOverride || ((state && state.last_synced_at)
     ? state.last_synced_at.toISOString()
-    : new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    : new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
 
   const { orders } = await shopify.getRecentOrders(since);
   let inserted = 0;
@@ -403,21 +406,21 @@ async function pullShopify() {
     lastSyncedAt: new Date(),
     status: 'ok',
   });
-  return { channel: 'shopify', orders: orders.length, inserted };
+  return { channel: 'shopify', since, orders: orders.length, inserted };
 }
 
 // --------- PULL: eBay orders ---------
-async function pullEbay() {
+async function pullEbay(opts = {}) {
   const brand = require('../lib/brand');
   if (!ebay.isConfigured()) return { skipped: 'not_configured' };
 
   // Sync cursor is shared across all eBay stores for this brand. Each store's
   // orders are tagged with that store's channelCode so the Sales tab can
-  // differentiate them.
+  // differentiate them. sinceOverride widens the window for a manual re-pull.
   const state = await getCursor('ebay');
-  const since = (state && state.last_synced_at)
+  const since = opts.sinceOverride || ((state && state.last_synced_at)
     ? state.last_synced_at.toISOString()
-    : new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    : new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
 
   // Determine which stores have a usable token. Skip silently for stores
   // without tokens (warning logged at brand-import time).
@@ -557,7 +560,7 @@ async function pullEbay() {
   }
 
   await setCursor('ebay', { lastSyncedAt: new Date(), status: 'ok' });
-  return { channel: 'ebay', orders: totalOrders, inserted: totalInserted, stores: perStore };
+  return { channel: 'ebay', since, orders: totalOrders, inserted: totalInserted, stores: perStore };
 }
 
 // --------- PUSH: stock levels for sale items ---------
@@ -603,15 +606,15 @@ async function pushAllStockToShopify() {
 }
 
 // --------- Orchestrator ---------
-async function runFullSync() {
+async function runFullSync(opts = {}) {
   const results = {};
-  try { results.shopify = await pullShopify(); }
+  try { results.shopify = await pullShopify(opts); }
   catch (e) {
     console.error('[sync] shopify pull failed:', e.message);
     results.shopify = { error: e.message };
     await setCursor('shopify', { lastSyncedAt: new Date(), status: 'error', error: e.message });
   }
-  try { results.ebay = await pullEbay(); }
+  try { results.ebay = await pullEbay(opts); }
   catch (e) {
     console.error('[sync] ebay pull failed:', e.message);
     results.ebay = { error: e.message };
