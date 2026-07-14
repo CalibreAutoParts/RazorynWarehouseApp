@@ -223,21 +223,41 @@ router.post('/clear-catalogue', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/settings/sync-now (admin) — manual sync trigger
+// POST /api/settings/sync-now (admin) — manual sync trigger.
+// Runs in the BACKGROUND: a full sync re-pushes the whole catalogue to Shopify
+// (1000+ API calls on a big store) and would blow past the HTTP gateway timeout
+// (the 502 users were seeing). We kick it off, return immediately, and expose
+// live progress via GET /sync-now/status so the UI can show a % bar.
+let syncNowStatus = { state: 'idle', startedAt: null, finishedAt: null, phase: null, percent: 0, sinceDays: 0, result: null, error: null };
+
 router.post('/sync-now', requireAdmin, async (req, res) => {
-  try {
-    // Optional { sinceDays } widens the order-pull window past the saved cursor so
-    // orders missed during an outage (when the cursor jumped ahead) are recovered.
-    const sinceDays = Math.max(0, Math.min(30, parseInt(req.body?.sinceDays) || 0));
-    const opts = sinceDays > 0
-      ? { sinceOverride: new Date(Date.now() - sinceDays * 86400000).toISOString() }
-      : {};
-    const result = await sync.runFullSync(opts);
-    await audit(req, 'manual_sync', null, null, { sinceDays, ...result });
-    res.json({ ok: true, sinceDays, result });
-  } catch (e) {
-    res.status(500).json({ error: 'sync_failed', message: e.message });
+  if (syncNowStatus.state === 'running') {
+    return res.json({ ok: true, started: false, alreadyRunning: true, status: syncNowStatus });
   }
+  // Optional { sinceDays } widens the order-pull window past the saved cursor so
+  // orders missed during an outage (when the cursor jumped ahead) are recovered.
+  const sinceDays = Math.max(0, Math.min(30, parseInt(req.body?.sinceDays) || 0));
+  const opts = sinceDays > 0
+    ? { sinceOverride: new Date(Date.now() - sinceDays * 86400000).toISOString() }
+    : {};
+  syncNowStatus = { state: 'running', startedAt: Date.now(), finishedAt: null, phase: 'Starting…', percent: 0, sinceDays, result: null, error: null };
+  await audit(req, 'manual_sync', null, null, { sinceDays, background: true });
+  res.json({ ok: true, started: true, sinceDays });
+  setImmediate(async () => {
+    try {
+      opts.onProgress = ({ phase, percent }) => { syncNowStatus.phase = phase; syncNowStatus.percent = percent; };
+      const result = await sync.runFullSync(opts);
+      syncNowStatus = { state: 'done', startedAt: syncNowStatus.startedAt, finishedAt: Date.now(), phase: 'Done', percent: 100, sinceDays, result, error: null };
+    } catch (e) {
+      syncNowStatus = { state: 'error', startedAt: syncNowStatus.startedAt, finishedAt: Date.now(), phase: syncNowStatus.phase, percent: syncNowStatus.percent, sinceDays, result: syncNowStatus.result, error: e.message };
+      console.error('[sync-now] failed:', e.message);
+    }
+  });
+});
+
+// GET /api/settings/sync-now/status — poll live sync progress + final result.
+router.get('/sync-now/status', requireAdmin, (req, res) => {
+  res.json(syncNowStatus);
 });
 
 // POST /api/settings/push-all-stock (admin) — force-push every product's current

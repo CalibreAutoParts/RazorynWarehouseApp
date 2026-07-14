@@ -585,7 +585,7 @@ async function pushStockForSaleItems(items) {
 // Push warehouse stock to Shopify for all products that have a Shopify ID.
 // Useful as part of a manual "Sync now" so stock changes from the warehouse
 // (sales, stock checks, returns) propagate to Shopify even if a previous push failed.
-async function pushAllStockToShopify() {
+async function pushAllStockToShopify(onItem) {
   if (!shopify.isConfigured()) return { skipped: 'not_configured' };
   const { rows } = await query(
     `SELECT id, sku, qty_on_hand, shopify_inventory_id
@@ -593,7 +593,8 @@ async function pushAllStockToShopify() {
      WHERE active = true AND shopify_inventory_id IS NOT NULL`
   );
   let pushed = 0, errors = 0;
-  for (const p of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const p = rows[i];
     try {
       await shopify.pushStockForProduct(p);
       pushed++;
@@ -601,25 +602,37 @@ async function pushAllStockToShopify() {
       errors++;
       console.warn('[sync] push fail for', p.sku, e.message);
     }
+    if (onItem) { try { onItem(i + 1, rows.length); } catch (_) {} }
   }
   return { channel: 'shopify_stock', pushed, errors, total: rows.length };
 }
 
 // --------- Orchestrator ---------
+// opts.onProgress({ phase, percent, results }) is called throughout so a caller
+// (the background sync runner) can drive a live progress bar. Phases are weighted
+// by roughly how long they take; the full-catalogue Shopify stock push dominates.
 async function runFullSync(opts = {}) {
   const results = {};
+  const report = (phase, percent) => {
+    if (!opts.onProgress) return;
+    try { opts.onProgress({ phase, percent: Math.max(0, Math.min(100, Math.round(percent))), results }); } catch (_) {}
+  };
+
+  report('Pulling Shopify orders', 2);
   try { results.shopify = await pullShopify(opts); }
   catch (e) {
     console.error('[sync] shopify pull failed:', e.message);
     results.shopify = { error: e.message };
     await setCursor('shopify', { lastSyncedAt: new Date(), status: 'error', error: e.message });
   }
+  report('Pulling eBay orders', 15);
   try { results.ebay = await pullEbay(opts); }
   catch (e) {
     console.error('[sync] ebay pull failed:', e.message);
     results.ebay = { error: e.message };
     await setCursor('ebay', { lastSyncedAt: new Date(), status: 'error', error: e.message });
   }
+  report('Reconciling recent stock changes', 30);
 
   // MASTER-STOCK PROPAGATION: the warehouse is the master. Re-push the latest
   // qty to BOTH channels for every product whose stock changed recently — from
@@ -636,6 +649,7 @@ async function runFullSync(opts = {}) {
         AND p.active = true
     `);
     let pushed = 0;
+    const totalTouched = touched.rows.length;
     for (const product of touched.rows) {
       if (shopify.isConfigured()) {
         try { await shopify.pushStockForProduct(product); } catch (e) { console.warn('[sync] shopify re-push', product.sku, e.message); }
@@ -644,6 +658,7 @@ async function runFullSync(opts = {}) {
         try { await ebay.pushStockForProduct(product); } catch (e) { console.warn('[sync] ebay re-push', product.sku, e.message); }
       }
       pushed++;
+      if (totalTouched && pushed % 10 === 0) report(`Reconciling recent stock changes (${pushed}/${totalTouched})`, 30 + (pushed / totalTouched) * 15);
     }
     results.stockPropagation = { productsRepushed: pushed };
   } catch (e) {
@@ -651,12 +666,18 @@ async function runFullSync(opts = {}) {
     results.stockPropagation = { error: e.message };
   }
 
-  try { results.shopifyStock = await pushAllStockToShopify(); }
+  report('Pushing stock to Shopify', 45);
+  try {
+    results.shopifyStock = await pushAllStockToShopify((done, total) => {
+      if (total && done % 15 === 0) report(`Pushing stock to Shopify (${done}/${total})`, 45 + (done / total) * 45);
+    });
+  }
   catch (e) {
     console.error('[sync] stock push failed:', e.message);
     results.shopifyStock = { error: e.message };
   }
 
+  report('Marking dispatched orders', 92);
   try { results.autoDispatch = await autoMarkDispatched(); }
   catch (e) {
     console.error('[sync] auto-dispatch failed:', e.message);
@@ -666,9 +687,11 @@ async function runFullSync(opts = {}) {
   // Backstop: after all stock changes (sales, propagation), recompute every
   // bundle's availability and push it to eBay — catches component sales that
   // came in through this sync without an immediate per-product recompute.
+  report('Recomputing bundles', 96);
   try { results.bundles = await bundles.recomputeAllBundles(); }
   catch (e) { console.error('[sync] bundle recompute failed:', e.message); results.bundles = { error: e.message }; }
 
+  report('Done', 100);
   return results;
 }
 

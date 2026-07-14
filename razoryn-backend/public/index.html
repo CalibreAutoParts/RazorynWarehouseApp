@@ -18943,43 +18943,61 @@ async function testEbayConnection() {
 // per-store detail INCLUDING errors (previously any pull error was silently shown
 // as "no new orders"), so a failing sync is visible instead of looking like a
 // no-op.
+// Build a human report + error list from a sync result object.
+function syncReportLines(r) {
+  const lines = [], errors = [];
+  const s = r.shopify;
+  if (s) {
+    if (s.error) errors.push(`Shopify pull failed: ${s.error}`);
+    else if (s.skipped) lines.push('• Shopify: not configured');
+    else if (s.inserted > 0) lines.push(`✓ Shopify: ${s.inserted} new order${s.inserted === 1 ? '' : 's'} imported${s.orders != null ? ` (${s.orders} in window)` : ''}`);
+    else lines.push(`• Shopify: no new orders${s.orders ? ` (${s.orders} already imported)` : ''}`);
+  }
+  const e = r.ebay;
+  if (e) {
+    if (e.error) errors.push(`eBay pull failed: ${e.error}`);
+    else if (e.skipped) lines.push('• eBay: not configured');
+    else {
+      if (e.inserted > 0) lines.push(`✓ eBay: ${e.inserted} new order${e.inserted === 1 ? '' : 's'} imported${e.orders != null ? ` (${e.orders} in window)` : ''}`);
+      else lines.push(`• eBay: no new orders${e.orders ? ` (${e.orders} already imported)` : ' found in window'}`);
+      for (const st of (e.stores || [])) {
+        if (st.error) errors.push(`eBay store "${st.code}": ${st.error}`);
+        else if (st.orders != null) lines.push(`   – ${st.code}: ${st.orders} fetched, ${st.inserted} new`);
+      }
+    }
+  }
+  if (r.shopifyStock && r.shopifyStock.error) errors.push(`Stock push to Shopify failed: ${r.shopifyStock.error}`);
+  else if (r.shopifyStock && !r.shopifyStock.skipped) lines.push(`✓ Stock pushed to Shopify: ${r.shopifyStock.pushed} of ${r.shopifyStock.total}`);
+  if (r.stockPropagation && r.stockPropagation.productsRepushed != null) lines.push(`✓ Stock re-pushed to channels: ${r.stockPropagation.productsRepushed} recently-changed`);
+  const newCount = (r.shopify?.inserted || 0) + (r.ebay?.inserted || 0);
+  return { lines, errors, newCount };
+}
+
+// Kick off a background sync and poll its live progress (% bar). sinceDays>0
+// re-pulls a wider order window to recover orders missed during an outage.
 async function syncNow(sinceDays) {
   const nDays = parseInt(sinceDays) || 0;
   const taskId = Task.start(nDays ? `Re-pulling last ${nDays} day(s) of orders` : 'Syncing orders & stock');
   try {
-    const result = await Api.post('/api/settings/sync-now', nDays ? { sinceDays: nDays } : {});
-    const r = result.result || {};
-    const lines = [];
-    const errors = [];
-
-    // Shopify
-    const s = r.shopify;
-    if (s) {
-      if (s.error) errors.push(`Shopify pull failed: ${s.error}`);
-      else if (s.skipped) lines.push('• Shopify: not configured');
-      else if (s.inserted > 0) lines.push(`✓ Shopify: ${s.inserted} new order${s.inserted === 1 ? '' : 's'} imported${s.orders != null ? ` (${s.orders} in window)` : ''}`);
-      else lines.push(`• Shopify: no new orders${s.orders ? ` (${s.orders} already imported)` : ''}`);
-    }
-    // eBay — surface top-level AND per-store errors + fetched vs inserted
-    const e = r.ebay;
-    if (e) {
-      if (e.error) errors.push(`eBay pull failed: ${e.error}`);
-      else if (e.skipped) lines.push('• eBay: not configured');
-      else {
-        if (e.inserted > 0) lines.push(`✓ eBay: ${e.inserted} new order${e.inserted === 1 ? '' : 's'} imported${e.orders != null ? ` (${e.orders} in window)` : ''}`);
-        else lines.push(`• eBay: no new orders${e.orders ? ` (${e.orders} already imported)` : ' found in window'}`);
-        for (const st of (e.stores || [])) {
-          if (st.error) errors.push(`eBay store "${st.code}": ${st.error}`);
-          else if (st.orders != null) lines.push(`   – ${st.code}: ${st.orders} fetched, ${st.inserted} new`);
-        }
-      }
-    }
-    // Stock push
-    if (r.shopifyStock && r.shopifyStock.error) errors.push(`Stock push to Shopify failed: ${r.shopifyStock.error}`);
-    else if (r.shopifyStock && !r.shopifyStock.skipped) lines.push(`✓ Stock pushed to Shopify: ${r.shopifyStock.pushed} of ${r.shopifyStock.total}`);
-    if (r.stockPropagation && r.stockPropagation.productsRepushed != null) lines.push(`✓ Stock re-pushed to channels: ${r.stockPropagation.productsRepushed} recently-changed`);
-
-    const newCount = (s?.inserted || 0) + (e?.inserted || 0);
+    const start = await Api.post('/api/settings/sync-now', nDays ? { sinceDays: nDays } : {});
+    if (start.alreadyRunning) { /* fall through to poll the in-flight run */ }
+    // Poll the background job until it finishes, driving the % progress bar.
+    const finalResult = await new Promise((resolve, reject) => {
+      let tries = 0;
+      const poll = async () => {
+        try {
+          const st = await Api.get('/api/settings/sync-now/status');
+          Task.update(taskId, (st.phase || 'Syncing') + (nDays ? ` · last ${nDays}d` : ''), st.percent || 0);
+          if (st.state === 'done') return resolve(st.result || {});
+          if (st.state === 'error') return reject(new Error(st.error || 'sync failed'));
+          if (++tries > 600) return reject(new Error('Sync is taking unusually long — check back shortly.'));
+          setTimeout(poll, 1500);
+        } catch (err) { reject(err); }
+      };
+      poll();
+    });
+    const r = finalResult;
+    const { lines, errors, newCount } = syncReportLines(r);
     if (errors.length) {
       Task.fail(taskId, 'Sync had errors');
       toast('Sync ran but hit problems:\n' + errors.join('\n') + (lines.length ? '\n\n' + lines.join('\n') : ''), 'error', 12000);
