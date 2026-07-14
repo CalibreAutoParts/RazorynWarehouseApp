@@ -1785,6 +1785,53 @@ async function getStoreUserId(storeArg) {
   }
 }
 
+// Clear the in-memory auth caches (OAuth access token + each store's cached
+// eBay UserID). Call after a token/username change so the process stops using
+// stale values without needing a full restart.
+function resetAuthCaches() {
+  _storeUserIdCache = {};
+  cachedToken = null;
+  tokenExpiresAt = 0;
+}
+
+// Live connection test for a store's eBay credential. Resets the caches, then
+// makes a real GetUser call and reports back the account the token maps to (so a
+// username change can be confirmed) plus the exact eBay error on failure. This is
+// the diagnostic behind the "Test eBay connection" button.
+async function checkConnection(storeArg) {
+  const store = resolveStore(storeArg);
+  const out = {
+    code: store ? store.code : null,
+    name: store ? store.name : null,
+    channelCode: store ? store.channelCode : null,
+    tokenEnv: store ? store.tokenEnv : null,
+    hasToken: !!(store && store.token),
+    mode: REFRESH_TOKEN ? 'oauth' : 'authnauth',
+    ok: false, userId: null, email: null, error: null,
+  };
+  resetAuthCaches();
+  if (!CLIENT_ID || !CLIENT_SECRET) {
+    out.error = 'Missing eBay app credentials (EBAY_CLIENT_ID / EBAY_CLIENT_SECRET).';
+    return out;
+  }
+  if (!out.hasToken && !REFRESH_TOKEN) {
+    out.error = `No eBay token loaded for store "${out.code}". Set the ${out.tokenEnv || 'EBAY_AUTH_TOKEN'} environment variable, then redeploy so the app reloads it.`;
+    return out;
+  }
+  try {
+    const xml = await tradingCall('GetUser', '', storeArg);
+    const uid = extractOne(xml, 'UserID') || null;
+    out.userId = uid;
+    out.email = extractOne(xml, 'Email') || null;
+    out.ok = !!uid;
+    if (uid) _storeUserIdCache[store.code] = uid;
+    else out.error = 'eBay accepted the request but returned no UserID.';
+  } catch (e) {
+    out.error = e.message;
+  }
+  return out;
+}
+
 async function itemBelongsToStore(itemId, storeArg) {
   if (!itemId) return false;
   const myUserId = await getStoreUserId(storeArg);
@@ -1875,6 +1922,8 @@ module.exports = {
   getRateLimits,
   itemBelongsToStore,
   getStoreUserId,
+  resetAuthCaches,
+  checkConnection,
   // Multi-store helpers
   listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary, standalone: !!s.standalone, disabled: !!s.disabled, disabledReason: s.disabledReason || null })),
   getPrimaryStore: () => brand.getPrimaryStore(),
