@@ -697,6 +697,28 @@ router.get('/sync-state', async (req, res) => {
   res.json({ state: rows });
 });
 
+// GET /api/settings/ebay-health — live connection test for each eBay store.
+// Resets the in-memory auth caches, makes a real GetUser call per store, and
+// returns the account the token maps to (to confirm a username change) plus the
+// exact eBay error on failure. Also surfaces the last recorded eBay sync error.
+router.get('/ebay-health', requireAdmin, async (req, res) => {
+  const ebay = require('../services/ebay');
+  let stores = [];
+  try { stores = ebay.listStores(); } catch (_) { stores = []; }
+  const results = [];
+  for (const s of stores) {
+    try { results.push(await ebay.checkConnection(s.code)); }
+    catch (e) { results.push({ code: s.code, name: s.name, ok: false, error: e.message }); }
+  }
+  let lastSync = null;
+  try {
+    const r = await query(`SELECT * FROM sync_state WHERE channel = 'ebay'`);
+    lastSync = r.rows[0] || null;
+  } catch (_) {}
+  await audit(req, 'ebay_health_check', null, null, { stores: results.map(r => ({ code: r.code, ok: r.ok })) });
+  res.json({ stores: results, lastSync });
+});
+
 // ──────────────────────────────────────────────────────────────────────────
 // Logo upload + delete + serve.
 // POST /api/settings/logo with { dataUrl, filename } — stores as base64 data

@@ -16149,13 +16149,21 @@ function renderSettings() {
       </div>
 
       <div class="card" style="margin-bottom:16px">
-        <div class="card-head"><h3>eBay integration</h3></div>
+        <div class="card-head"><h3>eBay integration</h3>
+          <div class="card-desc">Test whether the app can talk to eBay. Use this after changing your eBay username or token — it shows the exact error and which eBay account the current token belongs to.</div>
+        </div>
         <div class="card-body">
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">
-            Once eBay credentials are set in Railway, eBay listings will be matched to your products by SKU. Make sure your eBay listings have the same SKU as the Shopify variants.
+            eBay listings are matched to your products by SKU. eBay credentials live in Railway environment variables — the app loads them <strong>at startup</strong>, so after changing a token you must <strong>redeploy</strong> for it to take effect (there is no in-app token field).
           </p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+            <button class="btn btn-primary" onclick="testEbayConnection()">🔌 Test eBay connection</button>
+            <button class="btn btn-outline" onclick="syncNow()">↻ Sync orders &amp; stock now</button>
+            <span id="ebay-health-status" style="font-size:12px;color:var(--ink-soft)"></span>
+          </div>
+          <div id="ebay-health-result" style="margin-bottom:12px"></div>
           <div style="padding:12px;background:var(--blue-light);color:var(--blue);border-radius:8px;font-size:12px">
-            Configure <strong>EBAY_CLIENT_ID</strong>, <strong>EBAY_CLIENT_SECRET</strong>, and <strong>EBAY_REFRESH_TOKEN</strong> in Railway, then click <em>Sync orders &amp; stock now</em> above.
+            Required Railway variables: <strong>EBAY_CLIENT_ID</strong> + <strong>EBAY_CLIENT_SECRET</strong> (app keys), plus your account token — <strong>EBAY_AUTH_TOKEN</strong> (Auth’n’Auth) or <strong>EBAY_REFRESH_TOKEN</strong> (OAuth). Update the token, redeploy, then click <em>Test eBay connection</em>.
           </div>
         </div>
       </div>
@@ -18893,6 +18901,41 @@ function compSparkline(history) {
    UTILITIES
    ========================================================== */
 function el(id) { return document.getElementById(id); }
+// Live eBay connection test — surfaces the real eBay error and the account the
+// current token maps to, so a username/token change can be verified.
+async function testEbayConnection() {
+  const statusEl = el('ebay-health-status');
+  const resultEl = el('ebay-health-result');
+  if (statusEl) statusEl.textContent = 'Testing…';
+  if (resultEl) resultEl.innerHTML = '';
+  try {
+    const data = await Api.get('/api/settings/ebay-health');
+    if (statusEl) statusEl.textContent = '';
+    const stores = data.stores || [];
+    if (!stores.length) { if (resultEl) resultEl.innerHTML = '<div style="font-size:13px;color:var(--ink-soft)">No eBay stores configured.</div>'; return; }
+    const cards = stores.map(s => {
+      const ok = s.ok;
+      const bg = ok ? 'var(--green-light)' : 'var(--red-light)';
+      const fg = ok ? 'var(--green)' : 'var(--red)';
+      const head = ok
+        ? `✓ Connected as <strong>${escapeHtml(s.userId || '?')}</strong>${s.email ? ` (${escapeHtml(s.email)})` : ''}`
+        : `✗ ${escapeHtml(s.name || s.code || 'eBay')} — not connected`;
+      const detail = ok
+        ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Store “${escapeHtml(s.code || '')}” · ${escapeHtml(s.mode || '')} · token from ${escapeHtml(s.tokenEnv || 'env')}. If this isn’t the eBay account you expect, the token belongs to the wrong login.</div>`
+        : `<div style="font-size:12px;margin-top:6px"><strong>Error:</strong> ${escapeHtml(s.error || 'unknown')}</div>
+           <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Fix: set a fresh <strong>${escapeHtml(s.tokenEnv || 'EBAY_AUTH_TOKEN')}</strong> in Railway for store “${escapeHtml(s.code || '')}”, then redeploy and test again.</div>`;
+      return `<div style="padding:10px 12px;background:${bg};color:${fg};border-radius:8px;font-size:13px;margin-bottom:8px">${head}${detail}</div>`;
+    }).join('');
+    const ls = data.lastSync;
+    const lastErr = ls && ls.last_status === 'error' && ls.last_error
+      ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Last sync error (${ls.updated_at ? new Date(ls.updated_at).toLocaleString('en-GB') : ''}): ${escapeHtml(ls.last_error)}</div>`
+      : (ls && ls.last_status === 'ok' ? `<div style="font-size:11px;color:var(--green);margin-top:4px">Last sync OK ${ls.last_synced_at ? '· ' + new Date(ls.last_synced_at).toLocaleString('en-GB') : ''}</div>` : '');
+    if (resultEl) resultEl.innerHTML = cards + lastErr;
+  } catch (e) {
+    if (statusEl) statusEl.textContent = '';
+    if (resultEl) resultEl.innerHTML = `<div style="padding:10px 12px;background:var(--red-light);color:var(--red);border-radius:8px;font-size:13px">Couldn’t run the test: ${escapeHtml(e.data?.message || e.message)}</div>`;
+  }
+}
 async function syncNow() {
   const taskId = Task.start('Syncing orders & stock');
   try {
