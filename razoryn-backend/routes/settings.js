@@ -226,9 +226,15 @@ router.post('/clear-catalogue', requireAdmin, async (req, res) => {
 // POST /api/settings/sync-now (admin) — manual sync trigger
 router.post('/sync-now', requireAdmin, async (req, res) => {
   try {
-    const result = await sync.runFullSync();
-    await audit(req, 'manual_sync', null, null, result);
-    res.json({ ok: true, result });
+    // Optional { sinceDays } widens the order-pull window past the saved cursor so
+    // orders missed during an outage (when the cursor jumped ahead) are recovered.
+    const sinceDays = Math.max(0, Math.min(30, parseInt(req.body?.sinceDays) || 0));
+    const opts = sinceDays > 0
+      ? { sinceOverride: new Date(Date.now() - sinceDays * 86400000).toISOString() }
+      : {};
+    const result = await sync.runFullSync(opts);
+    await audit(req, 'manual_sync', null, null, { sinceDays, ...result });
+    res.json({ ok: true, sinceDays, result });
   } catch (e) {
     res.status(500).json({ error: 'sync_failed', message: e.message });
   }

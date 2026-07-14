@@ -16159,8 +16159,10 @@ function renderSettings() {
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
             <button class="btn btn-primary" onclick="testEbayConnection()">🔌 Test eBay connection</button>
             <button class="btn btn-outline" onclick="syncNow()">↻ Sync orders &amp; stock now</button>
+            <button class="btn btn-outline" onclick="syncNow(3)" title="Re-fetch the last 3 days of orders from every channel, ignoring the saved sync position — recovers orders missed while sync was broken. Safe to run (duplicates are skipped).">⟲ Re-pull last 3 days</button>
             <span id="ebay-health-status" style="font-size:12px;color:var(--ink-soft)"></span>
           </div>
+          <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">Sync now / Re-pull report exactly what each channel fetched and imported (and any error) in the popup — so you can see whether orders came through, rather than a silent “nothing happened”.</div>
           <div id="ebay-health-result" style="margin-bottom:12px"></div>
           <div style="padding:12px;background:var(--blue-light);color:var(--blue);border-radius:8px;font-size:12px">
             Required Railway variables: <strong>EBAY_CLIENT_ID</strong> + <strong>EBAY_CLIENT_SECRET</strong> (app keys), plus your account token — <strong>EBAY_AUTH_TOKEN</strong> (Auth’n’Auth) or <strong>EBAY_REFRESH_TOKEN</strong> (OAuth). Update the token, redeploy, then click <em>Test eBay connection</em>.
@@ -18936,40 +18938,61 @@ async function testEbayConnection() {
     if (resultEl) resultEl.innerHTML = `<div style="padding:10px 12px;background:var(--red-light);color:var(--red);border-radius:8px;font-size:13px">Couldn’t run the test: ${escapeHtml(e.data?.message || e.message)}</div>`;
   }
 }
-async function syncNow() {
-  const taskId = Task.start('Syncing orders & stock');
+// sinceDays (optional) re-pulls a wider window of orders than the saved cursor —
+// used to recover orders missed while sync was broken. Reports per-channel and
+// per-store detail INCLUDING errors (previously any pull error was silently shown
+// as "no new orders"), so a failing sync is visible instead of looking like a
+// no-op.
+async function syncNow(sinceDays) {
+  const nDays = parseInt(sinceDays) || 0;
+  const taskId = Task.start(nDays ? `Re-pulling last ${nDays} day(s) of orders` : 'Syncing orders & stock');
   try {
-    const result = await Api.post('/api/settings/sync-now');
+    const result = await Api.post('/api/settings/sync-now', nDays ? { sinceDays: nDays } : {});
     const r = result.result || {};
     const lines = [];
-    if (r.shopify) {
-      const s = r.shopify;
-      if (s.skipped) lines.push('• Shopify orders: not configured (set SHOPIFY env vars)');
-      else if (s.inserted > 0) lines.push(`✓ ${s.inserted} new Shopify order${s.inserted === 1 ? '' : 's'} imported`);
-      else lines.push('• Shopify: no new orders since last sync');
+    const errors = [];
+
+    // Shopify
+    const s = r.shopify;
+    if (s) {
+      if (s.error) errors.push(`Shopify pull failed: ${s.error}`);
+      else if (s.skipped) lines.push('• Shopify: not configured');
+      else if (s.inserted > 0) lines.push(`✓ Shopify: ${s.inserted} new order${s.inserted === 1 ? '' : 's'} imported${s.orders != null ? ` (${s.orders} in window)` : ''}`);
+      else lines.push(`• Shopify: no new orders${s.orders ? ` (${s.orders} already imported)` : ''}`);
     }
-    if (r.ebay) {
-      const e = r.ebay;
-      if (e.skipped) lines.push('• eBay orders: not configured');
-      else if (e.inserted > 0) lines.push(`✓ ${e.inserted} new eBay order${e.inserted === 1 ? '' : 's'} imported`);
-      else lines.push('• eBay: no new orders since last sync');
+    // eBay — surface top-level AND per-store errors + fetched vs inserted
+    const e = r.ebay;
+    if (e) {
+      if (e.error) errors.push(`eBay pull failed: ${e.error}`);
+      else if (e.skipped) lines.push('• eBay: not configured');
+      else {
+        if (e.inserted > 0) lines.push(`✓ eBay: ${e.inserted} new order${e.inserted === 1 ? '' : 's'} imported${e.orders != null ? ` (${e.orders} in window)` : ''}`);
+        else lines.push(`• eBay: no new orders${e.orders ? ` (${e.orders} already imported)` : ' found in window'}`);
+        for (const st of (e.stores || [])) {
+          if (st.error) errors.push(`eBay store "${st.code}": ${st.error}`);
+          else if (st.orders != null) lines.push(`   – ${st.code}: ${st.orders} fetched, ${st.inserted} new`);
+        }
+      }
     }
-    if (r.shopifyStock && !r.shopifyStock.skipped) {
-      const ss = r.shopifyStock;
-      lines.push(`✓ Stock pushed to Shopify: ${ss.pushed} of ${ss.total} products`);
+    // Stock push
+    if (r.shopifyStock && r.shopifyStock.error) errors.push(`Stock push to Shopify failed: ${r.shopifyStock.error}`);
+    else if (r.shopifyStock && !r.shopifyStock.skipped) lines.push(`✓ Stock pushed to Shopify: ${r.shopifyStock.pushed} of ${r.shopifyStock.total}`);
+    if (r.stockPropagation && r.stockPropagation.productsRepushed != null) lines.push(`✓ Stock re-pushed to channels: ${r.stockPropagation.productsRepushed} recently-changed`);
+
+    const newCount = (s?.inserted || 0) + (e?.inserted || 0);
+    if (errors.length) {
+      Task.fail(taskId, 'Sync had errors');
+      toast('Sync ran but hit problems:\n' + errors.join('\n') + (lines.length ? '\n\n' + lines.join('\n') : ''), 'error', 12000);
+    } else {
+      Task.done(taskId, newCount ? `${newCount} new order${newCount === 1 ? '' : 's'}` : 'Sync complete');
+      toast((lines.length ? 'Sync complete:\n' + lines.join('\n') : 'Sync complete. No new data.'), 'success', 8000);
     }
-    const newCount = (r.shopify?.inserted || 0) + (r.ebay?.inserted || 0);
-    const msg = lines.length
-      ? 'Sync complete:\n' + lines.join('\n')
-      : 'Sync complete. No new data.';
-    Task.done(taskId, newCount ? `${newCount} new order${newCount === 1 ? '' : 's'}` : 'Sync complete');
-    toast(msg, 'success', 6000);
     await Store.refreshAll();
     if (typeof renderDashboard === 'function' && State.page === 'dashboard') renderDashboard();
     if (State.page === 'sales' && typeof renderSales === 'function') renderSales();
   } catch (e) {
     Task.fail(taskId, 'Sync failed');
-    toast('Sync failed: ' + (e.data?.message || e.message), 'error', 6000);
+    toast('Sync failed: ' + (e.data?.message || e.message), 'error', 8000);
   }
 }
 /* ==================== TASK PROGRESS BAR ====================
