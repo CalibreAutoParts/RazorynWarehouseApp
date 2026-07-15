@@ -2558,49 +2558,57 @@ const DESC_BODY_END = '<!--/RZN_DESC_BODY-->';
 
 function defaultDescTemplate() {
   const brand = require('../lib/brand');
-  const color = brand.primaryColor || '#c8202d';
-  // A sectioned, storefront-style layout (inline CSS only — eBay strips <style>,
-  // scripts and active content). Tokens: {{brand}} {{tagline}} {{domain}}
-  // {{title}} {{sku}} {{partno}} {{vehicle}} {{storeurl}}. The body (spec table /
-  // description) is inserted between header and footer via the RZN_DESC_BODY
-  // sentinels. A "trust bar" + "more parts for your vehicle" CTA + payment /
-  // delivery / returns panels give it design and link buyers to similar items.
+  const color = brand.primaryColor || '#c8202d';       // brand bar / structure
+  const accent = brand.accentColor || brand.primaryColor || '#c8202d';  // red CTA/headings
+  // Clean, icon-led, storefront-style layout (inline CSS only — eBay strips
+  // <style>, scripts, external CSS). Tokens: {{brand}} {{tagline}} {{domain}}
+  // {{title}} {{sku}} {{partno}} {{vehicle}} {{storeurl}} {{related}}. The body
+  // (spec table) sits between the RZN_DESC_BODY sentinels; {{related}} is the
+  // "You might be interested in" product cards. Icons are emoji so they render
+  // everywhere (incl. the eBay mobile app) with no external images.
+  const badge = (icon, top, bot) =>
+    `<td style="width:25%;text-align:center;vertical-align:top;padding:6px 8px">` +
+      `<div style="font-size:26px;line-height:1">${icon}</div>` +
+      `<div style="font-size:11px;color:#555;margin-top:5px">${top}</div>` +
+      `<div style="font-size:11px;font-weight:700;color:#222;margin-top:1px">${bot}</div>` +
+    `</td>`;
   const header =
-    `<div style="font-family:Arial,Helvetica,sans-serif;max-width:880px;margin:0 auto;color:#1a1a1a;border:1px solid #e7e7e7;border-radius:10px;overflow:hidden">` +
-      // top brand bar
+    `<div style="font-family:Arial,Helvetica,sans-serif;max-width:860px;margin:0 auto;color:#1a1a1a;border:1px solid #e7e7e7;border-radius:10px;overflow:hidden">` +
+      // brand bar
       `<div style="background:${color};color:#fff;padding:18px 22px">` +
         `<div style="font-size:24px;font-weight:800;letter-spacing:.4px;line-height:1.1">{{brand}}</div>` +
-        `<div style="font-size:13px;opacity:.95;margin-top:2px">{{tagline}}</div>` +
+        `<div style="font-size:13px;opacity:.95;margin-top:3px">{{tagline}}</div>` +
       `</div>` +
-      // trust bar
-      `<div style="display:block;background:#faf7f7;border-bottom:1px solid #eee;padding:10px 22px;font-size:12px;color:#444">` +
-        `<span style="display:inline-block;margin:2px 14px 2px 0">&#9889; Same-day dispatch before 12pm</span>` +
-        `<span style="display:inline-block;margin:2px 14px 2px 0">&#10003; OEM-quality replacement</span>` +
-        `<span style="display:inline-block;margin:2px 14px 2px 0">&#128666; Fast UK delivery</span>` +
-        `<span style="display:inline-block;margin:2px 0">&#128172; Message your reg for fitment help</span>` +
-      `</div>` +
-      // title + body container
+      // trust badges (icons, not text walls)
+      `<table role="presentation" width="100%" style="border-collapse:collapse;background:#fafafa;border-bottom:1px solid #eee"><tr>` +
+        badge('&#128230;', 'All parts', 'NEW &amp; PRIMED') +
+        badge('&#128683;', "We don't", 'PAINT PANELS') +
+        badge('&#128737;&#65039;', 'Quality', 'INSURANCE-GRADE') +
+        badge('&#128666;', 'Next-day', 'TRACKED DELIVERY') +
+      `</tr></table>` +
+      // title + part number, then the body container
       `<div style="padding:20px 22px">` +
         `<div style="font-size:19px;font-weight:700;margin-bottom:4px;line-height:1.3">{{title}}</div>` +
-        `<div style="font-size:13px;color:#777;margin-bottom:16px">Part No: <strong style="color:${color}">{{partno}}</strong></div>`;
+        `<div style="font-size:13px;color:#777;margin-bottom:16px">Part No: <strong style="color:${accent}">{{partno}}</strong></div>`;
   const footer =
+      // key notices (concise, boxed, accent bar)
+      `<div style="margin:4px 0 2px;border:1px solid #f0d9dc;background:#fdf6f7;border-left:4px solid ${accent};border-radius:6px;padding:12px 14px;font-size:13px;line-height:1.55;color:#333">` +
+        `<div style="margin-bottom:8px">&#9888;&#65039; <strong>Please don't rely on eBay's compatibility guide</strong> — it's a guide only. Message us your registration and we'll confirm this part fits your exact vehicle.</div>` +
+        `<div style="margin:0">&#128312; All panels are supplied <strong>primed and require painting</strong> unless otherwise stated. <strong>We do not paint panels.</strong></div>` +
+      `</div>` +
       `</div>` +   // close body container
-      // more parts for this vehicle (links to similar items on the storefront)
-      `<div style="background:#f5f7fb;border-top:1px solid #e7e7e7;padding:18px 22px;text-align:center">` +
-        `<div style="font-size:15px;font-weight:700;margin-bottom:8px">Need more parts for your {{vehicle}}?</div>` +
-        `<div style="font-size:13px;color:#555;margin-bottom:12px">Browse our full range of matching panels, lights and body parts.</div>` +
-        `<a href="{{storeurl}}" style="display:inline-block;background:${color};color:#fff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 22px;border-radius:6px">Shop more parts &rarr;</a>` +
-      `</div>` +
-      // info panels: payment / delivery / returns
-      `<div style="padding:18px 22px;border-top:1px solid #e7e7e7;font-size:13px;line-height:1.6;color:#333">` +
-        `<div style="display:block;margin-bottom:12px"><span style="font-weight:700">Secure payment &nbsp;</span>Visa &middot; Mastercard &middot; Maestro &middot; PayPal &middot; Apple Pay &middot; Google Pay</div>` +
-        `<div style="display:block;margin-bottom:12px"><span style="font-weight:700">Delivery &nbsp;</span>Dispatched same day when ordered &amp; paid before 12pm (Mon&ndash;Fri). Mainland UK rates apply; Highlands/Islands may differ &mdash; ask before buying.</div>` +
-        `<div style="display:block;margin-bottom:0"><span style="font-weight:700">Returns &nbsp;</span>30-day returns. Faulty items replaced or refunded. Please check the part number and photos against your original before purchase.</div>` +
-      `</div>` +
+      // "You might be interested in" — real product cards (or a fallback CTA)
+      `{{related}}` +
+      // info strip: payment / delivery / returns (compact, icon-led)
+      `<table role="presentation" width="100%" style="border-collapse:collapse;border-top:1px solid #e7e7e7;font-size:12.5px;color:#333"><tr>` +
+        `<td style="width:33%;vertical-align:top;padding:14px 16px;border-right:1px solid #eee"><div style="font-weight:700;margin-bottom:3px">&#128179; Secure payment</div>Visa, Mastercard, PayPal, Apple &amp; Google Pay</div></td>` +
+        `<td style="width:34%;vertical-align:top;padding:14px 16px;border-right:1px solid #eee"><div style="font-weight:700;margin-bottom:3px">&#128666; Fast delivery</div>Same-day dispatch when paid before 12pm (Mon&ndash;Fri). Leave a mobile number with your order.</div></td>` +
+        `<td style="width:33%;vertical-align:top;padding:14px 16px"><div style="font-weight:700;margin-bottom:3px">&#8617;&#65039; 30-day returns</div>Faulty items replaced or refunded. Check the part number &amp; photos first.</div></td>` +
+      `</tr></table>` +
       // dark footer
-      `<div style="background:#141414;color:#ddd;padding:16px 22px;font-size:12px;line-height:1.6">` +
-        `<div style="font-weight:700;color:#fff;margin-bottom:4px">Why buy from {{brand}}</div>` +
-        `<div style="margin-bottom:10px">OEM-quality collision &amp; body parts &middot; trade prices &middot; fast dispatch &middot; expert fitment help.</div>` +
+      `<div style="background:#141414;color:#ddd;padding:14px 22px;font-size:12px;line-height:1.6">` +
+        `<div style="color:#fff;font-weight:700">Why buy from {{brand}}</div>` +
+        `<div style="margin:4px 0 8px">Trade-quality body panels &middot; fast dispatch &middot; expert fitment help &mdash; just message us your reg.</div>` +
         `<div style="color:#999">{{brand}} &middot; {{domain}}</div>` +
       `</div>` +
     `</div>`;
@@ -2629,15 +2637,22 @@ function unwrapDesc(desc) {
 function wrapDesc(body, tpl, ctx) {
   const brand = require('../lib/brand');
   const domain = (brand.domain || '').replace(/^https?:\/\//, '');
-  // "Similar items" link: search the storefront for the vehicle so buyers can
-  // find matching parts. Falls back to the store homepage.
+  const accent = brand.accentColor || brand.primaryColor || '#c8202d';
   const vehicle = ctx.vehicle || '';
   const base = domain ? `https://${domain}` : '';
   const storeurl = ctx.storeurl || (base ? (vehicle ? `${base}/search?q=${encodeURIComponent(vehicle)}` : base) : '#');
+  // {{related}} = the "You might be interested in" cards when we have them, else a
+  // simple CTA button linking to more parts for this vehicle.
+  const related = ctx.related || (base
+    ? `<div style="background:#f5f7fb;border-top:1px solid #e7e7e7;padding:16px 22px;text-align:center">` +
+        `<div style="font-size:15px;font-weight:700;margin-bottom:10px">Need more parts for your ${escapeHtmlServer(vehicle || 'vehicle')}?</div>` +
+        `<a href="${storeurl}" style="display:inline-block;background:${accent};color:#fff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 22px;border-radius:6px">Shop more parts &rarr;</a>` +
+      `</div>`
+    : '');
   const fill = (s) => String(s || '').replace(/\{\{(\w+)\}\}/g, (_, k) => {
     const map = { brand: brand.name || 'Our Store', tagline: brand.tagline || '',
       domain, title: ctx.title || '', sku: ctx.sku || '', partno: ctx.partno || '',
-      vehicle: vehicle || 'vehicle', storeurl };
+      vehicle: vehicle || 'vehicle', storeurl, related };
     return map[k] != null ? map[k] : '';
   });
   return fill(tpl.header) + DESC_BODY_START + (body || '') + DESC_BODY_END + fill(tpl.footer);
@@ -2670,9 +2685,66 @@ function buildStyledDescBody(product, specifics) {
       `<td style="padding:9px 12px;border-bottom:1px solid #eee;color:#666;white-space:nowrap;width:42%">${escapeHtmlServer(k)}</td>` +
       `<td style="padding:9px 12px;border-bottom:1px solid #eee;font-weight:600;color:#111">${escapeHtmlServer(v)}</td>` +
     `</tr>`).join('');
-  return `<div style="font-size:14px;color:#333;line-height:1.6;margin-bottom:14px">Brand-new, ready-to-fit replacement part. <strong>Please match the part number and photos to your original before purchasing</strong> &mdash; message us your registration and we'll confirm it fits your exact model.</div>` +
-    (table ? `<table style="width:100%;border-collapse:collapse;border:1px solid #eee;border-radius:8px;overflow:hidden;font-size:14px">${table}</table>` : '') +
-    `<div style="font-size:13px;color:#777;margin-top:14px;padding-top:12px;border-top:1px dashed #ddd">Colour may be primed and require painting to match your vehicle unless stated. eBay compatibility is a guide only &mdash; if unsure, send us your reg and we'll check for you.</div>`;
+  return `<div style="font-size:14px;color:#333;line-height:1.6;margin-bottom:14px">Brand-new, ready-to-fit replacement part &mdash; supplied primed. <strong>Match the part number and photos to your original before buying</strong>, or send us your reg and we'll confirm the fit.</div>` +
+    (table ? `<table style="width:100%;border-collapse:collapse;border:1px solid #eee;border-radius:8px;overflow:hidden;font-size:14px">${table}</table>` : '');
+}
+
+// "You might be interested in" — up to 4 OTHER live eBay listings for the SAME
+// make/model, as photo + title + price cards linking to those eBay items (staying
+// on eBay is policy-safe). Returns '' when there are no matching linked listings,
+// in which case wrapDesc falls back to the storefront CTA.
+async function buildRelatedItemsHtml(product, storeCode) {
+  const brand = require('../lib/brand');
+  const accent = brand.accentColor || brand.primaryColor || '#c8202d';
+  const make = product.brand, model = product.model;
+  if (!make && !model) return '';
+  let rows = [];
+  try {
+    const r = await query(
+      `SELECT p.title, p.price_ebay, p.image_url, ml.ebay_item_id
+         FROM products p
+         JOIN mirror_links ml ON ml.shopify_product_id::text = p.shopify_product_id::text
+        WHERE p.active = true AND p.id <> $1 AND p.image_url IS NOT NULL
+          AND ml.ebay_item_id IS NOT NULL
+          AND ($4 = '' OR ml.store_code = $4 OR ml.store_code IS NULL)
+          AND ( ($2 <> '' AND p.brand = $2) )
+          AND ( ($3 = '') OR p.model = $3 )
+        ORDER BY (p.model = $3) DESC, p.updated_at DESC
+        LIMIT 4`,
+      [product.id, make || '', model || '', storeCode || '']);
+    rows = r.rows;
+  } catch (_) { return ''; }
+  if (!rows.length) return '';
+  const cards = rows.map(it => {
+    const url = `https://www.ebay.co.uk/itm/${escapeHtmlServer(String(it.ebay_item_id))}`;
+    const price = it.price_ebay != null ? `£${parseFloat(it.price_ebay).toFixed(2)}` : '';
+    return `<td style="width:25%;vertical-align:top;padding:8px">` +
+      `<a href="${url}" style="text-decoration:none;color:#111;display:block;border:1px solid #eee;border-radius:8px;overflow:hidden">` +
+        `<img src="${escapeHtmlServer(it.image_url)}" alt="" style="width:100%;height:120px;object-fit:cover;display:block;background:#f4f4f4">` +
+        `<div style="padding:8px 10px">` +
+          `<div style="font-size:12px;line-height:1.35;height:50px;overflow:hidden">${escapeHtmlServer(String(it.title || '').slice(0, 70))}</div>` +
+          (price ? `<div style="font-size:14px;font-weight:800;color:${accent};margin-top:4px">${price}</div>` : '') +
+        `</div>` +
+      `</a></td>`;
+  }).join('');
+  return `<div style="background:#f5f7fb;border-top:1px solid #e7e7e7;padding:16px 18px">` +
+    `<div style="font-size:15px;font-weight:800;text-transform:uppercase;letter-spacing:.3px;margin:0 4px 8px">You might be interested in</div>` +
+    `<table role="presentation" width="100%" style="border-collapse:collapse"><tr>${cards}</tr></table>` +
+  `</div>`;
+}
+
+// One place that builds the FULL wrapped eBay description for a product, used by
+// create AND the "push design to existing listings" bulk action so they match.
+async function composeEbayDescription(product, { specifics, storeCode, rawBody } = {}) {
+  const body = (rawBody && String(rawBody).trim()) ? unwrapDesc(rawBody) : buildStyledDescBody(product, specifics || []);
+  const vehicle = [product.brand || parseVehicleFromTitle(product.title || '').make,
+                   product.model || parseVehicleFromTitle(product.title || '').model].filter(Boolean).join(' ').trim();
+  let related = '';
+  try { related = await buildRelatedItemsHtml(product, storeCode); } catch (_) {}
+  const tpl = await getDescTemplate();
+  return wrapDesc(body, tpl, {
+    title: product.title, sku: product.sku, partno: product.part_number || product.sku, vehicle, related,
+  });
 }
 
 const skuKeyify = (n) => String(n || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
@@ -3129,17 +3201,12 @@ async function doCreateEbay(b, { req } = {}) {
   // every new listing looks designed (header/trust bar/spec table/similar-items
   // CTA/payment+delivery+returns/footer). Skip wrapping only if the caller opts
   // out (b.wrapDescription === false) or already sent a pre-wrapped body.
-  {
-    const specForBody = mergedSpecifics;
-    const body = (rawBody && String(rawBody).trim()) ? unwrapDesc(rawBody) : buildStyledDescBody(product, specForBody);
-    const vehicle = [product.brand || parseVehicleFromTitle(title).make, product.model || parseVehicleFromTitle(title).model]
-      .filter(Boolean).join(' ').trim();
-    if (b.wrapDescription === false) {
-      description = body;
-    } else {
-      const tpl = await getDescTemplate();
-      description = wrapDesc(body, tpl, { title, sku: product.sku, partno: product.part_number || product.sku, vehicle });
-    }
+  if (b.wrapDescription === false) {
+    description = (rawBody && String(rawBody).trim()) ? unwrapDesc(rawBody) : buildStyledDescBody(product, mergedSpecifics);
+  } else {
+    description = await composeEbayDescription(
+      { ...product, title, part_number: product.part_number || product.sku },
+      { specifics: mergedSpecifics, storeCode: store.code, rawBody });
   }
 
   // eBay "Brand" = who MADE the part (company name / "Unbranded"), NOT the
@@ -3637,6 +3704,61 @@ router.delete('/drafts/:id', requireAdmin, async (req, res) => {
   await audit(req, 'delete_draft', 'listing_draft', id, {});
   res.json({ ok: true });
 });
+
+// ──────────────────────────────────────────────────────────────────────────
+// PUSH THE NEW STYLED DESCRIPTION TO EXISTING LIVE LISTINGS.
+// Regenerates the full branded description (spec table + notices + related-item
+// cards) for every linked eBay listing and revises it. Runs in the BACKGROUND
+// (hundreds of ReviseItem calls) with pollable progress. Optionally also sets the
+// Shopify body_html. Best-effort per item — one failure never stops the run.
+// ──────────────────────────────────────────────────────────────────────────
+let restyleStatus = { state: 'idle', startedAt: null, finishedAt: null, total: 0, done: 0, ok: 0, failed: 0, sampleError: null, includeShopify: false };
+
+router.post('/restyle-descriptions', requireAdmin, async (req, res) => {
+  if (restyleStatus.state === 'running') return res.json({ ok: true, started: false, alreadyRunning: true, status: restyleStatus });
+  const includeShopify = !!(req.body && req.body.includeShopify);
+  const onlyProductId = req.body && req.body.productId ? parseInt(req.body.productId) : null;
+  restyleStatus = { state: 'running', startedAt: Date.now(), finishedAt: null, total: 0, done: 0, ok: 0, failed: 0, sampleError: null, includeShopify };
+  await audit(req, 'restyle_descriptions', null, null, { includeShopify, onlyProductId });
+  res.json({ ok: true, started: true, includeShopify });
+  setImmediate(async () => {
+    try {
+      const stores = ebay.listStores().filter(st => st.hasToken && !st.disabled);
+      const linkRows = (await query(
+        `SELECT ml.ebay_item_id, ml.store_code, p.*
+           FROM mirror_links ml JOIN products p ON p.shopify_product_id::text = ml.shopify_product_id::text
+          WHERE ml.ebay_item_id IS NOT NULL ${onlyProductId ? 'AND p.id = ' + onlyProductId : ''}`)).rows;
+      restyleStatus.total = linkRows.length;
+      for (const row of linkRows) {
+        const store = stores.find(st => st.code === row.store_code) || (stores.find(st => st.primary) || stores[0]);
+        try {
+          if (!store) throw new Error('no eBay store for link');
+          const specifics = Array.isArray(row.ebay_item_specifics) ? row.ebay_item_specifics : [];
+          const html = await composeEbayDescription(row, { specifics, storeCode: store.code });
+          await ebay.reviseItem(row.ebay_item_id, { description: html }, store.code);
+          await query(`UPDATE products SET ebay_description = $1, updated_at = now() WHERE id = $2`, [html, row.id]).catch(() => {});
+          if (includeShopify && row.shopify_product_id && shopify.isConfigured()) {
+            try { await shopify.updateProduct(row.shopify_product_id, { description: html, imageUrls: [] }); } catch (_) {}
+          }
+          restyleStatus.ok++;
+        } catch (e) {
+          restyleStatus.failed++;
+          if (!restyleStatus.sampleError) restyleStatus.sampleError = e.message;
+        }
+        restyleStatus.done++;
+      }
+      restyleStatus.state = 'done'; restyleStatus.finishedAt = Date.now();
+      await query(`INSERT INTO notifications (type, title, body, severity) VALUES ('sync','Listing descriptions updated',$1,$2)`,
+        [`${restyleStatus.ok} updated${restyleStatus.failed ? `, ${restyleStatus.failed} failed` : ''}`, restyleStatus.failed ? 'warn' : 'success']).catch(() => {});
+    } catch (e) {
+      restyleStatus.state = 'error'; restyleStatus.finishedAt = Date.now(); restyleStatus.sampleError = e.message;
+      console.error('[restyle-descriptions] failed:', e.message);
+    }
+  });
+});
+
+// GET /api/listings/restyle-descriptions/status — poll live progress.
+router.get('/restyle-descriptions/status', requireAdmin, (req, res) => res.json(restyleStatus));
 
 // Expose the single-flight runner so the sync cron can run the warehouse import
 // automatically without racing a manual run.
