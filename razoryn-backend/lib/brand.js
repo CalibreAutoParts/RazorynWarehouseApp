@@ -18,6 +18,7 @@ const BRANDS = {
     primaryColor: '#c8202d',        // brand red — sidebar, primary buttons, accents
     primaryColorDark: '#e2545f',    // lifted red for dark mode (legible on dark bg)
     secondaryColor: '#1a1a1a',       // ink colour for headers
+    accentColor: '#c8202d',          // CTA / section-heading colour (red)
     supportColor: '#ffffff',
     invoicePrefix: 'REP',
     appTitle: 'Razoryn Warehouse Hub',
@@ -43,6 +44,7 @@ const BRANDS = {
     primaryColor: '#0D1B2A',         // navy — sidebar, headings
     primaryColorDark: '#4a7fc0',     // legible blue for dark mode (navy is invisible on dark bg)
     secondaryColor: '#E30613',        // red accent — primary buttons, links
+    accentColor: '#E30613',          // CTA / section-heading colour (red)
     supportColor: '#ffffff',
     invoicePrefix: 'CAP',
     appTitle: 'Calibre Warehouse Hub',

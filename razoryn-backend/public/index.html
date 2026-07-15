@@ -16211,6 +16211,15 @@ function renderSettings() {
             <button class="btn btn-outline" onclick="previewEbayTemplate()">👁 Preview</button>
           </div>
           <div id="tpl-preview" style="margin-top:12px"></div>
+          <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line-2)">
+            <div style="font-weight:600;font-size:13px;margin-bottom:4px">🎨 Push the new design to existing listings</div>
+            <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Regenerates the full styled description (spec table, trust badges, “don’t rely on eBay fitment / primed / we don’t paint” notices, and “You might be interested in” cards from the same make/model) and revises every live eBay listing. Runs in the background — you can leave this page.</div>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:10px"><input type="checkbox" id="restyle-shopify"> Also update the Shopify product descriptions</label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn btn-primary" onclick="pushDescriptionsToLive(this)">🎨 Push design to live listings</button>
+              <span id="restyle-status" style="font-size:12px;color:var(--ink-soft)"></span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -16837,6 +16846,37 @@ async function saveEbayTemplate() {
     await Api.post('/api/listings/ebay-template', { header: el('tpl-header').value, footer: el('tpl-footer').value });
     toast('eBay template saved', 'success');
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+// Regenerate + push the styled description to every live listing (background job).
+async function pushDescriptionsToLive(btn) {
+  const includeShopify = !!el('restyle-shopify')?.checked;
+  if (!confirm(`Regenerate and push the new design to ALL live eBay listings${includeShopify ? ' and Shopify descriptions' : ''}?\n\nThis revises every linked listing in the background. Safe to run again anytime.`)) return;
+  const statusEl = el('restyle-status');
+  if (btn) btn.disabled = true;
+  const taskId = Task.start('Pushing descriptions to live listings');
+  try {
+    await Api.post('/api/listings/restyle-descriptions', { includeShopify });
+    await new Promise((resolve, reject) => {
+      const poll = async () => {
+        try {
+          const s = await Api.get('/api/listings/restyle-descriptions/status');
+          const pct = s.total ? Math.round((s.done / s.total) * 100) : 0;
+          Task.update(taskId, `Descriptions ${s.done}/${s.total}`, pct);
+          if (statusEl) statusEl.textContent = `${s.done}/${s.total} done · ${s.ok} updated${s.failed ? ` · ${s.failed} failed` : ''}`;
+          if (s.state === 'done' || s.state === 'error') return resolve(s);
+          setTimeout(poll, 1500);
+        } catch (err) { reject(err); }
+      };
+      poll();
+    }).then(s => {
+      if (s.state === 'error') { Task.fail(taskId, 'Failed'); toast('Push failed: ' + (s.sampleError || 'unknown'), 'error', 9000); }
+      else {
+        Task.done(taskId, `${s.ok}/${s.total} updated`);
+        toast(`✓ Descriptions updated on ${s.ok} listing${s.ok === 1 ? '' : 's'}${s.failed ? ` · ${s.failed} failed (e.g. "${String(s.sampleError || '').slice(0, 80)}")` : ''}`, s.failed ? 'warn' : 'success', 9000);
+      }
+    });
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Push failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) btn.disabled = false; }
 }
 function resetEbayTemplate() {
   if (!_ebayTplDefaults) return;
