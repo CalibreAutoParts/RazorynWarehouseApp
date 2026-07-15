@@ -1090,6 +1090,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           Create listing
         </button>
+        <button class="nav-item admin-only" data-page="drafts">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          Drafts
+        </button>
         <button class="nav-item admin-only" data-page="mirror">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
           Listing Mirror
@@ -2705,7 +2709,8 @@ function routeTo(page) {
     activity: renderActivity, pricingrules: renderPricingRules,
     labels: renderLabels, notes: renderNotes, dispatch: renderDispatch,
     competitors: renderCompetitors, bundles: renderBundles, createlisting: renderCreateListing,
-    sharedstock: renderSharedStock, editlisting: renderEditListing, costs: renderCosts
+    sharedstock: renderSharedStock, editlisting: renderEditListing, costs: renderCosts,
+    drafts: renderDrafts
   };
   try {
     (pages[page] || renderDashboard)();
@@ -10981,6 +10986,8 @@ const CL = { categoryId: '', categoryName: '', defs: [], _catResults: [], images
 // Holds a snapshot of the just-created listing so "Repeat listing" can re-open
 // the Create page pre-filled. Consumed (and cleared) once by renderCreateListing.
 let CL_REPEAT = null;
+// Pending draft to restore into the Create form ({ draftId, snapshot }).
+let CL_DRAFT = null;
 function clPct() {
   const c = State.pricingConfig || {};
   return c.priceLinkPct != null ? c.priceLinkPct : (c.bankTransferPct != null ? c.bankTransferPct : 10);
@@ -11034,6 +11041,7 @@ async function renderCreateListing() {
         <div class="actions">
           <button class="btn btn-ghost" onclick="backfillPreorderPresentation(this)" title="Clean up existing pre-order listings: remove any text baked into titles, ensure the pre-order tag/ETA + collection">🧹 Tidy pre-order listings</button>
           <button class="btn btn-outline" onclick="routeTo('mirror')">Cancel</button>
+          <button class="btn btn-outline" onclick="clSaveDraft(this)" title="Save everything to the warehouse without listing on eBay/Shopify. Come back to finish it (e.g. when photos arrive).">💾 Save as draft</button>
           <button class="btn btn-primary" onclick="submitUnifiedCreate(this)">Create &amp; push everywhere</button>
         </div>
       </div>
@@ -11045,6 +11053,7 @@ async function renderCreateListing() {
   try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (_) {}
   CL.categoryId = ''; CL.categoryName = ''; CL._catResults = []; CL.images = [];
   CL.editProductId = null; CL.imagesReadonly = false;   // create mode (not edit)
+  CL.draftId = null;   // set when resuming a saved draft
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
   if (el('cl-core')) { el('cl-core').innerHTML = clCoreHtml(); clRenderPhotos(); }
   // Populate the Shopify delivery (shipping) profile dropdown.
@@ -11060,6 +11069,9 @@ async function renderCreateListing() {
   setTimeout(() => { const p = el('ce-price'); if (p) p.addEventListener('input', clUpdateDerivedFromEbay); clUpdateDerivedFromEbay(); }, 120);
   // "Repeat listing": if a snapshot is pending, re-fill the whole form from it.
   if (CL_REPEAT) { const snap = CL_REPEAT; CL_REPEAT = null; clApplySnapshot(snap); }
+  // Resuming a saved DRAFT — restore every field, keep the saved SKU, remember
+  // the draft id so publishing (create) removes it.
+  if (CL_DRAFT) { const d = CL_DRAFT; CL_DRAFT = null; CL.draftId = d.draftId || null; clApplySnapshot(d.snapshot, { keepSku: true }); }
 }
 
 // ============ EDIT LISTING — same layout as Create, pre-filled from the live ============
@@ -11397,6 +11409,8 @@ async function submitUnifiedCreate(btn, overrides = {}) {
   }
   if (created.stockPool) toast(`🔗 Linked into a shared stock pool — ${created.stockPool.memberCount} listings now share part № ${escapeHtml(created.partNumber || partNumber || sku)} (qty ${created.stockPool.qty})`, 'success', 8000);
   await Store.refresh('products').catch(() => {});
+  // Publishing a draft: the listing is now a real product, so remove the draft.
+  if (CL.draftId) { try { await Api.delete('/api/listings/drafts/' + CL.draftId); } catch (_) {} CL.draftId = null; }
 
   // Pre-listing: eBay is held (scheduled / push-live), NOT published now. Stop here.
   if (prelisted) {
@@ -11500,10 +11514,79 @@ function clCaptureSnapshot() {
   document.querySelectorAll('#ce-specifics [data-spec]').forEach(inp => {
     snap.specs[inp.getAttribute('data-spec')] = inp.value;
   });
+  // Placement-on-Vehicle checkboxes have no id, so capture them explicitly.
+  snap.placements = [...document.querySelectorAll('.ce-placement:checked')].map(c => c.value);
   document.querySelectorAll('#cl-mf-list .cl-mf-row').forEach(row => {
     snap.metafields.push({ def: row.querySelector('.cl-mf-def')?.value || '', val: row.querySelector('.cl-mf-val')?.value || '' });
   });
   return snap;
+}
+
+// ── DRAFT LISTINGS — save the whole form to the warehouse without pushing ──
+// Reuses the snapshot capture/restore used by "Repeat listing".
+async function clSaveDraft(btn) {
+  const snap = clCaptureSnapshot();
+  const sku = (el('cl-sku')?.value || '').trim();
+  const title = (el('ce-title')?.value || '').trim() || (el('cl-title')?.value || '').trim();
+  const partNumber = (el('cl-partnumber')?.value || '').trim();
+  const vehicle = [snap.specs['Make'] || '', snap.specs['Model'] || ''].filter(Boolean).join(' ').trim();
+  if (!sku && !title) { toast('Add at least a SKU or an eBay title before saving a draft', 'warn'); return; }
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/listings/drafts', {
+      draftId: CL.draftId || undefined,
+      title, sku, partNumber, vehicle, imageCount: (CL.images || []).length,
+      payload: { snapshot: snap, v: 1 },
+    });
+    CL.draftId = r.draftId;
+    toast('💾 Draft saved — find it under Drafts', 'success', 5000);
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+async function renderDrafts() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Draft listings</h1><div class="desc">Listings saved to the warehouse but not yet on eBay/Shopify. Great for new stock with no photos yet — save now, add photos and publish when it arrives. Nothing here affects stock, costs or the stock-take.</div></div>
+        <div class="actions">
+          <button class="btn btn-outline" onclick="loadDrafts()">⟳ Refresh</button>
+          <button class="btn btn-primary" onclick="routeTo('createlisting')">+ New listing</button>
+        </div>
+      </div>
+      <div id="drafts-list"><div class="empty" style="padding:24px"><div class="t">Loading…</div></div></div>
+    </div>`;
+  loadDrafts();
+}
+async function loadDrafts() {
+  const wrap = el('drafts-list'); if (!wrap) return;
+  let drafts = [];
+  try { drafts = (await Api.get('/api/listings/drafts')).drafts || []; }
+  catch (e) { wrap.innerHTML = `<div class="empty" style="padding:24px"><div class="t">Couldn't load drafts</div>${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  if (!drafts.length) { wrap.innerHTML = `<div class="empty" style="padding:30px;text-align:center"><div class="t">No drafts yet</div>Start a listing and click “💾 Save as draft”, then come back here to finish it.</div>`; return; }
+  wrap.innerHTML = drafts.map(d => `
+    <div class="card" style="margin-bottom:10px"><div class="card-body" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <div style="flex:1;min-width:200px">
+        <div style="font-weight:600">${escapeHtml(d.title || d.sku || 'Untitled draft')}</div>
+        <div style="font-size:12px;color:var(--ink-soft)">${escapeHtml(d.sku || '—')}${d.part_number ? ' · PN ' + escapeHtml(d.part_number) : ''}${d.vehicle ? ' · ' + escapeHtml(d.vehicle) : ''} · ${d.image_count || 0} photo${d.image_count === 1 ? '' : 's'} · saved ${new Date(d.updated_at).toLocaleDateString('en-GB')}</div>
+      </div>
+      ${(d.image_count || 0) === 0 ? '<span class="pill" style="font-size:10px;background:var(--amber-light);color:var(--amber)">no photos yet</span>' : ''}
+      <button class="btn btn-primary btn-sm" onclick="openDraft(${d.id})" title="Open in the create form to finish + publish">Open</button>
+      <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="deleteDraft(${d.id})" title="Discard draft">🗑</button>
+    </div></div>`).join('');
+}
+async function openDraft(id) {
+  try {
+    const r = await Api.get('/api/listings/drafts/' + id);
+    const payload = r.draft?.payload || {};
+    CL_DRAFT = { draftId: id, snapshot: payload.snapshot || payload };
+    routeTo('createlisting');   // renderCreateListing consumes CL_DRAFT
+  } catch (e) { toast("Couldn't open draft: " + (e.data?.message || e.message), 'error'); }
+}
+async function deleteDraft(id) {
+  if (!confirm('Delete this draft? This cannot be undone.')) return;
+  try { await Api.delete('/api/listings/drafts/' + id); toast('Draft deleted', 'success'); loadDrafts(); }
+  catch (e) { toast('Delete failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 // Poll for an element id to appear (the eBay panel renders asynchronously).
@@ -11520,7 +11603,8 @@ function clWaitFor(id, timeout = 5000) {
 }
 
 // Restore a snapshot onto a freshly-rendered Create-listing page.
-async function clApplySnapshot(snap) {
+// opts.keepSku — keep the saved SKU (drafts) instead of clearing it (repeat).
+async function clApplySnapshot(snap, opts = {}) {
   if (!snap) return;
   // Shopify category + photos live in CL state, not in DOM fields.
   CL.categoryId = snap.clCategoryId || '';
@@ -11556,11 +11640,19 @@ async function clApplySnapshot(snap) {
       if (snap.specs[name] != null) inp.value = snap.specs[name];
     });
   }
+  // Restore Placement-on-Vehicle checkboxes.
+  if (Array.isArray(snap.placements) && snap.placements.length) {
+    const want = new Set(snap.placements);
+    document.querySelectorAll('.ce-placement').forEach(c => { c.checked = want.has(c.value); });
+  }
   clUpdateDerivedFromEbay();
   // A repeat is almost always a sibling listing, so force a fresh SKU: clear it
   // and focus it. The PART NUMBER is kept — same part number = shared stock pool.
-  const skuEl = el('cl-sku');
-  if (skuEl) { skuEl.value = ''; setTimeout(() => { skuEl.focus(); }, 60); }
+  // A draft keeps its saved SKU (we're resuming the same listing).
+  if (!opts.keepSku) {
+    const skuEl = el('cl-sku');
+    if (skuEl) { skuEl.value = ''; setTimeout(() => { skuEl.focus(); }, 60); }
+  }
 }
 function clRenderPhotos() {
   const wrap = el('cl-photos'); if (!wrap) return;
