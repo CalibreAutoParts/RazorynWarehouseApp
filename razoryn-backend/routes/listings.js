@@ -3584,7 +3584,9 @@ router.get('/drafts', requireAdmin, async (req, res) => {
 // GET /api/listings/drafts/:id — full draft incl. payload (for reopening).
 router.get('/drafts/:id', requireAdmin, async (req, res) => {
   await ensureDraftsTable();
-  const { rows } = await query(`SELECT * FROM listing_drafts WHERE id = $1`, [req.params.id]);
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'bad_id' });
+  const { rows } = await query(`SELECT * FROM listing_drafts WHERE id = $1`, [id]);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
   res.json({ draft: rows[0] });
 });
@@ -3629,8 +3631,10 @@ router.post('/drafts', requireAdmin, async (req, res) => {
 // DELETE /api/listings/drafts/:id — discard a draft (also called after publish).
 router.delete('/drafts/:id', requireAdmin, async (req, res) => {
   await ensureDraftsTable();
-  await query(`DELETE FROM listing_drafts WHERE id = $1`, [req.params.id]);
-  await audit(req, 'delete_draft', 'listing_draft', req.params.id, {});
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'bad_id' });
+  await query(`DELETE FROM listing_drafts WHERE id = $1`, [id]);
+  await audit(req, 'delete_draft', 'listing_draft', id, {});
   res.json({ ok: true });
 });
 
