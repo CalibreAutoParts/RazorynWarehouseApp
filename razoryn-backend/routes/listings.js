@@ -121,6 +121,28 @@ async function ensureMirrorLinksColumns() {
 }
 ensureMirrorLinksColumns();
 
+// Persist the full eBay listing config ON THE PRODUCT so (a) editing a listing
+// never wipes item specifics that the edit form didn't resend — we rebuild the
+// complete set from here — and (b) draft listings can store everything and be
+// reopened without data loss. ebay_item_specifics holds the last full
+// [{name,value|values}] set; draft_payload holds a whole unpublished listing.
+let _listingColsDone = false;
+async function ensureListingColumns() {
+  if (_listingColsDone) return;
+  try {
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_category_id TEXT`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_condition_id INTEGER`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_item_specifics JSONB`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_description TEXT`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS is_draft BOOLEAN NOT NULL DEFAULT false`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS draft_payload JSONB`);
+    _listingColsDone = true;
+  } catch (e) {
+    console.warn('[listings.js] listing-columns migration warning:', e.message);
+  }
+}
+ensureListingColumns();
+
 // Pulls active listings from every configured eBay store, including ones
 // flagged as `standalone`. Used for diagnostics, manual link enrichment,
 // and store-code detection on legacy mirror_links rows.
@@ -1954,6 +1976,19 @@ router.get('/listing-detail/:productId', requireAdmin, async (req, res) => {
     }
   } catch (e) { out.ebayLinks = []; }
 
+  // Persisted eBay config on the product is the fallback source of truth for the
+  // edit form, so specifics reload even when there's no live listing yet (draft)
+  // or the GetItem read failed — this is what stops an edit from wiping them.
+  const persisted = Array.isArray(product.ebay_item_specifics) ? product.ebay_item_specifics : [];
+  out.persisted = { specifics: persisted, categoryId: product.ebay_category_id || null,
+    conditionId: product.ebay_condition_id || null, description: product.ebay_description || '' };
+  if (out.ebay) {
+    if (!Array.isArray(out.ebay.specifics) || !out.ebay.specifics.length) out.ebay.specifics = persisted;
+  } else if (persisted.length || product.ebay_category_id) {
+    out.ebay = { specifics: persisted, categoryId: product.ebay_category_id, conditionId: product.ebay_condition_id,
+      description: product.ebay_description || '', quantity: product.qty_on_hand, price: product.price_ebay, fromPersisted: true };
+  }
+
   res.json(out);
 });
 
@@ -2058,13 +2093,33 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
     else { const urlsOnly = (b.images || []).filter(u => /^https?:\/\//.test(String(u))); if (urlsOnly.length) ebayPictureUrls = urlsOnly; }
   }
 
-  // 3) eBay — revise every linked listing (title/price/description/specifics/
-  // images) and set quantity. Category isn't changed (eBay restricts that on
-  // live listings).
-  const itemSpecifics = Array.isArray(b.itemSpecifics)
+  // 3) eBay — revise every linked listing. CRITICAL: eBay's ReviseItem treats a
+  // submitted <ItemSpecifics> block as a FULL REPLACEMENT, so we must send the
+  // COMPLETE set, never a subset (that was the bug: the edit form posts only a
+  // few fields and everything else got wiped). We rebuild the full set per
+  // listing as: live listing specifics  <  our persisted set  <  derived from
+  // warehouse (Make/Model/Placement/Country/MPN/Interchange/Product Number)  <
+  // the edit form's values (highest priority). Nothing the user didn't touch is
+  // lost. The edit form only sets values — it never clears (empties are dropped).
+  const formSpecifics = Array.isArray(b.itemSpecifics)
     ? b.itemSpecifics.filter(it => it && it.name && it.value != null && String(it.value).trim() !== '')
         .map(it => ({ name: String(it.name), value: String(it.value) }))
-    : null;
+    : [];
+  // Product-level pieces (same for every linked store).
+  const storedSpecifics = Array.isArray(product.ebay_item_specifics) ? product.ebay_item_specifics : [];
+  const derivedNow = await deriveEbaySpecifics(
+    { ...product, part_number: partNumber, sku, title: shopTitle },
+    { countryOfOrigin: b.countryOfOrigin != null ? b.countryOfOrigin : undefined });
+  // Persist our best full set (without the per-listing live layer) for next time.
+  const persistSpecifics = mergeSpecificsByName(storedSpecifics, derivedNow, formSpecifics);
+  try {
+    await query(`UPDATE products SET ebay_item_specifics = $1::jsonb,
+                   ebay_description = COALESCE($2, ebay_description), updated_at = now() WHERE id = $3`,
+      [JSON.stringify(persistSpecifics),
+       (b.ebayDescription != null && String(b.ebayDescription).trim() !== '') ? String(b.ebayDescription) : null,
+       productId]);
+  } catch (_) {}
+
   result.ebay = [];
   try {
     const links = await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [product.shopify_product_id]);
@@ -2073,16 +2128,24 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
       const store = stores.find(st => st.code === link.store_code) || (link.store_code ? null : (stores.find(st => st.primary) || stores[0]));
       if (!store) { result.ebay.push({ itemId: link.ebay_item_id, skipped: 'store_unavailable' }); continue; }
       try {
+        // Read the listing's CURRENT specifics so anything set directly on eBay
+        // (or that we never persisted) also survives. Best-effort.
+        let liveSpecifics = [];
+        try {
+          const det = await ebay.getItemDetails(link.ebay_item_id, store.code);
+          if (det && Array.isArray(det.specifics)) liveSpecifics = det.specifics;
+        } catch (_) { /* fall back to persisted + derived */ }
+        const fullSpecifics = mergeSpecificsByName(liveSpecifics, storedSpecifics, derivedNow, formSpecifics);
         await ebay.reviseItem(link.ebay_item_id, {
           sku,
           title: ebayTitle ? ebayTitle.slice(0, 80) : undefined,
           price: ebayPrice != null ? ebayPrice : undefined,
           description: b.ebayDescription != null && String(b.ebayDescription).trim() !== '' ? b.ebayDescription : undefined,
-          itemSpecifics: itemSpecifics && itemSpecifics.length ? itemSpecifics : undefined,
+          itemSpecifics: fullSpecifics.length ? fullSpecifics : undefined,
           pictureUrls: ebayPictureUrls && ebayPictureUrls.length ? ebayPictureUrls : undefined,
         }, store.code);
         try { await ebay.setQuantityTradingAPI(link.ebay_item_id, qty, store.code); } catch (e) { /* qty push best-effort */ }
-        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true });
+        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true, specificsSent: fullSpecifics.length });
       } catch (e) {
         result.ebay.push({ itemId: link.ebay_item_id, store: store.code, error: e.message });
       }
@@ -2851,10 +2914,64 @@ function httpErr(status, body) {
 // today and published next week still uses current config. `b` is the same body
 // the POST /create-ebay route accepts. Returns the route's JSON payload, or throws
 // (httpErr for validation, plain Error for eBay failures).
+// Normalise a specific's value(s) to a plain array of non-empty strings.
+function specValues(s) {
+  if (!s) return [];
+  const raw = Array.isArray(s.values) ? s.values : (Array.isArray(s.value) ? s.value : [s.value]);
+  return raw.map(v => (v == null ? '' : String(v).trim())).filter(Boolean);
+}
+
+// Merge several [{name, value|values}] lists into ONE full set, keyed by
+// case-insensitive name. LATER lists win on a name collision. Empty values drop
+// the entry. This is the primitive that lets a Revise send the COMPLETE specifics
+// set (live + derived + edits) so eBay's full-replace never wipes a field.
+function mergeSpecificsByName(...lists) {
+  const byName = new Map();   // lowerName -> { name, values }
+  for (const list of lists) {
+    for (const s of (list || [])) {
+      if (!s || !s.name) continue;
+      const vals = specValues(s);
+      const key = String(s.name).toLowerCase();
+      if (vals.length) byName.set(key, { name: String(s.name), values: vals });
+      // an explicit empty value from a LATER list clears the field
+      else if (Array.isArray(s.values) || 'value' in s) byName.delete(key);
+    }
+  }
+  return [...byName.values()].map(e => e.values.length > 1
+    ? { name: e.name, values: e.values }
+    : { name: e.name, value: e.values[0] });
+}
+
+// The specifics we can always rebuild from persisted warehouse data — so an edit
+// (or any re-push) never loses them even if the form/live read omitted them.
+// Used by BOTH create and revise so the two paths agree.
+async function deriveEbaySpecifics(product, { countryOfOrigin, includeProductNumber = true } = {}) {
+  const derived = [];
+  const vehicle = parseVehicleFromTitle(product.title || '');
+  const vMake = product.brand || vehicle.make;
+  const vModel = product.model || vehicle.model;
+  const vYear = vehicle.year;
+  if (product.part_number) derived.push({ name: 'Manufacturer Part Number', value: product.part_number });
+  if (product.position) derived.push({ name: 'Placement on Vehicle', value: product.position });
+  if (vMake) derived.push({ name: 'Make', value: vMake });
+  if (vModel) derived.push({ name: 'Model', value: vModel });
+  if (vYear) derived.push({ name: 'Year', value: vYear });
+  if (countryOfOrigin) derived.push({ name: 'Country of Origin', value: countryOfOrigin });
+  if (includeProductNumber && product.shopify_product_id) derived.push({ name: 'Product Number', value: String(product.shopify_product_id) });
+  // Sub / alternate part numbers → "Interchange Part Number" (comma-joined).
+  try {
+    const spn = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [product.id]);
+    const codes = spn.rows.map(r => r.code).filter(Boolean);
+    if (codes.length) derived.push({ name: 'Interchange Part Number', value: codes.join(', ') });
+  } catch (_) { /* non-fatal */ }
+  return derived;
+}
+
 async function doCreateEbay(b, { req } = {}) {
   const ebay = require('../services/ebay');
   const shopify = require('../services/shopify');
   const brand = require('../lib/brand');
+  await ensureListingColumns();
 
   if (!b.productId)  throw httpErr(400, { error: 'productId required' });
   if (!b.storeCode)  throw httpErr(400, { error: 'storeCode required' });
@@ -2930,34 +3047,13 @@ async function doCreateEbay(b, { req } = {}) {
   const categoryId = b.categoryId || settings.ebay_default_category_id;
   if (!categoryId) throw httpErr(400, { error: 'no_category', message: 'No eBay category — pass categoryId or set a default in Settings.' });
 
-  // Vehicle fitment specifics. product.brand/model hold the VEHICLE make/model
-  // in this catalogue, so prefer them; fall back to title parsing for anything
-  // missing (and for the year range, which has no product column).
-  const vehicle = parseVehicleFromTitle(title);
-  const vMake  = product.brand || vehicle.make;
-  const vModel = product.model || vehicle.model;
-  const vYear  = vehicle.year;
-  const derivedSpecifics = [];
-  if (product.position) derivedSpecifics.push({ name: 'Placement on Vehicle', value: product.position });
-  if (vMake)  derivedSpecifics.push({ name: 'Make',  value: vMake });
-  if (vModel) derivedSpecifics.push({ name: 'Model', value: vModel });
-  if (vYear)  derivedSpecifics.push({ name: 'Year',  value: vYear });
-  // Country of Origin — default from Settings (configurable; default "China"),
-  // overridable per listing. Product Number — the Shopify product ID, so the
-  // eBay listing carries the same item number as Shopify.
+  // Vehicle fitment + part-number specifics we can always rebuild from the
+  // warehouse (Placement/Make/Model/Year/Country/Product Number/MPN/Interchange).
+  // Country of Origin — default from Settings (configurable), overridable per listing.
   const countryOfOrigin = (b.countryOfOrigin != null ? b.countryOfOrigin : (settings.ebay_country_of_origin || 'China'));
-  if (countryOfOrigin) derivedSpecifics.push({ name: 'Country of Origin', value: countryOfOrigin });
-  if (product.shopify_product_id) derivedSpecifics.push({ name: 'Product Number', value: String(product.shopify_product_id) });
-  // Alternate / sub part numbers → eBay "Interchange Part Number" so buyers can
-  // find the part by any of its codes. Skip if the user already supplied one.
-  try {
-    const spn = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [product.id]);
-    const codes = spn.rows.map(r => r.code).filter(Boolean);
-    const hasInterchange = (Array.isArray(b.itemSpecifics) ? b.itemSpecifics : []).some(s => /interchange|other part/i.test(s.name || ''));
-    if (codes.length && !hasInterchange) derivedSpecifics.push({ name: 'Interchange Part Number', value: codes.join(', ') });
-  } catch (e) { /* table may be empty/absent — non-fatal */ }
-  // User-provided specifics win on name collisions (addItem dedupes, last wins).
-  const mergedSpecifics = [...derivedSpecifics, ...(Array.isArray(b.itemSpecifics) ? b.itemSpecifics : [])];
+  const derivedSpecifics = await deriveEbaySpecifics(product, { countryOfOrigin });
+  // User-provided specifics WIN on name collisions (form overlays the derived set).
+  const mergedSpecifics = mergeSpecificsByName(derivedSpecifics, Array.isArray(b.itemSpecifics) ? b.itemSpecifics : []);
 
   // eBay "Brand" = who MADE the part (company name / "Unbranded"), NOT the
   // vehicle make. Per-listing override wins, else the saved Settings default.
@@ -3038,6 +3134,18 @@ async function doCreateEbay(b, { req } = {}) {
     await query(`INSERT INTO mirror_links (ebay_item_id, shopify_product_id, store_code, last_mirrored_at, last_synced_sku, last_synced_title) VALUES ($1, $2, $3, now(), $4, $5)`,
       [String(result.itemId), product.shopify_product_id, store.code, product.sku, product.title]);
   });
+
+  // Persist the FULL eBay config on the product so a later edit can rebuild the
+  // complete item-specifics set (never wiping fields the edit form omits), and so
+  // the description/category/condition survive re-pushes. Best-effort.
+  try {
+    await query(
+      `UPDATE products SET ebay_category_id = $1, ebay_condition_id = $2,
+              ebay_item_specifics = $3::jsonb, ebay_description = COALESCE($4, ebay_description),
+              updated_at = now() WHERE id = $5`,
+      [String(categoryId), b.conditionId || 1000, JSON.stringify(mergedSpecifics),
+       description || null, product.id]);
+  } catch (e) { console.warn('[create-ebay] persist listing config:', e.message); }
 
   if (req) {
     await audit(req, 'create_ebay_listing', 'product', product.id, {
