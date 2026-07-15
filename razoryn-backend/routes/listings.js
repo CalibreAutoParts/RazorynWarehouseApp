@@ -3532,6 +3532,101 @@ router.post('/resolve-legacy-links', requireAdmin, async (req, res) => {
   });
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// DRAFT LISTINGS — save a listing's full form state (eBay category, condition,
+// item specifics, sub part numbers, photos, descriptions, prices) to the
+// warehouse WITHOUT pushing to any channel. Drafts are separate from inventory
+// (their own table) so they don't touch stock, costs, or the stock-take. New
+// stock with no photos yet can be drafted now and published when photos arrive.
+// Publishing runs the normal create-listing + create-ebay flow client-side, then
+// deletes the draft. Reopening a draft restores every field — nothing is lost.
+// ──────────────────────────────────────────────────────────────────────────
+let _draftsReady = false;
+async function ensureDraftsTable() {
+  if (_draftsReady) return;
+  try {
+    await query(`CREATE TABLE IF NOT EXISTS listing_drafts (
+      id           SERIAL PRIMARY KEY,
+      title        TEXT,
+      sku          TEXT,
+      part_number  TEXT,
+      vehicle      TEXT,
+      image_count  INTEGER NOT NULL DEFAULT 0,
+      incoming_id  INTEGER REFERENCES incoming_stock(id) ON DELETE SET NULL,
+      payload      JSONB NOT NULL,
+      created_by   INTEGER,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
+    _draftsReady = true;
+  } catch (e) { console.warn('[listings] ensureDraftsTable:', e.message); }
+}
+ensureDraftsTable();
+
+// GET /api/listings/drafts — list drafts (summary only, no heavy payload/images).
+router.get('/drafts', requireAdmin, async (req, res) => {
+  await ensureDraftsTable();
+  try {
+    const { rows } = await query(
+      `SELECT id, title, sku, part_number, vehicle, image_count, incoming_id, created_at, updated_at
+         FROM listing_drafts ORDER BY updated_at DESC`);
+    res.json({ drafts: rows });
+  } catch (e) { res.status(500).json({ error: 'list_failed', message: e.message }); }
+});
+
+// GET /api/listings/drafts/:id — full draft incl. payload (for reopening).
+router.get('/drafts/:id', requireAdmin, async (req, res) => {
+  await ensureDraftsTable();
+  const { rows } = await query(`SELECT * FROM listing_drafts WHERE id = $1`, [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+  res.json({ draft: rows[0] });
+});
+
+// POST /api/listings/drafts — create or update a draft (SAVE ONLY, no channel push).
+// Body: { draftId?, payload, incomingId? }. payload is the whole captured form
+// (core + eBay + images base64 + subPartNumbers). We derive a few summary columns
+// for the list view; everything else lives verbatim in payload so nothing is lost.
+router.post('/drafts', requireAdmin, async (req, res) => {
+  await ensureDraftsTable();
+  const b = req.body || {};
+  const payload = b.payload && typeof b.payload === 'object' ? b.payload : null;
+  if (!payload) return res.status(400).json({ error: 'payload_required' });
+  // The frontend sends the opaque form snapshot as `payload` plus explicit
+  // summary fields for the list view (title/sku/partNumber/vehicle/imageCount).
+  const title = (b.title != null ? String(b.title) : '').trim() || null;
+  const sku = (b.sku != null ? String(b.sku) : '').trim() || null;
+  const partNumber = (b.partNumber != null ? String(b.partNumber) : '').trim() || null;
+  const vehicle = (b.vehicle != null ? String(b.vehicle) : '').trim() || null;
+  const imageCount = parseInt(b.imageCount) || 0;
+  const incomingId = b.incomingId != null ? (parseInt(b.incomingId) || null) : null;
+  try {
+    if (b.draftId) {
+      const r = await query(
+        `UPDATE listing_drafts SET title=$1, sku=$2, part_number=$3, vehicle=$4, image_count=$5,
+                incoming_id=COALESCE($6, incoming_id), payload=$7::jsonb, updated_at=now()
+           WHERE id=$8 RETURNING id`,
+        [title, sku, partNumber, vehicle, imageCount, incomingId, JSON.stringify(payload), b.draftId]);
+      if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+      await audit(req, 'save_draft', 'listing_draft', b.draftId, { title, sku });
+      return res.json({ ok: true, draftId: r.rows[0].id, updated: true });
+    }
+    const r = await query(
+      `INSERT INTO listing_drafts (title, sku, part_number, vehicle, image_count, incoming_id, payload, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8) RETURNING id`,
+      [title, sku, partNumber, vehicle, imageCount, incomingId, JSON.stringify(payload), req.user.id]);
+    await audit(req, 'save_draft', 'listing_draft', r.rows[0].id, { title, sku });
+    res.json({ ok: true, draftId: r.rows[0].id, created: true });
+  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+});
+
+// DELETE /api/listings/drafts/:id — discard a draft (also called after publish).
+router.delete('/drafts/:id', requireAdmin, async (req, res) => {
+  await ensureDraftsTable();
+  await query(`DELETE FROM listing_drafts WHERE id = $1`, [req.params.id]);
+  await audit(req, 'delete_draft', 'listing_draft', req.params.id, {});
+  res.json({ ok: true });
+});
+
 // Expose the single-flight runner so the sync cron can run the warehouse import
 // automatically without racing a manual run.
 router.runWarehouseImport = runImportSingleFlight;
