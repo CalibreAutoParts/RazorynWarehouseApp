@@ -2130,18 +2130,25 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
       try {
         // Read the listing's CURRENT specifics so anything set directly on eBay
         // (or that we never persisted) also survives. Best-effort.
-        let liveSpecifics = [];
+        let liveSpecifics = [], liveOk = false;
         try {
           const det = await ebay.getItemDetails(link.ebay_item_id, store.code);
-          if (det && Array.isArray(det.specifics)) liveSpecifics = det.specifics;
+          if (det && Array.isArray(det.specifics)) { liveSpecifics = det.specifics; liveOk = true; }
         } catch (_) { /* fall back to persisted + derived */ }
+        // Only REPLACE specifics when we have a trustworthy full baseline — a
+        // successful live read OR a previously-persisted set. If the live read
+        // failed and we've never persisted (a listing predating this feature),
+        // we OMIT the <ItemSpecifics> block so eBay keeps the listing's existing
+        // specifics: sending a partial set would wipe the rest (the original bug).
+        const haveBaseline = liveOk || storedSpecifics.length > 0;
         const fullSpecifics = mergeSpecificsByName(liveSpecifics, storedSpecifics, derivedNow, formSpecifics);
+        const specificsToSend = (haveBaseline && fullSpecifics.length) ? fullSpecifics : undefined;
         await ebay.reviseItem(link.ebay_item_id, {
           sku,
           title: ebayTitle ? ebayTitle.slice(0, 80) : undefined,
           price: ebayPrice != null ? ebayPrice : undefined,
           description: b.ebayDescription != null && String(b.ebayDescription).trim() !== '' ? b.ebayDescription : undefined,
-          itemSpecifics: fullSpecifics.length ? fullSpecifics : undefined,
+          itemSpecifics: specificsToSend,
           pictureUrls: ebayPictureUrls && ebayPictureUrls.length ? ebayPictureUrls : undefined,
         }, store.code);
         try { await ebay.setQuantityTradingAPI(link.ebay_item_id, qty, store.code); } catch (e) { /* qty push best-effort */ }
