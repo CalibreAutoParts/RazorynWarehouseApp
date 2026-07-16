@@ -16276,8 +16276,10 @@ function renderSettings() {
             <button class="btn btn-primary" onclick="findShopifyLocations()">📍 Find my Location ID</button>
             <button class="btn btn-primary" onclick="importFromShopify()">⬇ Import all products</button>
             <button class="btn btn-outline" onclick="syncNow()">↻ Sync orders &amp; stock now</button>
+            <button class="btn btn-outline" onclick="cleanupShopifyDuplicates(this)" title="Remove already-imported Shopify orders that came from a non-store sales channel (e.g. the old eBay channel), which double-counted eBay sales. Restores their stock. Store sales going forward already only count Online Store, Shop and POS.">🧹 Remove non-store (duplicate) orders</button>
             <button class="btn btn-outline" onclick="clearCatalogue()" style="margin-left:auto;color:var(--red);border-color:var(--red)">🗑 Clear all products &amp; locations</button>
           </div>
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">“Store” now counts only Shopify’s own channels — Online Store, Shop and Point of Sale. Orders from other sales channels (e.g. a marketplace channel app) are skipped so eBay sales aren’t counted twice.</div>
           <div id="shopify-result" style="font-size:12px;color:var(--ink-soft)"></div>
 
           <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px">
@@ -16304,7 +16306,9 @@ function renderSettings() {
             <button class="btn btn-primary" onclick="testEbayConnection()">🔌 Test eBay connection</button>
             <button class="btn btn-outline" onclick="syncNow()">↻ Sync orders &amp; stock now</button>
             <button class="btn btn-outline" onclick="syncNow(3)" title="Re-fetch the last 3 days of orders from every channel, ignoring the saved sync position — recovers orders missed while sync was broken. Safe to run (duplicates are skipped).">⟲ Re-pull last 3 days</button>
+            <button class="btn btn-outline" onclick="backfillEbay(this)" title="Import EVERY eBay order created since 1 Jan 2026 by paging through the whole period. Safe to re-run (duplicates skipped).">⏪ Backfill eBay from 2026</button>
             <span id="ebay-health-status" style="font-size:12px;color:var(--ink-soft)"></span>
+            <span id="ebay-backfill-status" style="font-size:12px;color:var(--ink-soft)"></span>
           </div>
           <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">Sync now / Re-pull report exactly what each channel fetched and imported (and any error) in the popup — so you can see whether orders came through, rather than a silent “nothing happened”.</div>
           <div id="ebay-health-result" style="margin-bottom:12px"></div>
@@ -19192,6 +19196,71 @@ async function syncNow(sinceDays) {
     Task.fail(taskId, 'Sync failed');
     toast('Sync failed: ' + (e.data?.message || e.message), 'error', 8000);
   }
+}
+
+// Generic background-job poller: POST startUrl, poll statusUrl until done/error,
+// driving the task bar. onTick(status)→[label,pct]. Resolves with the final status.
+async function pollBackgroundJob({ startUrl, startBody, statusUrl, taskLabel, tick }) {
+  const taskId = Task.start(taskLabel);
+  try {
+    await Api.post(startUrl, startBody || {});
+    const final = await new Promise((resolve, reject) => {
+      const poll = async () => {
+        try {
+          const s = await Api.get(statusUrl);
+          const [label, pct] = tick ? tick(s) : [taskLabel, s.percent || 0];
+          Task.update(taskId, label, pct);
+          if (s.state === 'done' || s.state === 'error') return resolve(s);
+          setTimeout(poll, 1500);
+        } catch (err) { reject(err); }
+      };
+      poll();
+    });
+    if (final.state === 'error') { Task.fail(taskId, 'Failed'); }
+    else { Task.done(taskId, 'Done'); }
+    return final;
+  } catch (e) { Task.fail(taskId, 'Failed'); throw e; }
+}
+
+// Backfill every eBay order since 1 Jan 2026.
+async function backfillEbay(btn) {
+  if (!confirm('Import every eBay order created since 1 Jan 2026?\n\nThis pages through the whole period (can take a few minutes) and is safe to re-run — duplicates are skipped.')) return;
+  const statusEl = el('ebay-backfill-status');
+  if (btn) btn.disabled = true;
+  try {
+    const s = await pollBackgroundJob({
+      startUrl: '/api/settings/backfill-ebay', startBody: { since: '2026-01-01' },
+      statusUrl: '/api/settings/backfill-ebay/status', taskLabel: 'Backfilling eBay from 2026',
+      tick: (st) => { if (statusEl) statusEl.textContent = `${st.phase || ''} · ${st.inserted || 0} imported`; return [`eBay backfill ${st.percent || 0}%`, st.percent || 0]; },
+    });
+    if (s.state === 'error') toast('Backfill failed: ' + (s.error || 'unknown'), 'error', 9000);
+    else {
+      toast(`✓ eBay backfill complete — ${s.inserted} new order(s) imported since Jan 2026.` + (s.stores || []).filter(x=>x.error).map(x=>`\n${x.code}: ${x.error}`).join(''), 'success', 10000);
+      try { await Store.refresh('sales'); } catch (_) {}
+      if (State.page === 'sales') renderSales();
+    }
+  } catch (e) { toast('Backfill failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+// Remove already-imported non-store (duplicate) Shopify orders.
+async function cleanupShopifyDuplicates(btn) {
+  if (!confirm('Remove already-imported Shopify orders that came from a non-store sales channel (e.g. the old eBay channel)?\n\nThese double-counted your eBay sales. Their stock is restored. Safe — genuine Online Store / Shop / POS orders are kept.')) return;
+  if (btn) btn.disabled = true;
+  try {
+    const s = await pollBackgroundJob({
+      startUrl: '/api/settings/cleanup-shopify-duplicates', startBody: { since: '2026-01-01' },
+      statusUrl: '/api/settings/cleanup-shopify-duplicates/status', taskLabel: 'Cleaning up store sales',
+      tick: (st) => [`Scanned ${st.scanned || 0} · removed ${st.removed || 0}`, st.scanned ? Math.round((st.removed / Math.max(st.scanned,1)) * 100) : 5],
+    });
+    if (s.state === 'error') toast('Cleanup failed: ' + (s.error || 'unknown'), 'error', 9000);
+    else {
+      toast(`✓ Removed ${s.removed} non-store order(s) (${gbp(s.revenueRemoved || 0)}) that duplicated eBay sales. Store totals are now Shopify-only.`, 'success', 10000);
+      try { await Store.refresh('sales'); } catch (_) {}
+      if (State.page === 'sales') renderSales();
+    }
+  } catch (e) { toast('Cleanup failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) btn.disabled = false; }
 }
 /* ==================== TASK PROGRESS BAR ====================
    A tiny module that shows a global progress indicator while long-running

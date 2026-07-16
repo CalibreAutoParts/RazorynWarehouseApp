@@ -260,6 +260,83 @@ router.get('/sync-now/status', requireAdmin, (req, res) => {
   res.json(syncNowStatus);
 });
 
+// POST /api/settings/backfill-ebay { since? } — pull EVERY eBay order created
+// since `since` (default 2026-01-01) by paging 30-day windows. Background + poll.
+let ebayBackfillStatus = { state: 'idle', startedAt: null, finishedAt: null, phase: null, percent: 0, since: null, fetched: 0, inserted: 0, stores: [], error: null };
+router.post('/backfill-ebay', requireAdmin, async (req, res) => {
+  if (ebayBackfillStatus.state === 'running') return res.json({ ok: true, started: false, alreadyRunning: true, status: ebayBackfillStatus });
+  let since = (req.body?.since && String(req.body.since)) || '2026-01-01';
+  const d = new Date(since); if (isNaN(d.getTime())) since = '2026-01-01';
+  ebayBackfillStatus = { state: 'running', startedAt: Date.now(), finishedAt: null, phase: 'Starting…', percent: 0, since, fetched: 0, inserted: 0, stores: [], error: null };
+  await audit(req, 'backfill_ebay', null, null, { since });
+  res.json({ ok: true, started: true, since });
+  setImmediate(async () => {
+    try {
+      const r = await sync.backfillEbayOrders(new Date(since).toISOString(), (p) => {
+        ebayBackfillStatus.percent = p.totalSteps ? Math.round((p.step / p.totalSteps) * 100) : 0;
+        ebayBackfillStatus.phase = `Store ${p.store} — up to ${new Date(p.windowEnd).toLocaleDateString('en-GB')}`;
+        ebayBackfillStatus.fetched = (ebayBackfillStatus.fetched || 0);
+        ebayBackfillStatus.inserted = p.inserted;
+      });
+      ebayBackfillStatus = { state: 'done', startedAt: ebayBackfillStatus.startedAt, finishedAt: Date.now(), phase: 'Done', percent: 100, since, fetched: r.fetched, inserted: r.inserted, stores: r.stores || [], error: null };
+      await query(`INSERT INTO notifications (type, title, body, severity) VALUES ('sync','eBay backfill complete',$1,'success')`,
+        [`${r.inserted} new eBay order(s) imported from ${new Date(since).toLocaleDateString('en-GB')}`]).catch(() => {});
+    } catch (e) {
+      ebayBackfillStatus = { ...ebayBackfillStatus, state: 'error', finishedAt: Date.now(), error: e.message };
+      console.error('[backfill-ebay] failed:', e.message);
+    }
+  });
+});
+router.get('/backfill-ebay/status', requireAdmin, (req, res) => res.json(ebayBackfillStatus));
+
+// POST /api/settings/cleanup-shopify-duplicates { since? } — remove already-imported
+// Shopify orders that came from a NON-native sales channel (e.g. the old eBay
+// channel app), which double-counted eBay sales. Reverses their stock and
+// tombstones them so they don't re-import. Background + poll.
+let shopifyCleanupStatus = { state: 'idle', startedAt: null, finishedAt: null, scanned: 0, removed: 0, revenueRemoved: 0, error: null };
+router.post('/cleanup-shopify-duplicates', requireAdmin, async (req, res) => {
+  if (shopifyCleanupStatus.state === 'running') return res.json({ ok: true, started: false, alreadyRunning: true, status: shopifyCleanupStatus });
+  let since = (req.body?.since && String(req.body.since)) || '2026-01-01';
+  const d = new Date(since); if (isNaN(d.getTime())) since = '2026-01-01';
+  const userId = req.user?.id || null;
+  shopifyCleanupStatus = { state: 'running', startedAt: Date.now(), finishedAt: null, scanned: 0, removed: 0, revenueRemoved: 0, error: null };
+  await audit(req, 'cleanup_shopify_duplicates', null, null, { since });
+  res.json({ ok: true, started: true, since });
+  setImmediate(async () => {
+    try {
+      const shopify = require('../services/shopify');
+      if (!shopify.isConfigured()) { shopifyCleanupStatus = { ...shopifyCleanupStatus, state: 'done', finishedAt: Date.now() }; return; }
+      const { orders } = await shopify.getRecentOrders(new Date(since).toISOString());
+      shopifyCleanupStatus.scanned = (orders || []).length;
+      for (const order of (orders || [])) {
+        if (sync.isNativeShopifyOrder(order)) continue;   // keep native store orders
+        const found = await query(`SELECT id, total FROM sales WHERE channel = 'shopify' AND external_order_id = $1`, [String(order.id)]);
+        if (!found.rows[0]) continue;
+        const saleId = found.rows[0].id;
+        try {
+          // Reverse the stock this duplicate wrongly decremented.
+          const items = await query(`SELECT product_id, qty FROM sale_items WHERE sale_id = $1 AND product_id IS NOT NULL`, [saleId]);
+          for (const it of items.rows) {
+            await query(`UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2`, [it.qty, it.product_id]);
+            await query(`INSERT INTO stock_movements (product_id, delta, reason, performed_by) VALUES ($1,$2,'shopify_channel_cleanup',$3)`, [it.product_id, it.qty, userId]);
+          }
+          await query(`INSERT INTO deleted_external_orders (channel, external_order_id, deleted_by) VALUES ('shopify',$1,$2) ON CONFLICT (external_order_id) DO NOTHING`, [String(order.id), userId]).catch(() => {});
+          await query(`DELETE FROM sales WHERE id = $1`, [saleId]);
+          shopifyCleanupStatus.removed++;
+          shopifyCleanupStatus.revenueRemoved += parseFloat(found.rows[0].total) || 0;
+        } catch (e) { console.warn('[cleanup-shopify] remove failed:', e.message); }
+      }
+      shopifyCleanupStatus = { ...shopifyCleanupStatus, state: 'done', finishedAt: Date.now(), revenueRemoved: +shopifyCleanupStatus.revenueRemoved.toFixed(2) };
+      await query(`INSERT INTO notifications (type, title, body, severity) VALUES ('sync','Store sales cleaned up',$1,'success')`,
+        [`Removed ${shopifyCleanupStatus.removed} non-store Shopify order(s) that duplicated eBay sales`]).catch(() => {});
+    } catch (e) {
+      shopifyCleanupStatus = { ...shopifyCleanupStatus, state: 'error', finishedAt: Date.now(), error: e.message };
+      console.error('[cleanup-shopify] failed:', e.message);
+    }
+  });
+});
+router.get('/cleanup-shopify-duplicates/status', requireAdmin, (req, res) => res.json(shopifyCleanupStatus));
+
 // POST /api/settings/push-all-stock (admin) — force-push every product's current
 // warehouse quantity to Shopify AND eBay (full reconcile after a stock-take).
 // Runs in the BACKGROUND (a big catalogue is 1000+ API calls and would time out
