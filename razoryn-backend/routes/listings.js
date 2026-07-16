@@ -2576,7 +2576,7 @@ function defaultDescTemplate() {
       // logo header (white, thin accent rule) — {{logo}} is the logo image or text
       `<table role="presentation" width="100%" style="border-collapse:collapse;border-top:4px solid ${accent}"><tr>` +
         `<td style="vertical-align:middle;padding:20px 26px">{{logo}}</td>` +
-        `<td style="vertical-align:middle;padding:20px 26px;text-align:right;font-size:14px;color:#555">{{tagline}}<br><strong style="color:${color}">{{domain}}</strong></td>` +
+        `<td style="vertical-align:middle;padding:20px 26px;text-align:right;font-size:14px;color:#555">{{tagline}}<br><strong style="color:${color}">{{brand}}</strong></td>` +
       `</tr></table>` +
       // trust badges
       `<table role="presentation" width="100%" style="border-collapse:collapse;background:#fafafa;border-top:1px solid #eee;border-bottom:1px solid #eee"><tr>` +
@@ -2617,7 +2617,7 @@ function defaultDescTemplate() {
       `</tr></table>` +
       // dark footer
       `<div style="background:${color};color:#dfe6ee;padding:16px 26px;font-size:13px;line-height:1.6">` +
-        `<span style="color:#fff;font-weight:800">{{brand}}</span> &middot; trade-quality body panels &middot; fast dispatch &middot; message us your reg for fitment help &middot; {{domain}}` +
+        `<span style="color:#fff;font-weight:800">{{brand}}</span> &middot; trade-quality body panels &middot; fast dispatch &middot; message us your reg for fitment help` +
       `</div>` +
     `</div>`;
   return { header, footer };
@@ -2647,14 +2647,12 @@ function wrapDesc(body, tpl, ctx) {
   const domain = (brand.domain || '').replace(/^https?:\/\//, '');
   const accent = brand.accentColor || brand.primaryColor || '#c8202d';
   const vehicle = ctx.vehicle || '';
-  const base = domain ? `https://${domain}` : '';
-  const storeurl = ctx.storeurl || (base ? (vehicle ? `${base}/search?q=${encodeURIComponent(vehicle)}` : base) : '#');
-  // {{related}} = the "You might be interested in" cards when we have them, else a
-  // simple CTA button linking to more parts for this vehicle.
-  const related = ctx.related || (base
-    ? `<div style="background:#f5f7fb;border-top:1px solid #e7e7e7;padding:16px 22px;text-align:center">` +
-        `<div style="font-size:15px;font-weight:700;margin-bottom:10px">Need more parts for your ${escapeHtmlServer(vehicle || 'vehicle')}?</div>` +
-        `<a href="${storeurl}" style="display:inline-block;background:${accent};color:#fff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 22px;border-radius:6px">Shop more parts &rarr;</a>` +
+  // {{related}} = the "You might be interested in" cards when we have them. NO
+  // external website link/URL here — eBay can suspend accounts for off-site links,
+  // so the fallback is a plain (non-linking) prompt to message us.
+  const related = ctx.related || (vehicle
+    ? `<div style="background:#f5f7fb;border-top:1px solid #e7e7e7;padding:16px 22px;text-align:center;font-size:15px;color:#333">` +
+        `Need another part for your <strong>${escapeHtmlServer(vehicle)}</strong>? <strong>Message us</strong> — we stock parts for hundreds of vehicles.` +
       `</div>`
     : '');
   // {{logo}} = logo <img> (or brand-name text fallback); {{returns}}/{{delivery}}
@@ -2665,7 +2663,7 @@ function wrapDesc(body, tpl, ctx) {
   const fill = (s) => String(s || '').replace(/\{\{(\w+)\}\}/g, (_, k) => {
     const map = { brand: brand.name || 'Our Store', tagline: brand.tagline || '',
       domain, title: ctx.title || '', sku: ctx.sku || '', partno: ctx.partno || '',
-      vehicle: vehicle || 'vehicle', storeurl, related, logo, returns, delivery };
+      vehicle: vehicle || 'vehicle', related, logo, returns, delivery };
     return map[k] != null ? map[k] : '';
   });
   return fill(tpl.header) + DESC_BODY_START + (body || '') + DESC_BODY_END + fill(tpl.footer);
