@@ -378,9 +378,62 @@ function orderRefundInfo(order) {
 }
 
 // Trading API GetOrders — per-store token
+// Map ONE Trading-API <Order> XML block into our normalised order object.
+function mapTradingOrderXml(oXml) {
+  const orderId = extractOne(oXml, 'OrderID');
+  const creationDate = extractOne(oXml, 'CreatedTime');
+  const total = parseFloat(extractOne(oXml, 'Total') || '0');
+  const subtotal = parseFloat(extractOne(oXml, 'Subtotal') || '0');
+  const shippingCost = parseFloat(extractOne(extractOne(oXml, 'ShippingServiceSelected') || '', 'ShippingServiceCost') || '0');
+  const buyerUserId = decodeEntities(extractOne(oXml, 'BuyerUserID') || '');
+  const checkoutStatus = extractOne(extractOne(oXml, 'CheckoutStatus') || '', 'Status');
+
+  const shipBlock = extractOne(oXml, 'ShippingAddress') || '';
+  let street2Raw = decodeEntities(extractOne(shipBlock, 'Street2') || '');
+  if (/^ebay[a-z0-9]{4,}$/i.test(street2Raw)) street2Raw = '';
+  let countryRaw = decodeEntities(extractOne(shipBlock, 'Country') || '');
+  if (countryRaw === 'GB' || countryRaw === 'UK' || countryRaw === 'GBR' || countryRaw === 'United Kingdom') countryRaw = '';
+  const shipParts = [
+    decodeEntities(extractOne(shipBlock, 'Name') || ''),
+    decodeEntities(extractOne(shipBlock, 'Street1') || ''),
+    street2Raw,
+    decodeEntities(extractOne(shipBlock, 'CityName') || ''),
+    decodeEntities(extractOne(shipBlock, 'StateOrProvince') || ''),
+    decodeEntities(extractOne(shipBlock, 'PostalCode') || ''),
+    countryRaw,
+  ].filter(Boolean);
+  const shippingAddress = shipParts.length ? shipParts.join('\n') : null;
+  const buyerName = decodeEntities(extractOne(shipBlock, 'Name') || '') || buyerUserId || null;
+  const buyerEmail = decodeEntities(extractOne(oXml, 'Email') || '') || null;
+  const buyerPhone = decodeEntities(extractOne(shipBlock, 'Phone') || '') || null;
+
+  const txArray = extractOne(oXml, 'TransactionArray') || '';
+  const txBlocks = extractAll(txArray, 'Transaction');
+  const lineItems = txBlocks.map(tx => {
+    const item = extractOne(tx, 'Item') || '';
+    return {
+      lineItemId: extractOne(tx, 'TransactionID'),
+      sku: decodeEntities(extractOne(item, 'SKU') || ''),
+      title: decodeEntities(extractOne(item, 'Title') || ''),
+      quantity: parseInt(extractOne(tx, 'QuantityPurchased') || '1'),
+      lineItemCost: { value: extractOne(tx, 'TransactionPrice') || '0', currency: 'GBP' },
+    };
+  });
+
+  return {
+    orderId, creationDate,
+    buyer: { username: buyerUserId || null, name: buyerName, email: buyerEmail, phone: buyerPhone },
+    shippingAddress,
+    pricingSummary: {
+      priceSubtotal: { value: subtotal }, total: { value: total },
+      deliveryCost: { value: shippingCost }, tax: { value: 0 },
+    },
+    lineItems, checkoutStatus,
+  };
+}
+
 async function getRecentOrdersTrading(sinceISO, storeArg) {
-  const sinceDate = new Date(sinceISO);
-  const fromDate = sinceDate.toISOString();
+  const fromDate = new Date(sinceISO).toISOString();
   const toDate = new Date().toISOString();
   const bodyInner = `
     <CreateTimeFrom>${fromDate}</CreateTimeFrom>
@@ -398,74 +451,34 @@ async function getRecentOrdersTrading(sinceISO, storeArg) {
     const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
     throw new Error('eBay GetOrders error: ' + decodeEntities(err));
   }
+  return extractAll(extractOne(xml, 'OrderArray') || '', 'Order').map(mapTradingOrderXml);
+}
 
-  const orderBlocks = extractAll(extractOne(xml, 'OrderArray') || '', 'Order');
-  const orders = [];
-  for (const oXml of orderBlocks) {
-    const orderId = extractOne(oXml, 'OrderID');
-    const creationDate = extractOne(oXml, 'CreatedTime');
-    const total = parseFloat(extractOne(oXml, 'Total') || '0');
-    const subtotal = parseFloat(extractOne(oXml, 'Subtotal') || '0');
-    const shippingCost = parseFloat(extractOne(extractOne(oXml, 'ShippingServiceSelected') || '', 'ShippingServiceCost') || '0');
-    const buyerUserId = decodeEntities(extractOne(oXml, 'BuyerUserID') || '');
-    const checkoutStatus = extractOne(extractOne(oXml, 'CheckoutStatus') || '', 'Status');
-
-    // Shipping address — Trading API puts it under ShippingAddress
-    const shipBlock = extractOne(oXml, 'ShippingAddress') || '';
-    let street2Raw = decodeEntities(extractOne(shipBlock, 'Street2') || '');
-    // eBay sometimes injects an anonymized buyer-email proxy (e.g. "ebayerm7qr9") in Street2.
-    // Strip it before it ends up on invoices.
-    if (/^ebay[a-z0-9]{4,}$/i.test(street2Raw)) street2Raw = '';
-    let countryRaw = decodeEntities(extractOne(shipBlock, 'Country') || '');
-    // Strip GB / UK / United Kingdom — redundant for UK customers and prints poorly.
-    if (countryRaw === 'GB' || countryRaw === 'UK' || countryRaw === 'GBR' || countryRaw === 'United Kingdom') countryRaw = '';
-    const shipParts = [
-      decodeEntities(extractOne(shipBlock, 'Name') || ''),
-      decodeEntities(extractOne(shipBlock, 'Street1') || ''),
-      street2Raw,
-      decodeEntities(extractOne(shipBlock, 'CityName') || ''),
-      decodeEntities(extractOne(shipBlock, 'StateOrProvince') || ''),
-      decodeEntities(extractOne(shipBlock, 'PostalCode') || ''),
-      countryRaw,
-    ].filter(Boolean);
-    const shippingAddress = shipParts.length ? shipParts.join('\n') : null;
-    const buyerName = decodeEntities(extractOne(shipBlock, 'Name') || '') || buyerUserId || null;
-    const buyerEmail = decodeEntities(extractOne(oXml, 'Email') || '') || null;
-    const buyerPhone = decodeEntities(extractOne(shipBlock, 'Phone') || '') || null;
-
-    // Transactions (line items)
-    const txArray = extractOne(oXml, 'TransactionArray') || '';
-    const txBlocks = extractAll(txArray, 'Transaction');
-    const lineItems = txBlocks.map(tx => {
-      const item = extractOne(tx, 'Item') || '';
-      return {
-        lineItemId: extractOne(tx, 'TransactionID'),
-        sku: decodeEntities(extractOne(item, 'SKU') || ''),
-        title: decodeEntities(extractOne(item, 'Title') || ''),
-        quantity: parseInt(extractOne(tx, 'QuantityPurchased') || '1'),
-        lineItemCost: {
-          value: extractOne(tx, 'TransactionPrice') || '0',
-          currency: 'GBP',
-        },
-      };
-    });
-
-    orders.push({
-      orderId,
-      creationDate,
-      buyer: { username: buyerUserId || null, name: buyerName, email: buyerEmail, phone: buyerPhone },
-      shippingAddress,
-      pricingSummary: {
-        priceSubtotal: { value: subtotal },
-        total: { value: total },
-        deliveryCost: { value: shippingCost },
-        tax: { value: 0 },
-      },
-      lineItems,
-      checkoutStatus,
-    });
-  }
-  return orders;
+// Windowed + PAGED order pull for a specific date range (for backfills). eBay's
+// GetOrders CreateTime window must be <=30 days and returns <=100 per page, so
+// this pages through every page for the [fromISO, toISO] window. Caller loops
+// 30-day windows. Uses the store's Auth'n'Auth token via tradingCall.
+async function getOrdersBetween(fromISO, toISO, storeArg) {
+  const all = [];
+  let page = 1, totalPages = 1;
+  do {
+    const bodyInner = `
+      <CreateTimeFrom>${new Date(fromISO).toISOString()}</CreateTimeFrom>
+      <CreateTimeTo>${new Date(toISO).toISOString()}</CreateTimeTo>
+      <OrderStatus>All</OrderStatus>
+      <Pagination><EntriesPerPage>100</EntriesPerPage><PageNumber>${page}</PageNumber></Pagination>
+      <DetailLevel>ReturnAll</DetailLevel>`;
+    const xml = await tradingCall('GetOrders', bodyInner, storeArg);
+    if (xml.includes('<Ack>Failure</Ack>')) {
+      const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
+      throw new Error('eBay GetOrders error: ' + decodeEntities(err));
+    }
+    const tp = parseInt(extractOne(extractOne(xml, 'PaginationResult') || '', 'TotalNumberOfPages') || '1');
+    if (Number.isFinite(tp) && tp > 0) totalPages = tp;
+    for (const oXml of extractAll(extractOne(xml, 'OrderArray') || '', 'Order')) all.push(mapTradingOrderXml(oXml));
+    page++;
+  } while (page <= totalPages && page <= 60);   // 60-page safety cap (~6000 orders/window)
+  return all;
 }
 
 async function pushStockForProduct(product) {
@@ -1908,6 +1921,7 @@ module.exports = {
   getAccessToken,
   setInventoryQty,
   getRecentOrders,
+  getOrdersBetween,
   orderRefundInfo,
   getOrderDetail,
   dumpOrderXml,

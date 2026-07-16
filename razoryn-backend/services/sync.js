@@ -13,6 +13,17 @@ const ebay = require('./ebay');
 const bundles = require('./bundles');
 const { reconcileSaleRefund } = require('../lib/refunds');
 
+// Orders sold through Shopify's OWN channels only (Online Store 'web', Shop app,
+// Point of Sale, and admin/manual). A third-party sales-channel app (eBay, Amazon,
+// etc.) stamps its own source_name; those orders duplicate what we import from the
+// marketplace directly, so we exclude them from the "store" figures.
+const NATIVE_SHOPIFY_SOURCES = new Set(['web', 'pos', 'shop', 'shop_app', 'iphone', 'android', 'shopify_draft_order', '']);
+function isNativeShopifyOrder(order) {
+  const src = String(order && order.source_name != null ? order.source_name : '').toLowerCase().trim();
+  if (NATIVE_SHOPIFY_SOURCES.has(src)) return true;
+  return /^(web|pos|shop)/.test(src);   // treat web*/pos*/shop* variants as native; everything else = third-party channel
+}
+
 // True if a channel order was deliberately deleted (tombstoned) so it must NOT be
 // re-imported. Best-effort — if the table doesn't exist yet, nothing is suppressed.
 async function isExternalOrderSuppressed(externalId) {
@@ -284,6 +295,11 @@ async function pullShopify(opts = {}) {
   let inserted = 0;
 
   for (const order of orders) {
+    // Only import orders sold through Shopify's OWN channels (Online Store, Shop,
+    // POS, admin). Orders from a third-party sales channel (e.g. an eBay/Amazon
+    // channel app) are duplicates of what we already import from that marketplace
+    // directly, so they'd double-count — skip them.
+    if (!isNativeShopifyOrder(order)) continue;
     // Skip if we already have it, or if it was deliberately deleted (tombstoned)
     // so a wiped order doesn't silently resurrect.
     if (await isExternalOrderSuppressed(String(order.id))) continue;
@@ -409,6 +425,122 @@ async function pullShopify(opts = {}) {
   return { channel: 'shopify', since, orders: orders.length, inserted };
 }
 
+// Import ONE eBay order into a sale (dedup on external_order_id). Shared by the
+// normal pull and the backfill. Returns 'skipped' | 'existing' | 'inserted'.
+async function importEbayOrderRow(order, store, { vatRegistered, vatRate, adjustStock = true }) {
+  if (await isExternalOrderSuppressed(order.orderId)) return 'skipped';
+  const existing = await query(`SELECT id FROM sales WHERE external_order_id = $1`, [order.orderId]);
+  if (existing.rows.length) {
+    // Already imported — net any refund/cancellation the order now reports.
+    try {
+      const info = ebay.orderRefundInfo(order);
+      if (info.amount > 0) await reconcileSaleRefund(existing.rows[0].id, { channelRefund: info.amount });
+    } catch (e) { console.warn('[sync] ebay refund reconcile:', e.message); }
+    return 'existing';
+  }
+  const brand = require('../lib/brand');
+  const ukVat = require('../lib/uk-vat');
+  await withTx(async (c) => {
+    const subtotal = parseFloat(order.pricingSummary?.priceSubtotal?.value || 0);
+    const shipping = parseFloat(order.pricingSummary?.deliveryCost?.value || 0);
+    const total = parseFloat(order.pricingSummary?.total?.value || 0);
+    const vat = ukVat.orderVat({ subtotal, shipping, shippingAddress: order.shippingAddress, vatRegistered, vatRate }).vat;
+    const prefix = brand.invoicePrefix || 'REP';
+    const paymentRef = `${prefix}-E-${order.orderId}`;
+    const channelCode = store.channelCode || 'ebay_em';
+    const sale = await c.query(
+      `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
+                          subtotal, vat, shipping, total, status, occurred_at, shipping_address,
+                          payment_method, payment_reference, order_number, invoice_number)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'paid',$10,$11,$12,$13,$14,$15) RETURNING id`,
+      [channelCode, order.orderId,
+       order.buyer?.name || order.buyer?.username || null, order.buyer?.email || null, order.buyer?.phone || null,
+       subtotal, vat, shipping, total, order.creationDate, order.shippingAddress || null,
+       'ebay', paymentRef, order.orderId, paymentRef]);
+    for (const li of order.lineItems || []) {
+      const matched = await resolveProductBySku(c, li.sku);
+      const productId = matched?.id || null;
+      const qty = li.quantity || 1;
+      const unitPrice = parseFloat(li.lineItemCost?.value || 0) / qty;
+      await c.query(
+        `INSERT INTO sale_items (sale_id, product_id, sku, title, qty, unit_price, line_total)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [sale.rows[0].id, productId, li.sku || `(no-sku-${li.lineItemId})`, li.title, qty, unitPrice, parseFloat(li.lineItemCost?.value || 0)]);
+      // adjustStock=false for BACKFILL: record the sale for revenue but DON'T touch
+      // current stock (old sales are already reflected in the live stock levels, so
+      // decrementing again would double-count stock down).
+      if (!adjustStock) continue;
+      if (productId) {
+        await c.query(`UPDATE products SET qty_on_hand = qty_on_hand - $1 WHERE id = $2`, [qty, productId]);
+        await c.query(`INSERT INTO stock_movements (product_id, delta, reason, reference_id) VALUES ($1,$2,$3,$4)`,
+          [productId, -qty, `sale_${channelCode}`, sale.rows[0].id]);
+        await mirrorSaleToStockGroup(c, productId, qty, `sale_${channelCode}`, sale.rows[0].id);
+      } else {
+        try { const bundle = await bundles.findBundleBySku(li.sku, c); if (bundle) await bundles.deductBundleComponents(c, bundle.id, qty, sale.rows[0].id, `sale_bundle_${channelCode}`); }
+        catch (e) { console.warn('[sync] bundle deduct failed:', e.message); }
+      }
+    }
+    if (adjustStock) { for (const li of order.lineItems || []) { const matched = await resolveProductBySku(c, li.sku); if (matched) await recordLowStockIfNeeded(matched.id); } }
+  });
+  if (adjustStock) { for (const li of order.lineItems || []) { try { const m = await resolveProductBySku(null, li.sku); if (m) await handleStockOutIfIncoming(m.id); } catch (_) {} } }
+  try {
+    const info = ebay.orderRefundInfo(order);
+    if (info.amount > 0) { const s = await query(`SELECT id FROM sales WHERE external_order_id = $1`, [order.orderId]); if (s.rows[0]) await reconcileSaleRefund(s.rows[0].id, { channelRefund: info.amount }); }
+  } catch (_) {}
+  return 'inserted';
+}
+
+// BACKFILL: pull EVERY eBay order created since `sinceISO` (e.g. 2026-01-01) by
+// paging through 30-day windows per store (eBay caps a query at ~30 days/page).
+// Dedup on external_order_id means re-runs are safe. onProgress reports as it goes.
+async function backfillEbayOrders(sinceISO, onProgress) {
+  const brand = require('../lib/brand');
+  if (!ebay.isConfigured()) return { skipped: 'not_configured' };
+  const activeStores = brand.stores.filter(s => s.token);
+  if (!activeStores.length) return { channel: 'ebay', inserted: 0, stores: [] };
+  const ukVat = require('../lib/uk-vat');
+  let vatRegistered = false, vatRate = 20;
+  try { const vr = await query(`SELECT vat_rate, vat_registered FROM app_settings WHERE id = 1`); vatRegistered = !!vr.rows[0]?.vat_registered; vatRate = parseFloat(vr.rows[0]?.vat_rate || 20); } catch (_) {}
+
+  const start = new Date(sinceISO);
+  // Cap the backfill at the eBay sync cursor: everything up to the cursor is
+  // already reflected in live stock (so we import revenue-only), and anything
+  // NEWER than the cursor is left for the normal pullEbay to import WITH the stock
+  // decrement. Without this cap, a not-yet-synced order would be imported here
+  // revenue-only, then deduped by pullEbay — its stock decrement lost forever.
+  const state = await getCursor('ebay');
+  const cursorMs = state && state.last_synced_at ? new Date(state.last_synced_at).getTime() : Date.now();
+  const now = new Date(Math.min(Date.now(), cursorMs));
+  const WINDOW_MS = 29 * 24 * 60 * 60 * 1000;   // <30-day windows (eBay limit)
+  // total windows (for progress) across all stores
+  const windowsPerStore = Math.max(1, Math.ceil((now - start) / WINDOW_MS));
+  const totalSteps = windowsPerStore * activeStores.length;
+  let step = 0, totalFetched = 0, totalInserted = 0;
+  const perStore = [];
+  for (const store of activeStores) {
+    let fetched = 0, inserted = 0, error = null;
+    for (let wsMs = start.getTime(); wsMs < now.getTime(); wsMs += WINDOW_MS) {
+      const weMs = Math.min(wsMs + WINDOW_MS, now.getTime());
+      let orders = [];
+      try { orders = await ebay.getOrdersBetween(new Date(wsMs).toISOString(), new Date(weMs).toISOString(), store); }
+      catch (e) { error = e.message; console.warn(`[sync.backfillEbay] store=${store.code} window failed: ${e.message}`); }
+      fetched += orders.length;
+      for (const order of orders) {
+        try { const r = await importEbayOrderRow(order, store, { vatRegistered, vatRate, adjustStock: false }); if (r === 'inserted') inserted++; }
+        catch (e) { console.warn('[sync.backfillEbay] order failed:', e.message); }
+      }
+      step++;
+      // Report CUMULATIVE totals (prior stores + this store so far) so the live
+      // counters never go backwards when moving to the next store.
+      if (onProgress) onProgress({ step, totalSteps, store: store.code, windowEnd: new Date(weMs).toISOString(), fetched: totalFetched + fetched, inserted: totalInserted + inserted });
+    }
+    perStore.push({ code: store.code, fetched, inserted, error });
+    totalFetched += fetched; totalInserted += inserted;
+  }
+  await setCursor('ebay', { lastSyncedAt: new Date(), status: 'ok' });
+  return { channel: 'ebay', fetched: totalFetched, inserted: totalInserted, stores: perStore };
+}
+
 // --------- PULL: eBay orders ---------
 async function pullEbay(opts = {}) {
   const brand = require('../lib/brand');
@@ -455,104 +587,10 @@ async function pullEbay(opts = {}) {
     let inserted = 0;
 
     for (const order of orders) {
-      if (await isExternalOrderSuppressed(order.orderId)) continue;
-      const existing = await query(
-        `SELECT id FROM sales WHERE external_order_id = $1`,
-        [order.orderId]
-      );
-      if (existing.rows.length) {
-        // Already imported — net any refund/cancellation the order now reports.
-        // (The Post-Order returns pipeline is the durable source for older orders;
-        // this catches refunds on recently-created ones the order feed still lists.)
-        try {
-          const info = ebay.orderRefundInfo(order);
-          if (info.amount > 0) await reconcileSaleRefund(existing.rows[0].id, { channelRefund: info.amount });
-        } catch (e) { console.warn('[sync.pullEbay] refund reconcile:', e.message); }
-        continue;
-      }
-
-      await withTx(async (c) => {
-        const subtotal = parseFloat(order.pricingSummary?.priceSubtotal?.value || 0);
-        const shipping = parseFloat(order.pricingSummary?.deliveryCost?.value || 0);
-        const total = parseFloat(order.pricingSummary?.total?.value || 0);
-        // eBay's tax field is 0 for a standard UK sale — compute the inclusive VAT
-        // portion ourselves for domestic orders; GSP-hub exports are zero-rated.
-        const vat = ukVat.orderVat({ subtotal, shipping, shippingAddress: order.shippingAddress, vatRegistered, vatRate }).vat;
-
-        // Unified reference: <PREFIX>-E-<eBay order #>. Same value in
-        // invoice_number and payment_reference.
-        const prefix = brand.invoicePrefix || 'REP';
-        const paymentRef = `${prefix}-E-${order.orderId}`;
-
-        // Channel = the store's channelCode (ebay_em / ebay_cl / etc.).
-        const channelCode = store.channelCode || 'ebay_em';
-
-        const sale = await c.query(
-          `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
-                              subtotal, vat, shipping, total, status, occurred_at, shipping_address,
-                              payment_method, payment_reference, order_number, invoice_number)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'paid',$10,$11,$12,$13,$14,$15) RETURNING id`,
-          [
-            channelCode,
-            order.orderId,
-            order.buyer?.name || order.buyer?.username || null,
-            order.buyer?.email || null,
-            order.buyer?.phone || null,
-            subtotal, vat, shipping, total,
-            order.creationDate,
-            order.shippingAddress || null,
-            'ebay', paymentRef, order.orderId, paymentRef,
-          ]
-        );
-
-        for (const li of order.lineItems || []) {
-          const matched = await resolveProductBySku(c, li.sku);
-          const productId = matched?.id || null;
-          const qty = li.quantity || 1;
-          const unitPrice = parseFloat(li.lineItemCost?.value || 0) / qty;
-          await c.query(
-            `INSERT INTO sale_items (sale_id, product_id, sku, title, qty, unit_price, line_total)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-            [sale.rows[0].id, productId, li.sku || `(no-sku-${li.lineItemId})`,
-             li.title, qty, unitPrice, parseFloat(li.lineItemCost?.value || 0)]
-          );
-          if (productId) {
-            await c.query(`UPDATE products SET qty_on_hand = qty_on_hand - $1 WHERE id = $2`,
-              [qty, productId]);
-            await c.query(
-              `INSERT INTO stock_movements (product_id, delta, reason, reference_id)
-               VALUES ($1,$2,$3,$4)`,
-              [productId, -qty, `sale_${channelCode}`, sale.rows[0].id]
-            );
-            await mirrorSaleToStockGroup(c, productId, qty, `sale_${channelCode}`, sale.rows[0].id);
-          } else {
-            // No singular product matched — this may be a BUNDLE listing. If so,
-            // deduct each component (e.g. selling the Left+Right set reduces both)
-            // so the individual listings can't oversell.
-            try {
-              const bundle = await bundles.findBundleBySku(li.sku, c);
-              if (bundle) await bundles.deductBundleComponents(c, bundle.id, qty, sale.rows[0].id, `sale_bundle_${channelCode}`);
-            } catch (e) { console.warn('[sync.pullEbay] bundle deduct failed:', e.message); }
-          }
-        }
-        for (const li of order.lineItems || []) {
-          const matched = await resolveProductBySku(c, li.sku);
-          if (matched) await recordLowStockIfNeeded(matched.id);
-        }
-      });
-      // Post-commit: any line that sold down to 0 with stock incoming → pre-order.
-      for (const li of order.lineItems || []) {
-        try { const m = await resolveProductBySku(null, li.sku); if (m) await handleStockOutIfIncoming(m.id); } catch (_) {}
-      }
-      // Net any refund/cancellation present at first import.
       try {
-        const info = ebay.orderRefundInfo(order);
-        if (info.amount > 0) {
-          const s = await query(`SELECT id FROM sales WHERE external_order_id = $1`, [order.orderId]);
-          if (s.rows[0]) await reconcileSaleRefund(s.rows[0].id, { channelRefund: info.amount });
-        }
-      } catch (_) {}
-      inserted++;
+        const r = await importEbayOrderRow(order, store, { vatRegistered, vatRate });
+        if (r === 'inserted') inserted++;
+      } catch (e) { console.warn('[sync.pullEbay] order failed:', e.message); }
     }
     totalOrders += orders.length;
     totalInserted += inserted;
@@ -867,6 +905,8 @@ module.exports = {
   runFullSync,
   pullShopify,
   pullEbay,
+  backfillEbayOrders,
+  isNativeShopifyOrder,
   pushStockForSaleItems,
   pushAllStockToShopify,
   pushAllStockToEbay,
