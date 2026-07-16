@@ -2558,58 +2558,66 @@ const DESC_BODY_END = '<!--/RZN_DESC_BODY-->';
 
 function defaultDescTemplate() {
   const brand = require('../lib/brand');
-  const color = brand.primaryColor || '#c8202d';       // brand bar / structure
+  const color = brand.primaryColor || '#c8202d';       // brand structure colour
   const accent = brand.accentColor || brand.primaryColor || '#c8202d';  // red CTA/headings
-  // Clean, icon-led, storefront-style layout (inline CSS only — eBay strips
-  // <style>, scripts, external CSS). Tokens: {{brand}} {{tagline}} {{domain}}
-  // {{title}} {{sku}} {{partno}} {{vehicle}} {{storeurl}} {{related}}. The body
-  // (spec table) sits between the RZN_DESC_BODY sentinels; {{related}} is the
-  // "You might be interested in" product cards. Icons are emoji so they render
-  // everywhere (incl. the eBay mobile app) with no external images.
+  // Variant A — clean, full-width, storefront-style (inline CSS only; eBay strips
+  // <style>/scripts/external CSS). Tokens: {{brand}} {{tagline}} {{domain}}
+  // {{title}} {{sku}} {{partno}} {{logo}} {{vehicle}} {{related}} {{returns}}
+  // {{delivery}}. Body (spec table) sits between the RZN_DESC_BODY sentinels.
+  // Icons are emoji so they render everywhere incl. the eBay mobile app.
   const badge = (icon, top, bot) =>
-    `<td style="width:25%;text-align:center;vertical-align:top;padding:6px 8px">` +
-      `<div style="font-size:26px;line-height:1">${icon}</div>` +
-      `<div style="font-size:11px;color:#555;margin-top:5px">${top}</div>` +
-      `<div style="font-size:11px;font-weight:700;color:#222;margin-top:1px">${bot}</div>` +
+    `<td style="width:25%;text-align:center;vertical-align:top;padding:16px 8px">` +
+      `<div style="font-size:32px;line-height:1">${icon}</div>` +
+      `<div style="font-size:12px;color:#666;margin-top:8px">${top}</div>` +
+      `<div style="font-size:13px;font-weight:800;color:#222;margin-top:2px;text-transform:uppercase;letter-spacing:.3px">${bot}</div>` +
     `</td>`;
   const header =
-    `<div style="font-family:Arial,Helvetica,sans-serif;max-width:860px;margin:0 auto;color:#1a1a1a;border:1px solid #e7e7e7;border-radius:10px;overflow:hidden">` +
-      // brand bar
-      `<div style="background:${color};color:#fff;padding:18px 22px">` +
-        `<div style="font-size:24px;font-weight:800;letter-spacing:.4px;line-height:1.1">{{brand}}</div>` +
-        `<div style="font-size:13px;opacity:.95;margin-top:3px">{{tagline}}</div>` +
-      `</div>` +
-      // trust badges (icons, not text walls)
-      `<table role="presentation" width="100%" style="border-collapse:collapse;background:#fafafa;border-bottom:1px solid #eee"><tr>` +
-        badge('&#128230;', 'All parts', 'NEW &amp; PRIMED') +
-        badge('&#128683;', "We don't", 'PAINT PANELS') +
-        badge('&#128737;&#65039;', 'Quality', 'INSURANCE-GRADE') +
-        badge('&#128666;', 'Next-day', 'TRACKED DELIVERY') +
+    `<div style="font-family:Arial,Helvetica,sans-serif;width:100%;box-sizing:border-box;color:#1a1a1a;border:1px solid #e2e2e2;border-radius:10px;overflow:hidden">` +
+      // logo header (white, thin accent rule) — {{logo}} is the logo image or text
+      `<table role="presentation" width="100%" style="border-collapse:collapse;border-top:4px solid ${accent}"><tr>` +
+        `<td style="vertical-align:middle;padding:20px 26px">{{logo}}</td>` +
+        `<td style="vertical-align:middle;padding:20px 26px;text-align:right;font-size:14px;color:#555">{{tagline}}<br><strong style="color:${color}">{{domain}}</strong></td>` +
       `</tr></table>` +
-      // title + part number, then the body container
-      `<div style="padding:20px 22px">` +
-        `<div style="font-size:19px;font-weight:700;margin-bottom:4px;line-height:1.3">{{title}}</div>` +
-        `<div style="font-size:13px;color:#777;margin-bottom:16px">Part No: <strong style="color:${accent}">{{partno}}</strong></div>`;
-  const footer =
-      // key notices (concise, boxed, accent bar)
-      `<div style="margin:4px 0 2px;border:1px solid #f0d9dc;background:#fdf6f7;border-left:4px solid ${accent};border-radius:6px;padding:12px 14px;font-size:13px;line-height:1.55;color:#333">` +
-        `<div style="margin-bottom:8px">&#9888;&#65039; <strong>Please don't rely on eBay's compatibility guide</strong> — it's a guide only. Message us your registration and we'll confirm this part fits your exact vehicle.</div>` +
-        `<div style="margin:0">&#128312; All panels are supplied <strong>primed and require painting</strong> unless otherwise stated. <strong>We do not paint panels.</strong></div>` +
+      // trust badges
+      `<table role="presentation" width="100%" style="border-collapse:collapse;background:#fafafa;border-top:1px solid #eee;border-bottom:1px solid #eee"><tr>` +
+        badge('&#128230;', 'All parts', 'New &amp; primed') +
+        badge('&#128683;', "We don't", 'Paint panels') +
+        badge('&#9889;', 'Order by 12pm', 'Same-day dispatch') +
+        badge('&#127468;&#127463;', 'In stock', 'UK stock') +
+      `</tr></table>` +
+      // title + part number
+      `<div style="padding:24px 26px 4px">` +
+        `<div style="font-size:23px;font-weight:800;line-height:1.28">{{title}}</div>` +
+        `<div style="margin-top:10px"><span style="display:inline-block;background:${color};color:#fff;font-weight:700;font-size:15px;padding:6px 13px;border-radius:6px">Part No: {{partno}}</span></div>` +
       `</div>` +
+      // BIG standalone fitment banner
+      `<div style="margin:20px 26px;background:#fdecee;border:1px solid #f6c9ce;border-radius:12px;padding:22px;text-align:center">` +
+        `<div style="font-size:21px;font-weight:800;color:${accent}">&#9888;&#65039; CHECK THIS FITS YOUR CAR</div>` +
+        `<div style="font-size:15px;color:#333;margin:10px auto 16px;max-width:640px;line-height:1.55">eBay's compatibility list is a <strong>guide only</strong>. Send us your <strong>registration (number plate)</strong> and we'll confirm this is the exact part for your vehicle &mdash; before you buy.</div>` +
+        `<div style="display:inline-block;background:${accent};color:#fff;font-weight:800;font-size:15px;padding:13px 28px;border-radius:8px">&#128172; Message us your reg</div>` +
+      `</div>` +
+      // body container (spec table goes here)
+      `<div style="padding:4px 26px 8px;font-size:15px">`;
+  const footer =
       `</div>` +   // close body container
+      // primed / we don't paint (single clear line)
+      `<div style="margin:0 26px 18px;font-size:14px;color:#555;line-height:1.55">&#128312; Supplied <strong>primed</strong> and requires painting unless otherwise stated. <strong>We do not paint panels.</strong></div>` +
       // "You might be interested in" — real product cards (or a fallback CTA)
       `{{related}}` +
-      // info strip: payment / delivery / returns (compact, icon-led)
-      `<table role="presentation" width="100%" style="border-collapse:collapse;border-top:1px solid #e7e7e7;font-size:12.5px;color:#333"><tr>` +
-        `<td style="width:33%;vertical-align:top;padding:14px 16px;border-right:1px solid #eee"><div style="font-weight:700;margin-bottom:3px">&#128179; Secure payment</div>Visa, Mastercard, PayPal, Apple &amp; Google Pay</div></td>` +
-        `<td style="width:34%;vertical-align:top;padding:14px 16px;border-right:1px solid #eee"><div style="font-weight:700;margin-bottom:3px">&#128666; Fast delivery</div>Same-day dispatch when paid before 12pm (Mon&ndash;Fri). Leave a mobile number with your order.</div></td>` +
-        `<td style="width:33%;vertical-align:top;padding:14px 16px"><div style="font-weight:700;margin-bottom:3px">&#8617;&#65039; 30-day returns</div>Faulty items replaced or refunded. Check the part number &amp; photos first.</div></td>` +
+      // feedback (confident, no self-deprecation)
+      `<div style="margin:18px 26px;background:#f4f8ff;border:1px solid #d9e6ff;border-radius:12px;padding:20px 22px;text-align:center">` +
+        `<div style="font-size:18px;font-weight:800">&#11088; Happy with your part?</div>` +
+        `<div style="font-size:15px;color:#444;margin-top:8px;line-height:1.55">We'd really appreciate your feedback. If anything isn't right, <strong>message us first</strong> and we'll always put it right.</div>` +
+      `</div>` +
+      // delivery / returns strip (returns pulled from the real listing policy)
+      `<table role="presentation" width="100%" style="border-collapse:collapse;border-top:1px solid #eee;font-size:14px;color:#333"><tr>` +
+        `<td style="width:33%;vertical-align:top;padding:18px 20px;border-right:1px solid #eee"><div style="font-weight:800;margin-bottom:4px">&#128179; Secure payment</div>Visa, Mastercard, PayPal, Apple &amp; Google Pay</div></td>` +
+        `<td style="width:34%;vertical-align:top;padding:18px 20px;border-right:1px solid #eee"><div style="font-weight:800;margin-bottom:4px">&#128666; Delivery</div>{{delivery}}</div></td>` +
+        `<td style="width:33%;vertical-align:top;padding:18px 20px"><div style="font-weight:800;margin-bottom:4px">&#8617;&#65039; {{returns}}</div>Faulty items replaced or refunded &mdash; check the part number &amp; photos first.</div></td>` +
       `</tr></table>` +
       // dark footer
-      `<div style="background:#141414;color:#ddd;padding:14px 22px;font-size:12px;line-height:1.6">` +
-        `<div style="color:#fff;font-weight:700">Why buy from {{brand}}</div>` +
-        `<div style="margin:4px 0 8px">Trade-quality body panels &middot; fast dispatch &middot; expert fitment help &mdash; just message us your reg.</div>` +
-        `<div style="color:#999">{{brand}} &middot; {{domain}}</div>` +
+      `<div style="background:${color};color:#dfe6ee;padding:16px 26px;font-size:13px;line-height:1.6">` +
+        `<span style="color:#fff;font-weight:800">{{brand}}</span> &middot; trade-quality body panels &middot; fast dispatch &middot; message us your reg for fitment help &middot; {{domain}}` +
       `</div>` +
     `</div>`;
   return { header, footer };
@@ -2649,10 +2657,15 @@ function wrapDesc(body, tpl, ctx) {
         `<a href="${storeurl}" style="display:inline-block;background:${accent};color:#fff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 22px;border-radius:6px">Shop more parts &rarr;</a>` +
       `</div>`
     : '');
+  // {{logo}} = logo <img> (or brand-name text fallback); {{returns}}/{{delivery}}
+  // are the real/settings terms passed in by composeEbayDescription.
+  const logo = ctx.logo || `<div style="font-size:26px;font-weight:800;color:${brand.primaryColor || '#c8202d'}">${String(brand.name || 'Our Store')}</div>`;
+  const returns = ctx.returns || 'Returns accepted';
+  const delivery = ctx.delivery || 'Fast UK dispatch';
   const fill = (s) => String(s || '').replace(/\{\{(\w+)\}\}/g, (_, k) => {
     const map = { brand: brand.name || 'Our Store', tagline: brand.tagline || '',
       domain, title: ctx.title || '', sku: ctx.sku || '', partno: ctx.partno || '',
-      vehicle: vehicle || 'vehicle', storeurl, related };
+      vehicle: vehicle || 'vehicle', storeurl, related, logo, returns, delivery };
     return map[k] != null ? map[k] : '';
   });
   return fill(tpl.header) + DESC_BODY_START + (body || '') + DESC_BODY_END + fill(tpl.footer);
@@ -2718,32 +2731,75 @@ async function buildRelatedItemsHtml(product, storeCode) {
   const cards = rows.map(it => {
     const url = `https://www.ebay.co.uk/itm/${escapeHtmlServer(String(it.ebay_item_id))}`;
     const price = it.price_ebay != null ? `£${parseFloat(it.price_ebay).toFixed(2)}` : '';
-    return `<td style="width:25%;vertical-align:top;padding:8px">` +
-      `<a href="${url}" style="text-decoration:none;color:#111;display:block;border:1px solid #eee;border-radius:8px;overflow:hidden">` +
-        `<img src="${escapeHtmlServer(it.image_url)}" alt="" style="width:100%;height:120px;object-fit:cover;display:block;background:#f4f4f4">` +
-        `<div style="padding:8px 10px">` +
-          `<div style="font-size:12px;line-height:1.35;height:50px;overflow:hidden">${escapeHtmlServer(String(it.title || '').slice(0, 70))}</div>` +
-          (price ? `<div style="font-size:14px;font-weight:800;color:${accent};margin-top:4px">${price}</div>` : '') +
+    // object-fit:contain on white so the whole part shows (car-part photos crop badly).
+    return `<td style="width:25%;vertical-align:top;padding:10px">` +
+      `<a href="${url}" style="text-decoration:none;color:#111;display:block;border:1px solid #eee;border-radius:10px;overflow:hidden;background:#fff">` +
+        `<img src="${escapeHtmlServer(it.image_url)}" alt="" style="width:100%;height:180px;object-fit:contain;display:block;background:#f6f6f6">` +
+        `<div style="padding:10px 12px 12px">` +
+          `<div style="font-size:13px;line-height:1.4;height:56px;overflow:hidden">${escapeHtmlServer(String(it.title || '').slice(0, 75))}</div>` +
+          (price ? `<div style="font-size:16px;font-weight:800;color:${accent};margin-top:5px">${price}</div>` : '') +
         `</div>` +
       `</a></td>`;
   }).join('');
-  return `<div style="background:#f5f7fb;border-top:1px solid #e7e7e7;padding:16px 18px">` +
-    `<div style="font-size:15px;font-weight:800;text-transform:uppercase;letter-spacing:.3px;margin:0 4px 8px">You might be interested in</div>` +
+  return `<div style="background:#f5f7fb;border-top:1px solid #e7e7e7;padding:18px 18px 8px">` +
+    `<div style="font-size:16px;font-weight:800;text-transform:uppercase;letter-spacing:.4px;margin:0 6px 8px">You might be interested in</div>` +
     `<table role="presentation" width="100%" style="border-collapse:collapse"><tr>${cards}</tr></table>` +
   `</div>`;
 }
 
+// The app's own public origin (serves the logo). From CORS_ORIGIN (see server.js);
+// null when unset so the logo falls back to the brand-name text.
+function appBaseUrl() {
+  const raw = process.env.CORS_ORIGIN || '';
+  const first = raw.split(',').map(s => s.trim()).find(s => /^https:\/\//i.test(s));
+  if (!first) return null;
+  try { return new URL(first).origin; } catch (_) { return null; }
+}
+// Absolute logo URL for the description header: the uploaded logo (/public-logo)
+// when one exists, else the brand's static logo file. Null → text fallback.
+function listingLogoUrl(hasUpload) {
+  const base = appBaseUrl();
+  if (!base) return null;
+  const brand = require('../lib/brand');
+  return hasUpload ? `${base}/public-logo` : `${base}${brand.logoUrl || '/logo.png'}`;
+}
+
 // One place that builds the FULL wrapped eBay description for a product, used by
 // create AND the "push design to existing listings" bulk action so they match.
-async function composeEbayDescription(product, { specifics, storeCode, rawBody } = {}) {
+// opts.terms (from a live GetItem) = { returnsWithinDays, returnsAccepted } → the
+// returns line shows the listing's REAL policy; otherwise the Settings default.
+async function composeEbayDescription(product, { specifics, storeCode, rawBody, terms } = {}) {
+  const brand = require('../lib/brand');
+  const color = brand.primaryColor || '#c8202d';
   const body = (rawBody && String(rawBody).trim()) ? unwrapDesc(rawBody) : buildStyledDescBody(product, specifics || []);
   const vehicle = [product.brand || parseVehicleFromTitle(product.title || '').make,
                    product.model || parseVehicleFromTitle(product.title || '').model].filter(Boolean).join(' ').trim();
   let related = '';
   try { related = await buildRelatedItemsHtml(product, storeCode); } catch (_) {}
+
+  // Settings (data JSON) hold the editable defaults + whether a logo was uploaded.
+  let row = {};
+  try { row = (await query(`SELECT logo_data_url, data FROM app_settings WHERE id = 1`)).rows[0] || {}; } catch (_) {}
+  const s = row.data || {};
+  const logoUrl = listingLogoUrl(!!row.logo_data_url);
+  const logoHtml = logoUrl
+    ? `<img src="${escapeHtmlServer(logoUrl)}" alt="${escapeHtmlServer(brand.name || '')}" style="height:48px;max-width:240px;object-fit:contain;display:block">`
+    : `<div style="font-size:26px;font-weight:800;color:${color}">${escapeHtmlServer(brand.name || 'Our Store')}</div>`;
+
+  // Returns line: real per-listing days > Settings default days/blurb > generic.
+  const realDays = terms && terms.returnsWithinDays ? terms.returnsWithinDays : null;
+  const settingsDays = s.ebay_returns_days ? parseInt(s.ebay_returns_days) : null;
+  const days = realDays || settingsDays;
+  const returnsText = (terms && terms.returnsAccepted === false)
+    ? 'See the Returns tab'
+    : (days ? `${days}-day returns` : (s.ebay_returns_blurb || 'Returns accepted'));
+  const deliveryText = s.ebay_delivery_blurb
+    || 'Same-day dispatch when paid before 12pm (Mon–Fri). Please leave a mobile number with your order.';
+
   const tpl = await getDescTemplate();
   return wrapDesc(body, tpl, {
     title: product.title, sku: product.sku, partno: product.part_number || product.sku, vehicle, related,
+    logo: logoHtml, returns: returnsText, delivery: deliveryText,
   });
 }
 
@@ -2905,17 +2961,26 @@ router.post('/bulk-price', requireAdmin, async (req, res) => {
   res.json({ ok: true, results, summary: { total: items.length, ok: results.filter(r => !r.error).length } });
 });
 
-// Read the effective eBay description template (+ defaults, for "reset").
+// Read the effective eBay description template (+ defaults, for "reset") plus the
+// editable delivery/returns defaults used on new listings.
 router.get('/ebay-template', requireAdmin, async (req, res) => {
-  res.json({ ...(await getDescTemplate()), defaults: defaultDescTemplate() });
+  let d = {};
+  try { d = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {}; } catch (_) {}
+  res.json({
+    ...(await getDescTemplate()), defaults: defaultDescTemplate(),
+    returnsDays: d.ebay_returns_days || '', returnsBlurb: d.ebay_returns_blurb || '', deliveryBlurb: d.ebay_delivery_blurb || '',
+  });
 });
-// Save the eBay description header/footer into app_settings.data.
+// Save the eBay description header/footer + delivery/returns defaults into app_settings.data.
 router.post('/ebay-template', requireAdmin, async (req, res) => {
-  const { header, footer } = req.body || {};
+  const { header, footer, returnsDays, returnsBlurb, deliveryBlurb } = req.body || {};
   const cur = await query(`SELECT data FROM app_settings WHERE id = 1`);
   const data = { ...(cur.rows[0]?.data || {}) };
   if (header !== undefined) data.ebay_desc_header = header;
   if (footer !== undefined) data.ebay_desc_footer = footer;
+  if (returnsDays !== undefined) data.ebay_returns_days = String(returnsDays || '').replace(/[^0-9]/g, '') || null;
+  if (returnsBlurb !== undefined) data.ebay_returns_blurb = returnsBlurb || null;
+  if (deliveryBlurb !== undefined) data.ebay_delivery_blurb = deliveryBlurb || null;
   await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify(data)]);
   await audit(req, 'save_ebay_template');
   res.json({ ok: true });
@@ -3733,8 +3798,16 @@ router.post('/restyle-descriptions', requireAdmin, async (req, res) => {
         const store = stores.find(st => st.code === row.store_code) || (stores.find(st => st.primary) || stores[0]);
         try {
           if (!store) throw new Error('no eBay store for link');
-          const specifics = Array.isArray(row.ebay_item_specifics) ? row.ebay_item_specifics : [];
-          const html = await composeEbayDescription(row, { specifics, storeCode: store.code });
+          // Read the live listing so the description shows its REAL specifics +
+          // returns window; fall back to the persisted specifics if the read fails.
+          let specifics = Array.isArray(row.ebay_item_specifics) ? row.ebay_item_specifics : [];
+          let terms = null;
+          try {
+            const det = await ebay.getItemDetails(row.ebay_item_id, store.code);
+            if (det && Array.isArray(det.specifics) && det.specifics.length) specifics = det.specifics;
+            if (det && det.returns) terms = { returnsWithinDays: det.returns.withinDays, returnsAccepted: det.returns.accepted };
+          } catch (_) {}
+          const html = await composeEbayDescription(row, { specifics, storeCode: store.code, terms });
           await ebay.reviseItem(row.ebay_item_id, { description: html }, store.code);
           await query(`UPDATE products SET ebay_description = $1, updated_at = now() WHERE id = $2`, [html, row.id]).catch(() => {});
           if (includeShopify && row.shopify_product_id && shopify.isConfigured()) {
