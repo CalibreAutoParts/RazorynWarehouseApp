@@ -1528,7 +1528,7 @@ const Store = {
     // dashboard renderers can call .filter/.length without crashing.
     const calls = [
       ['products',      () => loadAllProducts()],
-      ['sales',         () => Api.get('/api/sales?pageSize=200&includeUnpaid=1').then(r => { State.salesRefundsByChannel = r.refundsByChannel || {}; State.salesRefundsTotal = r.refundsTotal || 0; return (r.sales || []).map(adaptSale); })],
+      ['sales',         () => Api.get('/api/sales?pageSize=200&includeUnpaid=1').then(r => { State.salesRefundsByChannel = r.refundsByChannel || {}; State.salesRefundsTotal = r.refundsTotal || 0; State.salesOpenReturnsTotal = r.openReturnsTotal || 0; return (r.sales || []).map(adaptSale); })],
       ['returns',       () => Api.get('/api/returns').then(r => (r.returns || []).map(adaptReturn))],
       ['schedule',      () => Api.get('/api/schedule').then(r => (r.tasks || []).map(adaptTask))],
       ['videos',        () => Api.get('/api/videos').then(r => (r.videos || []).map(adaptVideo))],
@@ -1562,7 +1562,7 @@ const Store = {
   async refresh(key) {
     const map = {
       products:      () => loadAllProducts(),
-      sales:         () => Api.get('/api/sales?pageSize=200&includeUnpaid=1').then(r => { State.salesRefundsByChannel = r.refundsByChannel || {}; State.salesRefundsTotal = r.refundsTotal || 0; return (r.sales || []).map(adaptSale); }),
+      sales:         () => Api.get('/api/sales?pageSize=200&includeUnpaid=1').then(r => { State.salesRefundsByChannel = r.refundsByChannel || {}; State.salesRefundsTotal = r.refundsTotal || 0; State.salesOpenReturnsTotal = r.openReturnsTotal || 0; return (r.sales || []).map(adaptSale); }),
       returns:       () => Api.get('/api/returns').then(r => (r.returns || []).map(adaptReturn)),
       schedule:      () => Api.get('/api/schedule').then(r => (r.tasks || []).map(adaptTask)),
       videos:        () => Api.get('/api/videos').then(r => (r.videos || []).map(adaptVideo)),
@@ -7268,6 +7268,7 @@ function renderSales() {
           <button class="btn btn-primary admin-only" onclick="openManualSale()">+ New sale / estimate</button>
           <button class="btn btn-outline admin-only" onclick="openVatReport()" title="VAT due per quarter — bank + card sales, with a download for your VAT return">📊 VAT returns</button>
           <button class="btn btn-outline admin-only" onclick="relinkUnmatchedSales()" title="Try to match unlinked orders to products by SKU again">🔗 Re-link unmatched</button>
+          <button class="btn btn-outline admin-only" onclick="reconcileRefunds(this)" title="Pull the latest eBay return cases and re-check every sale, so returned/refunded items (incl. open returns) are correctly deducted from the totals">↩ Reconcile returns</button>
           <button class="btn btn-outline" onclick="exportSalesXlsx()" title="Excel workbook with one sheet per channel">⬇ Excel (per-channel)</button>
           <button class="btn btn-outline" onclick="exportSalesCsv()" title="Single CSV — current filter only">CSV</button>
           <button class="btn btn-outline" onclick="syncNow()">↻ Pull latest</button>
@@ -7366,7 +7367,8 @@ function renderSales() {
     // refund figure must match (card sales live under their own channel and aren't
     // in this gross; their refunds still net off the Net-revenue tile via refTotal).
     const refDirect = (rbc.direct_cash || 0) + (rbc.direct_bank || 0);
-    const refTotal = State.salesRefundsTotal || 0;
+    const refTotal = State.salesRefundsTotal || 0;   // incl. open-return provisions
+    const openRet = State.salesOpenReturnsTotal || 0;  // subset of refTotal that's still an OPEN return
     const totalShop = allPaid.filter(s=>s.channel==='shopify').reduce((a,b)=>a+b.amount,0) - refShop;
     const totalEby = allPaid.filter(s=>(s.channel||'').startsWith('ebay')).reduce((a,b)=>a+b.amount,0) - refEby;
     const ebyCount = livePaid.filter(s=>(s.channel||'').startsWith('ebay')).length;
@@ -7382,7 +7384,7 @@ function renderSales() {
       ? `<div class="stat"><div class="label">Pre-orders</div><div class="value">${preorders.length}</div><div class="delta">${gbp(preorderValue)} reserved · not yet revenue</div></div>`
       : `<div class="stat"><div class="label">Direct (cash + bank)</div><div class="value">${gbp(totalDirect)}</div><div class="delta">${livePaid.filter(s=>s.channel==='cash'||s.channel==='bank').length} orders${refDirect ? ` · −${gbp(refDirect)}` : ''}</div></div>`;
     el('sales-stats').innerHTML = `
-      <div class="stat"><div class="label">Net revenue</div><div class="value">${gbp(netTotal)}</div><div class="delta">${livePaid.length} sales${refTotal ? ` · −${gbp(refTotal)} refunded` : ''}</div></div>
+      <div class="stat"><div class="label">Net revenue</div><div class="value">${gbp(netTotal)}</div><div class="delta">${livePaid.length} sales${refTotal ? ` · −${gbp(refTotal)} refunded/returned${openRet ? ` (incl. ${gbp(openRet)} open returns)` : ''}` : ''}</div></div>
       <div class="stat"><div class="label">Store</div><div class="value">${gbp(totalShop)}</div><div class="delta">${livePaid.filter(s=>s.channel==='shopify').length} orders${refShop ? ` · −${gbp(refShop)}` : ''}</div></div>
       <div class="stat"><div class="label">eBay${(State.brand?.stores||[]).length > 1 ? ' (all)' : ''}</div><div class="value">${gbp(totalEby)}</div><div class="delta">${ebyCount} orders${refEby ? ` · −${gbp(refEby)}` : ''}</div></div>
       ${fourthTile}
@@ -7425,6 +7427,9 @@ function renderSales() {
       const refundBadge = s.isRefunded
         ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--red-light);color:var(--red);font-weight:700" title="Order fully refunded — excluded from revenue, sales count and dispatch">↩ Refunded</span>`
         : (s.isPartlyRefunded ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--amber-light);color:var(--amber)" title="Partially refunded ${gbp(s.refundedAmount)} — the refund is netted off revenue">↩ −${gbp(s.refundedAmount)}</span>` : '');
+      // An OPEN return (not yet refunded) — its value is provisionally deducted from the totals.
+      const openReturnBadge = (!s.isRefunded && (State.returns || []).some(r => String(r.saleId) === String(s.id) && ['open','received','pending'].includes(r.status)))
+        ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--amber-light);color:var(--amber);font-weight:700" title="A return is open on this order — its value is deducted from the sales total until it's resolved">↩ Return open</span>` : '';
       // Amount cell: show what actually counts (net); strike the gross when refunded.
       const amountCell = (s.isRefunded || s.isPartlyRefunded)
         ? `<div><strong>${gbp(s.netAmount)}</strong></div><div style="color:var(--ink-soft);font-size:11px;text-decoration:line-through">${gbp(s.amount)}</div>`
@@ -7449,7 +7454,7 @@ function renderSales() {
         <td onclick="event.stopPropagation()"><input type="checkbox" class="sale-row-check" data-sid="${s.id}" ${State.salesSelected.has(s.id)?'checked':''} onchange="salesToggleRow('${s.id}',this.checked)"></td>
         <td>${fmtDate(s.date)}</td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${s.invoice||'—'}</td>
-        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}${unpaidBadge}${preorderBadge}${fitmentBadge}${lpBadge}${refundBadge}</td>
+        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}${unpaidBadge}${preorderBadge}${fitmentBadge}${lpBadge}${refundBadge}${openReturnBadge}</td>
         <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
         <td>${s.customer}</td>
         <td class="num">${amountCell}</td>
@@ -7520,10 +7525,44 @@ async function salesReload() {
     State.sales = (r.sales || []).map(adaptSale);
     State.salesRefundsByChannel = r.refundsByChannel || {};
     State.salesRefundsTotal = r.refundsTotal || 0;
+    State.salesOpenReturnsTotal = r.openReturnsTotal || 0;
     renderSales();
   } catch (e) {
     toast('Failed to load sales: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+// Backlog check: pull the latest eBay returns and re-reconcile every sale so
+// returned/refunded items (incl. open returns) are deducted from the totals.
+async function reconcileRefunds(btn) {
+  if (!confirm('Pull the latest eBay returns and re-check every sale?\n\nThis makes sure returned, refunded and open-return items are correctly deducted from the sales totals. Runs in the background.')) return;
+  if (btn) btn.disabled = true;
+  const taskId = Task.start('Reconciling returns & refunds');
+  try {
+    await Api.post('/api/sales/reconcile-refunds', {});
+    const final = await new Promise((resolve, reject) => {
+      const poll = async () => {
+        try {
+          const s = await Api.get('/api/sales/reconcile-refunds/status');
+          const pct = s.total ? Math.round((s.done / s.total) * 100) : (s.state === 'running' ? 5 : 100);
+          Task.update(taskId, s.phase || 'Reconciling', pct);
+          if (s.state === 'done' || s.state === 'error') return resolve(s);
+          setTimeout(poll, 1500);
+        } catch (err) { reject(err); }
+      };
+      poll();
+    });
+    if (final.state === 'error') { Task.fail(taskId, 'Failed'); toast('Reconcile failed: ' + (final.error || 'unknown'), 'error', 9000); }
+    else {
+      Task.done(taskId, `${final.updated} updated`);
+      toast(`✓ Reconciled ${final.total} sale(s) with returns — ${final.updated} had a refund applied. Totals now deduct returned/refunded items.`, 'success', 9000);
+      // Refresh the sales figures.
+      try { await Store.refresh('sales'); } catch (_) {}
+      if (State.page === 'sales' && typeof renderSales === 'function') renderSales();
+      if (State.page === 'dashboard' && typeof renderDashboard === 'function') renderDashboard();
+    }
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Reconcile failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) btn.disabled = false; }
 }
 
 // #13 — record payment for an issued-but-unpaid invoice (stock already given).

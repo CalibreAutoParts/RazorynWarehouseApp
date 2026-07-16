@@ -168,24 +168,79 @@ router.get('/', requireAdmin, async (req, res) => {
   // lib/refunds.reconcileSaleRefund. A fully-refunded order (status='refunded')
   // nets its whole total even if the itemised amount under-recorded. Grouped by the
   // sale's own channel and constrained to the SAME window as the revenue summary.
-  let refundsByChannel = {}, refundsTotal = 0;
+  // We deduct BOTH already-refunded amounts AND sales that have a return still
+  // OPEN (not yet processed) — an open return is money that will come back out, so
+  // it shouldn't inflate the sales total. Per sale the deduction is the GREATEST of
+  // (a) the actual refund (full total if status='refunded', else refunded_amount)
+  // and (b) the open-return provisional (the open return's refund_amount if set,
+  // else the whole sale total). GREATEST avoids double-counting when both exist.
+  let refundsByChannel = {}, refundsTotal = 0, openReturnsTotal = 0;
   try {
     const refWhere = where.slice();
-    refWhere.push(`(s.refunded_amount > 0 OR s.status = 'refunded')`);
+    refWhere.push(`(s.refunded_amount > 0 OR s.status = 'refunded' OR orr.sale_id IS NOT NULL)`);
     const rRows = (await query(`
       SELECT s.channel,
-             COALESCE(SUM(CASE WHEN s.status = 'refunded' THEN s.total
-                               ELSE s.refunded_amount END),0)::numeric AS refunds
-      FROM sales s WHERE ${refWhere.join(' AND ')} GROUP BY s.channel`, params)).rows;
+             COALESCE(SUM(GREATEST(
+               CASE WHEN s.status = 'refunded' THEN s.total ELSE s.refunded_amount END,
+               CASE WHEN orr.sale_id IS NOT NULL THEN (CASE WHEN orr.amt > 0 THEN orr.amt ELSE s.total END) ELSE 0 END
+             )),0)::numeric AS refunds,
+             COALESCE(SUM(CASE WHEN orr.sale_id IS NOT NULL
+                               AND (CASE WHEN s.status='refunded' THEN s.total ELSE s.refunded_amount END) = 0
+                          THEN (CASE WHEN orr.amt > 0 THEN orr.amt ELSE s.total END) ELSE 0 END),0)::numeric AS open_returns
+      FROM sales s
+      LEFT JOIN (
+        SELECT sale_id, COALESCE(SUM(refund_amount),0) AS amt
+        FROM returns WHERE status IN ('open','received') GROUP BY sale_id
+      ) orr ON orr.sale_id = s.id
+      WHERE ${refWhere.join(' AND ')} GROUP BY s.channel`, params)).rows;
     for (const row of rRows) {
       const amt = parseFloat(row.refunds) || 0;
       refundsByChannel[row.channel] = amt;
       refundsTotal += amt;
+      openReturnsTotal += parseFloat(row.open_returns) || 0;
     }
   } catch (e) { /* refunded_amount column not ready — ignore */ }
 
-  res.json({ sales: rows, total: tot.rows[0].n, summary: summary.rows, refundsByChannel, refundsTotal });
+  res.json({ sales: rows, total: tot.rows[0].n, summary: summary.rows, refundsByChannel, refundsTotal: +refundsTotal.toFixed(2), openReturnsTotal: +openReturnsTotal.toFixed(2) });
 });
+
+// POST /api/sales/reconcile-refunds — backlog check: pull the latest eBay return
+// cases, then recompute every sale's refunded figure from all its returns so
+// historical returns/refunds are correctly deducted from the sales totals. Runs
+// in the background (pollable) because the eBay pull hits every store's API.
+let reconcileRefundsStatus = { state: 'idle', startedAt: null, finishedAt: null, phase: null, total: 0, done: 0, updated: 0, error: null };
+router.post('/reconcile-refunds', requireAdmin, async (req, res) => {
+  if (reconcileRefundsStatus.state === 'running') return res.json({ ok: true, started: false, alreadyRunning: true, status: reconcileRefundsStatus });
+  const days = Math.max(30, Math.min(365, parseInt(req.body?.days) || 180));
+  const userId = req.user?.id || null;
+  reconcileRefundsStatus = { state: 'running', startedAt: Date.now(), finishedAt: null, phase: 'Pulling eBay returns…', total: 0, done: 0, updated: 0, error: null };
+  await audit(req, 'reconcile_refunds', null, null, { days });
+  res.json({ ok: true, started: true, days });
+  setImmediate(async () => {
+    try {
+      const { reconcileSaleRefund } = require('../lib/refunds');
+      // 1) Pull the latest eBay Post-Order return cases so newly-returned items exist.
+      try {
+        const returns = require('./returns');
+        if (returns.syncEbayReturnsCore) await returns.syncEbayReturnsCore({ days, performedByUserId: userId });
+      } catch (e) { console.warn('[reconcile-refunds] eBay returns pull:', e.message); }
+      // 2) Reconcile every sale that has a return so refunded_amount is up to date.
+      reconcileRefundsStatus.phase = 'Reconciling sales…';
+      const { rows } = await query(`SELECT DISTINCT sale_id FROM returns WHERE sale_id IS NOT NULL`);
+      reconcileRefundsStatus.total = rows.length;
+      for (const r of rows) {
+        try { const out = await reconcileSaleRefund(r.sale_id); if (out && out.refunded > 0) reconcileRefundsStatus.updated++; }
+        catch (_) {}
+        reconcileRefundsStatus.done++;
+      }
+      reconcileRefundsStatus.state = 'done'; reconcileRefundsStatus.finishedAt = Date.now(); reconcileRefundsStatus.phase = 'Done';
+    } catch (e) {
+      reconcileRefundsStatus.state = 'error'; reconcileRefundsStatus.finishedAt = Date.now(); reconcileRefundsStatus.error = e.message;
+      console.error('[reconcile-refunds] failed:', e.message);
+    }
+  });
+});
+router.get('/reconcile-refunds/status', requireAdmin, (req, res) => res.json(reconcileRefundsStatus));
 
 // GET /api/sales/export.csv?channel=&from=&to=
 router.get('/export.csv', requireAdmin, async (req, res) => {
