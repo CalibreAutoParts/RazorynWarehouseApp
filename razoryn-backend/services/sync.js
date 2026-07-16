@@ -503,7 +503,14 @@ async function backfillEbayOrders(sinceISO, onProgress) {
   try { const vr = await query(`SELECT vat_rate, vat_registered FROM app_settings WHERE id = 1`); vatRegistered = !!vr.rows[0]?.vat_registered; vatRate = parseFloat(vr.rows[0]?.vat_rate || 20); } catch (_) {}
 
   const start = new Date(sinceISO);
-  const now = new Date();
+  // Cap the backfill at the eBay sync cursor: everything up to the cursor is
+  // already reflected in live stock (so we import revenue-only), and anything
+  // NEWER than the cursor is left for the normal pullEbay to import WITH the stock
+  // decrement. Without this cap, a not-yet-synced order would be imported here
+  // revenue-only, then deduped by pullEbay — its stock decrement lost forever.
+  const state = await getCursor('ebay');
+  const cursorMs = state && state.last_synced_at ? new Date(state.last_synced_at).getTime() : Date.now();
+  const now = new Date(Math.min(Date.now(), cursorMs));
   const WINDOW_MS = 29 * 24 * 60 * 60 * 1000;   // <30-day windows (eBay limit)
   // total windows (for progress) across all stores
   const windowsPerStore = Math.max(1, Math.ceil((now - start) / WINDOW_MS));
@@ -523,7 +530,9 @@ async function backfillEbayOrders(sinceISO, onProgress) {
         catch (e) { console.warn('[sync.backfillEbay] order failed:', e.message); }
       }
       step++;
-      if (onProgress) onProgress({ step, totalSteps, store: store.code, windowEnd: new Date(weMs).toISOString(), fetched, inserted });
+      // Report CUMULATIVE totals (prior stores + this store so far) so the live
+      // counters never go backwards when moving to the next store.
+      if (onProgress) onProgress({ step, totalSteps, store: store.code, windowEnd: new Date(weMs).toISOString(), fetched: totalFetched + fetched, inserted: totalInserted + inserted });
     }
     perStore.push({ code: store.code, fetched, inserted, error });
     totalFetched += fetched; totalInserted += inserted;

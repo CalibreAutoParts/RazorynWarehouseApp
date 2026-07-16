@@ -1,6 +1,6 @@
 // routes/settings.js — global app settings + manual sync trigger
 const express = require('express');
-const { query } = require('../db');
+const { query, withTx } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 const sync = require('../services/sync');
@@ -314,14 +314,18 @@ router.post('/cleanup-shopify-duplicates', requireAdmin, async (req, res) => {
         if (!found.rows[0]) continue;
         const saleId = found.rows[0].id;
         try {
-          // Reverse the stock this duplicate wrongly decremented.
-          const items = await query(`SELECT product_id, qty FROM sale_items WHERE sale_id = $1 AND product_id IS NOT NULL`, [saleId]);
-          for (const it of items.rows) {
-            await query(`UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2`, [it.qty, it.product_id]);
-            await query(`INSERT INTO stock_movements (product_id, delta, reason, performed_by) VALUES ($1,$2,'shopify_channel_cleanup',$3)`, [it.product_id, it.qty, userId]);
-          }
-          await query(`INSERT INTO deleted_external_orders (channel, external_order_id, deleted_by) VALUES ('shopify',$1,$2) ON CONFLICT (external_order_id) DO NOTHING`, [String(order.id), userId]).catch(() => {});
-          await query(`DELETE FROM sales WHERE id = $1`, [saleId]);
+          // Reverse stock + tombstone + delete atomically, so a partial failure
+          // can't leave stock restored while the sale survives (a re-run would then
+          // restore stock a second time).
+          await withTx(async (c) => {
+            const items = await c.query(`SELECT product_id, qty FROM sale_items WHERE sale_id = $1 AND product_id IS NOT NULL`, [saleId]);
+            for (const it of items.rows) {
+              await c.query(`UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2`, [it.qty, it.product_id]);
+              await c.query(`INSERT INTO stock_movements (product_id, delta, reason, performed_by) VALUES ($1,$2,'shopify_channel_cleanup',$3)`, [it.product_id, it.qty, userId]);
+            }
+            await c.query(`INSERT INTO deleted_external_orders (channel, external_order_id, deleted_by) VALUES ('shopify',$1,$2) ON CONFLICT (external_order_id) DO NOTHING`, [String(order.id), userId]);
+            await c.query(`DELETE FROM sales WHERE id = $1`, [saleId]);
+          });
           shopifyCleanupStatus.removed++;
           shopifyCleanupStatus.revenueRemoved += parseFloat(found.rows[0].total) || 0;
         } catch (e) { console.warn('[cleanup-shopify] remove failed:', e.message); }
