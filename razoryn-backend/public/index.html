@@ -16203,6 +16203,10 @@ function renderSettings() {
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">
             Branded header/footer wrapped around each listing's description when you click <strong>🏷 Apply eBay template</strong> in the Listing Mirror. Inline-styled HTML only (eBay strips scripts). Tokens: <code>{{brand}}</code> <code>{{tagline}}</code> <code>{{domain}}</code> <code>{{title}}</code> <code>{{sku}}</code> <code>{{partno}}</code>.
           </p>
+          <div style="display:grid;grid-template-columns:120px 1fr;gap:12px;margin-bottom:10px">
+            <div class="field"><label>Returns window (days)</label><input id="tpl-returns-days" type="number" min="0" max="365" placeholder="e.g. 30"><div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Default for NEW listings. Existing listings show their real eBay policy.</div></div>
+            <div class="field"><label>Delivery line</label><input id="tpl-delivery-blurb" type="text" placeholder="Same-day dispatch when paid before 12pm (Mon–Fri). Please leave a mobile number."></div>
+          </div>
           <div class="field"><label>Header HTML (before the description)</label><textarea id="tpl-header" rows="6" style="font-family:ui-monospace,monospace;font-size:12px"></textarea></div>
           <div class="field"><label>Footer HTML (after the description)</label><textarea id="tpl-footer" rows="6" style="font-family:ui-monospace,monospace;font-size:12px"></textarea></div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -16839,11 +16843,16 @@ async function loadEbayTemplate() {
     _ebayTplDefaults = r.defaults || { header: '', footer: '' };
     if (el('tpl-header')) el('tpl-header').value = r.header || '';
     if (el('tpl-footer')) el('tpl-footer').value = r.footer || '';
+    if (el('tpl-returns-days')) el('tpl-returns-days').value = r.returnsDays || '';
+    if (el('tpl-delivery-blurb')) el('tpl-delivery-blurb').value = r.deliveryBlurb || '';
   } catch (_) {}
 }
 async function saveEbayTemplate() {
   try {
-    await Api.post('/api/listings/ebay-template', { header: el('tpl-header').value, footer: el('tpl-footer').value });
+    await Api.post('/api/listings/ebay-template', {
+      header: el('tpl-header').value, footer: el('tpl-footer').value,
+      returnsDays: el('tpl-returns-days')?.value || '', deliveryBlurb: el('tpl-delivery-blurb')?.value || '',
+    });
     toast('eBay template saved', 'success');
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }

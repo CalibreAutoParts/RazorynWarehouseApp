@@ -875,6 +875,18 @@ async function getItemDetails(itemId, storeArg) {
   let desc = (extractOne(xml, 'Description') || '').replace(/^<!\[CDATA\[/, '').replace(/\]\]>$/, '');
   desc = decodeEntities(desc);
   const primaryCat = extractOne(xml, 'PrimaryCategory') || '';
+  // Real returns + dispatch terms for THIS listing (from the ReturnAll XML) so the
+  // description can show the true window instead of a hardcoded claim.
+  // ReturnsWithinOption is like "Days_30" / "Months_1"; ReturnsAcceptedOption is
+  // "ReturnsAccepted" / "ReturnsNotAccepted". DispatchTimeMax = handling days.
+  const returnBlock = extractOne(xml, 'ReturnPolicy') || '';
+  const returnsWithin = extractOne(returnBlock, 'ReturnsWithinOption') || '';
+  const returnsAcceptedRaw = extractOne(returnBlock, 'ReturnsAcceptedOption') || '';
+  const wm = returnsWithin.match(/(\d+)/);
+  const returnsWithinDays = wm
+    ? (/month/i.test(returnsWithin) ? parseInt(wm[1]) * 30 : parseInt(wm[1]))
+    : null;
+  const dispatchMax = extractOne(xml, 'DispatchTimeMax');
   return {
     itemId: String(itemId),
     title: decodeEntities(extractOne(xml, 'Title') || ''),
@@ -885,6 +897,11 @@ async function getItemDetails(itemId, storeArg) {
     categoryName: decodeEntities(extractOne(primaryCat, 'CategoryName') || '') || null,
     pictureUrls: extractAll(xml, 'PictureURL').map(decodeEntities),
     specifics,
+    returns: {
+      accepted: returnsAcceptedRaw ? !/not/i.test(returnsAcceptedRaw) : null,
+      withinDays: returnsWithinDays,
+    },
+    dispatchDays: dispatchMax != null && dispatchMax !== '' ? parseInt(dispatchMax) : null,
     storeCode: resolveStore(storeArg)?.code,
   };
 }
