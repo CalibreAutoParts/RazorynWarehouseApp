@@ -2016,15 +2016,26 @@ function enterApp() {
     try {
       await Store.refresh('notifications');
       if (['dashboard','inventory'].includes(State.page)) await Store.refresh('products');
-      if (State.page === 'sales' || State.page === 'dashboard') {
+      if (State.page === 'dashboard') {
         await Store.refresh('sales');
-        // Detect new sales
         const currentIds = new Set((State.sales || []).map(s => s.id));
         const newOnes = (State.sales || []).filter(s => !lastSalesIds.has(s.id));
-        if (newOnes.length && lastSalesIds.size > 0) {
-          for (const s of newOnes) notifyNewSale(s);
-        }
+        if (newOnes.length && lastSalesIds.size > 0) { for (const s of newOnes) notifyNewSale(s); }
         lastSalesIds = currentIds;
+      } else if (State.page === 'sales') {
+        // Re-fetch respecting the user's active date window (salesReload, not the
+        // 200-row default loader that would shrink/replace the filtered list), and
+        // let it re-render — the tab/search/period are restored from State. Skip
+        // entirely while the user is typing/interacting so we never yank focus.
+        const a0 = document.activeElement;
+        const busy = a0 && /^(INPUT|TEXTAREA|SELECT)$/.test(a0.tagName) && document.getElementById('content')?.contains(a0);
+        if (!busy && typeof salesReload === 'function') {
+          const prev = lastSalesIds;
+          try { await salesReload(); } catch (_) {}
+          const newOnes = (State.sales || []).filter(s => !prev.has(s.id));
+          if (newOnes.length && prev.size > 0) { for (const s of newOnes) notifyNewSale(s); }
+          lastSalesIds = new Set((State.sales || []).map(s => s.id));
+        }
       }
       if (State.page === 'returns') await Store.refresh('returns');
       else { try { await Store.refresh('returns'); } catch (e) {} }  // background refresh so return notifications can fire from any page
@@ -2064,7 +2075,7 @@ function enterApp() {
       const repaintMap = {
         dashboard: typeof renderDashboard === 'function' ? renderDashboard : null,
         inventory: typeof renderInventory === 'function' ? renderInventory : null,
-        sales: typeof renderSales === 'function' ? renderSales : null,
+        sales: null,   // handled above via salesReload (respects the active filter)
         returns: typeof renderReturns === 'function' ? renderReturns : null,
         schedule: typeof renderSchedule === 'function' ? renderSchedule : null,
       };
@@ -7393,7 +7404,14 @@ function renderSales() {
   function paintTable(filter='all') {
     const subset = applyFilter(filter);
     State._salesFiltered = subset;
-    el('sales-tbody').innerHTML = subset.length ? subset.map(s => {
+    // Cap the number of DOM rows — a "This year" view can be 1000s of rows and
+    // rendering them all at once freezes the browser ("page unresponsive"). Totals
+    // above still cover the whole set (paintStats uses the full list).
+    const CAP = 300;
+    const shown = subset.slice(0, CAP);
+    // Precompute open-return sale IDs ONCE (was an O(rows × returns) scan per row).
+    const _openReturnSaleIds = new Set((State.returns || []).filter(r => ['open','received','pending'].includes(r.status)).map(r => String(r.saleId)));
+    el('sales-tbody').innerHTML = shown.length ? (shown.map(s => {
       // Pro-forma badge for estimates that have a payment method (created via Quote Builder)
       // vs vanilla "ESTIMATE" for legacy estimates without one. Either way payment method
       // is locked — staff can't change it via the UI once the row exists.
@@ -7428,7 +7446,7 @@ function renderSales() {
         ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--red-light);color:var(--red);font-weight:700" title="Order fully refunded — excluded from revenue, sales count and dispatch">↩ Refunded</span>`
         : (s.isPartlyRefunded ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--amber-light);color:var(--amber)" title="Partially refunded ${gbp(s.refundedAmount)} — the refund is netted off revenue">↩ −${gbp(s.refundedAmount)}</span>` : '');
       // An OPEN return (not yet refunded) — its value is provisionally deducted from the totals.
-      const openReturnBadge = (!s.isRefunded && (State.returns || []).some(r => String(r.saleId) === String(s.id) && ['open','received','pending'].includes(r.status)))
+      const openReturnBadge = (!s.isRefunded && _openReturnSaleIds.has(String(s.id)))
         ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--amber-light);color:var(--amber);font-weight:700" title="A return is open on this order — its value is deducted from the sales total until it's resolved">↩ Return open</span>` : '';
       // Amount cell: show what actually counts (net); strike the gross when refunded.
       const amountCell = (s.isRefunded || s.isPartlyRefunded)
@@ -7470,18 +7488,23 @@ function renderSales() {
           <button class="btn btn-ghost btn-sm" onclick="deleteSale('${s.id}', ${s.isEstimate})" title="Delete this ${s.isEstimate ? 'estimate' : 'invoice'} ${!s.isEstimate ? '(restores stock)' : ''}" style="color:var(--red)">🗑</button>
         </td>
       </tr>
-    `; }).join('') : '<tr><td colspan="8"><div class="empty"><div class="t">No ' + (filter === 'estimates' ? 'estimates' : 'sales') + '</div></div></td></tr>';
+    `; }).join('') + (subset.length > CAP ? `<tr><td colspan="8" style="text-align:center;padding:14px;color:var(--ink-soft)">Showing the first ${CAP} of ${subset.length.toLocaleString()} — narrow with the search box, a channel tab, or a shorter date range to see the rest. Totals above cover all ${subset.length.toLocaleString()}.</td></tr>` : '')) : '<tr><td colspan="8"><div class="empty"><div class="t">No ' + (filter === 'estimates' ? 'estimates' : 'sales') + '</div></div></td></tr>';
     salesUpdateBulkBar();
   }
-  let currentFilter = 'all';
-  paintStats(); paintTable();
+  // Restore the active tab + search from State so a background refresh (or any
+  // re-render) doesn't reset the user's filter back to "All channels".
+  let currentFilter = State.salesTab || 'all';
+  document.querySelectorAll('[data-sf]').forEach(x => x.classList.toggle('active', x.dataset.sf === currentFilter));
+  const salesSearch = el('sales-search');
+  if (salesSearch && State.salesSearch) salesSearch.value = State.salesSearch;
+  paintStats(currentFilter); paintTable(currentFilter);
   document.querySelectorAll('[data-sf]').forEach(b => b.addEventListener('click', () => {
     document.querySelectorAll('[data-sf]').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     currentFilter = b.dataset.sf;
+    State.salesTab = currentFilter;
     paintStats(currentFilter); paintTable(currentFilter);
   }));
-  const salesSearch = el('sales-search');
   if (salesSearch) salesSearch.addEventListener('input', () => {
     State.salesSearch = salesSearch.value;
     paintTable(currentFilter);
