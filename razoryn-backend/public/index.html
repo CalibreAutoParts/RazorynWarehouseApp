@@ -7900,15 +7900,33 @@ async function openSaleDetail(id) {
         ${parseFloat(s.shipping) > 0 ? `<div style="text-align:right;color:var(--ink-soft)">Shipping</div><div style="text-align:right">${fmt(s.shipping)}</div>` : ''}
         <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px">Total</div>
         <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px">${fmt(s.total)}</div>
+        ${(parseFloat(s.refunded_amount) > 0 || s.status === 'refunded') ? `
+          <div style="text-align:right;color:var(--amber)">Returned / refunded</div><div style="text-align:right;color:var(--amber)">−${fmt(s.status === 'refunded' ? s.total : s.refunded_amount)}</div>
+          <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px">${s.is_paid === false ? 'Now to pay' : 'Net value'}</div>
+          <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px;color:var(--green)">${fmt(s.status === 'refunded' ? 0 : (parseFloat(s.total) - parseFloat(s.refunded_amount || 0)))}</div>` : ''}
       </div>
     `,
     actions: [
       { label: 'Close', onClick: closeModal },
       ...(!s.is_estimate ? [{ label: '↩ Log return', onClick: () => openReturnFromSale(id) }] : []),
+      ...(!s.is_estimate && (parseFloat(s.refunded_amount) > 0 || s.status === 'refunded') ? [{ label: '↩ Undo returns / reopen', onClick: () => undoReturnsForSale(id) }] : []),
       { label: '✉ Email', onClick: () => { closeModal(); emailSingleInvoice(id); } },
       { label: '🖨 Print / PDF', primary: true, onClick: () => { closeModal(); printSingleInvoice(id); } },
     ],
   });
+}
+
+// Remove ALL returns booked against a sale, reverse the restock, and reopen the
+// invoice — for fixing a mistaken or duplicated return so it can be re-done.
+async function undoReturnsForSale(id) {
+  if (!confirm('Remove ALL returns booked on this order and reopen the invoice?\n\nThis reverses the restock (takes those items back OUT of stock) and clears the refund, so the invoice returns to its full value and you can re-book the return correctly. Use this to fix a mistaken or duplicated return.')) return;
+  try {
+    const r = await Api.post('/api/returns/undo-for-sale/' + id, {});
+    toast(`Reopened — removed ${r.removed} return(s) and reversed the restock. You can now re-book the return.`, 'success', 8000);
+    closeModal();
+    await Store.refresh('sales'); await Store.refresh('products').catch(() => {}); await Store.refresh('returns').catch(() => {});
+    if (State.page === 'sales' && typeof renderSales === 'function') renderSales();
+  } catch (e) { toast('Undo failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 async function emailSingleInvoice(id) {
@@ -18259,15 +18277,18 @@ async function openReturnFromSale(saleId) {
         <select id="rfs-reason"><option>Customer changed mind</option><option>Faulty / damaged</option><option>Wrong part</option><option>Didn't fit</option><option>Other</option></select></div>
       <div class="field"><label>Notes (optional)</label><input id="rfs-notes" placeholder="e.g. refunded in cash, part back on shelf"></div>
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:6px"><input type="checkbox" id="rfs-restock" checked> Put the item(s) back into stock</label>
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:6px"><input type="checkbox" id="rfs-refunded" checked> Mark the whole invoice as refunded</label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:6px"><input type="checkbox" id="rfs-refunded"> Void the WHOLE invoice (full return — nothing left to pay)</label>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Leave the box <strong>off</strong> for a partial return: the invoice stays open for the items the customer kept, and its value drops by what you returned so you can mark the rest paid.</div>
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
-      { label: '↩ Book return', primary: true, onClick: () => submitReturnFromSale(saleId) },
+      { label: '↩ Book return', primary: true, onClick: (ev) => submitReturnFromSale(saleId, ev) },
     ],
   });
 }
-async function submitReturnFromSale(saleId) {
+let _rfsBusy = false;   // guards against a double-click booking the return twice
+async function submitReturnFromSale(saleId, ev) {
+  if (_rfsBusy) return;
   const items = (window._rfsItems || []).map((it, i) => {
     const picked = document.querySelector(`.rfs-pick[data-i="${i}"]`)?.checked;
     if (!picked) return null;
@@ -18278,6 +18299,9 @@ async function submitReturnFromSale(saleId) {
     };
   }).filter(Boolean);
   if (!items.length) { toast('Pick at least one item to return', 'warn'); return; }
+  _rfsBusy = true;
+  const btn = ev && ev.target && ev.target.closest ? ev.target.closest('button') : null;
+  if (btn) btn.disabled = true;
   const taskId = Task.start('Booking return');
   try {
     const r = await Api.post('/api/returns/from-sale', {
@@ -18289,15 +18313,17 @@ async function submitReturnFromSale(saleId) {
       notes: el('rfs-notes')?.value || null,
     });
     Task.done(taskId, 'Returned');
-    toast(`Return booked · £${Number(r.totalRefund || 0).toFixed(2)} refunded${r.restocked ? ' · stock restored' : ''}`, 'success', 6000);
+    toast(`Return booked · £${Number(r.totalRefund || 0).toFixed(2)} deducted${r.restocked ? ' · stock restored' : ''}`, 'success', 6000);
     closeModal();
     await Store.refresh('sales');
     await Store.refresh('products').catch(() => {});
+    await Store.refresh('returns').catch(() => {});
     if (typeof renderSales === 'function' && State.page === 'sales') renderSales();
   } catch (e) {
     Task.fail(taskId, 'Failed');
-    toast('Return failed: ' + (e.data?.message || e.message), 'error');
-  }
+    if (e.data?.error === 'duplicate_return') { toast('That return was already logged a moment ago — nothing was duplicated.', 'warn', 7000); closeModal(); await Store.refresh('sales').catch(()=>{}); if (State.page === 'sales') renderSales(); }
+    else { toast('Return failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
+  } finally { _rfsBusy = false; }
 }
 
 async function deleteSale(id, isEstimate) {

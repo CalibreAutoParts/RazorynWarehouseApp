@@ -112,6 +112,16 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
   const sale = saleRes.rows[0];
   if (!sale) return res.status(404).json({ error: 'sale_not_found' });
 
+  // Guard against a double-submit (rapid duplicate) creating two identical returns
+  // — double-restocking stock and double-refunding. If a return for this order was
+  // logged in the last 20s, treat this as the accidental second click and no-op.
+  try {
+    const recent = await query(`SELECT COUNT(*)::int AS n FROM returns WHERE sale_id = $1 AND created_at > now() - interval '20 seconds'`, [b.saleId]);
+    if (recent.rows[0].n > 0) {
+      return res.status(409).json({ error: 'duplicate_return', message: 'A return was just logged for this order a moment ago — refresh to see it. (Prevented a duplicate.)' });
+    }
+  } catch (_) { /* non-fatal */ }
+
   const restock = b.restock !== false;
   const result = await withTx(async (c) => {
     let created = 0, restocked = 0, totalRefund = 0;
@@ -159,6 +169,58 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
     }
   }
   res.json({ ok: true, ...result });
+});
+
+// Reverse a return's effect on a sale + stock, then refold refunds and reopen the
+// invoice if it's no longer fully refunded. Shared by DELETE /:id and undo-for-sale.
+async function reverseReturnRow(c, ret, userId) {
+  if (ret.resolution === 'restock' && ret.product_id && ret.qty) {
+    await c.query(`UPDATE products SET qty_on_hand = qty_on_hand - $1 WHERE id = $2`, [ret.qty, ret.product_id]);
+    await c.query(`INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by) VALUES ($1,$2,'return_reversed',$3,$4)`, [ret.product_id, -ret.qty, ret.id, userId]);
+  }
+  await c.query(`DELETE FROM return_photos WHERE return_id = $1`, [ret.id]).catch(() => {});
+  await c.query(`DELETE FROM returns WHERE id = $1`, [ret.id]);
+}
+async function refoldAndReopen(saleId) {
+  if (!saleId) return;
+  try { await reconcileSaleRefund(saleId); } catch (_) {}
+  try {
+    const s = await query(`SELECT total, refunded_amount, status FROM sales WHERE id = $1`, [saleId]);
+    const row = s.rows[0];
+    // If it was flipped to 'refunded' but is no longer fully refunded, reopen it so
+    // the remaining balance can be marked paid.
+    if (row && row.status === 'refunded' && parseFloat(row.refunded_amount || 0) < parseFloat(row.total) - 0.005) {
+      await query(`UPDATE sales SET status = 'paid' WHERE id = $1`, [saleId]);
+    }
+  } catch (_) {}
+}
+
+// DELETE /api/returns/:id — remove ONE return: reverse its restock, drop its
+// refund from the sale, reopen the invoice if it's no longer fully refunded.
+router.delete('/:id', requirePermission('returns'), async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'bad_id' });
+  const r = await query(`SELECT * FROM returns WHERE id = $1`, [id]);
+  const ret = r.rows[0];
+  if (!ret) return res.status(404).json({ error: 'not_found' });
+  await withTx(async (c) => { await reverseReturnRow(c, ret, req.user.id); });
+  await refoldAndReopen(ret.sale_id);
+  await audit(req, 'delete_return', 'return', id, { saleId: ret.sale_id, qty: ret.qty, refund: ret.refund_amount });
+  res.json({ ok: true, saleId: ret.sale_id });
+});
+
+// POST /api/returns/undo-for-sale/:saleId — remove ALL returns booked against a
+// sale (reversing every restock) and reopen the invoice. For fixing a mis-booked
+// or duplicated return so it can be re-done correctly.
+router.post('/undo-for-sale/:saleId', requirePermission('returns'), async (req, res) => {
+  const saleId = parseInt(req.params.saleId);
+  if (!saleId) return res.status(400).json({ error: 'bad_id' });
+  const rows = (await query(`SELECT * FROM returns WHERE sale_id = $1`, [saleId])).rows;
+  if (!rows.length) return res.json({ ok: true, removed: 0 });
+  await withTx(async (c) => { for (const ret of rows) await reverseReturnRow(c, ret, req.user.id); });
+  await refoldAndReopen(saleId);
+  await audit(req, 'undo_returns_for_sale', 'sale', saleId, { removed: rows.length });
+  res.json({ ok: true, removed: rows.length });
 });
 
 // POST /api/returns/:id/photos  (multipart)
