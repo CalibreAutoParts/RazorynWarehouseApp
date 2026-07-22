@@ -62,10 +62,11 @@ const CARRIERS = {
   'Evri':         'https://www.evri.com/track/parcel/{tracking}',
   'FedEx':        'https://www.fedex.com/fedextrack/?trknbr={tracking}',
   'DHL':          'https://www.dhl.com/gb-en/home/tracking.html?tracking-id={tracking}',
-  // Proovia + Dropfleet: URL tracking pages (owner to confirm the exact {tracking}
-  // deep-link; left as null until then so we just show the number to type on their site).
+  // Proovia + Dropfleet are URL-tracked (no delivery API). DropFleet uses a single
+  // track landing page (numbers start "DFDX") — no per-parcel deep-link, so we link
+  // to the page and show the number to type in. Proovia deep-link still unknown.
   'Proovia':      null,
-  'Dropfleet':    null,
+  'Dropfleet':    'https://www.dropfleet.co.uk/track',
   'Other / custom courier': null,  // free text, no auto-track link
 };
 // Carriers eBay recognises natively (so we send the real name); others map to 'Other'
@@ -758,6 +759,10 @@ async function flagStaleShipments() {
       WHERE s.is_estimate = false AND s.dispatched_at IS NOT NULL
         AND s.delivered_at IS NULL AND (s.shipping_status IS NULL OR s.shipping_status NOT IN ('delivered','lost','issue'))
         AND COALESCE(s.fulfillment_method, CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
+        -- Skip carriers we can't auto-confirm delivery for (DropFleet / Proovia are
+        -- URL-tracked only). Otherwise they ALWAYS trip "possible lost" at 21 days
+        -- even though they're fine — a false-positive spam source. Track them by hand.
+        AND COALESCE(LOWER(s.carrier), '') NOT IN ('dropfleet', 'drop fleet', 'proovia')
         AND s.dispatched_at >= now() - INTERVAL '120 days'`);
     for (const s of rows) {
       const dit = Math.floor(parseFloat(s.days_in_transit) || 0);
