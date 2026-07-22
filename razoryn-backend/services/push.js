@@ -71,8 +71,19 @@ async function removeSubscription(endpoint) {
 // Send a push to every subscribed device (best-effort). Dead subscriptions
 // (404/410 Gone) are pruned automatically. Never throws — push is auxiliary to
 // the in-app notification, so a failure must not break the caller.
-async function sendToAll({ title, body, url, tag, category } = {}) {
+// Per-category cooldown so a sync sweep that pushes once PER low-stock item or
+// PER new return (inside a loop) can't blast a burst of OS notifications. The
+// first push of a category goes out; further pushes of the same category within
+// the window are dropped (the in-app notifications list still records them all).
+const _lastPushByCategory = {};
+const PUSH_COOLDOWN_MS = 45_000;
+async function sendToAll({ title, body, url, tag, category, force } = {}) {
   try {
+    if (category && !force) {
+      const last = _lastPushByCategory[category] || 0;
+      if (Date.now() - last < PUSH_COOLDOWN_MS) return { sent: 0, throttled: true };
+      _lastPushByCategory[category] = Date.now();
+    }
     await ensureSetup();
     const { rows } = await query(`SELECT endpoint, p256dh, auth FROM push_subscriptions`);
     if (!rows.length) return { sent: 0, total: 0 };

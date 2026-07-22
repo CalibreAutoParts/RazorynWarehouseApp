@@ -1490,7 +1490,34 @@ function adaptNotification(n) {
     severity: n.severity,
     read: !!n.read_at,
     date: n.created_at,
+    relatedType: n.related_type || null,
+    relatedId: n.related_id != null ? n.related_id : null,
   };
+}
+// Where a notification should take you when clicked. Shipment alerts carry
+// related_type='sale' but should open Dispatch; everything else follows related_type.
+function notifTarget(n) {
+  if (String(n.type || '').startsWith('shipment_')) return { page: 'dispatch' };
+  switch (n.relatedType) {
+    case 'sale': return n.relatedId ? { action: () => openSaleDetail(n.relatedId) } : { page: 'sales' };
+    case 'product': return { page: 'inventory' };
+    case 'return': return { page: 'returns' };
+    case 'competitor_listing': return { page: 'competitors' };
+    default:
+      // Fall back on the notification type for the ones with no related_type.
+      if (n.type === 'payment_followup') return { page: 'sales' };
+      if (String(n.type || '').startsWith('ebay_prelist')) return { page: 'createlisting' };
+      return null;
+  }
+}
+function openNotif(id) {
+  const n = (State.notifications || []).find(x => String(x.id) === String(id));
+  if (!n) return;
+  if (!n.read) { markRead(id); }
+  const t = notifTarget(n);
+  if (!t) return;
+  if (t.action) t.action();
+  else if (t.page) routeTo(t.page);
 }
 
 /* ==========================================================
@@ -2020,7 +2047,7 @@ function enterApp() {
         await Store.refresh('sales');
         const currentIds = new Set((State.sales || []).map(s => s.id));
         const newOnes = (State.sales || []).filter(s => !lastSalesIds.has(s.id));
-        if (newOnes.length && lastSalesIds.size > 0) { for (const s of newOnes) notifyNewSale(s); }
+        if (newOnes.length && lastSalesIds.size > 0) notifyNewSalesBatch(newOnes);
         lastSalesIds = currentIds;
       } else if (State.page === 'sales') {
         // Re-fetch respecting the user's active date window (salesReload, not the
@@ -2033,7 +2060,7 @@ function enterApp() {
           const prev = lastSalesIds;
           try { await salesReload(); } catch (_) {}
           const newOnes = (State.sales || []).filter(s => !prev.has(s.id));
-          if (newOnes.length && prev.size > 0) { for (const s of newOnes) notifyNewSale(s); }
+          if (newOnes.length && prev.size > 0) notifyNewSalesBatch(newOnes);
           lastSalesIds = new Set((State.sales || []).map(s => s.id));
         }
       }
@@ -2045,16 +2072,14 @@ function enterApp() {
       //   • Existing return's status flipped from open-ish to closed → "return closed"
       if (Array.isArray(State.returns) && lastReturnsState.size > 0) {
         const closedStatuses = new Set(['closed', 'resolved', 'completed', 'cancelled']);
+        const opened = [], closed = [];
         for (const r of State.returns) {
           const prev = lastReturnsState.get(r.id);
-          if (prev === undefined) {
-            // Brand-new return that wasn't here last poll
-            notifyNewReturn(r);
-          } else if (prev !== r.status && closedStatuses.has(String(r.status || '').toLowerCase()) && !closedStatuses.has(String(prev || '').toLowerCase())) {
-            // Status transitioned into a closed-ish state
-            notifyReturnClosed(r);
-          }
+          if (prev === undefined) opened.push(r);
+          else if (prev !== r.status && closedStatuses.has(String(r.status || '').toLowerCase()) && !closedStatuses.has(String(prev || '').toLowerCase())) closed.push(r);
         }
+        if (opened.length) notifyReturnsBatch(opened, false);
+        if (closed.length) notifyReturnsBatch(closed, true);
       }
       lastReturnsState = new Map((State.returns || []).map(r => [r.id, r.status]));
       // Low-stock detection — when a product crosses from healthy → at-or-below
@@ -2142,6 +2167,42 @@ function notifyLowStock(productIds) {
   } catch (e) {}
   Sounds.playForLowStock();
   toast(`${title} · ${body}`, 'warn');
+}
+
+// Batched new-order alert — ONE notification/toast/sound for all orders that
+// arrived in a poll cycle (was one-per-order, which spammed the tray). A shared
+// tag means consecutive batches collapse in the OS tray instead of stacking.
+function notifyNewSalesBatch(sales) {
+  if (!sales || !sales.length) return;
+  const total = sales.reduce((a, s) => a + parseFloat(s.amount || s.total || 0), 0);
+  let title, body;
+  if (sales.length === 1) {
+    const s = sales[0];
+    title = `New ${(s.channel || 'order').replace(/_/g, ' ')} order · £${parseFloat(s.amount || 0).toFixed(2)}`;
+    body = `${s.customer || 'Customer'}${s.invoice ? ' · ' + s.invoice : ''}`;
+  } else {
+    title = `${sales.length} new orders · £${total.toFixed(2)}`;
+    body = sales.slice(0, 3).map(s => s.customer || 'Customer').join(', ') + (sales.length > 3 ? ` +${sales.length - 3} more` : '');
+  }
+  try { if ('Notification' in window && Notification.permission === 'granted') { const n = new Notification(title, { body, icon: (State.brand?.logoUrl || '/logo.png'), tag: 'sales-batch' }); n.onclick = () => { window.focus(); routeTo('sales'); }; } } catch (e) {}
+  try { if ('vibrate' in navigator) navigator.vibrate([100, 50, 100]); } catch (e) {}
+  Sounds.playForSale();
+  toast(`${title} · ${body}`, 'success', 6000);
+}
+
+// Batched returns alert (opened or closed) — one notification/toast/sound per batch.
+function notifyReturnsBatch(returns, isClosed) {
+  if (!returns || !returns.length) return;
+  const first = returns[0];
+  const sku = first.sku || first.product_sku || '';
+  const title = returns.length === 1 ? (isClosed ? 'Return closed' : 'New return opened')
+    : `${returns.length} returns ${isClosed ? 'closed' : 'opened'}`;
+  const body = returns.length === 1
+    ? (isClosed ? `${sku} · ${first.status}`.replace(/^ · /, '') : `${sku} · ${first.reason || first.reason_code || 'return'}`.replace(/^ · /, ''))
+    : `${sku || first.title || 'return'}${returns.length > 1 ? ` +${returns.length - 1} more` : ''}`;
+  try { if ('Notification' in window && Notification.permission === 'granted') { const n = new Notification(title, { body, icon: (State.brand?.logoUrl || '/logo.png'), tag: isClosed ? 'returns-closed-batch' : 'returns-batch' }); n.onclick = () => { window.focus(); routeTo('returns'); }; } } catch (e) {}
+  if (isClosed) Sounds.playForReturnClosed(); else Sounds.playForReturn();
+  toast(`${title} · ${body}`, isClosed ? 'success' : 'warn', 6000);
 }
 
 function notifyNewSale(sale) {
@@ -6816,8 +6877,13 @@ function dispatchTrackingUrl(carrier, tracking) {
     'Tuffnells':    `https://www.tuffnells.co.uk/track-a-parcel?consignment=${t}`,
     'Yodel':        `https://www.yodel.co.uk/tracking/${t}`,
     'APC Overnight': `https://apc-overnight.com/customers/tracking-customer-portal?jobref=${t}`,
+    // DropFleet has a single track landing page (numbers start "DFDX") — no
+    // per-parcel deep-link, so we open the page; the number is shown next to it.
+    'DropFleet':    `https://www.dropfleet.co.uk/track`,
   };
-  return templates[carrier] || null;
+  // Case-insensitive lookup so 'Dropfleet' / 'DropFleet' both resolve.
+  const key = Object.keys(templates).find(k => k.toLowerCase() === String(carrier).toLowerCase());
+  return key ? templates[key] : null;
 }
 
 // Human-friendly age — "2 hr", "1 day", "3 days". Optional pill formatting:
@@ -10358,23 +10424,28 @@ function paintNotifs() {
   const list = el('notif-list');
   if (!list) return;
   list.innerHTML = State.notifications.length ? State.notifications.map(n => {
-    const icon = (n.type === 'low_stock' || n.type === 'low-stock') ? '⚠️'
-               : n.type === 'return' ? '↩️'
-               : n.type === 'sync_error' ? '🔄'
-               : n.type === 'sale' ? '💰'
+    const t = String(n.type || '');
+    const icon = /low.?stock/.test(t) ? '⚠️'
+               : t.startsWith('return') ? '↩️'
+               : t.startsWith('shipment_') ? '📦'
+               : t.startsWith('sync') || t === 'sync_error' ? '🔄'
+               : t === 'payment_followup' ? '⏳'
+               : t === 'sale' ? '💰'
+               : t.startsWith('preorder') || t.startsWith('incoming') ? '📥'
                : '🔔';
     const severityBg = n.severity === 'error' ? 'background:var(--red-light)'
                      : n.severity === 'warn' ? 'background:var(--amber-light)'
                      : '';
+    const clickable = !!notifTarget(n);
     return `
-    <div style="display:flex;align-items:flex-start;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);${n.read ? '' : severityBg || 'background:var(--bg-soft)'}">
+    <div ${clickable ? `onclick="openNotif('${n.id}')" style="cursor:pointer;` : 'style="'}display:flex;align-items:flex-start;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);${n.read ? '' : severityBg || 'background:var(--bg-soft)'}">
       <div style="font-size:20px">${icon}</div>
       <div style="flex:1">
         <div style="font-weight:${n.read?500:600};font-size:13px">${n.title || '(untitled)'}</div>
         ${n.body ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:3px">${n.body}</div>` : ''}
-        <div style="color:var(--ink-soft);font-size:11px;margin-top:4px">${fmtDate(n.date)}</div>
+        <div style="color:var(--ink-soft);font-size:11px;margin-top:4px">${fmtDate(n.date)}${clickable ? ' · <span style="color:var(--brand-primary)">tap to view →</span>' : ''}</div>
       </div>
-      ${!n.read ? `<button class="btn btn-ghost btn-sm" onclick="markRead('${n.id}')">Mark read</button>`:''}
+      ${!n.read ? `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();markRead('${n.id}')">Mark read</button>`:''}
     </div>
   `}).join('') : '<div class="empty"><div class="t">No notifications</div>You\'ll see low-stock alerts and returns here.</div>';
 }
