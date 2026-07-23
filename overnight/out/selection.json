@@ -1,0 +1,35 @@
+{
+  "run_date": "2026-07-23",
+  "store": "Razoryn eParts (razoryn.co.uk)",
+  "instagram": "@razorynautoparts (IG Business ID 27977252611965554)",
+  "selection_rule": "ACTIVE products created_at >= 2026-07-14, newest first, collapse left/right duplicates, prefer distinct vehicle models",
+  "selected": [
+    {
+      "product_id": "gid://shopify/Product/10950500319570",
+      "title": "Nissan Juke F16 2019-2026 Rear Quarter Left Wheel Arch Moulding",
+      "price_gbp": "25.26",
+      "created_at": "2026-07-16T22:50:16Z",
+      "url": "https://www.razoryn.co.uk/products/nissan-juke-f16-2019-2026-rear-quarter-left-wheel-arch-moulding",
+      "image_url": "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/4fd01220d822780bd01c2ccecfbcef73.jpg?v=1784242216",
+      "note": "Right side also available (same part)"
+    },
+    {
+      "product_id": "gid://shopify/Product/10950493995346",
+      "title": "Toyota Yaris 2020-2026 Front Right Foglamp Cover Grille",
+      "price_gbp": "55.57",
+      "created_at": "2026-07-16T22:37:42Z",
+      "url": "https://www.razoryn.co.uk/products/toyota-yaris-2020-2026-front-right-foglamp-cover-grille",
+      "image_url": "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/26797eb45b782c44441b837703eca4d3.jpg?v=1784241462",
+      "note": "Over £50 -> qualifies for free UK delivery"
+    },
+    {
+      "product_id": "gid://shopify/Product/10950484590930",
+      "title": "Nissan Qashqai J12 2020-2026 Front Left Foglamp Cover Grille",
+      "price_gbp": "33.24",
+      "created_at": "2026-07-16T22:24:51Z",
+      "url": "https://www.razoryn.co.uk/products/nissan-qashqai-j12-2020-2026-front-left-foglamp-cover-grille",
+      "image_url": "https://cdn.shopify.com/s/files/1/1033/6278/9714/files/029bb9865d8027de422ab91f60932dbf.jpg?v=1784240691",
+      "note": "Right side also available (same part)"
+    }
+  ]
+}
