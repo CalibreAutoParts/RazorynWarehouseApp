@@ -18,7 +18,8 @@
     "render:tiktok": "remotion render TikTokDeal out/tiktok/all.mp4",
     "render:parts": "remotion render PartsShowcase out/promos/parts-showcase.mp4",
     "render:site": "remotion render SiteShowcase out/promos/site-showcase.mp4",
-    "render:tiktok-all": "node render-tiktok.mjs"
+    "render:tiktok-all": "node render-tiktok.mjs",
+    "render:products": "node render-products.mjs"
   },
   "dependencies": {
     "@remotion/bundler": "^4.0.0",

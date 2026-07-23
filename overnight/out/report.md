@@ -62,6 +62,23 @@ cron/web run with Composio pre-authorised). Everything else is ready:
 Alternatively, if `cdn.shopify.com` were reachable locally, the videos could be rendered
 here with the local ffmpeg and only the publish step would need Composio.
 
+## UPDATE — manual render kit added (build the ads yourself)
+
+Since publishing via Composio was blocked and `cdn.shopify.com` is egress-blocked in
+this cloud sandbox (so the videos can't be rendered here), the three ads are now a
+one-command render you run on your own machine, where the Shopify photos are reachable:
+
+```
+cd ad-system/video
+npm install
+npm run render:products
+```
+
+Outputs `ad-system/video/out/products/{juke-f16-rear-arch,yaris-foglamp-grille,qashqai-j12-foglamp-grille}.mp4`
+— upload each as an Instagram Reel with the matching caption from `out/captions.md`.
+Full instructions + caption↔file mapping: `ad-system/video/PRODUCT_ADS_README.md`.
+The new `ProductAd` Remotion composition is driven entirely by `ad-system/video/src/products.json`.
+
 ## Files
 - `out/report.md` — this report
 - `out/selection.json` — chosen products, prices, URLs, image URLs

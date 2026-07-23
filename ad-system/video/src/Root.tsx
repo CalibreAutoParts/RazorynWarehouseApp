@@ -12,7 +12,9 @@ import {RhdHeadlights} from './RhdHeadlights';
 import {EbayTrust} from './EbayTrust';
 import {GenZParts} from './GenZParts';
 import {TikTokDeal} from './TikTokDeal';
+import {ProductAd, Product} from './ProductAd';
 import collectionsData from './collections.json';
+import productsData from './products.json';
 import {PARTS, MODELS} from './brand';
 
 const FPS = 30;
@@ -20,6 +22,7 @@ const INTRO = 48;   // 1.6s
 const PER = 48;     // 1.6s per part — snappy montage
 const OUTRO = 102;  // 3.4s — end card holds long enough to read
 const COLLECTIONS = collectionsData as Col[];
+const PRODUCTS = productsData as Product[];
 
 // generic "all cars" collection for the brand-level TikTok deal
 const TIKTOK_ALL: Col = {
@@ -87,6 +90,11 @@ export const RemotionRoot: React.FC = () => {
       {/* TikTok deal (code TIKTOK5) per collection — for A/B testing which model converts */}
       {COLLECTIONS.map((c) => (
         <Composition key={c.slug} id={`tiktok-${c.slug}`} component={TikTokDeal} durationInFrames={11 * FPS} fps={FPS} width={1080} height={1920} defaultProps={{col: c}} />
+      ))}
+
+      {/* Single-product Reels for Instagram — id: product-<id> (~20s, 1080x1920) */}
+      {PRODUCTS.map((p) => (
+        <Composition key={p.id} id={`product-${p.id}`} component={ProductAd} durationInFrames={20 * FPS} fps={FPS} width={1080} height={1920} defaultProps={{product: p}} />
       ))}
     </>
   );
