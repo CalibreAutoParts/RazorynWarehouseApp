@@ -106,6 +106,97 @@ router.get('/', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// GET /api/customers/from-sales — repeat-customer directory derived straight
+// from the sales table (no customers table needed). Groups every past sale by
+// customer email (falling back to name), so historical/unlinked orders are all
+// covered. Flags anyone with more than one order as a repeat customer.
+//   ?q=       — filter by name/email substring
+//   ?repeat=1 — only customers with >1 order
+//   ?sort=    — 'spend' (default) | 'orders' | 'recent'
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/from-sales', requireAdmin, async (req, res) => {
+  const q = (req.query.q || '').trim().toLowerCase();
+  const repeatOnly = req.query.repeat === '1' || req.query.repeat === 'true';
+  const sort = req.query.sort || 'spend';
+  const params = [];
+  const where = [
+    `s.is_estimate = false`,
+    `s.status NOT IN ('cancelled')`,
+    // Must have SOME identity to group on.
+    `COALESCE(NULLIF(TRIM(s.customer_name), ''), NULLIF(TRIM(s.customer_email), '')) IS NOT NULL`,
+  ];
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`(LOWER(s.customer_name) LIKE $${params.length} OR LOWER(s.customer_email) LIKE $${params.length})`);
+  }
+  const having = repeatOnly ? 'HAVING COUNT(*) > 1' : '';
+  const orderBy = sort === 'orders' ? 'order_count DESC, total_spend DESC'
+                : sort === 'recent' ? 'last_order DESC'
+                : 'total_spend DESC, order_count DESC';
+  // Grouping key: prefer a normalised email, else a normalised name. Representative
+  // name/email/phone taken from the most recent order via DISTINCT ON in a subquery
+  // would be ideal, but MAX() keeps this a single scan and is good enough for display.
+  const r = await query(`
+    WITH base AS (
+      SELECT s.*,
+        COALESCE(NULLIF(LOWER(TRIM(s.customer_email)), ''), LOWER(TRIM(s.customer_name))) AS grp
+      FROM sales s
+      WHERE ${where.join(' AND ')}
+    )
+    SELECT grp,
+      (ARRAY_AGG(customer_name ORDER BY occurred_at DESC))[1]                              AS name,
+      (ARRAY_AGG(NULLIF(TRIM(customer_email), '') ORDER BY occurred_at DESC) FILTER (WHERE NULLIF(TRIM(customer_email), '') IS NOT NULL))[1] AS email,
+      (ARRAY_AGG(NULLIF(TRIM(customer_phone), '') ORDER BY occurred_at DESC) FILTER (WHERE NULLIF(TRIM(customer_phone), '') IS NOT NULL))[1] AS phone,
+      COUNT(*)::int                                                                        AS order_count,
+      COALESCE(SUM(GREATEST(total - COALESCE(refunded_amount, 0), 0)), 0)                  AS total_spend,
+      MIN(occurred_at)                                                                     AS first_order,
+      MAX(occurred_at)                                                                     AS last_order,
+      STRING_AGG(DISTINCT channel, ',')                                                    AS channels
+    FROM base
+    GROUP BY grp
+    ${having}
+    ORDER BY ${orderBy}
+    LIMIT 1000
+  `, params);
+  const customers = r.rows.map(row => ({
+    ...row,
+    total_spend: Number(row.total_spend) || 0,
+    is_repeat: row.order_count > 1,
+    channels: (row.channels || '').split(',').filter(Boolean),
+  }));
+  const totals = {
+    customers: customers.length,
+    repeat: customers.filter(c => c.is_repeat).length,
+  };
+  await audit(req, 'view_customer_directory', 'customer', null); // GDPR: log customer-data read
+  res.json({ customers, totals });
+});
+
+// GET /api/customers/from-sales/orders?email=&name= — every order for one
+// customer, matched by email (preferred) or name. Powers the expand-row view.
+router.get('/from-sales/orders', requireAdmin, async (req, res) => {
+  const email = (req.query.email || '').trim().toLowerCase();
+  const name = (req.query.name || '').trim().toLowerCase();
+  if (!email && !name) return res.status(400).json({ error: 'email_or_name_required' });
+  const params = [];
+  const match = [];
+  if (email) { params.push(email); match.push(`LOWER(TRIM(s.customer_email)) = $${params.length}`); }
+  if (name)  { params.push(name);  match.push(`LOWER(TRIM(s.customer_name)) = $${params.length}`); }
+  const r = await query(`
+    SELECT s.id, s.channel, s.invoice_number, s.payment_reference, s.external_order_id,
+           s.customer_name, s.customer_email, s.total, COALESCE(s.refunded_amount, 0) AS refunded_amount,
+           s.status, s.is_estimate, s.payment_method, s.occurred_at,
+           (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS item_count
+    FROM sales s
+    WHERE (${match.join(' OR ')})
+    ORDER BY s.occurred_at DESC
+    LIMIT 200
+  `, params);
+  await audit(req, 'view_customer_orders', 'customer', null, { email, name }); // GDPR
+  res.json({ orders: r.rows });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
 // POST /api/customers — create a new customer record.
 // PATCH /api/customers/:id — update existing.
 // Both used by the in-modal "save customer" flow when staff completes a

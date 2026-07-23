@@ -251,8 +251,9 @@ router.get('/export.csv', requireAdmin, async (req, res) => {
   if (to)      { params.push(to); where.push(`s.occurred_at <= $${params.length}`); }
   const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const { rows } = await query(`
-    SELECT s.occurred_at, s.channel, s.invoice_number, s.payment_reference, s.external_order_id,
+    SELECT s.id, s.occurred_at, s.channel, s.invoice_number, s.payment_reference, s.external_order_id,
            s.customer_name, s.customer_email, s.total, s.payment_method,
+           s.status, s.is_estimate, COALESCE(s.refunded_amount, 0) AS refunded_amount,
            si.title AS item_title, si.sku AS item_sku, si.qty, si.unit_price, si.line_total,
            p.part_number AS part_number
     FROM sales s
@@ -261,21 +262,29 @@ router.get('/export.csv', requireAdmin, async (req, res) => {
     ${w}
     ORDER BY s.occurred_at DESC, si.id`, params);
 
-  const headers = [
-    'Date', 'Channel', 'Invoice / Reference', 'Order ID', 'Customer',
-    'Customer Email', 'Item', 'SKU', 'Part Number', 'Qty', 'Unit Price', 'Line Total',
-    'Order Total', 'Payment Method',
-  ];
   const csvEscape = (v) => {
     if (v == null) return '';
     const s = String(v);
     if (s.includes('"') || s.includes(',') || s.includes('\n')) return '"' + s.replace(/"/g, '""') + '"';
     return s;
   };
-  const lines = [headers.join(',')];
+  const monthKey = (d) => {
+    if (!d) return '';
+    const dt = new Date(d);
+    return dt.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }); // "Aug 2025"
+  };
+
+  // ── Section 1: DETAIL — one row per line item (each sale broken down) ──
+  const headers = [
+    'Date', 'Month', 'Channel', 'Invoice / Reference', 'Order ID', 'Customer',
+    'Customer Email', 'Item', 'SKU', 'Part Number', 'Qty', 'Unit Price', 'Line Total',
+    'Order Total', 'Payment Method',
+  ];
+  const lines = ['DETAIL — one row per item', headers.join(',')];
   for (const r of rows) {
     lines.push([
       r.occurred_at ? new Date(r.occurred_at).toISOString() : '',
+      monthKey(r.occurred_at),
       r.channel,
       r.invoice_number || r.payment_reference || '',
       r.external_order_id || '',
@@ -291,6 +300,39 @@ router.get('/export.csv', requireAdmin, async (req, res) => {
       r.payment_method || '',
     ].map(csvEscape).join(','));
   }
+
+  // ── Section 2: MONTHLY SUMMARY — one row per month ──
+  // De-duplicate the order total per sale (line items repeat it), net off any
+  // refunds, and exclude estimates / cancelled orders from realised revenue.
+  const months = new Map(); // monthLabel -> { sortKey, orders:Set, items, gross, refunds }
+  const seenSale = new Set();
+  for (const r of rows) {
+    if (r.is_estimate || r.status === 'cancelled') continue;
+    const label = monthKey(r.occurred_at);
+    if (!label) continue;
+    const dt = new Date(r.occurred_at);
+    const sortKey = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+    if (!months.has(label)) months.set(label, { sortKey, orders: new Set(), items: 0, gross: 0, refunds: 0 });
+    const m = months.get(label);
+    m.items += Number(r.qty) || 0;
+    if (!seenSale.has(r.id)) {
+      seenSale.add(r.id);
+      m.orders.add(r.id);
+      m.gross += Number(r.total) || 0;
+      m.refunds += Number(r.refunded_amount) || 0;
+    }
+  }
+  const summaryRows = [...months.entries()].sort((a, b) => b[1].sortKey.localeCompare(a[1].sortKey));
+  lines.push('', '', 'MONTHLY SUMMARY');
+  lines.push(['Month', 'Orders', 'Items', 'Gross (£)', 'Refunds (£)', 'Net (£)'].join(','));
+  let gO = 0, gI = 0, gG = 0, gR = 0;
+  for (const [label, m] of summaryRows) {
+    const net = m.gross - m.refunds;
+    gO += m.orders.size; gI += m.items; gG += m.gross; gR += m.refunds;
+    lines.push([label, m.orders.size, m.items, m.gross.toFixed(2), m.refunds.toFixed(2), net.toFixed(2)].map(csvEscape).join(','));
+  }
+  lines.push(['TOTAL', gO, gI, gG.toFixed(2), gR.toFixed(2), (gG - gR).toFixed(2)].map(csvEscape).join(','));
+
   const filename = `sales-${channel || 'all'}-${new Date().toISOString().slice(0,10)}.csv`;
   res.set('Content-Type', 'text/csv; charset=utf-8');
   res.set('Content-Disposition', `attachment; filename="${filename}"`);
@@ -1011,6 +1053,22 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// Build a human, filesystem-safe name for a saved/emailed document, in the
+// form "<Type> - <Name> - <Ref>" (e.g. "Invoice - John Smith - CAP-0778") so
+// downloaded/attached PDFs are named meaningfully instead of a random string.
+function docFileLabel(mode) {
+  return mode === 'estimate' ? 'Estimate'
+       : mode === 'proforma' ? 'Pro forma'
+       : mode === 'receipt'  ? 'Receipt'
+       : 'Invoice';
+}
+function invoiceFileBase({ mode, name, ref }) {
+  const clean = (s) => String(s == null ? '' : s)
+    .replace(/[\\/:*?"<>|\n\r\t]+/g, ' ')   // strip characters illegal in filenames
+    .replace(/\s+/g, ' ').trim();
+  return [docFileLabel(mode), clean(name) || 'Customer', clean(ref)].filter(Boolean).join(' - ');
+}
+
 function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   // mode: 'invoice' | 'estimate' | 'receipt'
   const brand = require('../lib/brand');
@@ -1076,6 +1134,13 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
                  : isProforma ? 'PRO FORMA INVOICE'
                  : isCashReceipt ? 'RECEIPT'
                  : 'INVOICE';
+  // Page <title> = the download filename the browser proposes for "Save as PDF".
+  // Format: "<Type> - <Name> - <Ref>" so saved documents are named meaningfully.
+  const downloadTitle = escapeHtml(invoiceFileBase({
+    mode,
+    name: billedToName,
+    ref: sale.invoice_number || sale.payment_reference || ('#' + sale.id),
+  }));
 
   // Print suppression: empty <title> + @page CSS removes URL/timestamp headers in most browsers.
   // (Browsers still show some headers if user hasn't disabled them in print settings; the user
@@ -1103,7 +1168,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   // ----- ESTIMATE: minimal layout, no logo, no business details -----
   if (mode === 'estimate') {
     return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title></title>
+<html><head><meta charset="utf-8"><title>${downloadTitle}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1209,7 +1274,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   // ----- CASH RECEIPT: very compact, no company details / no VAT info (per brief) -----
   if (isCashReceipt) {
     return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title></title>
+<html><head><meta charset="utf-8"><title>${downloadTitle}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1283,7 +1348,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   const shippingNet = shippingGross * netFactor;
 
   return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title></title>
+<html><head><meta charset="utf-8"><title>${downloadTitle}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1719,7 +1784,8 @@ async function composeAndSendInvoiceEmail({ sale, items = [], company = {}, bran
   try {
     const { buildInvoicePdf } = require('../lib/invoice-pdf');
     const pdf = await buildInvoicePdf({ sale, items, company, brand, mode });
-    attachments = [{ filename: `${docLabel.replace(/[^a-z0-9]+/gi, '-')}-${(sale.invoice_number || sale.payment_reference || sale.id)}.pdf`, content: pdf.toString('base64') }];
+    const pdfName = invoiceFileBase({ mode, name: sale.customer_name, ref: sale.invoice_number || sale.payment_reference || sale.id });
+    attachments = [{ filename: `${pdfName}.pdf`, content: pdf.toString('base64') }];
     const fallbackMsg = `<p style="margin:0">Please find your ${esc(docLabel.toLowerCase())} attached.</p>`;
     emailHtml = `<div style="font-family:Arial,Helvetica,sans-serif;color:#222;line-height:1.5;padding:8px">${cover || fallbackMsg}</div>`;
   } catch (e) {
