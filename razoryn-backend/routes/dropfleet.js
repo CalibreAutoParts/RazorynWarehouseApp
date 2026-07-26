@@ -70,18 +70,20 @@ router.post('/push', requireAdmin, async (req, res) => {
 router.get('/pending', requireAdmin, async (req, res) => {
   try {
     const manualOnly = req.query.manualOnly === '1' || req.query.manualOnly === 'true';
-    res.json({ count: await df.countUnshipped({ manualOnly }) });
+    const days = req.query.days;
+    res.json({ count: await df.countUnshipped({ manualOnly, days }) });
   } catch (e) {
     res.status(500).json({ error: 'count_failed', message: e.message });
   }
 });
 
-// POST /api/dropfleet/sync-unshipped { manualOnly? } — backfill the whole
+// POST /api/dropfleet/sync-unshipped { manualOnly?, days? } — backfill the
 // unshipped delivery backlog into DropFleet (batched, de-duped, retried).
 router.post('/sync-unshipped', requireAdmin, async (req, res) => {
   const manualOnly = !!(req.body && req.body.manualOnly);
-  const r = await df.pushUnshipped({ manualOnly });
-  if (r.ok) await audit(req, 'dropfleet_sync_unshipped', null, null, { total: r.total, attempted: r.attempted, ingested: r.ingested });
+  const days = req.body && req.body.days;
+  const r = await df.pushUnshipped({ manualOnly, days });
+  if (r.ok) await audit(req, 'dropfleet_sync_unshipped', null, null, { total: r.total, attempted: r.attempted, ingested: r.ingested, days });
   res.json(r);
 });
 
