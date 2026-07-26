@@ -197,25 +197,44 @@ async function pushSaleIds(saleIds) {
   return { ...res, attempted: orders.length, skipped };
 }
 
-// Bulk-sync the current unshipped delivery backlog into DropFleet, in batches of
-// 50. Mirrors the Dispatch "to ship" worklist: paid, non-estimate, not yet
-// dispatched, fulfilment = ship (not cash-on-collection). Safe to re-run — the
-// external_id de-dupe means re-sends update the pending order, never duplicate.
-//   manualOnly: restrict to direct cash/bank sales (exclude eBay/Shopify).
-async function pushUnshipped({ manualOnly = false } = {}) {
-  const cfg = await getConfig();
-  if (!cfg.apiKey) return { ok: false, error: 'not_configured' };
+// WHERE clause for the bulk sync — mirrors the Dispatch "to ship" worklist so
+// the sync only sends what's genuinely awaiting dispatch:
+//   • not an estimate, fulfilment = ship (not cash-on-collection)
+//   • NOT already handled: no dispatched_at, no collected_at, and no tracking
+//     number (a tracking number means it already shipped — often on the source
+//     channel — so it must NOT be pushed to DropFleet again)
+//   • status excludes refunded/cancelled/dispatched/preorder
+//   • within the recency window (older orders are assumed already shipped on
+//     eBay/Shopify before this app's dispatch tracking existed) — this is what
+//     the Dispatch page bounds by, so the counts line up
+// `$1` is the day window; manualOnly is a static channel clause (no param).
+function unshippedWhere(manualOnly) {
   const channelClause = manualOnly ? `AND channel IN ('direct_cash','direct_bank')` : '';
-  const { rows } = await query(`
-    SELECT id FROM sales
+  return `
     WHERE is_estimate = false
       AND dispatched_at IS NULL
+      AND collected_at IS NULL
+      AND (tracking_number IS NULL OR tracking_number = '')
       AND COALESCE(fulfillment_method, CASE WHEN payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
       AND status NOT IN ('refunded','cancelled','dispatched','preorder')
-      ${channelClause}
-    ORDER BY occurred_at ASC
-    LIMIT 1000
-  `);
+      AND occurred_at >= now() - ($1 || ' days')::interval
+      ${channelClause}`;
+}
+const _clampDays = (d) => Math.max(1, Math.min(3650, parseInt(d, 10) || 10));
+
+// Bulk-sync the current unshipped delivery backlog into DropFleet, in batches of
+// 50. Safe to re-run — the external_id de-dupe means re-sends update the pending
+// order, never duplicate.
+//   manualOnly: restrict to direct cash/bank sales (exclude eBay/Shopify).
+//   days:       recency window (default 10, matching the Dispatch worklist).
+async function pushUnshipped({ manualOnly = false, days = 10 } = {}) {
+  const cfg = await getConfig();
+  if (!cfg.apiKey) return { ok: false, error: 'not_configured' };
+  const d = _clampDays(days);
+  const { rows } = await query(
+    `SELECT id FROM sales ${unshippedWhere(manualOnly)} ORDER BY occurred_at ASC LIMIT 1000`,
+    [String(d)]
+  );
   const ids = rows.map(r => r.id);
   if (!ids.length) return { ok: true, ingested: 0, attempted: 0, total: 0, batches: 0, skipped: [] };
   let ingested = 0, attempted = 0;
@@ -236,16 +255,11 @@ async function pushUnshipped({ manualOnly = false } = {}) {
 }
 
 // Count how many orders the bulk sync would push (for the confirm dialog).
-async function countUnshipped({ manualOnly = false } = {}) {
-  const channelClause = manualOnly ? `AND channel IN ('direct_cash','direct_bank')` : '';
-  const { rows } = await query(`
-    SELECT COUNT(*)::int AS n FROM sales
-    WHERE is_estimate = false
-      AND dispatched_at IS NULL
-      AND COALESCE(fulfillment_method, CASE WHEN payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
-      AND status NOT IN ('refunded','cancelled','dispatched','preorder')
-      ${channelClause}
-  `);
+async function countUnshipped({ manualOnly = false, days = 10 } = {}) {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM sales ${unshippedWhere(manualOnly)}`,
+    [String(_clampDays(days))]
+  );
   return rows[0]?.n || 0;
 }
 

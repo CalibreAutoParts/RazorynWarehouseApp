@@ -16493,8 +16493,9 @@ function renderSettings() {
 
           <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px">
             <div style="font-weight:600;font-size:14px;margin-bottom:4px">Sync the existing backlog</div>
-            <p style="color:var(--ink-soft);font-size:12px;margin-bottom:10px">Auto-push only covers orders created <em>after</em> it's switched on. Send your current unshipped delivery backlog over in one go — safe to run again anytime (DropFleet de-dupes, so re-sends update rather than duplicate).</p>
-            <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:10px"><input type="checkbox" id="df-manual-only"> Manual (cash/bank) orders only — exclude eBay &amp; Shopify</label>
+            <p style="color:var(--ink-soft);font-size:12px;margin-bottom:10px">Auto-push only covers orders created <em>after</em> it's switched on. Send your current unshipped delivery backlog over in one go — safe to run again anytime (DropFleet de-dupes, so re-sends update rather than duplicate). Only orders still awaiting dispatch are sent — anything already dispatched, collected, or with a tracking number is left out.</p>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:8px"><input type="checkbox" id="df-manual-only"> Manual (cash/bank) orders only — exclude eBay &amp; Shopify</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:10px">Include orders from the last <input type="number" id="df-sync-days" value="10" min="1" max="3650" style="width:70px;padding:4px 6px;font-size:12px"> days <span style="color:var(--ink-soft)">(matches the Dispatch worklist window)</span></label>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="btn btn-outline" onclick="syncUnshippedDropfleet(this)">🚚 Sync unshipped orders to DropFleet</button>
               <span id="df-sync-status" style="font-size:12px;color:var(--ink-soft)"></span>
@@ -17194,16 +17195,17 @@ async function testDropfleet(btn) {
 // Backfill: push the whole unshipped delivery backlog to DropFleet.
 async function syncUnshippedDropfleet(btn) {
   const manualOnly = !!el('df-manual-only')?.checked;
+  const days = Math.max(1, Math.min(3650, parseInt(el('df-sync-days')?.value, 10) || 10));
   const statusEl = el('df-sync-status');
   let count = null;
-  try { count = (await Api.get('/api/dropfleet/pending?manualOnly=' + (manualOnly ? '1' : '0'))).count; } catch (_) {}
+  try { count = (await Api.get(`/api/dropfleet/pending?manualOnly=${manualOnly ? '1' : '0'}&days=${days}`)).count; } catch (_) {}
   const n = (count == null) ? 'all' : count;
-  if (count === 0) { toast('No unshipped delivery orders to sync', 'info'); return; }
-  if (!confirm(`Send ${n} unshipped ${manualOnly ? 'manual ' : ''}delivery order${n === 1 ? '' : 's'} to DropFleet?\n\nThey'll appear in DropFleet's Integrated Orders for review. Safe to run again — nothing is duplicated.`)) return;
+  if (count === 0) { toast('No orders awaiting dispatch in the last ' + days + ' days', 'info'); return; }
+  if (!confirm(`Send ${n} unshipped ${manualOnly ? 'manual ' : ''}delivery order${n === 1 ? '' : 's'} (last ${days} days) to DropFleet?\n\nAlready-dispatched or tracked orders are excluded. They'll appear in DropFleet's Integrated Orders for review. Safe to run again — nothing is duplicated.`)) return;
   if (btn) btn.disabled = true;
   if (statusEl) { statusEl.textContent = 'Syncing…'; statusEl.style.color = 'var(--ink-soft)'; }
   try {
-    const r = await Api.post('/api/dropfleet/sync-unshipped', { manualOnly });
+    const r = await Api.post('/api/dropfleet/sync-unshipped', { manualOnly, days });
     if (r.ok) {
       const skipped = (r.skipped || []).length;
       const msg = `✓ Sent ${r.ingested}/${r.total} to DropFleet${skipped ? ` · ${skipped} skipped (missing address)` : ''}`;
