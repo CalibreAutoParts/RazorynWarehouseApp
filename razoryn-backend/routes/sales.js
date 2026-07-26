@@ -747,6 +747,8 @@ router.post('/', requireAdmin, async (req, res) => {
   // customer email is present.
   const baseUrl = `${req.protocol}://${req.get('host')}`;
   setImmediate(() => maybeAutoEmailSale(result.sale.id, baseUrl));
+  // Optional: auto-forward the order to DropFleet (no-op unless enabled + auto-push on).
+  setImmediate(() => require('../services/dropfleet').autoPushSale(result.sale.id).catch(() => {}));
   res.status(201).json(result);
 });
 
@@ -1040,6 +1042,8 @@ router.post('/:id/convert-to-invoice', requireAdmin, async (req, res) => {
   // Estimate → invoice: email the finalised invoice to the customer.
   const baseUrl = `${req.protocol}://${req.get('host')}`;
   setImmediate(() => maybeAutoEmailSale(result.sale.id, baseUrl));
+  // Optional: auto-forward the order to DropFleet (no-op unless enabled + auto-push on).
+  setImmediate(() => require('../services/dropfleet').autoPushSale(result.sale.id).catch(() => {}));
   res.json(result);
 });
 

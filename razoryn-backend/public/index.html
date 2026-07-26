@@ -6807,6 +6807,7 @@ function renderDispatchRow(s, kind) {
         <td>${ageBadge}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
           <button class="btn btn-ghost btn-sm" onclick="openSaleDetail('${s.id}')" title="Preview what's in this order">🧾</button>
+          <button class="btn btn-ghost btn-sm" onclick="pushDropfleet('${s.id}',this)" title="Send this order to DropFleet's Integrated Orders for booking">🚚 DropFleet</button>
           <button class="btn btn-primary btn-sm" onclick="openDispatchModal('${s.id}')">📦 Mark dispatched</button>
           <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','collect');return false" style="color:var(--ink-soft)">↪ It's a collection</a></div>
         </td>
@@ -16462,6 +16463,36 @@ function renderSettings() {
       </div>
 
       <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>🚚 DropFleet delivery integration</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">
+            Push orders straight into your DropFleet <strong>Integrated Orders</strong> tab. Pushed orders show on the DropFleet map for an admin to review and book in one click — that's when the real tracking number and booking email are generated. Get a key in DropFleet under <em>Settings → Integrations → Create key</em> (looks like <code>dfk_…</code>).
+          </p>
+          <div class="grid-2" style="grid-template-columns:1fr 1fr">
+            <div class="field"><label>API key</label><input id="df-key" type="password" placeholder="dfk_… (leave blank to keep current)" autocomplete="off"><div id="df-key-status" style="font-size:11px;color:var(--ink-soft);margin-top:2px"></div></div>
+            <div class="field"><label>Default carrier (optional)</label>
+              <select id="df-carrier"><option value="">— none —</option>${['Royal Mail','Evri','FedEx','DHL','Proovia','Dropfleet'].map(c=>`<option>${c}</option>`).join('')}</select>
+              <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Used when an order has no carrier of its own — DropFleet maps it to an ETA.</div>
+            </div>
+            <div class="field"><label>Default service (optional)</label><input id="df-service" placeholder="e.g. Next Day, Tracked 48"></div>
+          </div>
+          <div class="perm-row">
+            <div><div class="perm-name">Integration enabled</div><div class="perm-desc">Master switch for sending orders to DropFleet.</div></div>
+            <label class="switch"><input type="checkbox" id="df-enabled"><span></span></label>
+          </div>
+          <div class="perm-row">
+            <div><div class="perm-name">Auto-push new delivery orders</div><div class="perm-desc">When ON, each new manual sale marked for delivery is sent to DropFleet automatically. eBay/Shopify orders are never auto-pushed — use the 🚚 button on the Dispatch tab for those.</div></div>
+            <label class="switch"><input type="checkbox" id="df-autopush"><span></span></label>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+            <button class="btn btn-primary" onclick="saveDropfleetConfig(this)">Save</button>
+            <button class="btn btn-outline" onclick="testDropfleet(this)">🔌 Test connection</button>
+            <span id="df-status" style="font-size:13px"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>eBay description template</h3></div>
         <div class="card-body">
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">
@@ -17102,6 +17133,66 @@ function renderSettings() {
   loadBackInStockCount();
   loadEbayTemplate();
   loadInvoiceHubStatus();
+  loadDropfleetConfig();
+}
+
+// ── DropFleet delivery integration ──
+async function loadDropfleetConfig() {
+  try {
+    const c = await Api.get('/api/dropfleet/config');
+    if (el('df-enabled')) el('df-enabled').checked = !!c.enabled;
+    if (el('df-autopush')) el('df-autopush').checked = !!c.autoPush;
+    if (el('df-carrier')) el('df-carrier').value = c.defaultCarrier || '';
+    if (el('df-service')) el('df-service').value = c.defaultService || '';
+    if (el('df-key-status')) el('df-key-status').textContent = c.configured ? `✓ Key saved (…${c.keyLast4})` : 'No key saved yet';
+  } catch (_) {}
+}
+async function saveDropfleetConfig(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const body = {
+      enabled: el('df-enabled').checked,
+      autoPush: el('df-autopush').checked,
+      defaultCarrier: el('df-carrier').value,
+      defaultService: (el('df-service').value || '').trim(),
+    };
+    const key = (el('df-key').value || '').trim();
+    if (key) body.apiKey = key;   // only overwrite the stored key when a new one is typed
+    const r = await Api.put('/api/dropfleet/config', body);
+    el('df-key').value = '';
+    if (el('df-key-status')) el('df-key-status').textContent = r.configured ? `✓ Key saved (…${r.keyLast4})` : 'No key saved yet';
+    toast('DropFleet settings saved', 'success');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) btn.disabled = false; }
+}
+async function testDropfleet(btn) {
+  const s = el('df-status');
+  if (btn) btn.disabled = true;
+  if (s) { s.textContent = 'Testing…'; s.style.color = 'var(--ink-soft)'; }
+  try {
+    const r = await Api.post('/api/dropfleet/test', {});
+    if (s) {
+      if (r.ok) { s.textContent = '✓ Connected — key is valid'; s.style.color = 'var(--green)'; }
+      else if (r.error === 'not_configured') { s.textContent = 'Save a key first, then test'; s.style.color = 'var(--amber)'; }
+      else if (r.error === 'invalid_key') { s.textContent = '✗ Key rejected (401) — check the key'; s.style.color = 'var(--red)'; }
+      else { s.textContent = '✗ ' + (r.error || 'failed'); s.style.color = 'var(--red)'; }
+    }
+  } catch (e) { if (s) { s.textContent = '✗ ' + (e.data?.message || e.message); s.style.color = 'var(--red)'; } }
+  finally { if (btn) btn.disabled = false; }
+}
+// Send a single order to DropFleet from the Dispatch worklist.
+async function pushDropfleet(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/dropfleet/push', { saleId: id });
+    if (r.ok && r.ingested > 0) toast('✓ Sent to DropFleet — review it in Integrated Orders', 'success', 6000);
+    else if (r.ok) toast('DropFleet accepted 0 orders — check the address/postcode', 'warn', 7000);
+    else if (r.error === 'not_configured') toast('Add your DropFleet API key in Settings first', 'warn', 7000);
+    else if (r.error === 'invalid_key') toast('DropFleet rejected the key (401) — check Settings', 'error', 7000);
+    else if (r.error === 'nothing_pushable') toast("Order is missing name/address/postcode — can't push", 'warn', 7000);
+    else toast('DropFleet push failed: ' + (r.error || 'unknown'), 'error', 7000);
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) btn.disabled = false; }
 }
 
 let _ebayTplDefaults = null;
