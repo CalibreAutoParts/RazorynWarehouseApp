@@ -97,7 +97,11 @@ ensureSocialColumns();
 // GET /api/settings
 router.get('/', async (req, res) => {
   const { rows } = await query('SELECT * FROM app_settings WHERE id = 1');
-  res.json({ settings: rows[0] || {} });
+  const settings = rows[0] || {};
+  // Never leak the DropFleet API key to the browser — this endpoint is readable
+  // by any authenticated user. The masked status is served by /api/dropfleet/config.
+  if ('dropfleet_api_key' in settings) delete settings.dropfleet_api_key;
+  res.json({ settings });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
