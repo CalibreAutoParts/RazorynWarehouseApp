@@ -6799,6 +6799,7 @@ function renderDispatchRow(s, kind) {
         <td>
           <div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div>
           ${s.order_number && s.order_number !== ref ? `<div style="font-size:10px;color:var(--ink-soft)">${escapeHtml(s.order_number)}</div>` : ''}
+          ${s.dropfleet_pushed_at ? `<div style="margin-top:3px"><span class="pill green" style="font-size:9px" title="Sent to DropFleet ${escapeAttr(fmtDate(s.dropfleet_pushed_at))}">🚚 Sent to DropFleet</span></div>` : ''}
         </td>
         <td>${channelPill(s.channel)}</td>
         <td>${escapeHtml(s.customer_name || '—')}</td>
@@ -6807,7 +6808,7 @@ function renderDispatchRow(s, kind) {
         <td>${ageBadge}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
           <button class="btn btn-ghost btn-sm" onclick="openSaleDetail('${s.id}')" title="Preview what's in this order">🧾</button>
-          <button class="btn btn-ghost btn-sm" onclick="pushDropfleet('${s.id}',this)" title="Send this order to DropFleet's Integrated Orders for booking">🚚 DropFleet</button>
+          <button class="btn btn-ghost btn-sm" onclick="pushDropfleet('${s.id}',this)" title="${s.dropfleet_pushed_at ? 'Re-send this order to DropFleet (updates the pending order)' : "Send this order to DropFleet's Integrated Orders for booking"}">🚚 ${s.dropfleet_pushed_at ? 'Re-send' : 'DropFleet'}</button>
           <button class="btn btn-primary btn-sm" onclick="openDispatchModal('${s.id}')">📦 Mark dispatched</button>
           <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','collect');return false" style="color:var(--ink-soft)">↪ It's a collection</a></div>
         </td>
@@ -16489,6 +16490,16 @@ function renderSettings() {
             <button class="btn btn-outline" onclick="testDropfleet(this)">🔌 Test connection</button>
             <span id="df-status" style="font-size:13px"></span>
           </div>
+
+          <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">Sync the existing backlog</div>
+            <p style="color:var(--ink-soft);font-size:12px;margin-bottom:10px">Auto-push only covers orders created <em>after</em> it's switched on. Send your current unshipped delivery backlog over in one go — safe to run again anytime (DropFleet de-dupes, so re-sends update rather than duplicate).</p>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:10px"><input type="checkbox" id="df-manual-only"> Manual (cash/bank) orders only — exclude eBay &amp; Shopify</label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn btn-outline" onclick="syncUnshippedDropfleet(this)">🚚 Sync unshipped orders to DropFleet</button>
+              <span id="df-sync-status" style="font-size:12px;color:var(--ink-soft)"></span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -17180,12 +17191,49 @@ async function testDropfleet(btn) {
   } catch (e) { if (s) { s.textContent = '✗ ' + (e.data?.message || e.message); s.style.color = 'var(--red)'; } }
   finally { if (btn) btn.disabled = false; }
 }
+// Backfill: push the whole unshipped delivery backlog to DropFleet.
+async function syncUnshippedDropfleet(btn) {
+  const manualOnly = !!el('df-manual-only')?.checked;
+  const statusEl = el('df-sync-status');
+  let count = null;
+  try { count = (await Api.get('/api/dropfleet/pending?manualOnly=' + (manualOnly ? '1' : '0'))).count; } catch (_) {}
+  const n = (count == null) ? 'all' : count;
+  if (count === 0) { toast('No unshipped delivery orders to sync', 'info'); return; }
+  if (!confirm(`Send ${n} unshipped ${manualOnly ? 'manual ' : ''}delivery order${n === 1 ? '' : 's'} to DropFleet?\n\nThey'll appear in DropFleet's Integrated Orders for review. Safe to run again — nothing is duplicated.`)) return;
+  if (btn) btn.disabled = true;
+  if (statusEl) { statusEl.textContent = 'Syncing…'; statusEl.style.color = 'var(--ink-soft)'; }
+  try {
+    const r = await Api.post('/api/dropfleet/sync-unshipped', { manualOnly });
+    if (r.ok) {
+      const skipped = (r.skipped || []).length;
+      const msg = `✓ Sent ${r.ingested}/${r.total} to DropFleet${skipped ? ` · ${skipped} skipped (missing address)` : ''}`;
+      if (statusEl) { statusEl.textContent = msg; statusEl.style.color = 'var(--green)'; }
+      toast(msg, skipped ? 'warn' : 'success', 8000);
+      if (State.page === 'dispatch') Store.refresh('dispatch').then(() => renderDispatch()).catch(() => {});
+    } else if (r.error === 'not_configured') {
+      if (statusEl) { statusEl.textContent = 'Save a key first'; statusEl.style.color = 'var(--amber)'; }
+      toast('Add your DropFleet API key first', 'warn');
+    } else if (r.error === 'invalid_key') {
+      if (statusEl) { statusEl.textContent = '✗ Key rejected (401)'; statusEl.style.color = 'var(--red)'; }
+      toast('DropFleet rejected the key (401) — check it', 'error');
+    } else {
+      if (statusEl) { statusEl.textContent = '✗ ' + (r.error || 'failed'); statusEl.style.color = 'var(--red)'; }
+      toast('Sync failed: ' + (r.error || 'unknown'), 'error');
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '✗ ' + (e.data?.message || e.message); statusEl.style.color = 'var(--red)'; }
+    toast('Failed: ' + (e.data?.message || e.message), 'error');
+  } finally { if (btn) btn.disabled = false; }
+}
 // Send a single order to DropFleet from the Dispatch worklist.
 async function pushDropfleet(id, btn) {
   if (btn) btn.disabled = true;
   try {
     const r = await Api.post('/api/dropfleet/push', { saleId: id });
-    if (r.ok && r.ingested > 0) toast('✓ Sent to DropFleet — review it in Integrated Orders', 'success', 6000);
+    if (r.ok && r.ingested > 0) {
+      toast('✓ Sent to DropFleet — review it in Integrated Orders', 'success', 6000);
+      if (State.page === 'dispatch') Store.refresh('dispatch').then(() => renderDispatch()).catch(() => {});
+    }
     else if (r.ok) toast('DropFleet accepted 0 orders — check the address/postcode', 'warn', 7000);
     else if (r.error === 'not_configured') toast('Add your DropFleet API key in Settings first', 'warn', 7000);
     else if (r.error === 'invalid_key') toast('DropFleet rejected the key (401) — check Settings', 'error', 7000);

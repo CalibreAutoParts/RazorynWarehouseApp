@@ -25,6 +25,9 @@ async function ensureConfigColumn() {
   try {
     await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS dropfleet_api_key TEXT`);
     await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+    // Stamp set when an order has been accepted by DropFleet, so staff can see
+    // what's already gone over and we can badge it in the Dispatch worklist.
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS dropfleet_pushed_at TIMESTAMPTZ`);
     _migrated = true;
   } catch (e) {
     console.warn('[dropfleet] migration warning:', e.message);
@@ -137,22 +140,30 @@ function mapSaleToOrder(sale, items = [], cfg = {}) {
 }
 
 // POST a batch of already-mapped orders. Never throws — returns a result object.
+// Retries network errors and 5xx with exponential backoff (up to 3 attempts).
+// Retries are safe: DropFleet de-dupes on external_id, so a retry can't create a
+// duplicate. A 401 (bad/disabled key) or other 4xx is returned immediately.
 async function pushOrders(orders, cfg) {
   cfg = cfg || await getConfig();
   if (!cfg.apiKey) return { ok: false, error: 'not_configured' };
-  try {
-    const r = await axios.post(INGEST_URL, { orders }, {
-      headers: { 'Content-Type': 'application/json', 'X-Integration-Key': cfg.apiKey },
-      timeout: 20000,
-      validateStatus: () => true,
-    });
-    if (r.status === 401) return { ok: false, error: 'invalid_key', status: 401 };
-    if (r.status >= 500)  return { ok: false, error: 'server_error', status: r.status };
-    if (r.status !== 200) return { ok: false, error: 'http_' + r.status, status: r.status };
-    return { ok: true, ingested: Number(r.data?.ingested) || 0, status: 200 };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  let lastErr = 'failed';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, 1000 * attempt)); // 1s, 2s
+    try {
+      const r = await axios.post(INGEST_URL, { orders }, {
+        headers: { 'Content-Type': 'application/json', 'X-Integration-Key': cfg.apiKey },
+        timeout: 20000,
+        validateStatus: () => true,
+      });
+      if (r.status === 401) return { ok: false, error: 'invalid_key', status: 401 };
+      if (r.status >= 500)  { lastErr = 'server_error_' + r.status; continue; } // retry
+      if (r.status !== 200) return { ok: false, error: 'http_' + r.status, status: r.status };
+      return { ok: true, ingested: Number(r.data?.ingested) || 0, status: 200 };
+    } catch (e) {
+      lastErr = e.message; // network error — retry
+    }
   }
+  return { ok: false, error: lastErr };
 }
 
 // Load the given sale IDs, map them, and push. Orders missing the required
@@ -167,7 +178,7 @@ async function pushSaleIds(saleIds) {
   const byId = new Map();
   for (const it of items) { if (!byId.has(it.sale_id)) byId.set(it.sale_id, []); byId.get(it.sale_id).push(it); }
 
-  const orders = [], skipped = [];
+  const orders = [], pushedIds = [], skipped = [];
   for (const s of sales) {
     const o = mapSaleToOrder(s, byId.get(s.id) || [], cfg);
     if (!o.customer_name || !o.address || !o.postcode) {
@@ -175,10 +186,67 @@ async function pushSaleIds(saleIds) {
       continue;
     }
     orders.push(o);
+    pushedIds.push(s.id);
   }
   if (!orders.length) return { ok: false, error: 'nothing_pushable', skipped };
   const res = await pushOrders(orders, cfg);
+  // Stamp the sales that were accepted so staff can see what's already gone over.
+  if (res.ok && pushedIds.length) {
+    try { await query(`UPDATE sales SET dropfleet_pushed_at = now() WHERE id = ANY($1::int[])`, [pushedIds]); } catch (_) {}
+  }
   return { ...res, attempted: orders.length, skipped };
+}
+
+// Bulk-sync the current unshipped delivery backlog into DropFleet, in batches of
+// 50. Mirrors the Dispatch "to ship" worklist: paid, non-estimate, not yet
+// dispatched, fulfilment = ship (not cash-on-collection). Safe to re-run — the
+// external_id de-dupe means re-sends update the pending order, never duplicate.
+//   manualOnly: restrict to direct cash/bank sales (exclude eBay/Shopify).
+async function pushUnshipped({ manualOnly = false } = {}) {
+  const cfg = await getConfig();
+  if (!cfg.apiKey) return { ok: false, error: 'not_configured' };
+  const channelClause = manualOnly ? `AND channel IN ('direct_cash','direct_bank')` : '';
+  const { rows } = await query(`
+    SELECT id FROM sales
+    WHERE is_estimate = false
+      AND dispatched_at IS NULL
+      AND COALESCE(fulfillment_method, CASE WHEN payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
+      AND status NOT IN ('refunded','cancelled','dispatched','preorder')
+      ${channelClause}
+    ORDER BY occurred_at ASC
+    LIMIT 1000
+  `);
+  const ids = rows.map(r => r.id);
+  if (!ids.length) return { ok: true, ingested: 0, attempted: 0, total: 0, batches: 0, skipped: [] };
+  let ingested = 0, attempted = 0;
+  const skipped = [];
+  let batches = 0;
+  for (let i = 0; i < ids.length; i += 50) {
+    const batch = ids.slice(i, i + 50);
+    const r = await pushSaleIds(batch);
+    batches++;
+    // A key problem aborts the whole run — surface it rather than looping.
+    if (r.error === 'not_configured' || r.error === 'invalid_key') {
+      return { ok: false, error: r.error, ingested, attempted, total: ids.length, batches, skipped };
+    }
+    if (r.ok) { ingested += r.ingested || 0; attempted += r.attempted || 0; }
+    if (Array.isArray(r.skipped)) skipped.push(...r.skipped);
+  }
+  return { ok: true, ingested, attempted, total: ids.length, batches, skipped };
+}
+
+// Count how many orders the bulk sync would push (for the confirm dialog).
+async function countUnshipped({ manualOnly = false } = {}) {
+  const channelClause = manualOnly ? `AND channel IN ('direct_cash','direct_bank')` : '';
+  const { rows } = await query(`
+    SELECT COUNT(*)::int AS n FROM sales
+    WHERE is_estimate = false
+      AND dispatched_at IS NULL
+      AND COALESCE(fulfillment_method, CASE WHEN payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
+      AND status NOT IN ('refunded','cancelled','dispatched','preorder')
+      ${channelClause}
+  `);
+  return rows[0]?.n || 0;
 }
 
 // Validate the stored key without creating anything: an empty batch returns
@@ -212,4 +280,5 @@ async function autoPushSale(saleId) {
 module.exports = {
   INGEST_URL, getConfig, saveConfig, mapSaleToOrder, parseAddress,
   pushOrders, pushSaleIds, testConnection, autoPushSale,
+  pushUnshipped, countUnshipped,
 };

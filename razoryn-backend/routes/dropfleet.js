@@ -65,4 +65,24 @@ router.post('/push', requireAdmin, async (req, res) => {
   res.json(r);
 });
 
+// GET /api/dropfleet/pending?manualOnly= — how many unshipped orders a bulk sync
+// would push (for the confirm dialog).
+router.get('/pending', requireAdmin, async (req, res) => {
+  try {
+    const manualOnly = req.query.manualOnly === '1' || req.query.manualOnly === 'true';
+    res.json({ count: await df.countUnshipped({ manualOnly }) });
+  } catch (e) {
+    res.status(500).json({ error: 'count_failed', message: e.message });
+  }
+});
+
+// POST /api/dropfleet/sync-unshipped { manualOnly? } — backfill the whole
+// unshipped delivery backlog into DropFleet (batched, de-duped, retried).
+router.post('/sync-unshipped', requireAdmin, async (req, res) => {
+  const manualOnly = !!(req.body && req.body.manualOnly);
+  const r = await df.pushUnshipped({ manualOnly });
+  if (r.ok) await audit(req, 'dropfleet_sync_unshipped', null, null, { total: r.total, attempted: r.attempted, ingested: r.ingested });
+  res.json(r);
+});
+
 module.exports = router;
