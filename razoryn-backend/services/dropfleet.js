@@ -217,6 +217,8 @@ function unshippedWhere(manualOnly) {
       AND (tracking_number IS NULL OR tracking_number = '')
       AND COALESCE(fulfillment_method, CASE WHEN payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
       AND status NOT IN ('refunded','cancelled','dispatched','preorder')
+      AND NOT (COALESCE(refunded_amount, 0) > 0 AND COALESCE(refunded_amount, 0) >= total - 0.005)
+      AND NOT EXISTS (SELECT 1 FROM returns r WHERE r.sale_id = sales.id)
       AND occurred_at >= now() - ($1 || ' days')::interval
       ${channelClause}`;
 }

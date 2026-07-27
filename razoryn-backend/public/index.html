@@ -8503,6 +8503,12 @@ function openManualSale() {
             <option value="card">Card (Stripe) — REP-…-S</option>
           </select>
         </div>
+        <div class="field" style="grid-column:1/-1"><label>Fulfilment <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— is the customer collecting or is it being delivered?</span></label>
+          <select id="ms-fulfil">
+            <option value="collect">🤝 Collection — customer picks up (goes to "Collections to hand over")</option>
+            <option value="ship">📦 Delivery — ship it (goes to "Deliveries to ship")</option>
+          </select>
+        </div>
         <div class="field" style="position:relative"><label>Customer name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— start typing to find a saved buyer</span></label>
           <input id="ms-cust" autocomplete="off" oninput="msCustomerSearch(this.value)">
           <div id="ms-cust-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:240px;overflow:auto"></div>
@@ -8534,7 +8540,13 @@ function openManualSale() {
     ],
   });
   manualSaleAddRow();
+  // Fulfilment defaults to collection for cash (most cash buyers pick up) and
+  // delivery otherwise — but respects a manual override once staff pick one.
+  let _msFulfilTouched = false;
+  el('ms-fulfil').value = 'collect'; // cash is the default payment method
+  el('ms-fulfil').addEventListener('change', () => { _msFulfilTouched = true; });
   el('ms-payment').addEventListener('change', () => {
+    if (!_msFulfilTouched) el('ms-fulfil').value = el('ms-payment').value === 'cash' ? 'collect' : 'ship';
     document.querySelectorAll('#ms-items > [data-idx]').forEach(manualSalePrefillPrice);
     manualSaleRecalc();
   });
@@ -8754,6 +8766,7 @@ async function submitManualSale() {
   const payload = {
     channel,
     paymentMethod,
+    fulfillmentMethod: el('ms-fulfil')?.value === 'ship' ? 'ship' : 'collect',
     isEstimate,
     docType,                     // 'invoice' | 'unpaid' | 'estimate' | 'preorder'
     preorder: isPreorder,        // no stock check/deduct; out of revenue until shipped

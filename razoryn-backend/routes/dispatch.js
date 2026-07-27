@@ -158,6 +158,11 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
         AND COALESCE(s.fulfillment_method,
               CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
         AND s.status NOT IN ('refunded', 'cancelled', 'dispatched', 'preorder')
+        -- Also drop orders the app KNOWS are refunded/returned even if the
+        -- status flip hasn't run yet: a full refund (refunded_amount covers the
+        -- total) or any booked return means there's nothing to ship/hand over.
+        AND NOT (COALESCE(s.refunded_amount, 0) > 0 AND COALESCE(s.refunded_amount, 0) >= s.total - 0.005)
+        AND NOT EXISTS (SELECT 1 FROM returns r WHERE r.sale_id = s.id)
         AND s.occurred_at >= now() - ($1 || ' days')::interval
       ORDER BY s.occurred_at ASC
       LIMIT 500
@@ -175,6 +180,11 @@ router.get('/outstanding', requireAdmin, async (req, res) => {
               CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'collect'
         AND s.collected_at IS NULL
         AND s.status NOT IN ('refunded', 'cancelled', 'dispatched', 'preorder')
+        -- Also drop orders the app KNOWS are refunded/returned even if the
+        -- status flip hasn't run yet: a full refund (refunded_amount covers the
+        -- total) or any booked return means there's nothing to ship/hand over.
+        AND NOT (COALESCE(s.refunded_amount, 0) > 0 AND COALESCE(s.refunded_amount, 0) >= s.total - 0.005)
+        AND NOT EXISTS (SELECT 1 FROM returns r WHERE r.sale_id = s.id)
         AND s.occurred_at >= now() - ($1 || ' days')::interval
       ORDER BY s.occurred_at ASC
       LIMIT 500
