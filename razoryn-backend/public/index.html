@@ -14326,7 +14326,13 @@ async function ceCalcEbayPrice(btn) {
   const ctx = State._ceCtx || {};
   const product = ctx.product || {};
   const cfg = ctx.cfg || State.pricingConfig || {};
-  const pct = cfg.ebayMarkupPct != null ? parseFloat(cfg.ebayMarkupPct) : 15;
+  // Per-store markup wins when the selected store has an override; otherwise the
+  // brand-wide markup. Keeps a second store's price the same until deliberately diverged.
+  const storeCode = el('ce-store')?.value || '';
+  const storeOverride = cfg.ebayPerStoreMarkup && cfg.ebayPerStoreMarkup[storeCode];
+  const pct = (storeOverride != null && Number.isFinite(parseFloat(storeOverride)))
+    ? parseFloat(storeOverride)
+    : (cfg.ebayMarkupPct != null ? parseFloat(cfg.ebayMarkupPct) : 15);
   let shopifyPrice = parseFloat(product.shopify_price || product.price_shopify || 0);
 
   if (!shopifyPrice && product.id) {
@@ -16820,6 +16826,9 @@ function renderSettings() {
               <input id="set-ebay-markup" type="number" step="0.1" placeholder="e.g. 15">
               <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Used by the "From Shopify +%" button when creating an eBay listing (Shopify price × (1 + this%)).</div>
             </div>
+            <!-- Per-store markup overrides — rendered dynamically for each extra
+                 eBay store (brands with more than one). Blank = use the markup above. -->
+            <div id="set-ebay-store-markup-wrap"></div>
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:10px">
               <div class="field"><label>Country of origin (default)</label>
                 <input id="set-ebay-coo" placeholder="China">
@@ -17552,6 +17561,23 @@ async function loadPricingConfig() {
     setVal('set-ebay-category',  r.ebayDefaultCategoryId  || '');
     setVal('set-ebay-brand',     r.ebayDefaultBrand       || 'Unbranded');
     setVal('set-ebay-markup', r.ebayMarkupPct != null ? r.ebayMarkupPct : 15);
+    // Per-store markup overrides — one input per extra eBay store (skip the
+    // primary, which uses the markup field above). Blank = inherit that markup.
+    (function renderStoreMarkups() {
+      const wrap = el('set-ebay-store-markup-wrap');
+      if (!wrap) return;
+      const stores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_') && !s.primary);
+      const overrides = r.ebayPerStoreMarkup || {};
+      if (!stores.length) { wrap.innerHTML = ''; return; }
+      wrap.innerHTML = stores.map(s => {
+        const v = overrides[s.code];
+        return `<div class="field" style="margin-top:10px">
+            <label>${escapeHtml(s.name)} markup over Shopify (%)</label>
+            <input id="set-store-markup-${escapeAttr(s.code)}" data-store-markup="${escapeAttr(s.code)}" type="number" step="0.1" placeholder="blank = use ${r.ebayMarkupPct != null ? r.ebayMarkupPct : 15}% above" value="${v != null ? escapeAttr(v) : ''}">
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Overrides the markup above for this store's listings only. Leave blank to keep them the same.</div>
+          </div>`;
+      }).join('');
+    })();
     setVal('set-ebay-coo',       r.ebayCountryOfOrigin || 'China');
     setVal('set-ebay-vat',       r.ebayVatPercent != null ? r.ebayVatPercent : 20);
     setVal('set-ebay-store-cat', r.ebayDefaultStoreCategoryId || '');
@@ -18377,6 +18403,17 @@ async function savePricingConfig() {
     ebayDefaultCategoryId:  getStr('set-ebay-category'),
     ebayDefaultBrand:       getStr('set-ebay-brand'),
     ebayMarkupPct: getNum('set-ebay-markup'),
+    // Per-store markup overrides — { storeCode: pct } (blank inputs sent as ''
+    // so the backend deletes that store's override → inherits the markup above).
+    ebayPerStoreMarkup: (() => {
+      const out = {};
+      document.querySelectorAll('#set-ebay-store-markup-wrap [data-store-markup]').forEach(inp => {
+        const code = inp.getAttribute('data-store-markup');
+        const raw = (inp.value || '').trim();
+        out[code] = raw === '' ? '' : parseFloat(raw);
+      });
+      return out;
+    })(),
     ebayCountryOfOrigin:    getStr('set-ebay-coo'),
     ebayVatPercent:         getNum('set-ebay-vat'),
     ebayDefaultStoreCategoryId: getStr('set-ebay-store-cat'),

@@ -232,6 +232,32 @@ Once the custom domain works, update `CORS_ORIGIN` in Railway variables to
 Same caveat as Shopify: SKUs must match between the warehouse's `products.sku`
 and your eBay listings.
 
+### Adding a second Razoryn eBay store
+
+Razoryn is configured for **two** eBay selling accounts (`lib/brand.js`). The
+second account (`code: razoryn2`) is dormant until you give it a token:
+
+1. Under the **same** eBay developer app, generate an Auth'n'Auth token for the
+   new seller account (User Tokens flow). The shared `EBAY_APP_ID` /
+   `EBAY_CERT_ID` / `EBAY_DEV_ID` already cover it — no second app needed.
+2. Set `EBAY_AUTH_TOKEN_RAZORYN2` (and optionally `EBAY_STORE2_NAME` to the real
+   shop name) and redeploy. The store then appears automatically in the
+   create-listing store picker, order/return sync, and sales attribution
+   (labelled by its `name`; it uses the `ebay_cl` channel slot internally).
+3. **Per-store pricing** (optional): Settings → "eBay price markup over Shopify"
+   now shows a per-store override under the main markup. Leave it blank to keep
+   the second store's prices identical to the first; set a value to diverge.
+4. **Business policies**: set the second store's payment/shipping/return policy
+   IDs in Settings (they're saved per store).
+
+**Before bulk-listing on a brand-new eBay account:** new accounts start with low
+monthly **selling limits** (often ~10 items / small £ cap) and no seller
+history, so you can't list the whole catalogue on day one — eBay raises limits
+as you sell and pass account checks. Use **Preview** (VerifyAddItem, the
+"Preview" tick in the create-listing modal) to validate a listing's fees and
+required item specifics without going live, and stage listings via the Drafts /
+scheduled-prelist flow rather than pushing everything at once.
+
 ---
 
 ## What's wired vs what's stubbed
