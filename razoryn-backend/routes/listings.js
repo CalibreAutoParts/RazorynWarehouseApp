@@ -3408,6 +3408,159 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// Bulk "clone catalogue to another store".
+//
+// Mirrors the products already listed on one eBay account onto a SECOND account
+// (e.g. Razoryn → razorynecommerceltd). Each product is recreated on the target
+// store via the exact same doCreateEbay pipeline (photos, derived + saved item
+// specifics, branded description, per-store business policies), so a cloned
+// listing is identical to one made by hand.
+//
+// Design notes:
+//  • Candidates = active products listed on eBay somewhere but NOT yet on the
+//    target store. Re-running skips anything already cloned, so a run that stops
+//    (e.g. new-account SELLING LIMIT hit) simply resumes next time.
+//  • The frontend drives it in small batches so a long catalogue never becomes
+//    one giant request; the server also caps each batch and throttles between
+//    items to stay under eBay's call-rate + selling limits.
+//  • Price defaults to the source account's eBay price (price_ebay) — a faithful
+//    mirror. Diverge later with the existing Bulk price tool or per-store markup.
+//  • mode:'preview' runs VerifyAddItem (validates fees + required specifics, no
+//    live listing); mode:'publish' creates the real listing.
+// ──────────────────────────────────────────────────────────────────────────
+const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// A product is "listed on the target store" iff a mirror_link row ties its
+// Shopify product id to that store_code. Shared by candidates + run (skip check).
+async function _listedOnStore(shopifyProductId, storeCode) {
+  if (!shopifyProductId) return false;
+  const { rows } = await query(
+    `SELECT 1 FROM mirror_links WHERE shopify_product_id::text = $1 AND store_code = $2 LIMIT 1`,
+    [String(shopifyProductId), storeCode]);
+  return rows.length > 0;
+}
+
+// GET /api/listings/clone-to-store/candidates?toStore=razoryn2
+// Returns the products eligible to clone onto `toStore`, plus readiness flags
+// (token present, business policies set) so the UI can warn before a run.
+router.get('/clone-to-store/candidates', requireAdmin, async (req, res) => {
+  const brand = require('../lib/brand');
+  const toStore = String(req.query.toStore || '').trim();
+  const store = brand.getStore(toStore);
+  if (!store) return res.status(400).json({ error: 'unknown_store', message: `No eBay store "${toStore}". Available: ${brand.stores.map(s => s.code).join(', ')}` });
+  try { await query(`ALTER TABLE mirror_links ADD COLUMN IF NOT EXISTS store_code TEXT`); } catch (e) {}
+
+  // Listed on eBay somewhere (a mirror_link on a store OTHER than the target,
+  // incl. legacy NULL store_code) but not yet on the target store.
+  const { rows } = await query(`
+    SELECT p.id, p.sku, p.title, p.price_ebay, p.qty_on_hand,
+           p.ebay_category_id,
+           (p.ebay_item_specifics IS NOT NULL) AS has_specifics
+    FROM products p
+    WHERE p.active
+      AND p.shopify_product_id IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM mirror_links ml
+        WHERE ml.shopify_product_id::text = p.shopify_product_id
+          AND ml.store_code IS DISTINCT FROM $1)
+      AND NOT EXISTS (
+        SELECT 1 FROM mirror_links ml2
+        WHERE ml2.shopify_product_id::text = p.shopify_product_id
+          AND ml2.store_code = $1)
+    ORDER BY p.title`, [toStore]);
+
+  // Readiness: business policies for the target store (per-store keys, falling
+  // back to brand-wide), and the default category used when a product has none.
+  const settings = (await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {};
+  const polPrefix = `ebay_policy_${store.code}_`;
+  const policies = {
+    payment:  settings[`${polPrefix}payment`]  || settings['ebay_policy_payment']  || null,
+    shipping: settings[`${polPrefix}shipping`] || settings['ebay_policy_shipping'] || null,
+    return:   settings[`${polPrefix}return`]   || settings['ebay_policy_return']   || null,
+  };
+  const noCategory = rows.filter(r => !r.ebay_category_id && !settings.ebay_default_category_id).length;
+  const noPrice = rows.filter(r => r.price_ebay == null).length;
+
+  res.json({
+    toStore: store.code,
+    storeName: store.name,
+    hasToken: !!store.token,
+    policiesSet: !!(policies.payment && policies.shipping),
+    policies,
+    defaultCategory: settings.ebay_default_category_id || null,
+    total: rows.length,
+    warnings: { noCategory, noPrice },
+    candidates: rows.map(r => ({
+      id: r.id, sku: r.sku, title: r.title,
+      price: r.price_ebay != null ? parseFloat(r.price_ebay) : null,
+      qty: r.qty_on_hand, hasCategory: !!r.ebay_category_id, hasSpecifics: r.has_specifics,
+    })),
+  });
+});
+
+// POST /api/listings/clone-to-store/run
+// Body: { toStore, productIds: [], mode: 'preview'|'publish' }
+// Processes ONE batch (server-capped) and returns per-item results. Sets
+// stop=true when a selling-limit error is hit so the caller halts the loop.
+router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
+  const brand = require('../lib/brand');
+  const b = req.body || {};
+  const toStore = String(b.toStore || '').trim();
+  const mode = b.mode === 'publish' ? 'publish' : 'preview';
+  const store = brand.getStore(toStore);
+  if (!store) return res.status(400).json({ error: 'unknown_store' });
+  if (!store.token) return res.status(400).json({ error: 'store_no_token', message: `Store "${toStore}" has no eBay token set.` });
+  const ids = Array.isArray(b.productIds) ? b.productIds.slice(0, 25) : [];
+  if (!ids.length) return res.status(400).json({ error: 'no_products' });
+
+  const results = [];
+  let stop = false, stopReason = null;
+  for (const pid of ids) {
+    const pr = await query(`SELECT * FROM products WHERE id = $1`, [pid]);
+    const p = pr.rows[0];
+    if (!p) { results.push({ productId: pid, error: 'not_found' }); continue; }
+    // Resume-safe: never double-list on the target store.
+    if (await _listedOnStore(p.shopify_product_id, toStore)) {
+      results.push({ productId: pid, sku: p.sku, skipped: true, reason: 'already_listed' });
+      continue;
+    }
+    if (p.price_ebay == null) {
+      results.push({ productId: pid, sku: p.sku, error: 'no_price', message: 'Product has no eBay price to mirror.' });
+      continue;
+    }
+    try {
+      const out = await doCreateEbay({
+        productId: pid,
+        storeCode: toStore,
+        price: parseFloat(p.price_ebay),               // faithful mirror of the source price
+        categoryId: p.ebay_category_id || undefined,   // else doCreateEbay uses the Settings default
+        conditionId: p.ebay_condition_id || undefined,
+        quantity: p.qty_on_hand || 1,
+        itemSpecifics: Array.isArray(p.ebay_item_specifics) ? p.ebay_item_specifics : [],
+        preview: mode === 'preview',
+      }, { req });
+      results.push({
+        productId: pid, sku: p.sku, title: p.title, ok: true,
+        preview: mode === 'preview',
+        itemId: out.itemId || null, url: out.url || null, fees: out.fees || null,
+      });
+    } catch (e) {
+      const message = e.body?.message || e.message || 'failed';
+      const errCode = e.body?.error || 'failed';
+      results.push({ productId: pid, sku: p.sku, title: p.title, error: errCode, message, missing: e.body?.missing || null });
+      // eBay returns a "listing limit / selling limit reached" error on new
+      // accounts once the cap is hit — halt so we don't hammer failures.
+      if (/\blimit(s)?\b/i.test(message) && /(sell|listing|reach|exceed|allow)/i.test(message)) {
+        stop = true; stopReason = 'selling_limit';
+      }
+    }
+    await _sleep(350);  // gentle throttle between items
+  }
+  if (req) await audit(req, 'clone_to_store', 'ebay_store', toStore, { mode, count: ids.length, created: results.filter(r => r.ok && !r.preview).length });
+  res.json({ toStore, mode, results, stop, stopReason });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
 // Pre-listing eBay go-live.
 //
 // A pre-listed product is held in the warehouse (status 'scheduled') with the
