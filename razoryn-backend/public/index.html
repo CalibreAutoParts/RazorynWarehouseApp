@@ -11325,7 +11325,16 @@ async function pushPrelistingLive(productId) {
 // eBay account onto the second account, throttled and resumable, preview-first.
 // Backend: /api/listings/clone-to-store/{candidates,run}.
 // ──────────────────────────────────────────────────────────────────────────
-let CloneState = { toStore: null, storeName: '', candidates: [], results: [], running: false, stop: false, meta: null };
+let CloneState = { toStore: null, storeName: '', candidates: [], results: [], running: false, stop: false, meta: null, shippingPolicies: [], assign: {}, filter: '' };
+
+// Build <option>s for a shipping-policy <select>. `sel` = currently-selected id.
+function cloneShipOptions(sel, withDefaultLabel) {
+  const opts = [`<option value="">${withDefaultLabel || '— store default —'}</option>`];
+  for (const p of CloneState.shippingPolicies) {
+    opts.push(`<option value="${escapeAttr(p.id)}" ${String(sel) === String(p.id) ? 'selected' : ''}>${escapeHtml(p.name)}</option>`);
+  }
+  return opts.join('');
+}
 
 async function renderCloneStore() {
   // Target = the first non-primary eBay store (the second account).
@@ -11336,14 +11345,16 @@ async function renderCloneStore() {
   CloneState.storeName = target.name;
 
   el('content').innerHTML = `
-    <div style="max-width:900px">
+    <div style="max-width:1000px">
       <h1 style="margin-bottom:4px">Copy catalogue to ${escapeHtml(target.name)}</h1>
-      <div style="color:var(--ink-soft);font-size:14px;margin-bottom:18px">Recreates every listing from your main eBay account onto <strong>${escapeHtml(target.name)}</strong> — same title, price, photos and item specifics. Safe to stop and re-run: it skips anything already copied.</div>
+      <div style="color:var(--ink-soft);font-size:14px;margin-bottom:18px">Recreates every listing from your main eBay account onto <strong>${escapeHtml(target.name)}</strong> — same title, price, photos and item specifics. Payment &amp; return policies use your saved store defaults; set the <strong>shipping policy per item</strong> below. Safe to stop and re-run: it skips anything already copied and remembers your shipping choices.</div>
       <div id="clone-readiness"></div>
       <div id="clone-summary" class="card" style="margin-bottom:14px"><div class="card-body" style="padding:18px">Loading candidates…</div></div>
+      <div id="clone-shipcard"></div>
       <div id="clone-controls" style="display:none;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px"></div>
       <div id="clone-progress" style="display:none;margin-bottom:14px"></div>
-      <div id="clone-results"></div>
+      <div id="clone-tablewrap"></div>
+      <div id="clone-results" style="margin-top:14px"></div>
     </div>`;
   await cloneLoadCandidates();
 }
@@ -11353,12 +11364,87 @@ async function cloneLoadCandidates() {
     const r = await Api.get('/api/listings/clone-to-store/candidates?toStore=' + encodeURIComponent(CloneState.toStore));
     CloneState.candidates = r.candidates || [];
     CloneState.meta = r;
+    CloneState.shippingPolicies = r.shippingPolicies || [];
+    // Seed the in-memory assignment map from each item's saved choice.
+    CloneState.assign = {};
+    for (const c of CloneState.candidates) if (c.shippingPolicyId) CloneState.assign[c.id] = String(c.shippingPolicyId);
     cloneRenderReadiness(r);
     cloneRenderSummary(r);
+    cloneRenderShipCard(r);
     cloneRenderControls(r);
+    cloneRenderTable();
   } catch (e) {
     el('clone-summary').innerHTML = `<div class="card-body" style="padding:18px;color:var(--red)">Couldn't load candidates: ${escapeHtml(e.data?.message || e.message)}</div>`;
   }
+}
+
+// Shipping card: a default policy for unset items + bulk-assign to the filtered
+// rows. Only shown when the store actually exposes shipping policies.
+function cloneRenderShipCard(r) {
+  const box = el('clone-shipcard');
+  if (!box) return;
+  if (!CloneState.shippingPolicies.length) {
+    box.innerHTML = `<div class="card" style="margin-bottom:14px;border-left:3px solid var(--amber)"><div class="card-body" style="padding:12px 16px;font-size:13px">Couldn't load shipping policies from ${escapeHtml(r.storeName)} — check the account is connected and has business policies. Items will use your Settings default shipping policy.</div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="card" style="margin-bottom:14px"><div class="card-body" style="padding:16px">
+      <div style="font-weight:600;margin-bottom:10px">Shipping policy per item</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+        <div class="field" style="margin:0;min-width:240px"><label style="font-size:12px">Default for items not set individually</label>
+          <select id="clone-default-ship">${cloneShipOptions('', '— use Settings default —')}</select></div>
+        <div class="field" style="margin:0;min-width:240px"><label style="font-size:12px">Set the shown rows to</label>
+          <select id="clone-bulk-ship">${cloneShipOptions('', '— store default —')}</select></div>
+        <button class="btn btn-outline btn-sm" onclick="cloneApplyToShown()">Apply to shown rows</button>
+        <button class="btn btn-outline btn-sm" onclick="cloneSaveShipping(true)">💾 Save choices</button>
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Most items → your standard courier (set it as the default). Then filter for the exceptions (large panels, small items) and use "Apply to shown rows". Choices are saved automatically before every run.</div>
+    </div></div>`;
+}
+
+// Candidate table with a per-row shipping picker + a text filter.
+function cloneRenderTable() {
+  const wrap = el('clone-tablewrap');
+  if (!wrap) return;
+  const f = (CloneState.filter || '').toLowerCase().trim();
+  const rows = CloneState.candidates.filter(c => !f || (c.sku || '').toLowerCase().includes(f) || (c.title || '').toLowerCase().includes(f));
+  const unset = CloneState.candidates.filter(c => !CloneState.assign[c.id]).length;
+  wrap.innerHTML = `
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+      <input id="clone-filter" placeholder="Filter by SKU or title…" value="${escapeAttr(CloneState.filter || '')}" oninput="cloneOnFilter(this.value)" style="flex:1;min-width:220px">
+      <div style="font-size:12px;color:var(--ink-soft)">${rows.length} shown · ${unset} using default shipping</div>
+    </div>
+    <div class="card"><div class="card-body" style="padding:0;max-height:460px;overflow:auto">
+      <table class="table" style="margin:0"><thead><tr>
+        <th>SKU</th><th>Title</th><th style="text-align:right">Price</th><th style="min-width:220px">Shipping policy</th>
+      </tr></thead><tbody>
+      ${rows.length ? rows.map(c => `<tr>
+        <td style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(c.sku || '')}</td>
+        <td style="font-size:12px">${escapeHtml((c.title || '').slice(0, 70))}</td>
+        <td style="text-align:right">${c.price != null ? '£' + c.price.toFixed(2) : '<span style="color:var(--red)">no price</span>'}</td>
+        <td><select data-ship-pid="${c.id}" onchange="cloneOnRowShip(${c.id}, this.value)" style="width:100%">${cloneShipOptions(CloneState.assign[c.id] || '', '— use default —')}</select></td>
+      </tr>`).join('') : `<tr><td colspan="4" style="padding:18px;text-align:center;color:var(--ink-soft)">No matching items.</td></tr>`}
+      </tbody></table>
+    </div></div>`;
+}
+
+function cloneOnFilter(v) { CloneState.filter = v; cloneRenderTable(); const f = el('clone-filter'); if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); } }
+function cloneOnRowShip(pid, val) { if (val) CloneState.assign[pid] = val; else delete CloneState.assign[pid]; }
+function cloneApplyToShown() {
+  const val = el('clone-bulk-ship')?.value || '';
+  const f = (CloneState.filter || '').toLowerCase().trim();
+  const shown = CloneState.candidates.filter(c => !f || (c.sku || '').toLowerCase().includes(f) || (c.title || '').toLowerCase().includes(f));
+  for (const c of shown) { if (val) CloneState.assign[c.id] = val; else delete CloneState.assign[c.id]; }
+  cloneRenderTable();
+  toast(`Set shipping on ${shown.length} shown item(s)`, 'success', 2500);
+}
+
+// Persist current per-item choices. `notify` toasts; run() calls it silently.
+async function cloneSaveShipping(notify) {
+  const assignments = CloneState.candidates.map(c => ({ productId: c.id, shippingPolicyId: CloneState.assign[c.id] || '' }));
+  try {
+    await Api.post('/api/listings/clone-to-store/shipping', { toStore: CloneState.toStore, assignments });
+    if (notify) toast('Shipping choices saved', 'success', 2500);
+  } catch (e) { if (notify) toast('Save failed: ' + (e.data?.message || e.message), 'error', 6000); }
 }
 
 function cloneRenderReadiness(r) {
@@ -11388,10 +11474,11 @@ function cloneRenderControls(r) {
     <button id="clone-btn-preview" class="btn btn-outline" onclick="cloneRun('preview')">🔍 Preview all (${r.total})</button>
     <div class="field" style="margin:0">
       <label style="font-size:12px">Publish up to</label>
-      <input id="clone-max" type="number" min="1" value="10" style="width:90px" title="New eBay accounts have a low selling limit — start small (e.g. 10) and raise it as eBay lifts your limit.">
+      <input id="clone-max" type="number" min="1" value="${r.total}" style="width:100px" title="Your eBay selling limit is set from your business account setup. Leave at the full count to list everything; the run stops automatically if a limit is hit and resumes on the next run.">
     </div>
     <button id="clone-btn-publish" class="btn btn-primary" onclick="cloneRun('publish')" ${(!r.hasToken) ? 'disabled' : ''}>🚀 Publish now</button>
-    <button id="clone-btn-stop" class="btn btn-ghost" style="color:var(--red);display:none" onclick="cloneStop()">■ Stop</button>`;
+    <button id="clone-btn-stop" class="btn btn-ghost" style="color:var(--red);display:none" onclick="cloneStop()">■ Stop</button>
+    <div style="flex-basis:100%;font-size:11px;color:var(--ink-soft)">Preview first to validate fees + required specifics with no live listings. Publishing respects your eBay selling limit — if it's hit, the run stops and you resume later.</div>`;
 }
 
 function cloneStop() { CloneState.stop = true; toast('Stopping after the current item…', 'warn', 3000); }
@@ -11400,7 +11487,10 @@ async function cloneRun(mode) {
   if (CloneState.running) return;
   if (mode === 'publish' && !confirm(`Publish live listings on ${CloneState.storeName}? This creates real eBay listings. (Preview first if unsure.)`)) return;
   CloneState.running = true; CloneState.stop = false;
-  const maxItems = mode === 'publish' ? Math.max(1, parseInt(el('clone-max')?.value) || 10) : Infinity;
+  // Persist the current per-item shipping choices so the server-side run uses them.
+  await cloneSaveShipping(false);
+  const defaultShippingId = el('clone-default-ship')?.value || '';
+  const maxItems = mode === 'publish' ? Math.max(1, parseInt(el('clone-max')?.value) || CloneState.candidates.length) : Infinity;
   const pending = CloneState.candidates.slice();
   let ok = 0, fail = 0, skip = 0, publishedThisRun = 0, processed = 0;
   const total = mode === 'publish' ? Math.min(maxItems, pending.length) : pending.length;
@@ -11424,7 +11514,7 @@ async function cloneRun(mode) {
     const batch = pending.splice(0, room);
     let r;
     try {
-      r = await Api.post('/api/listings/clone-to-store/run', { toStore: CloneState.toStore, productIds: batch.map(c => c.id), mode });
+      r = await Api.post('/api/listings/clone-to-store/run', { toStore: CloneState.toStore, productIds: batch.map(c => c.id), mode, defaultShippingId });
     } catch (e) { toast('Run failed: ' + (e.data?.message || e.message), 'error', 8000); break; }
     for (const res of (r.results || [])) {
       CloneState.results.push(res);
