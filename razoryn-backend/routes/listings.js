@@ -3460,6 +3460,25 @@ async function _listedOnStore(shopifyProductId, storeCode) {
   return rows.length > 0;
 }
 
+// Pull category (+ item specifics) from the product's SOURCE eBay listing — the
+// account it's ALREADY on — when the warehouse record has none saved. This is
+// what makes "mirror the existing listing" work for products that were listed
+// before the app started persisting category/specifics on the product row.
+async function _sourceListingDetail(product, toStore) {
+  if (!product.shopify_product_id) return {};
+  const src = await query(
+    `SELECT ebay_item_id, store_code FROM mirror_links
+     WHERE shopify_product_id::text = $1 AND store_code IS DISTINCT FROM $2
+     ORDER BY (store_code IS NULL) LIMIT 1`,   // prefer a real store_code over legacy NULL
+    [String(product.shopify_product_id), toStore]);
+  const item = src.rows[0];
+  if (!item || !item.ebay_item_id) return {};
+  try {
+    const det = await ebay.getItemDetails(item.ebay_item_id, item.store_code || undefined);
+    return { categoryId: det.categoryId || null, specifics: Array.isArray(det.specifics) ? det.specifics : [] };
+  } catch (e) { return {}; }
+}
+
 // GET /api/listings/clone-to-store/candidates?toStore=razoryn2
 // Returns the products eligible to clone onto `toStore`, plus readiness flags
 // (token present, business policies set) so the UI can warn before a run.
@@ -3510,7 +3529,8 @@ router.get('/clone-to-store/candidates', requireAdmin, async (req, res) => {
     shipping: settings[`${polPrefix}shipping`] || settings['ebay_policy_shipping'] || null,
     return:   settings[`${polPrefix}return`]   || settings['ebay_policy_return']   || null,
   };
-  const noCategory = rows.filter(r => !r.ebay_category_id && !settings.ebay_default_category_id).length;
+  // Category no longer needs to be pre-saved — the run recovers it from each
+  // product's existing account-1 listing — so we only warn about missing price.
   const noPrice = rows.filter(r => r.price_ebay == null).length;
 
   res.json({
@@ -3521,7 +3541,7 @@ router.get('/clone-to-store/candidates', requireAdmin, async (req, res) => {
     policies,
     defaultCategory: settings.ebay_default_category_id || null,
     total: rows.length,
-    warnings: { noCategory, noPrice },
+    warnings: { noPrice },
     shippingPolicies,                                  // [{id,name}] for the per-item picker
     defaultShippingPolicy: policies.shipping || null,  // store-wide fallback (Settings)
     candidates: rows.map(r => ({
@@ -3601,15 +3621,35 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
       results.push({ productId: pid, sku: p.sku, error: 'no_price', message: 'Product has no eBay price to mirror.' });
       continue;
     }
+    // Category + specifics: saved warehouse values first; if missing, mirror them
+    // from the product's existing account-1 listing (and cache the category back
+    // to the product so later runs skip the lookup).
+    let categoryId = p.ebay_category_id || null;
+    let itemSpecifics = Array.isArray(p.ebay_item_specifics) ? p.ebay_item_specifics : [];
+    if (!categoryId || !itemSpecifics.length) {
+      const det = await _sourceListingDetail(p, toStore);
+      if (!categoryId && det.categoryId) categoryId = det.categoryId;
+      if (!itemSpecifics.length && det.specifics && det.specifics.length) itemSpecifics = det.specifics;
+      // Cache what we recovered back onto the product so a later run (and edits)
+      // skip the eBay lookup. COALESCE = never overwrite an existing value.
+      if (det.categoryId || (det.specifics && det.specifics.length)) {
+        query(`UPDATE products SET
+                 ebay_category_id = COALESCE(ebay_category_id, $1),
+                 ebay_item_specifics = COALESCE(ebay_item_specifics, $2::jsonb),
+                 updated_at = now() WHERE id = $3`,
+          [det.categoryId ? String(det.categoryId) : null,
+           (det.specifics && det.specifics.length) ? JSON.stringify(det.specifics) : null, pid]).catch(() => {});
+      }
+    }
     try {
       const out = await doCreateEbay({
         productId: pid,
         storeCode: toStore,
         price: parseFloat(p.price_ebay),               // faithful mirror of the source price
-        categoryId: p.ebay_category_id || undefined,   // else doCreateEbay uses the Settings default
+        categoryId: categoryId || undefined,           // else doCreateEbay uses the Settings default
         conditionId: p.ebay_condition_id || undefined,
         quantity: p.qty_on_hand || 1,
-        itemSpecifics: Array.isArray(p.ebay_item_specifics) ? p.ebay_item_specifics : [],
+        itemSpecifics,
         // Payment + return come from the store default; shipping is per-item.
         businessPolicies: shippingId ? { shippingId } : undefined,
         preview: mode === 'preview',
