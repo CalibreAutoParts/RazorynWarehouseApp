@@ -3430,6 +3430,26 @@ router.post('/create-ebay', requireAdmin, async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────
 const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// Per-(product, store) shipping-policy assignment. Payment + return policies are
+// the same for every item (the store default), but shipping varies per item
+// (e.g. large panels via a pallet courier, small items via a cheap 48h service).
+// Keyed by store so each eBay account can point at its own policy id, and so a
+// choice survives a stopped/resumed bulk run.
+let _shipPolicyTableReady = false;
+async function _ensureShipPolicyTable() {
+  if (_shipPolicyTableReady) return;
+  try {
+    await query(`CREATE TABLE IF NOT EXISTS product_ship_policy (
+      product_id INTEGER NOT NULL,
+      store_code TEXT NOT NULL,
+      shipping_policy_id TEXT,
+      updated_at TIMESTAMPTZ DEFAULT now(),
+      PRIMARY KEY (product_id, store_code)
+    )`);
+    _shipPolicyTableReady = true;
+  } catch (e) { console.warn('[clone] ensure product_ship_policy:', e.message); }
+}
+
 // A product is "listed on the target store" iff a mirror_link row ties its
 // Shopify product id to that store_code. Shared by candidates + run (skip check).
 async function _listedOnStore(shopifyProductId, storeCode) {
@@ -3449,14 +3469,18 @@ router.get('/clone-to-store/candidates', requireAdmin, async (req, res) => {
   const store = brand.getStore(toStore);
   if (!store) return res.status(400).json({ error: 'unknown_store', message: `No eBay store "${toStore}". Available: ${brand.stores.map(s => s.code).join(', ')}` });
   try { await query(`ALTER TABLE mirror_links ADD COLUMN IF NOT EXISTS store_code TEXT`); } catch (e) {}
+  await _ensureShipPolicyTable();
 
   // Listed on eBay somewhere (a mirror_link on a store OTHER than the target,
-  // incl. legacy NULL store_code) but not yet on the target store.
+  // incl. legacy NULL store_code) but not yet on the target store. Left-join the
+  // saved per-item shipping-policy choice for this store.
   const { rows } = await query(`
     SELECT p.id, p.sku, p.title, p.price_ebay, p.qty_on_hand,
            p.ebay_category_id,
-           (p.ebay_item_specifics IS NOT NULL) AS has_specifics
+           (p.ebay_item_specifics IS NOT NULL) AS has_specifics,
+           psp.shipping_policy_id
     FROM products p
+    LEFT JOIN product_ship_policy psp ON psp.product_id = p.id AND psp.store_code = $1
     WHERE p.active
       AND p.shopify_product_id IS NOT NULL
       AND EXISTS (
@@ -3468,6 +3492,14 @@ router.get('/clone-to-store/candidates', requireAdmin, async (req, res) => {
         WHERE ml2.shopify_product_id::text = p.shopify_product_id
           AND ml2.store_code = $1)
     ORDER BY p.title`, [toStore]);
+
+  // The target store's shipping business policies, so the UI can offer them
+  // per item. Best-effort — if the eBay call fails we still return candidates.
+  let shippingPolicies = [];
+  try {
+    const pols = await ebay.getBusinessPolicies('EBAY_GB', toStore);
+    shippingPolicies = (pols.shipping || []).map(p => ({ id: String(p.id), name: p.name }));
+  } catch (e) { console.warn('[clone] shipping policies load failed:', e.message); }
 
   // Readiness: business policies for the target store (per-store keys, falling
   // back to brand-wide), and the default category used when a product has none.
@@ -3490,12 +3522,46 @@ router.get('/clone-to-store/candidates', requireAdmin, async (req, res) => {
     defaultCategory: settings.ebay_default_category_id || null,
     total: rows.length,
     warnings: { noCategory, noPrice },
+    shippingPolicies,                                  // [{id,name}] for the per-item picker
+    defaultShippingPolicy: policies.shipping || null,  // store-wide fallback (Settings)
     candidates: rows.map(r => ({
       id: r.id, sku: r.sku, title: r.title,
       price: r.price_ebay != null ? parseFloat(r.price_ebay) : null,
       qty: r.qty_on_hand, hasCategory: !!r.ebay_category_id, hasSpecifics: r.has_specifics,
+      shippingPolicyId: r.shipping_policy_id || null,  // saved per-item choice for this store
     })),
   });
+});
+
+// POST /api/listings/clone-to-store/shipping
+// Persist per-item shipping-policy choices for a store. Body:
+//   { toStore, assignments: [{ productId, shippingPolicyId }] }
+// An empty/blank shippingPolicyId clears the item's override (→ store default).
+router.post('/clone-to-store/shipping', requireAdmin, async (req, res) => {
+  const brand = require('../lib/brand');
+  const b = req.body || {};
+  const toStore = String(b.toStore || '').trim();
+  if (!brand.getStore(toStore)) return res.status(400).json({ error: 'unknown_store' });
+  const assignments = Array.isArray(b.assignments) ? b.assignments : [];
+  await _ensureShipPolicyTable();
+  let saved = 0;
+  for (const a of assignments) {
+    const pid = parseInt(a.productId);
+    if (!Number.isFinite(pid)) continue;
+    const sp = (a.shippingPolicyId == null || a.shippingPolicyId === '') ? null : String(a.shippingPolicyId);
+    if (sp === null) {
+      await query(`DELETE FROM product_ship_policy WHERE product_id = $1 AND store_code = $2`, [pid, toStore]);
+    } else {
+      await query(
+        `INSERT INTO product_ship_policy (product_id, store_code, shipping_policy_id, updated_at)
+         VALUES ($1, $2, $3, now())
+         ON CONFLICT (product_id, store_code)
+         DO UPDATE SET shipping_policy_id = EXCLUDED.shipping_policy_id, updated_at = now()`,
+        [pid, toStore, sp]);
+    }
+    saved++;
+  }
+  res.json({ ok: true, saved });
 });
 
 // POST /api/listings/clone-to-store/run
@@ -3512,6 +3578,9 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
   if (!store.token) return res.status(400).json({ error: 'store_no_token', message: `Store "${toStore}" has no eBay token set.` });
   const ids = Array.isArray(b.productIds) ? b.productIds.slice(0, 25) : [];
   if (!ids.length) return res.status(400).json({ error: 'no_products' });
+  await _ensureShipPolicyTable();
+  // Optional run-level default shipping policy for items with no saved override.
+  const defaultShippingId = (b.defaultShippingId != null && b.defaultShippingId !== '') ? String(b.defaultShippingId) : null;
 
   const results = [];
   let stop = false, stopReason = null;
@@ -3519,6 +3588,10 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
     const pr = await query(`SELECT * FROM products WHERE id = $1`, [pid]);
     const p = pr.rows[0];
     if (!p) { results.push({ productId: pid, error: 'not_found' }); continue; }
+    // Per-item shipping policy: saved choice wins, else the run-level default,
+    // else doCreateEbay falls back to the store's Settings shipping policy.
+    const sppRow = await query(`SELECT shipping_policy_id FROM product_ship_policy WHERE product_id = $1 AND store_code = $2`, [pid, toStore]);
+    const shippingId = sppRow.rows[0]?.shipping_policy_id || defaultShippingId || undefined;
     // Resume-safe: never double-list on the target store.
     if (await _listedOnStore(p.shopify_product_id, toStore)) {
       results.push({ productId: pid, sku: p.sku, skipped: true, reason: 'already_listed' });
@@ -3537,6 +3610,8 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
         conditionId: p.ebay_condition_id || undefined,
         quantity: p.qty_on_hand || 1,
         itemSpecifics: Array.isArray(p.ebay_item_specifics) ? p.ebay_item_specifics : [],
+        // Payment + return come from the store default; shipping is per-item.
+        businessPolicies: shippingId ? { shippingId } : undefined,
         preview: mode === 'preview',
       }, { req });
       results.push({
