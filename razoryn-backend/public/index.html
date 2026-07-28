@@ -821,6 +821,8 @@
   /* Competitors page — visible to admins and warehouse staff with the perm. */
   .nav-item.competitors-only { display: none; }
   body.can-competitors .nav-item.competitors-only { display: flex; }
+  /* "Copy to 2nd store" — only when the brand has more than one eBay store. */
+  body:not(.is-multistore) .nav-item.multistore-only { display: none !important; }
 
   /* ==================== PROGRESS BAR ====================
      Top-of-screen task indicator. A thin brand-coloured stripe shows long-running
@@ -1109,6 +1111,10 @@
         <button class="nav-item admin-only" data-page="bulk" data-source="shopify">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m11 18-6-6 6-6"/></svg>
           Shopify → eBay
+        </button>
+        <button class="nav-item admin-only multistore-only" data-page="clonestore">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          Copy to 2nd store
         </button>
         <button class="nav-item admin-only" data-page="settings">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -1833,6 +1839,9 @@ async function loadBrand() {
     if (!r.ok) throw new Error('http_' + r.status);
     const b = await r.json();
     State.brand = b;
+    // Reveal the "Copy to 2nd store" nav only when the brand runs >1 eBay store.
+    const ebayStores = (b.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
+    document.body.classList.toggle('is-multistore', ebayStores.length > 1);
     // Page title
     if (b.appTitle) document.title = b.appTitle;
     // Logos — both light and dark variants. Backend serves /logo.png (light) and
@@ -2786,7 +2795,7 @@ function routeTo(page) {
     labels: renderLabels, notes: renderNotes, dispatch: renderDispatch,
     competitors: renderCompetitors, bundles: renderBundles, createlisting: renderCreateListing,
     sharedstock: renderSharedStock, editlisting: renderEditListing, costs: renderCosts,
-    drafts: renderDrafts
+    drafts: renderDrafts, clonestore: renderCloneStore
   };
   try {
     (pages[page] || renderDashboard)();
@@ -11311,6 +11320,149 @@ async function pushPrelistingLive(productId) {
 // (reused from openCreateEbayListing in draft mode) on the right. One submit
 // creates the warehouse product, pushes it to Shopify, then creates the eBay
 // listing using the eBay panel's fields.
+// ──────────────────────────────────────────────────────────────────────────
+// "Copy catalogue to 2nd store" — bulk-clones everything already on the primary
+// eBay account onto the second account, throttled and resumable, preview-first.
+// Backend: /api/listings/clone-to-store/{candidates,run}.
+// ──────────────────────────────────────────────────────────────────────────
+let CloneState = { toStore: null, storeName: '', candidates: [], results: [], running: false, stop: false, meta: null };
+
+async function renderCloneStore() {
+  // Target = the first non-primary eBay store (the second account).
+  const stores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
+  const target = stores.find(s => !s.primary) || stores[1];
+  if (!target) { el('content').innerHTML = `<div class="empty" style="padding:40px"><div class="t">Only one eBay store configured</div><div>This tool copies listings from your main eBay account to a second one. Add a second store to use it.</div></div>`; return; }
+  CloneState.toStore = target.code;
+  CloneState.storeName = target.name;
+
+  el('content').innerHTML = `
+    <div style="max-width:900px">
+      <h1 style="margin-bottom:4px">Copy catalogue to ${escapeHtml(target.name)}</h1>
+      <div style="color:var(--ink-soft);font-size:14px;margin-bottom:18px">Recreates every listing from your main eBay account onto <strong>${escapeHtml(target.name)}</strong> — same title, price, photos and item specifics. Safe to stop and re-run: it skips anything already copied.</div>
+      <div id="clone-readiness"></div>
+      <div id="clone-summary" class="card" style="margin-bottom:14px"><div class="card-body" style="padding:18px">Loading candidates…</div></div>
+      <div id="clone-controls" style="display:none;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px"></div>
+      <div id="clone-progress" style="display:none;margin-bottom:14px"></div>
+      <div id="clone-results"></div>
+    </div>`;
+  await cloneLoadCandidates();
+}
+
+async function cloneLoadCandidates() {
+  try {
+    const r = await Api.get('/api/listings/clone-to-store/candidates?toStore=' + encodeURIComponent(CloneState.toStore));
+    CloneState.candidates = r.candidates || [];
+    CloneState.meta = r;
+    cloneRenderReadiness(r);
+    cloneRenderSummary(r);
+    cloneRenderControls(r);
+  } catch (e) {
+    el('clone-summary').innerHTML = `<div class="card-body" style="padding:18px;color:var(--red)">Couldn't load candidates: ${escapeHtml(e.data?.message || e.message)}</div>`;
+  }
+}
+
+function cloneRenderReadiness(r) {
+  const issues = [];
+  if (!r.hasToken) issues.push('No eBay token set for this store — set <code>EBAY_AUTH_TOKEN_RAZORYN2</code> and redeploy.');
+  if (!r.policiesSet) issues.push(`No business policies set for ${escapeHtml(r.storeName)} — set them in <a href="#" onclick="routeTo('settings');return false" style="color:var(--brand-primary);font-weight:600">Settings → eBay</a> (payment + postage), or listings will be rejected.`);
+  if (r.warnings?.noCategory) issues.push(`${r.warnings.noCategory} product(s) have no saved eBay category and no default set — they'll use the Settings default category if present, else fail.`);
+  if (r.warnings?.noPrice) issues.push(`${r.warnings.noPrice} product(s) have no eBay price and will be skipped.`);
+  el('clone-readiness').innerHTML = issues.length
+    ? `<div class="card" style="margin-bottom:14px;border-left:3px solid var(--amber)"><div class="card-body" style="padding:12px 16px;font-size:13px;color:var(--ink)"><strong>⚠ Before you run:</strong><ul style="margin:8px 0 0;padding-left:20px;line-height:1.7">${issues.map(i => `<li>${i}</li>`).join('')}</ul></div></div>`
+    : '';
+}
+
+function cloneRenderSummary(r) {
+  const alreadyDone = CloneState.results.filter(x => x.ok && !x.preview).length;
+  el('clone-summary').innerHTML = `<div class="card-body" style="padding:18px;display:flex;gap:28px;flex-wrap:wrap">
+      <div><div style="font-size:28px;font-weight:700">${r.total}</div><div style="font-size:12px;color:var(--ink-soft)">listings to copy to ${escapeHtml(r.storeName)}</div></div>
+      <div><div style="font-size:28px;font-weight:700;color:var(--green)">${escapeHtml(String(r.hasToken ? '✓' : '—'))}</div><div style="font-size:12px;color:var(--ink-soft)">account connected</div></div>
+    </div>`;
+}
+
+function cloneRenderControls(r) {
+  const box = el('clone-controls');
+  if (!r.total) { box.style.display = 'none'; el('clone-summary').innerHTML += ''; return; }
+  box.style.display = 'flex';
+  box.innerHTML = `
+    <button id="clone-btn-preview" class="btn btn-outline" onclick="cloneRun('preview')">🔍 Preview all (${r.total})</button>
+    <div class="field" style="margin:0">
+      <label style="font-size:12px">Publish up to</label>
+      <input id="clone-max" type="number" min="1" value="10" style="width:90px" title="New eBay accounts have a low selling limit — start small (e.g. 10) and raise it as eBay lifts your limit.">
+    </div>
+    <button id="clone-btn-publish" class="btn btn-primary" onclick="cloneRun('publish')" ${(!r.hasToken) ? 'disabled' : ''}>🚀 Publish now</button>
+    <button id="clone-btn-stop" class="btn btn-ghost" style="color:var(--red);display:none" onclick="cloneStop()">■ Stop</button>`;
+}
+
+function cloneStop() { CloneState.stop = true; toast('Stopping after the current item…', 'warn', 3000); }
+
+async function cloneRun(mode) {
+  if (CloneState.running) return;
+  if (mode === 'publish' && !confirm(`Publish live listings on ${CloneState.storeName}? This creates real eBay listings. (Preview first if unsure.)`)) return;
+  CloneState.running = true; CloneState.stop = false;
+  const maxItems = mode === 'publish' ? Math.max(1, parseInt(el('clone-max')?.value) || 10) : Infinity;
+  const pending = CloneState.candidates.slice();
+  let ok = 0, fail = 0, skip = 0, publishedThisRun = 0, processed = 0;
+  const total = mode === 'publish' ? Math.min(maxItems, pending.length) : pending.length;
+
+  el('clone-progress').style.display = 'block';
+  if (el('clone-btn-preview')) el('clone-btn-preview').disabled = true;
+  if (el('clone-btn-publish')) el('clone-btn-publish').disabled = true;
+  if (el('clone-btn-stop')) el('clone-btn-stop').style.display = 'inline-flex';
+  CloneState.results = [];
+
+  const paint = () => {
+    const pct = total ? Math.round(processed / total * 100) : 100;
+    el('clone-progress').innerHTML = `
+      <div style="font-size:13px;margin-bottom:6px">${CloneState.running ? (mode === 'preview' ? 'Previewing' : 'Publishing') + '…' : 'Done.'} <strong>${processed}</strong>/${total} · <span style="color:var(--green)">${ok} ok</span> · <span style="color:var(--red)">${fail} failed</span>${skip ? ` · ${skip} skipped` : ''}</div>
+      <div style="height:8px;background:var(--line);border-radius:4px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--brand-primary);transition:width .3s"></div></div>`;
+  };
+  paint();
+
+  while (pending.length && !CloneState.stop && publishedThisRun < maxItems) {
+    const room = maxItems === Infinity ? 5 : Math.max(1, Math.min(5, maxItems - publishedThisRun));
+    const batch = pending.splice(0, room);
+    let r;
+    try {
+      r = await Api.post('/api/listings/clone-to-store/run', { toStore: CloneState.toStore, productIds: batch.map(c => c.id), mode });
+    } catch (e) { toast('Run failed: ' + (e.data?.message || e.message), 'error', 8000); break; }
+    for (const res of (r.results || [])) {
+      CloneState.results.push(res);
+      processed++;
+      if (res.ok) { ok++; if (!res.preview) publishedThisRun++; }
+      else if (res.skipped) skip++;
+      else fail++;
+    }
+    paint();
+    cloneRenderResults();
+    if (r.stop) { CloneState.stop = true; toast('⚠ eBay selling limit reached — stopped. Re-run later to continue where it left off.', 'warn', 12000); }
+  }
+
+  CloneState.running = false;
+  if (el('clone-btn-stop')) el('clone-btn-stop').style.display = 'none';
+  if (el('clone-btn-preview')) el('clone-btn-preview').disabled = false;
+  if (el('clone-btn-publish')) el('clone-btn-publish').disabled = !CloneState.meta?.hasToken;
+  paint();
+  toast(`${mode === 'preview' ? 'Preview' : 'Publish'} complete — ${ok} ok, ${fail} failed${skip ? `, ${skip} skipped` : ''}`, fail ? 'warn' : 'success', 8000);
+  if (mode === 'publish' && ok) { await Store.refresh('products').catch(() => {}); await cloneLoadCandidates(); }
+}
+
+function cloneRenderResults() {
+  const rows = CloneState.results.slice(-60).reverse();
+  if (!rows.length) { el('clone-results').innerHTML = ''; return; }
+  el('clone-results').innerHTML = `<div class="card"><div class="card-body" style="padding:0">
+    <table class="table" style="margin:0"><thead><tr><th>SKU</th><th>Result</th></tr></thead><tbody>
+    ${rows.map(r => {
+      let badge, detail = '';
+      if (r.skipped) { badge = `<span class="pill" style="background:var(--line);color:var(--ink-soft)">skipped</span>`; detail = 'already on this store'; }
+      else if (r.ok && r.preview) { badge = `<span class="pill" style="background:var(--blue-light);color:var(--blue)">preview ok</span>`; detail = r.fees != null ? `fees £${escapeHtml(String(r.fees))}` : 'validated'; }
+      else if (r.ok) { badge = `<span class="pill" style="background:var(--green-light);color:var(--green)">listed</span>`; detail = r.itemId ? `<a href="${escapeAttr(r.url || '#')}" target="_blank" style="color:var(--brand-primary)">${escapeHtml(String(r.itemId))}</a>` : ''; }
+      else { badge = `<span class="pill" style="background:var(--red-light);color:var(--red)">failed</span>`; detail = escapeHtml(r.message || r.error || '') + (r.missing ? ' — missing: ' + escapeHtml((r.missing || []).join(', ')) : ''); }
+      return `<tr><td style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(r.sku || String(r.productId || ''))}</td><td>${badge} <span style="font-size:12px;color:var(--ink-soft)">${detail}</span></td></tr>`;
+    }).join('')}
+    </tbody></table></div></div>`;
+}
+
 async function renderCreateListing() {
   loadSuppliersOnce();
   el('content').innerHTML = `
