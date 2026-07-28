@@ -3152,13 +3152,30 @@ function mergeSpecificsByName(...lists) {
 // The specifics we can always rebuild from persisted warehouse data — so an edit
 // (or any re-push) never loses them even if the form/live read omitted them.
 // Used by BOTH create and revise so the two paths agree.
+// Best Manufacturer Part Number for a product: the dedicated part_number if set,
+// else derived from the SKU — which for this catalogue IS the part number. Some
+// SKUs carry a human prefix ("RAV4 - 5212742190", "HYUNDAI IONIQ - 86514-G2000");
+// the real MPN is the last " - "-separated segment. Plain part-number SKUs
+// ("75602-0D010") have no " - " and pass through unchanged.
+function mpnFromProduct(product) {
+  const pn = String(product.part_number || '').trim();
+  if (pn) return pn;
+  const sku = String(product.sku || '').trim();
+  if (!sku) return '';
+  const parts = sku.split(' - ');
+  return (parts[parts.length - 1] || sku).trim() || sku;
+}
+
 async function deriveEbaySpecifics(product, { countryOfOrigin, includeProductNumber = true } = {}) {
   const derived = [];
   const vehicle = parseVehicleFromTitle(product.title || '');
   const vMake = product.brand || vehicle.make;
   const vModel = product.model || vehicle.model;
   const vYear = vehicle.year;
-  if (product.part_number) derived.push({ name: 'Manufacturer Part Number', value: product.part_number });
+  // MPN — eBay requires it for most car-part categories. Always resolves to
+  // something (part_number or SKU) so eBay won't reject for a missing MPN.
+  const mpnValue = mpnFromProduct(product);
+  if (mpnValue) derived.push({ name: 'Manufacturer Part Number', value: mpnValue });
   if (product.position) derived.push({ name: 'Placement on Vehicle', value: product.position });
   if (vMake) derived.push({ name: 'Make', value: vMake });
   if (vModel) derived.push({ name: 'Model', value: vModel });
@@ -3284,7 +3301,7 @@ async function doCreateEbay(b, { req } = {}) {
       const { specifics } = await ebay.getCategorySpecifics(store.code, categoryId);
       const provided = new Set(mergedSpecifics.filter(s => s.name && s.value).map(s => s.name.toLowerCase()));
       provided.add('brand');  // we always send a Brand (default/override)
-      if (product.part_number) provided.add('manufacturer part number');
+      if (product.part_number || product.sku) provided.add('manufacturer part number');
       const missing = specifics.filter(s => s.required && !provided.has(s.name.toLowerCase())).map(s => s.name);
       if (missing.length) {
         throw httpErr(422, {
@@ -3312,7 +3329,7 @@ async function doCreateEbay(b, { req } = {}) {
     businessPolicies: pol,
     location: loc,
     brand: ebayBrand,
-    mpn: product.part_number,
+    mpn: mpnFromProduct(product),
     itemSpecifics: mergedSpecifics,
     // Shop/store category — per-listing choice, else the saved default.
     storeCategoryId: b.storeCategoryId || settings.ebay_default_store_category_id || null,
