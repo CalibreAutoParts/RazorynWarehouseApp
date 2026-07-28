@@ -30,6 +30,26 @@ const BRANDS = {
         name: 'Razoryn',
         channelCode: 'ebay_em',
         tokenEnv: 'EBAY_AUTH_TOKEN',
+        primary: true,                    // source of truth for cross-listing + fallback for legacy links
+      },
+      // Second Razoryn eBay selling account. Shares the same App credentials
+      // (EBAY_APP_ID/CERT_ID/DEV_ID) — only its Auth'n'Auth token differs
+      // (EBAY_AUTH_TOKEN_RAZORYN2). Stays hidden everywhere until that token is
+      // set (brand.js nulls a missing token and every listing/sync/sales path
+      // filters by hasToken), so shipping this entry is a no-op until go-live.
+      //
+      // channelCode 'ebay_cl' is reused deliberately: it's already an allowed
+      // value in the sales.channel CHECK constraint + sync_state, so no schema
+      // migration is needed, and the sales UI labels the pill from this store's
+      // `name` (see channelPill in public/index.html). Display name is
+      // env-overridable so the real eBay shop name can be set without a code
+      // change/redeploy.
+      {
+        code: 'razoryn2',
+        name: process.env.EBAY_STORE2_NAME || 'Razoryn 2',
+        channelCode: 'ebay_cl',
+        tokenEnv: 'EBAY_AUTH_TOKEN_RAZORYN2',
+        standalone: true,                 // independent selling account, not the cross-listing source
       },
     ],
   },

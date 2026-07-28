@@ -519,6 +519,12 @@ router.get('/pricing-config', async (req, res) => {
       } catch (e) {}
       return out;
     })(),
+    // Per-store markup-over-Shopify overrides (multi-store brands only). Lives in
+    // data.storeMarkupPct JSONB, keyed by store code. A store without an entry
+    // falls back to the brand-wide ebayMarkupPct — so a second store "defaults to
+    // the same" until you deliberately diverge it. Used by the "From Shopify +%"
+    // button in the create-listing flow.
+    ebayPerStoreMarkup:     (r.data && r.data.storeMarkupPct && typeof r.data.storeMarkupPct === 'object') ? r.data.storeMarkupPct : {},
   });
 });
 
@@ -626,6 +632,21 @@ router.post('/pricing-config', requireAdmin, async (req, res) => {
           updates.push(`ebay_policy_${storeCode}_${kind} = $${params.length}`);
         }
       }
+    }
+    // Per-store markup overrides live in data.storeMarkupPct JSONB — merge the
+    // provided { storeCode: pct } map without clobbering other data keys. Empty
+    // / blank / non-numeric values delete that store's override (→ falls back to
+    // the brand-wide ebayMarkupPct).
+    if (b.ebayPerStoreMarkup && typeof b.ebayPerStoreMarkup === 'object') {
+      const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+      const map = { ...(cur.storeMarkupPct || {}) };
+      for (const [storeCode, pct] of Object.entries(b.ebayPerStoreMarkup)) {
+        if (!/^[a-z0-9_]+$/.test(storeCode)) continue;  // defence: only safe-char store codes
+        const n = parseFloat(pct);
+        if (pct === '' || pct === null || !Number.isFinite(n)) delete map[storeCode];
+        else map[storeCode] = n;
+      }
+      await query(`UPDATE app_settings SET data = jsonb_set(COALESCE(data,'{}'::jsonb), '{storeMarkupPct}', $1::jsonb, true), updated_at = now() WHERE id = 1`, [JSON.stringify(map)]);
     }
     // Auto-email toggle lives in the data JSONB, not a column — save it separately.
     if (b.autoEmailDocuments !== undefined) {
