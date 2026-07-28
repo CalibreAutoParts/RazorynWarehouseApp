@@ -1246,7 +1246,7 @@ async function addItem(storeArg, opts = {}) {
       <Description><![CDATA[${description || cleanTitle}]]></Description>
       <PrimaryCategory><CategoryID>${escapeXml(categoryId)}</CategoryID></PrimaryCategory>
       <StartPrice currencyID="${escapeXml(currency)}">${parseFloat(price).toFixed(2)}</StartPrice>
-      <Quantity>${parseInt(quantity) || 1}</Quantity>
+      <Quantity>${(() => { const q = parseInt(quantity); return Number.isFinite(q) && q >= 0 ? q : 1; })()}</Quantity>
       <SKU>${escapeXml(sku)}</SKU>
       <ConditionID>${parseInt(conditionId) || 1000}</ConditionID>
       <Country>${escapeXml(country)}</Country>

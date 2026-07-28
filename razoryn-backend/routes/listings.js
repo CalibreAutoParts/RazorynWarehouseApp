@@ -3304,7 +3304,9 @@ async function doCreateEbay(b, { req } = {}) {
     categoryId,
     conditionId: b.conditionId || 1000,
     price: parseFloat(b.price),
-    quantity: parseInt(b.quantity) || product.qty_on_hand || 1,
+    // An explicit quantity (including 0, for out-of-stock listings) is honoured;
+    // only a missing/invalid quantity falls back to stock-on-hand, then 1.
+    quantity: (() => { const q = parseInt(b.quantity); return Number.isFinite(q) ? q : (product.qty_on_hand || 1); })(),
     currency: 'GBP',
     imageUrls,
     businessPolicies: pol,
@@ -3601,6 +3603,10 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
   await _ensureShipPolicyTable();
   // Optional run-level default shipping policy for items with no saved override.
   const defaultShippingId = (b.defaultShippingId != null && b.defaultShippingId !== '') ? String(b.defaultShippingId) : null;
+  // Out-of-stock handling: 'skip' (default) leaves 0-stock items unlisted;
+  // 'zero' lists them at quantity 0 (needs eBay out-of-stock control on the
+  // account, else eBay rejects the item and it's reported as failed).
+  const oosMode = b.oosMode === 'zero' ? 'zero' : 'skip';
 
   const results = [];
   let stop = false, stopReason = null;
@@ -3619,6 +3625,13 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
     }
     if (p.price_ebay == null) {
       results.push({ productId: pid, sku: p.sku, error: 'no_price', message: 'Product has no eBay price to mirror.' });
+      continue;
+    }
+    // Real stock — never invented. 0-stock items are skipped unless the run
+    // opted to list them at quantity 0.
+    const qty = Number.isFinite(parseInt(p.qty_on_hand)) ? parseInt(p.qty_on_hand) : 0;
+    if (qty <= 0 && oosMode === 'skip') {
+      results.push({ productId: pid, sku: p.sku, skipped: true, reason: 'out_of_stock' });
       continue;
     }
     // Category + specifics: saved warehouse values first; if missing, mirror them
@@ -3648,7 +3661,7 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
         price: parseFloat(p.price_ebay),               // faithful mirror of the source price
         categoryId: categoryId || undefined,           // else doCreateEbay uses the Settings default
         conditionId: p.ebay_condition_id || undefined,
-        quantity: p.qty_on_hand || 1,
+        quantity: qty,                                  // real stock (0 allowed when oosMode='zero')
         itemSpecifics,
         // Payment + return come from the store default; shipping is per-item.
         businessPolicies: shippingId ? { shippingId } : undefined,
@@ -3673,6 +3686,58 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
   }
   if (req) await audit(req, 'clone_to_store', 'ebay_store', toStore, { mode, count: ids.length, created: results.filter(r => r.ok && !r.preview).length });
   res.json({ toStore, mode, results, stop, stopReason });
+});
+
+// GET /api/listings/clone-to-store/listed?toStore=  — count of listings already
+// on the target store (for the "sync quantities" affordance).
+router.get('/clone-to-store/listed', requireAdmin, async (req, res) => {
+  const brand = require('../lib/brand');
+  const toStore = String(req.query.toStore || '').trim();
+  if (!brand.getStore(toStore)) return res.status(400).json({ error: 'unknown_store' });
+  try { await query(`ALTER TABLE mirror_links ADD COLUMN IF NOT EXISTS store_code TEXT`); } catch (e) {}
+  const { rows } = await query(`SELECT COUNT(*)::int AS n FROM mirror_links WHERE store_code = $1`, [toStore]);
+  res.json({ toStore, listed: rows[0]?.n || 0 });
+});
+
+// POST /api/listings/clone-to-store/sync-quantities
+// Body: { toStore }
+// Pushes the current warehouse stock to every listing already on the target
+// store, so quantities match reality (e.g. after sales on the primary account
+// drew down shared stock). Processes one throttled batch per request; the caller
+// loops with ?after= cursor until done=true.
+router.post('/clone-to-store/sync-quantities', requireAdmin, async (req, res) => {
+  const brand = require('../lib/brand');
+  const b = req.body || {};
+  const toStore = String(b.toStore || '').trim();
+  const store = brand.getStore(toStore);
+  if (!store) return res.status(400).json({ error: 'unknown_store' });
+  if (!store.token) return res.status(400).json({ error: 'store_no_token' });
+  const after = parseInt(b.after) || 0;   // pagination cursor by mirror_links row order
+  const BATCH = 20;
+
+  // Listings on the target store joined to their warehouse product's stock.
+  const { rows } = await query(
+    `SELECT ml.ebay_item_id, p.id AS product_id, p.sku, p.qty_on_hand
+     FROM mirror_links ml
+     JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text
+     WHERE ml.store_code = $1
+     ORDER BY ml.ebay_item_id
+     OFFSET $2 LIMIT $3`, [toStore, after, BATCH]);
+
+  const results = [];
+  for (const r of rows) {
+    const qty = Number.isFinite(parseInt(r.qty_on_hand)) ? parseInt(r.qty_on_hand) : 0;
+    try {
+      await ebay.setQuantityTradingAPI(r.ebay_item_id, qty, toStore);
+      results.push({ itemId: r.ebay_item_id, sku: r.sku, ok: true, qty });
+    } catch (e) {
+      results.push({ itemId: r.ebay_item_id, sku: r.sku, error: e.message, qty });
+    }
+    await _sleep(300);
+  }
+  const done = rows.length < BATCH;
+  if (req && done) await audit(req, 'clone_sync_quantities', 'ebay_store', toStore, {});
+  res.json({ toStore, results, nextAfter: after + rows.length, done });
 });
 
 // ──────────────────────────────────────────────────────────────────────────

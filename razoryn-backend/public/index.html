@@ -11325,7 +11325,7 @@ async function pushPrelistingLive(productId) {
 // eBay account onto the second account, throttled and resumable, preview-first.
 // Backend: /api/listings/clone-to-store/{candidates,run}.
 // ──────────────────────────────────────────────────────────────────────────
-let CloneState = { toStore: null, storeName: '', candidates: [], results: [], running: false, stop: false, meta: null, shippingPolicies: [], assign: {}, filter: '' };
+let CloneState = { toStore: null, storeName: '', candidates: [], results: [], running: false, stop: false, meta: null, shippingPolicies: [], assign: {}, selected: {}, filter: '' };
 
 // Build <option>s for a shipping-policy <select>. `sel` = currently-selected id.
 function cloneShipOptions(sel, withDefaultLabel) {
@@ -11368,6 +11368,10 @@ async function cloneLoadCandidates() {
     // Seed the in-memory assignment map from each item's saved choice.
     CloneState.assign = {};
     for (const c of CloneState.candidates) if (c.shippingPolicyId) CloneState.assign[c.id] = String(c.shippingPolicyId);
+    // Default selection: everything in stock. Out-of-stock items start unticked
+    // (you're unlikely to want to list what you don't have).
+    CloneState.selected = {};
+    for (const c of CloneState.candidates) if ((c.qty || 0) > 0) CloneState.selected[c.id] = true;
     cloneRenderReadiness(r);
     cloneRenderSummary(r);
     cloneRenderShipCard(r);
@@ -11407,35 +11411,65 @@ function cloneRenderTable() {
   if (!wrap) return;
   const f = (CloneState.filter || '').toLowerCase().trim();
   const rows = CloneState.candidates.filter(c => !f || (c.sku || '').toLowerCase().includes(f) || (c.title || '').toLowerCase().includes(f));
-  const unset = CloneState.candidates.filter(c => !CloneState.assign[c.id]).length;
+  const selShown = rows.filter(c => CloneState.selected[c.id]).length;
   wrap.innerHTML = `
     <div style="display:flex;gap:12px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
       <input id="clone-filter" placeholder="Filter by SKU or title…" value="${escapeAttr(CloneState.filter || '')}" oninput="cloneOnFilter(this.value)" style="flex:1;min-width:220px">
-      <div style="font-size:12px;color:var(--ink-soft)">${rows.length} shown · ${unset} using default shipping</div>
+      <button class="btn btn-ghost btn-sm" onclick="cloneSelectShown(true)">Select shown</button>
+      <button class="btn btn-ghost btn-sm" onclick="cloneSelectShown(false)">Deselect shown</button>
+      <div style="font-size:12px;color:var(--ink-soft)">${rows.length} shown · ${cloneSelectedCount()} selected</div>
     </div>
     <div class="card"><div class="card-body" style="padding:0;max-height:460px;overflow:auto">
       <table class="table" style="margin:0"><thead><tr>
-        <th>SKU</th><th>Title</th><th style="text-align:right">Price</th><th style="min-width:220px">Shipping policy</th>
+        <th style="width:34px"><input type="checkbox" ${selShown && selShown === rows.length ? 'checked' : ''} onchange="cloneSelectShown(this.checked)" title="Select/deselect shown"></th>
+        <th>SKU</th><th>Title</th><th style="text-align:right">Qty</th><th style="text-align:right">Price</th><th style="min-width:220px">Shipping policy</th>
       </tr></thead><tbody>
-      ${rows.length ? rows.map(c => `<tr>
+      ${rows.length ? rows.map(c => `<tr style="${CloneState.selected[c.id] ? '' : 'opacity:.5'}">
+        <td><input type="checkbox" data-sel-pid="${c.id}" ${CloneState.selected[c.id] ? 'checked' : ''} onchange="cloneToggleSelect(${c.id}, this.checked)"></td>
         <td style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(c.sku || '')}</td>
-        <td style="font-size:12px">${escapeHtml((c.title || '').slice(0, 70))}</td>
+        <td style="font-size:12px">${escapeHtml((c.title || '').slice(0, 66))}</td>
+        <td style="text-align:right;${(c.qty || 0) <= 0 ? 'color:var(--red);font-weight:600' : ''}">${c.qty ?? 0}</td>
         <td style="text-align:right">${c.price != null ? '£' + c.price.toFixed(2) : '<span style="color:var(--red)">no price</span>'}</td>
         <td><select data-ship-pid="${c.id}" onchange="cloneOnRowShip(${c.id}, this.value)" style="width:100%">${cloneShipOptions(CloneState.assign[c.id] || '', '— use default —')}</select></td>
-      </tr>`).join('') : `<tr><td colspan="4" style="padding:18px;text-align:center;color:var(--ink-soft)">No matching items.</td></tr>`}
+      </tr>`).join('') : `<tr><td colspan="6" style="padding:18px;text-align:center;color:var(--ink-soft)">No matching items.</td></tr>`}
       </tbody></table>
     </div></div>`;
 }
 
+function cloneShownRows() {
+  const f = (CloneState.filter || '').toLowerCase().trim();
+  return CloneState.candidates.filter(c => !f || (c.sku || '').toLowerCase().includes(f) || (c.title || '').toLowerCase().includes(f));
+}
 function cloneOnFilter(v) { CloneState.filter = v; cloneRenderTable(); const f = el('clone-filter'); if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); } }
 function cloneOnRowShip(pid, val) { if (val) CloneState.assign[pid] = val; else delete CloneState.assign[pid]; }
+function cloneToggleSelect(pid, on) { if (on) CloneState.selected[pid] = true; else delete CloneState.selected[pid]; cloneRefreshCounts(); const tr = document.querySelector(`[data-sel-pid="${pid}"]`)?.closest('tr'); if (tr) tr.style.opacity = on ? '' : '.5'; }
+function cloneSelectShown(on) { for (const c of cloneShownRows()) { if (on) CloneState.selected[c.id] = true; else delete CloneState.selected[c.id]; } cloneRenderTable(); cloneRefreshCounts(); }
 function cloneApplyToShown() {
   const val = el('clone-bulk-ship')?.value || '';
-  const f = (CloneState.filter || '').toLowerCase().trim();
-  const shown = CloneState.candidates.filter(c => !f || (c.sku || '').toLowerCase().includes(f) || (c.title || '').toLowerCase().includes(f));
+  const shown = cloneShownRows();
   for (const c of shown) { if (val) CloneState.assign[c.id] = val; else delete CloneState.assign[c.id]; }
   cloneRenderTable();
   toast(`Set shipping on ${shown.length} shown item(s)`, 'success', 2500);
+}
+
+// Match quantities of listings already on the target store to warehouse stock.
+async function cloneSyncQuantities() {
+  if (CloneState.running) return;
+  if (!confirm(`Update the quantity of every listing already on ${CloneState.storeName} to match current warehouse stock?`)) return;
+  CloneState.running = true;
+  const taskId = Task.start('Syncing quantities…');
+  let after = 0, done = false, ok = 0, fail = 0;
+  try {
+    while (!done) {
+      const r = await Api.post('/api/listings/clone-to-store/sync-quantities', { toStore: CloneState.toStore, after });
+      for (const res of (r.results || [])) { if (res.ok) ok++; else fail++; }
+      after = r.nextAfter; done = r.done;
+      Task.update?.(taskId, `Synced ${ok + fail}…`);
+    }
+    Task.done(taskId, 'Quantities synced');
+  } catch (e) { Task.fail(taskId, 'Failed'); toast('Sync failed: ' + (e.data?.message || e.message), 'error', 8000); }
+  CloneState.running = false;
+  toast(`Quantity sync complete — ${ok} updated${fail ? `, ${fail} failed` : ''}`, fail ? 'warn' : 'success', 7000);
 }
 
 // Persist current per-item choices. `notify` toasts; run() calls it silently.
@@ -11465,19 +11499,33 @@ function cloneRenderSummary(r) {
     </div>`;
 }
 
+function cloneSelectedCount() { return CloneState.candidates.filter(c => CloneState.selected[c.id]).length; }
+
 function cloneRenderControls(r) {
   const box = el('clone-controls');
-  if (!r.total) { box.style.display = 'none'; el('clone-summary').innerHTML += ''; return; }
+  if (!r.total) { box.style.display = 'none'; return; }
+  const sel = cloneSelectedCount();
   box.style.display = 'flex';
   box.innerHTML = `
-    <button id="clone-btn-preview" class="btn btn-outline" onclick="cloneRun('preview')">🔍 Preview all (${r.total})</button>
+    <button id="clone-btn-preview" class="btn btn-outline" onclick="cloneRun('preview')">🔍 Preview selected</button>
     <div class="field" style="margin:0">
       <label style="font-size:12px">Publish up to</label>
-      <input id="clone-max" type="number" min="1" value="${r.total}" style="width:100px" title="Your eBay selling limit is set from your business account setup. Leave at the full count to list everything; the run stops automatically if a limit is hit and resumes on the next run.">
+      <input id="clone-max" type="number" min="1" value="${sel || r.total}" style="width:100px" title="Your eBay selling limit is set from your business account setup. Leave it to list all selected; the run stops automatically if a limit is hit and resumes on the next run.">
     </div>
-    <button id="clone-btn-publish" class="btn btn-primary" onclick="cloneRun('publish')" ${(!r.hasToken) ? 'disabled' : ''}>🚀 Publish now</button>
+    <button id="clone-btn-publish" class="btn btn-primary" onclick="cloneRun('publish')" ${(!r.hasToken) ? 'disabled' : ''}>🚀 Publish <span id="clone-selcount">${sel}</span> selected</button>
     <button id="clone-btn-stop" class="btn btn-ghost" style="color:var(--red);display:none" onclick="cloneStop()">■ Stop</button>
-    <div style="flex-basis:100%;font-size:11px;color:var(--ink-soft)">Preview first to validate fees + required specifics with no live listings. Publishing respects your eBay selling limit — if it's hit, the run stops and you resume later.</div>`;
+    <div class="field" style="margin:0">
+      <label style="font-size:12px">Out-of-stock items</label>
+      <select id="clone-oos"><option value="skip">Skip (don't list)</option><option value="zero">List at 0 stock</option></select>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="cloneSyncQuantities()" title="Update the quantity of listings already on this store to match current warehouse stock">🔄 Sync quantities on ${escapeHtml(r.storeName)}</button>
+    <div style="flex-basis:100%;font-size:11px;color:var(--ink-soft)">Only <strong id="clone-selcount2">${sel}</strong> selected item(s) are listed. Preview first (no live listings). "List at 0 stock" needs eBay's out-of-stock setting on the account. Publishing respects your selling limit.</div>`;
+}
+
+function cloneRefreshCounts() {
+  const sel = cloneSelectedCount();
+  if (el('clone-selcount')) el('clone-selcount').textContent = sel;
+  if (el('clone-selcount2')) el('clone-selcount2').textContent = sel;
 }
 
 function cloneStop() { CloneState.stop = true; toast('Stopping after the current item…', 'warn', 3000); }
@@ -11485,12 +11533,15 @@ function cloneStop() { CloneState.stop = true; toast('Stopping after the current
 async function cloneRun(mode) {
   if (CloneState.running) return;
   if (mode === 'publish' && !confirm(`Publish live listings on ${CloneState.storeName}? This creates real eBay listings. (Preview first if unsure.)`)) return;
+  const selectedItems = CloneState.candidates.filter(c => CloneState.selected[c.id]);
+  if (!selectedItems.length) { toast('No items selected — tick the ones you want to list.', 'warn', 4000); return; }
   CloneState.running = true; CloneState.stop = false;
   // Persist the current per-item shipping choices so the server-side run uses them.
   await cloneSaveShipping(false);
   const defaultShippingId = el('clone-default-ship')?.value || '';
-  const maxItems = mode === 'publish' ? Math.max(1, parseInt(el('clone-max')?.value) || CloneState.candidates.length) : Infinity;
-  const pending = CloneState.candidates.slice();
+  const oosMode = el('clone-oos')?.value || 'skip';
+  const maxItems = mode === 'publish' ? Math.max(1, parseInt(el('clone-max')?.value) || selectedItems.length) : Infinity;
+  const pending = selectedItems.slice();
   let ok = 0, fail = 0, skip = 0, publishedThisRun = 0, processed = 0;
   const total = mode === 'publish' ? Math.min(maxItems, pending.length) : pending.length;
 
@@ -11513,7 +11564,7 @@ async function cloneRun(mode) {
     const batch = pending.splice(0, room);
     let r;
     try {
-      r = await Api.post('/api/listings/clone-to-store/run', { toStore: CloneState.toStore, productIds: batch.map(c => c.id), mode, defaultShippingId });
+      r = await Api.post('/api/listings/clone-to-store/run', { toStore: CloneState.toStore, productIds: batch.map(c => c.id), mode, defaultShippingId, oosMode });
     } catch (e) { toast('Run failed: ' + (e.data?.message || e.message), 'error', 8000); break; }
     for (const res of (r.results || [])) {
       CloneState.results.push(res);
@@ -11543,7 +11594,7 @@ function cloneRenderResults() {
     <table class="table" style="margin:0"><thead><tr><th>SKU</th><th>Result</th></tr></thead><tbody>
     ${rows.map(r => {
       let badge, detail = '';
-      if (r.skipped) { badge = `<span class="pill" style="background:var(--line);color:var(--ink-soft)">skipped</span>`; detail = 'already on this store'; }
+      if (r.skipped) { badge = `<span class="pill" style="background:var(--line);color:var(--ink-soft)">skipped</span>`; detail = r.reason === 'out_of_stock' ? 'out of stock' : 'already on this store'; }
       else if (r.ok && r.preview) { badge = `<span class="pill" style="background:var(--blue-light);color:var(--blue)">preview ok</span>`; detail = r.fees != null ? `fees £${escapeHtml(String(r.fees))}` : 'validated'; }
       else if (r.ok) { badge = `<span class="pill" style="background:var(--green-light);color:var(--green)">listed</span>`; detail = r.itemId ? `<a href="${escapeAttr(r.url || '#')}" target="_blank" style="color:var(--brand-primary)">${escapeHtml(String(r.itemId))}</a>` : ''; }
       else { badge = `<span class="pill" style="background:var(--red-light);color:var(--red)">failed</span>`; detail = escapeHtml(r.message || r.error || '') + (r.missing ? ' — missing: ' + escapeHtml((r.missing || []).join(', ')) : ''); }
