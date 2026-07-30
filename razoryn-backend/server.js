@@ -278,6 +278,14 @@ if (cron.validate(dispatchCronExpr)) {
         const result = await dispatch.syncEbayDispatchCore({ days: 14 });
         if (result.dispatched) console.log(`[cron dispatch] auto-dispatched ${result.dispatched} eBay order(s)`);
       }
+      // Shopify counterpart — mark orders fulfilled on Shopify as dispatched so
+      // they drop off the worklist and aren't wrongly pushed to DropFleet.
+      if (typeof dispatch.syncShopifyDispatchCore === 'function') {
+        try {
+          const sr = await dispatch.syncShopifyDispatchCore({ days: 14 });
+          if (sr.dispatched) console.log(`[cron dispatch] auto-dispatched ${sr.dispatched} Shopify order(s)`);
+        } catch (e) { if (!/shopify_not_configured/.test(e.message)) console.warn('[cron dispatch] shopify readback failed:', e.message); }
+      }
       // Pull real delivery status from the carrier APIs (Royal Mail/FedEx/DHL).
       if (typeof dispatch.refreshTrackingStatuses === 'function') {
         const t = await dispatch.refreshTrackingStatuses({ limit: 150 });

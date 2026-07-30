@@ -340,6 +340,12 @@ router.post('/:saleId/mark-dispatched', requireAdmin, async (req, res) => {
   if (result.error) return res.status(409).json(result);
   await audit(req, 'dispatch_order', 'sale', result.sale.id, { carrier, trackingNumber: trackingClean });
 
+  // If this order was previously pushed to DropFleet, tell DropFleet it has now
+  // shipped (tracking assigned) so it drops off DropFleet's pending list.
+  if (trackingClean && result.sale.dropfleet_pushed_at) {
+    setImmediate(() => require('../services/dropfleet').notifyShipped(result.sale.id).catch(e => console.warn('[dispatch.dropfleet-withdraw]', e.message)));
+  }
+
   // Async push to source channel. Don't block the response on this.
   if (pushToChannel !== false && (result.sale.channel || '').match(/^(shopify|ebay_)/)) {
     setImmediate(() => pushDispatchToChannel(result.sale).catch(e => {
@@ -745,11 +751,67 @@ async function syncEbayDispatchCore({ days = 14 } = {}) {
       [sale.id, carrier, tracking]
     );
     dispatched++;
+    // If we'd pushed it to DropFleet, withdraw it (it shipped on eBay).
+    setImmediate(() => require('../services/dropfleet').notifyShipped(sale.id).catch(() => {}));
   }
   // shippedReported = how many shipped orders eBay returned for the window;
   // matched = how many of those line up with an open (undispatched) sale here.
   // These let the UI explain "nothing happened" instead of failing silently.
   return { checked: rows.length, dispatched, shippedReported: fulfilledIds.size, matched: rows.length };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Shopify dispatch sync — the Shopify counterpart to syncEbayDispatchCore.
+// Orders FULFILLED on Shopify (shipped there, any courier) must drop off the
+// warehouse worklist automatically — otherwise they look "unshipped" locally and
+// get wrongly pushed to DropFleet. Reads Shopify's fulfillment status + tracking
+// and marks the matching warehouse sale dispatched. channel_push_state='na'
+// because the tracking already lives on Shopify (we must NOT push it back).
+// Runs on the same 30-min dispatch cron and via the manual button.
+// ──────────────────────────────────────────────────────────────────────────
+async function syncShopifyDispatchCore({ days = 14 } = {}) {
+  await ensureDispatchColumns();
+  const shopify = require('../services/shopify');
+  if (!shopify.isConfigured()) return { checked: 0, dispatched: 0, skipped: 'shopify_not_configured' };
+  const sinceISO = new Date(Date.now() - days * 86400000).toISOString();
+  let orders = [];
+  try { orders = (await shopify.getRecentOrders(sinceISO)).orders || []; }
+  catch (e) { console.warn('[dispatch] shopify getRecentOrders failed:', e.message); return { checked: 0, dispatched: 0, error: e.message }; }
+
+  // Fulfilled (or partially fulfilled) orders → the tracking from a fulfillment.
+  const fulfilled = {}; // String(shopifyOrderId) -> { tracking, carrier }
+  for (const o of orders) {
+    const fs = String(o.fulfillment_status || '').toLowerCase();
+    if (fs !== 'fulfilled' && fs !== 'partial') continue;
+    const f = (o.fulfillments || []).find(x => x && x.tracking_number) || (o.fulfillments || [])[0] || {};
+    fulfilled[String(o.id)] = { tracking: f.tracking_number || null, carrier: f.tracking_company || null };
+  }
+  const ids = Object.keys(fulfilled);
+  if (!ids.length) return { checked: 0, dispatched: 0, shippedReported: 0 };
+
+  const { rows } = await query(
+    `SELECT id, external_order_id FROM sales
+      WHERE channel = 'shopify' AND is_estimate = false
+        AND dispatched_at IS NULL AND collected_at IS NULL
+        AND external_order_id = ANY($1)`,
+    [ids]
+  );
+  let dispatched = 0;
+  for (const sale of rows) {
+    const t = fulfilled[String(sale.external_order_id)] || {};
+    await query(
+      `UPDATE sales SET dispatched_at = now(), status = 'dispatched', channel_push_state = 'na',
+         carrier = COALESCE($2, carrier),
+         tracking_number = COALESCE($3, tracking_number),
+         dispatch_notes = COALESCE(dispatch_notes, 'Auto-dispatched from Shopify')
+       WHERE id = $1`,
+      [sale.id, t.carrier, t.tracking]
+    );
+    dispatched++;
+    // If we'd pushed it to DropFleet, withdraw it (it shipped on Shopify).
+    setImmediate(() => require('../services/dropfleet').notifyShipped(sale.id).catch(() => {}));
+  }
+  return { checked: rows.length, dispatched, shippedReported: ids.length, matched: rows.length };
 }
 
 // Flag shipments that have been in transit too long, so staff chase them. For each
@@ -861,5 +923,8 @@ module.exports.trackingUrlFor = trackingUrlFor;
 module.exports.CARRIERS = CARRIERS;
 module.exports.EBAY_NATIVE_CARRIERS = EBAY_NATIVE_CARRIERS;
 module.exports.syncEbayDispatchCore = syncEbayDispatchCore;
+module.exports.syncShopifyDispatchCore = syncShopifyDispatchCore;
 module.exports.flagStaleShipments = flagStaleShipments;
 module.exports.refreshTrackingStatuses = refreshTrackingStatuses;
+module.exports.pushDispatchToChannel = pushDispatchToChannel;
+module.exports.ensureDispatchColumns = ensureDispatchColumns;
