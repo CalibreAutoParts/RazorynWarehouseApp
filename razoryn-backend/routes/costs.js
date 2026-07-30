@@ -49,7 +49,9 @@ const today = () => new Date().toISOString().slice(0, 10);
 // GET /api/costs/products — product list with cost, floors, margins + flags.
 router.get('/products', requireAdmin, async (req, res) => {
   await ensureCostSchema();
-  const S = resolveCostSettings(await settingsRow());
+  const sRow = await settingsRow();
+  const S = resolveCostSettings(sRow);
+  const cashDiscPct = parseFloat(sRow?.cash_discount_pct ?? 10) || 0;   // cash = eBay − this %
   const { search = '', belowFloor, overstock, brand = '' } = req.query;
   const where = ['p.active = true'];
   const params = [];
@@ -87,6 +89,12 @@ router.get('/products', requireAdmin, async (req, res) => {
     const ms = (cost != null && ps) ? marginAtPrice({ price: ps, costPrice: cost, channel: 'shopify', ...fargs }) : { net: null, marginPct: null };
     // Margin if we drop the eBay price by the standard "send offer" discount.
     const moe = (cost != null && pe) ? marginAtOffer({ price: pe, costPrice: cost, channel: 'ebay', ...fargs }) : { net: null, marginPct: null, offerPrice: null };
+    // Cash sale: eBay price − cash discount %, sold direct (no marketplace fee).
+    const cashPrice = pe != null ? +(pe * (1 - cashDiscPct / 100)).toFixed(2) : null;
+    const mc = (cost != null && cashPrice) ? marginAtPrice({ price: cashPrice, costPrice: cost, channel: 'direct', ...fargs }) : { net: null, marginPct: null };
+    // Trade account: retail (eBay) price − trade discount %, sold direct.
+    const tradePrice = (pe != null && S.tradeDiscountPct > 0) ? +(pe * (1 - S.tradeDiscountPct / 100)).toFixed(2) : null;
+    const mt = (cost != null && tradePrice) ? marginAtPrice({ price: tradePrice, costPrice: cost, channel: 'direct', ...fargs }) : { net: null, marginPct: null };
     // The cost actually used in the maths (real landed, or goods grossed up by uplift).
     const effCost = cost != null ? effectiveCost(cost, landedCost, S) : null;
     return {
@@ -102,6 +110,9 @@ router.get('/products', requireAdmin, async (req, res) => {
       floorEbay: fe ? fe.floor : null, floorShopify: fs ? fs.floor : null,
       breakevenEbay: fe ? fe.breakeven : null, breakevenShopify: fs ? fs.breakeven : null,
       marginEbayPct: me.marginPct, marginShopifyPct: ms.marginPct, netEbay: me.net, netShopify: ms.net,
+      // Cash (eBay − cash discount, sold direct) + trade (retail − trade discount).
+      cashPrice, cashMarginPct: mc.marginPct, cashNet: mc.net,
+      tradePrice, tradeMarginPct: mt.marginPct, tradeNet: mt.net,
       offerEbayPct: moe.marginPct, offerEbayPrice: moe.offerPrice, offerEbayNet: moe.net,
       // Would a 5% offer dip below the breakeven (i.e. you'd lose money on it)?
       offerBelowBreakevenEbay: !!(fe && fe.breakeven != null && moe.offerPrice != null && moe.offerPrice < fe.breakeven),
@@ -252,13 +263,24 @@ router.post('/settings', requireAdmin, async (req, res) => {
   const numKeys = ['postageSmall', 'postageLarge', 'packagingCost',
     'ebayFvfPct', 'ebayRegulatoryPct', 'ebayHighReturnPct', 'ebayPerOrderFee', 'feesVatPct',
     'ebayFeePct', 'ebayFixedFee', 'shopifyFeePct', 'shopifyFixedFee',
-    'adRatePct', 'targetMarginPct', 'offerDiscountPct', 'landedUpliftPct', 'overstockThreshold'];
+    'adRatePct', 'externalAdPct', 'overheadPerUnit', 'overheadMonthlyUnits',
+    'targetMarginPct', 'offerDiscountPct', 'tradeDiscountPct', 'landedUpliftPct', 'overstockThreshold'];
   const boolKeys = ['feesVatOnEbay', 'feesVatOnShopify'];
   await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
   const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
   const costs = { ...(cur.costs || {}) };
   for (const k of numKeys) { if (b[k] != null && b[k] !== '') { const n = parseFloat(b[k]); if (!Number.isNaN(n)) costs[k] = n; } }
   for (const k of boolKeys) { if (b[k] != null) costs[k] = !!b[k]; }
+  // Overhead lines: [{ name, monthly }]. When provided, also auto-derive
+  // overheadPerUnit = total monthly overhead ÷ monthly units (if units given).
+  if (Array.isArray(b.overheadLines)) {
+    costs.overheadLines = b.overheadLines
+      .map(x => ({ name: String(x.name || '').slice(0, 60), monthly: parseFloat(x.monthly) || 0 }))
+      .filter(x => x.name || x.monthly);
+    const totalMonthly = costs.overheadLines.reduce((a, x) => a + (x.monthly || 0), 0);
+    const units = parseFloat(b.overheadMonthlyUnits) || costs.overheadMonthlyUnits || 0;
+    if (units > 0) costs.overheadPerUnit = +(totalMonthly / units).toFixed(2);
+  }
   // Shipping bands: array of { code, label, cost }. Replace wholesale when provided.
   if (Array.isArray(b.shippingBands)) {
     costs.shippingBands = b.shippingBands

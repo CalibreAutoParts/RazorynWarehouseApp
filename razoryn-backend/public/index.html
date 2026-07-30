@@ -13404,6 +13404,11 @@ function ctRow(p) {
         <div style="font-size:12px">${ctMoney(p.floorShopify)} <span style="color:var(--ink-soft)">/</span> <span style="${p.belowFloorShopify ? 'color:var(--red);font-weight:700' : ''}">${ctMoney(p.priceShopify)}</span></div>
         <div style="font-size:10px;color:${marginCol(p.marginShopifyPct)}">${p.marginShopifyPct == null ? '' : 'margin ' + ctPct(p.marginShopifyPct)}</div>
       </div>
+      <div style="width:104px;text-align:right">
+        <div style="font-size:10px;color:var(--ink-soft)">Cash${p.tradePrice != null ? ' / Trade' : ''}</div>
+        <div style="font-size:12px">${ctMoney(p.cashPrice)}${p.tradePrice != null ? ` <span style="color:var(--ink-soft)">/</span> ${ctMoney(p.tradePrice)}` : ''}</div>
+        <div style="font-size:10px;color:${marginCol(p.cashMarginPct)}">${p.cashMarginPct == null ? '' : ctPct(p.cashMarginPct)}${p.tradeMarginPct != null ? ` <span style="color:var(--ink-soft)">/</span> <span style="color:${marginCol(p.tradeMarginPct)}">${ctPct(p.tradeMarginPct)}</span>` : ''}</div>
+      </div>
       ${(p.belowFloorEbay || p.belowFloorShopify) ? '<span class="pill" style="font-size:9px;background:var(--red-light);color:var(--red);font-weight:700">🔻 below floor</span>' : ''}
     </div>`;
 }
@@ -13730,10 +13735,12 @@ async function ctLoadHistory(productId) {
 
 // ---- Cost settings ----
 let _csBands = [];
+let _csOverheads = [];
 async function ctOpenSettings() {
   let s = CT.settings;
   if (!s) { try { s = (await Api.get('/api/costs/settings')).settings; } catch (e) { toast('Failed to load settings', 'error'); return; } }
   _csBands = (s.shippingBands || []).map(b => ({ ...b }));
+  _csOverheads = (s.overheadLines || []).map(o => ({ ...o }));
   const f = (id, label, val, hint, step) => `<div class="field"><label>${label}</label><input id="cs-${id}" type="number" step="${step || '0.01'}" value="${val != null ? val : ''}">${hint ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">${hint}</div>` : ''}</div>`;
   const chk = (id, label, on, hint) => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><input type="checkbox" id="cs-${id}" ${on ? 'checked' : ''}> ${label}</label>${hint ? `<div style="font-size:11px;color:var(--ink-soft);margin:-2px 0 0 24px">${hint}</div>` : ''}`;
   modal({
@@ -13770,8 +13777,19 @@ async function ctOpenSettings() {
         ${f('packagingCost', 'Packaging £/order', s.packagingCost)}
         ${f('targetMarginPct', 'Target margin %', s.targetMarginPct, 'Recommended price = breakeven + this %.')}
         ${f('offerDiscountPct', 'Offer discount %', s.offerDiscountPct, 'Your standard "send offer" (eBay minimum 5%).')}
+        ${f('externalAdPct', 'External ads %', s.externalAdPct, 'Off-platform ad spend (Google/Meta) as a % of the sale price — applied to every channel.')}
+        ${f('tradeDiscountPct', 'Trade discount %', s.tradeDiscountPct, 'Exclusive % off the retail (eBay) price for trade accounts. Shows a trade price + margin column.')}
         ${f('landedUpliftPct', 'Freight/duty uplift %', s.landedUpliftPct, 'Adds this % of the goods cost to estimate freight + import VAT/duty, for items with no real landed cost yet. Items with an actual landed cost ignore it.')}
         ${f('overstockThreshold', 'Overstock threshold (units)', s.overstockThreshold, null, '1')}
+      </div>
+
+      <div style="font-weight:700;font-size:13px;margin:12px 0 4px">🏢 Fixed overheads → per-unit</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Your monthly fixed costs (rent, salaries, utilities…). Enter your typical <strong>units sold per month</strong> and the app spreads the total across each sale — that £/unit is folded into every breakeven &amp; margin so your prices actually cover the business, not just the part.</div>
+      <div id="cs-overheads"></div>
+      <button class="btn btn-outline btn-sm" onclick="csAddOverhead()" style="margin:4px 0 8px">+ Add overhead line</button>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        ${f('overheadMonthlyUnits', 'Units sold / month', s.overheadMonthlyUnits, 'Used to spread overheads: £/unit = total monthly overhead ÷ this.')}
+        <div class="field"><label style="font-size:12px">Overhead £/unit (derived)</label><input id="cs-overheadPerUnit" type="number" step="0.01" value="${s.overheadPerUnit ?? 0}" readonly title="Auto-calculated on save from the lines above ÷ units/month. You can also type it directly."></div>
       </div>`,
     actions: [
       { label: 'Cancel', onClick: closeModal },
@@ -13779,6 +13797,25 @@ async function ctOpenSettings() {
     ],
   });
   csRenderBands();
+  csRenderOverheads();
+  el('cs-overheadMonthlyUnits')?.addEventListener('input', csRecalcOverhead);
+}
+// Overhead lines editor + live £/unit derivation.
+function csRenderOverheads() {
+  const wrap = el('cs-overheads'); if (!wrap) return;
+  wrap.innerHTML = _csOverheads.map((o, i) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:5px">
+    <input value="${escapeAttr(o.name || '')}" placeholder="e.g. Rent, Salaries, Utilities" onchange="_csOverheads[${i}].name=this.value" style="flex:1">
+    <span style="color:var(--ink-soft)">£</span><input type="number" step="0.01" min="0" value="${o.monthly != null ? o.monthly : ''}" placeholder="/month" onchange="_csOverheads[${i}].monthly=parseFloat(this.value)||0;csRecalcOverhead()" style="width:110px">
+    <button class="btn btn-ghost btn-sm" onclick="_csOverheads.splice(${i},1);csRenderOverheads();csRecalcOverhead()" style="color:var(--red)">×</button>
+  </div>`).join('') || '<div style="font-size:12px;color:var(--ink-soft)">No overhead lines yet.</div>';
+  csRecalcOverhead();
+}
+function csAddOverhead() { _csOverheads.push({ name: '', monthly: 0 }); csRenderOverheads(); }
+function csRecalcOverhead() {
+  const total = _csOverheads.reduce((a, o) => a + (parseFloat(o.monthly) || 0), 0);
+  const units = parseFloat(el('cs-overheadMonthlyUnits')?.value) || 0;
+  const per = units > 0 ? +(total / units).toFixed(2) : (parseFloat(el('cs-overheadPerUnit')?.value) || 0);
+  if (el('cs-overheadPerUnit') && units > 0) el('cs-overheadPerUnit').value = per;
 }
 function csRenderBands() {
   const wrap = el('cs-bands'); if (!wrap) return;
@@ -13793,9 +13830,12 @@ function csAddBand() { _csBands.push({ code: '', label: '', cost: 0 }); csRender
 async function ctSaveSettings() {
   const numKeys = ['packagingCost', 'targetMarginPct', 'offerDiscountPct', 'landedUpliftPct', 'overstockThreshold',
     'ebayFvfPct', 'ebayRegulatoryPct', 'ebayHighReturnPct', 'ebayPerOrderFee', 'adRatePct', 'feesVatPct',
-    'shopifyFeePct', 'shopifyFixedFee'];
+    'shopifyFeePct', 'shopifyFixedFee', 'externalAdPct', 'tradeDiscountPct', 'overheadPerUnit', 'overheadMonthlyUnits'];
   const payload = {};
   for (const k of numKeys) { const v = el('cs-' + k)?.value; if (v !== '' && v != null) payload[k] = parseFloat(v); }
+  // Overhead lines (backend re-derives overheadPerUnit from these ÷ monthly units).
+  payload.overheadLines = _csOverheads.filter(o => (o.name || '').trim() || (parseFloat(o.monthly) || 0) > 0)
+    .map(o => ({ name: String(o.name || '').trim(), monthly: parseFloat(o.monthly) || 0 }));
   payload.feesVatOnEbay = !!el('cs-feesVatOnEbay')?.checked;
   payload.feesVatOnShopify = !!el('cs-feesVatOnShopify')?.checked;
   payload.shippingBands = _csBands.filter(b => (b.code || '').trim() && !Number.isNaN(parseFloat(b.cost)))

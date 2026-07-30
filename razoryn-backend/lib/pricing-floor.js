@@ -38,8 +38,11 @@ const DEFAULTS = {
   shopifyFeePct: 1.9,   // Shopify Payments online card rate % (UK ~1.9)
   shopifyFixedFee: 0.25,// Shopify per-transaction fixed (GBP)
   adRatePct: 0,         // promoted-listing ad rate % of gross (eBay only)
+  externalAdPct: 0,     // off-platform ad spend (Google/Meta) as % of price — all channels
+  overheadPerUnit: 0,   // fixed overhead (rent/salaries/etc.) recovered per unit sold (£)
   targetMarginPct: 15,  // uplift over breakeven → recommended floor
   offerDiscountPct: 5,  // the standard eBay "send offer" discount (min 5%)
+  tradeDiscountPct: 0,  // % off the retail price for trade accounts
   // Global estimate: when an item has NO actual freight/duty captured (container
   // not costed yet), add this % of the goods cost to approximate the landed cost
   // (average freight + import VAT/duty). Items WITH a real landed cost use that.
@@ -77,8 +80,16 @@ function resolveCostSettings(row) {
     shopifyFeePct:     num(c.shopifyFeePct, DEFAULTS.shopifyFeePct),
     shopifyFixedFee:   num(c.shopifyFixedFee, DEFAULTS.shopifyFixedFee),
     adRatePct:         num(c.adRatePct, DEFAULTS.adRatePct),
+    externalAdPct:     num(c.externalAdPct, DEFAULTS.externalAdPct),
+    overheadPerUnit:   num(c.overheadPerUnit, DEFAULTS.overheadPerUnit),
     targetMarginPct:   num(c.targetMarginPct, DEFAULTS.targetMarginPct),
     offerDiscountPct:  num(c.offerDiscountPct, DEFAULTS.offerDiscountPct),
+    tradeDiscountPct:  num(c.tradeDiscountPct, DEFAULTS.tradeDiscountPct),
+    // Named monthly overhead lines (rent, salaries, …) + the monthly unit volume
+    // used to derive overheadPerUnit. Stored for the UI; the maths uses the
+    // resolved overheadPerUnit £ above.
+    overheadLines:     Array.isArray(c.overheadLines) ? c.overheadLines : [],
+    overheadMonthlyUnits: num(c.overheadMonthlyUnits, 0),
     landedUpliftPct:   num(c.landedUpliftPct, DEFAULTS.landedUpliftPct),
     overstockThreshold: num(c.overstockThreshold, DEFAULTS.overstockThreshold),
     shippingBands:     bands,
@@ -144,8 +155,10 @@ function computeFloor({ costPrice, landedCost, isLarge, band, shippingCost, post
   // buyer pays postage separately (common for large panels) it's not absorbed here.
   const inPrice = (postageInPrice == null) ? !isLarge : !!postageInPrice;
   const postageCost = inPrice ? postage : 0;
-  const F = cost + postageCost + s.packagingCost + fixedFee * feeVatMult;
-  const p = ((feePct + adRatePct) / 100) * feeVatMult;
+  // Overhead (rent/salaries/etc.) recovered per unit is a fixed cost per sale.
+  const F = cost + postageCost + s.packagingCost + fixedFee * feeVatMult + num(s.overheadPerUnit, 0);
+  // External (off-platform) ad spend is a % of the sale price, on every channel.
+  const p = ((feePct + adRatePct) / 100) * feeVatMult + num(s.externalAdPct, 0) / 100;
   const vr = vatRegistered != null ? vatRegistered : s.vatRegistered;
   const v = vr ? (s.vatRate / 100) / (1 + s.vatRate / 100) : 0;
   const divisor = 1 - p - v;
@@ -170,8 +183,8 @@ function marginAtPrice({ price, costPrice, landedCost, isLarge, band, shippingCo
   const inPrice = (postageInPrice == null) ? !isLarge : !!postageInPrice;
   const vr = vatRegistered != null ? vatRegistered : s.vatRegistered;
   const v = vr ? (s.vatRate / 100) / (1 + s.vatRate / 100) : 0;
-  const F = cost + (inPrice ? postage : 0) + s.packagingCost + fixedFee * feeVatMult;
-  const net = +(B * (1 - ((feePct + adRatePct) / 100) * feeVatMult - v) - F).toFixed(2);
+  const F = cost + (inPrice ? postage : 0) + s.packagingCost + fixedFee * feeVatMult + num(s.overheadPerUnit, 0);
+  const net = +(B * (1 - ((feePct + adRatePct) / 100) * feeVatMult - num(s.externalAdPct, 0) / 100 - v) - F).toFixed(2);
   const marginPct = +((net / B) * 100).toFixed(1);
   return { net, marginPct };
 }
