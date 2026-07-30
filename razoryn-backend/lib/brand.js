@@ -30,7 +30,10 @@ const BRANDS = {
         name: 'Razoryn',
         channelCode: 'ebay_em',
         tokenEnv: 'EBAY_AUTH_TOKEN',
-        primary: true,                    // source of truth for cross-listing + fallback for legacy links
+        // No longer the primary — razorynecommerceltd is now the main account
+        // (see the razoryn2 entry). Legacy NULL-store_code mirror_links are
+        // pinned to this account by a one-time backfill in routes/listings.js so
+        // the primary swap can't mis-route their edits.
       },
       // Second Razoryn eBay selling account. Shares the same App credentials
       // (EBAY_APP_ID/CERT_ID/DEV_ID) — only its Auth'n'Auth token differs
@@ -49,7 +52,7 @@ const BRANDS = {
         name: process.env.EBAY_STORE2_NAME || 'Razoryn 2',
         channelCode: 'ebay_cl',
         tokenEnv: 'EBAY_AUTH_TOKEN_RAZORYN2',
-        standalone: true,                 // independent selling account, not the cross-listing source
+        primary: true,                    // MAIN account — default for new listings + cross-listing source
       },
     ],
   },

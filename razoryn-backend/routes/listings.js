@@ -114,6 +114,18 @@ async function ensureMirrorLinksColumns() {
   if (_migrationDone) return;
   try {
     await query(`ALTER TABLE mirror_links ADD COLUMN IF NOT EXISTS store_code TEXT`);
+    // One-time safety backfill: legacy links (created before per-store tracking)
+    // have a NULL store_code and resolve to whichever store is `primary`. Now that
+    // Razoryn runs two accounts and razorynecommerceltd is the primary, those
+    // legacy links must be pinned to the ORIGINAL account ('razoryn') so their
+    // edits/pushes keep going to the right listing instead of the new primary.
+    // Brand-guarded so it never touches Calibre's data.
+    try {
+      const brand = require('../lib/brand');
+      if (brand.code === 'razoryn') {
+        await query(`UPDATE mirror_links SET store_code = 'razoryn' WHERE store_code IS NULL`);
+      }
+    } catch (e) { console.warn('[listings.js] legacy store_code backfill warning:', e.message); }
     _migrationDone = true;
   } catch (e) {
     console.warn('[listings.js] mirror_links migration warning:', e.message);

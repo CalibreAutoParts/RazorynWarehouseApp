@@ -440,6 +440,7 @@ async function importEbayOrderRow(order, store, { vatRegistered, vatRate, adjust
   }
   const brand = require('../lib/brand');
   const ukVat = require('../lib/uk-vat');
+  let newSaleId = null;
   await withTx(async (c) => {
     const subtotal = parseFloat(order.pricingSummary?.priceSubtotal?.value || 0);
     const shipping = parseFloat(order.pricingSummary?.deliveryCost?.value || 0);
@@ -457,6 +458,7 @@ async function importEbayOrderRow(order, store, { vatRegistered, vatRate, adjust
        order.buyer?.name || order.buyer?.username || null, order.buyer?.email || null, order.buyer?.phone || null,
        subtotal, vat, shipping, total, order.creationDate, order.shippingAddress || null,
        'ebay', paymentRef, order.orderId, paymentRef]);
+    newSaleId = sale.rows[0].id;
     for (const li of order.lineItems || []) {
       const matched = await resolveProductBySku(c, li.sku);
       const productId = matched?.id || null;
@@ -487,6 +489,11 @@ async function importEbayOrderRow(order, store, { vatRegistered, vatRate, adjust
     const info = ebay.orderRefundInfo(order);
     if (info.amount > 0) { const s = await query(`SELECT id FROM sales WHERE external_order_id = $1`, [order.orderId]); if (s.rows[0]) await reconcileSaleRefund(s.rows[0].id, { channelRefund: info.amount }); }
   } catch (_) {}
+  // Fire the automated fitment-confirmation message the moment a LIVE order lands
+  // (not on backfill). Fire-and-forget + fully guarded (enabled/eligible) inside.
+  if (adjustStock && newSaleId) {
+    setImmediate(() => require('./fitment-messages').sendForSale(newSaleId).catch(() => {}));
+  }
   return 'inserted';
 }
 

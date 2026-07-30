@@ -376,10 +376,12 @@ if (cron.validate(followupCronExpr)) {
   console.error(`[boot] ⚠️  invalid PAYMENT_FOLLOWUP_CRON "${followupCronExpr}" — daily payment reminders disabled.`);
 }
 
-// Automated eBay fitment-confirmation messages — asks buyers for their reg/VIN
-// (+ photo) so we can check the part fits before dispatch, cutting wrong-fit
-// returns. No-op unless enabled in Settings. Every 2h by default (FITMENT_MSG_CRON).
-const fitmentCronExpr = (process.env.FITMENT_MSG_CRON || '0 */2 * * *').trim();
+// Automated eBay fitment-confirmation messages. The PRIMARY trigger is per-order
+// on import (services/sync.js), so buyers are messaged within minutes. This cron
+// is only a catch-up net for orders the hook missed (integration toggled on
+// after they arrived, or a transient send failure). No-op unless enabled in
+// Settings. Every 15 min by default (FITMENT_MSG_CRON).
+const fitmentCronExpr = (process.env.FITMENT_MSG_CRON || '*/15 * * * *').trim();
 if (cron.validate(fitmentCronExpr)) {
   cron.schedule(fitmentCronExpr, async () => {
     try {
