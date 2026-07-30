@@ -40,6 +40,13 @@ async function ensureProductLocationColumns() {
     // Custom per-item postage £ — used when shipping_band = 'custom' (an item that
     // doesn't fit a standard box yet). Overrides the band cost in the margin maths.
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS shipping_cost NUMERIC(10,2)`);
+    // "Hidden" (parked) listings — kept in inventory for reference but excluded
+    // from stock-checks, low-stock alerts, auto-pooling and channel stock/price
+    // pushes. Use for one-off/damaged items (deleted once sold) or lines we're not
+    // actively selling, so they stop generating API pushes and worklist noise.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT false`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS hidden_at TIMESTAMPTZ`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS hidden_reason TEXT`);
     // Actual landed cost (goods + apportioned container freight/duty). Set when a
     // container is received; null = estimate landed via the global uplift %.
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS landed_cost NUMERIC(12,4)`);
@@ -282,7 +289,7 @@ router.get('/low-stock', requirePermission('inventory'), async (req, res) => {
   const { rows } = await query(
     `SELECT id, sku, title, qty_on_hand, low_stock_threshold, brand, model
      FROM products
-     WHERE active = true AND qty_on_hand <= low_stock_threshold
+     WHERE active = true AND hidden = false AND qty_on_hand <= low_stock_threshold
      ORDER BY qty_on_hand ASC, title`
   );
   res.json({ products: rows });
@@ -326,7 +333,7 @@ router.get('/stock-groups/suggestions', requirePermission('inventory'), async (r
   const { rows } = await query(
     `SELECT id, sku, title, brand, model, part_number, qty_on_hand
      FROM products
-     WHERE active = true AND stock_group_id IS NULL AND part_number IS NOT NULL AND part_number <> ''`);
+     WHERE active = true AND hidden = false AND stock_group_id IS NULL AND part_number IS NOT NULL AND part_number <> ''`);
   const byCode = new Map();
   for (const p of rows) {
     const k = sgNorm(p.part_number);
@@ -376,7 +383,7 @@ router.post('/stock-groups/pool-all', requireAdmin, async (req, res) => {
   await ensureStockGroupsSchema();
   const { rows } = await query(
     `SELECT id, part_number, qty_on_hand FROM products
-     WHERE active = true AND stock_group_id IS NULL AND part_number IS NOT NULL AND part_number <> ''`);
+     WHERE active = true AND hidden = false AND stock_group_id IS NULL AND part_number IS NOT NULL AND part_number <> ''`);
   const byCode = new Map();
   for (const p of rows) {
     const k = sgNorm(p.part_number);
@@ -681,11 +688,14 @@ async function pushProductStockToChannels(productId, _opts = {}) {
   const result = { shopify: null, ebay: [] };
   // Load the product + its eBay links
   const pr = await query(
-    `SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id, stock_group_id, preorder_active, is_prelisted FROM products WHERE id = $1`,
+    `SELECT id, sku, qty_on_hand, shopify_inventory_id, shopify_product_id, stock_group_id, preorder_active, is_prelisted, hidden FROM products WHERE id = $1`,
     [productId]
   );
   const product = pr.rows[0];
   if (!product) return result;
+  // Hidden/parked listings don't receive channel pushes — that's the point of
+  // hiding them (stop the API traffic + worklist noise). No-op, reported.
+  if (product.hidden) { result.skipped = 'hidden'; return result; }
 
   // For a pre-order/incoming item we push an AVAILABLE-TO-PROMISE quantity instead
   // of qty_on_hand (which is 0): the units still on the way, minus those already
@@ -989,6 +999,35 @@ router.delete('/:id', requireAdmin, async (req, res) => {
   }
   await audit(req, hard ? 'hard_delete_product' : 'delete_product', 'product', req.params.id, { removeFromShopify });
   res.json({ ok: true });
+});
+
+// POST /api/products/:id/hide  { reason? }  — "park" a listing.
+// Keeps it visible in inventory but removes it from stock-checks, low-stock
+// alerts, auto-pooling and all channel stock/price pushes. Does NOT touch the
+// live eBay/Shopify listing (a damaged one-off stays sellable until it sells);
+// it just stops the app pushing to it. Reversible via /unhide.
+router.post('/:id/hide', requireAdmin, async (req, res) => {
+  await ensureProductLocationColumns();
+  const reason = (req.body?.reason || '').toString().slice(0, 300) || null;
+  const r = await query(
+    `UPDATE products SET hidden = true, hidden_at = now(), hidden_reason = $2, updated_at = now()
+     WHERE id = $1 RETURNING id, sku, title, hidden`, [req.params.id, reason]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  await audit(req, 'hide_product', 'product', req.params.id, { reason });
+  res.json({ ok: true, product: r.rows[0] });
+});
+
+// POST /api/products/:id/unhide  — restore a parked listing to normal operation.
+router.post('/:id/unhide', requireAdmin, async (req, res) => {
+  await ensureProductLocationColumns();
+  const r = await query(
+    `UPDATE products SET hidden = false, hidden_at = NULL, hidden_reason = NULL, updated_at = now()
+     WHERE id = $1 RETURNING id, sku, title, hidden`, [req.params.id]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  await audit(req, 'unhide_product', 'product', req.params.id, {});
+  // Re-sync stock to the channels now it's active again (best-effort).
+  try { await pushProductStockToChannels(req.params.id); } catch (_) {}
+  res.json({ ok: true, product: r.rows[0] });
 });
 
 // ---------- Shopify collections (shop categories) + live stock ----------

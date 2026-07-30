@@ -186,7 +186,7 @@ router.get('/restore-preview', requireAdmin, async (req, res) => {
     WHERE EXISTS (SELECT 1 FROM stock_checks sc2
                     WHERE sc2.product_id = p.id AND sc2.created_at >= $1
                       AND sc2.actual_qty > sc2.expected_qty)
-      AND p.qty_on_hand > first.expected_qty
+      AND p.qty_on_hand > first.expected_qty AND p.hidden = false
     ORDER BY (p.qty_on_hand - first.expected_qty) DESC`, [since]);
   res.json({ since, items: rows.map(r => ({ ...r, inflatedBy: r.current_qty - r.suggested_qty })) });
 });

@@ -1326,6 +1326,8 @@ function adaptProduct(p) {
     ebayPrelistStatus: p.ebay_prelist_status || null,
     stockGroupId: p.stock_group_id || null,
     stockGroupCode: p.stock_group_code || null,
+    hidden: !!p.hidden,
+    hiddenReason: p.hidden_reason || null,
   };
 }
 function adaptSale(s) {
@@ -2937,6 +2939,8 @@ function stFiltered() {
   return (State.products || []).filter(p => {
     // Pre-listed items aren't physically here yet — exclude from the count.
     if (p.isPrelisted) return false;
+    // Hidden/parked listings are excluded from stock-checks.
+    if (p.hidden) return false;
     if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model, ...(p.partNumbers||[]).map(x => x.code))) return false;
     if (make && p.brand !== make) return false;
     if (loc === '__none__') { if (p.location) return false; }
@@ -2948,7 +2952,7 @@ function stFiltered() {
   });
 }
 function stProgress() {
-  const countable = (State.products || []).filter(p => !p.isPrelisted);
+  const countable = (State.products || []).filter(p => !p.isPrelisted && !p.hidden);
   const total = countable.length;
   const done = countable.filter(p => State._stChecked.has(String(p.id))).length;
   const pct = total ? Math.round(done / total * 100) : 0;
@@ -4091,6 +4095,11 @@ function renderInventory() {
           <option value="ok">In stock</option>
           <option value="out">Out of stock</option>
         </select>
+        <select class="filter-select" id="inv-hidden" title="Hidden (parked) listings are excluded from stock-checks and channel pushes">
+          <option value="">Show all</option>
+          <option value="active">Active only</option>
+          <option value="hidden">Hidden only</option>
+        </select>
       </div>
 
       <div id="inv-bulk-bar" style="display:none;padding:10px 14px;background:var(--bg-soft);border:1px solid var(--line);border-radius:8px;margin-bottom:10px;align-items:center;gap:10px;flex-wrap:wrap">
@@ -4131,7 +4140,7 @@ function renderInventory() {
   function rowHtml(p) {
     const tq = totalQty(p);
     return `
-      <tr>
+      <tr${p.hidden ? ' style="opacity:.55"' : ''}>
         <td><input type="checkbox" class="inv-row-check" data-act="check" data-pid="${p.id}" ${State.invSelected.has(p.id)?'checked':''}></td>
         <td>
           ${p.imageUrl
@@ -4139,7 +4148,7 @@ function renderInventory() {
             : `<div style="width:48px;height:48px;border-radius:6px;background:var(--line-2);display:flex;align-items:center;justify-content:center;color:var(--ink-soft)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>`
           }
         </td>
-        <td><div style="font-weight:500">${p.title}</div><div style="color:var(--ink-soft);font-size:11px">${p.sku}</div></td>
+        <td><div style="font-weight:500">${p.title}${p.hidden ? ` <span class="pill" style="background:var(--line);color:var(--ink-soft);font-size:9px" title="Hidden${p.hiddenReason ? ': '+escapeAttr(p.hiddenReason) : ''} — excluded from stock-checks &amp; channel pushes">🙈 Hidden</span>` : ''}</div><div style="color:var(--ink-soft);font-size:11px">${p.sku}</div></td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${p.partNumber||'—'}</td>
         <td><div style="font-size:12px">${p.location || '—'}</div></td>
         <td class="num">
@@ -4147,7 +4156,7 @@ function renderInventory() {
           ${(p.incomingQty > 0 || p.isPrelisted) ? `<div style="font-size:11px;margin-top:3px"><span class="pill" style="background:var(--amber-light);color:var(--amber);font-size:10px;font-weight:600">${(p.isPrelisted || tq===0)?'Pre-order':'+'+p.incomingQty+' incoming'}</span>${(p.preorderEta || p.incomingEta) ? `<div style="color:var(--ink-soft);font-size:10px;margin-top:2px">ETA ~${new Date(p.preorderEta || p.incomingEta).toLocaleDateString('en-GB')}</div>` : ''}${p.isPrelisted && p.ebayPrelistStatus==='scheduled' ? `<div style="color:var(--ink-soft);font-size:10px;margin-top:2px">eBay: scheduled</div>` : ''}</div>` : ''}
         </td>
         <td class="num">${gbp(p.priceShopify)}</td>
-        <td style="white-space:nowrap">${(p.isPrelisted && p.ebayPrelistStatus === 'scheduled') ? `<button class="btn btn-primary btn-sm" onclick="pushPrelistingLive(${p.id})" title="Publish the held eBay listing now">⚡ Push live</button> ` : ''}<button class="btn btn-outline btn-sm" data-act="edit" data-pid="${p.id}">Edit</button> <button class="btn btn-ghost btn-sm" data-act="del" data-pid="${p.id}" style="color:var(--red)" title="Delete product">🗑</button></td>
+        <td style="white-space:nowrap">${(p.isPrelisted && p.ebayPrelistStatus === 'scheduled') ? `<button class="btn btn-primary btn-sm" onclick="pushPrelistingLive(${p.id})" title="Publish the held eBay listing now">⚡ Push live</button> ` : ''}<button class="btn btn-outline btn-sm" data-act="edit" data-pid="${p.id}">Edit</button> <button class="btn btn-ghost btn-sm" data-act="${p.hidden ? 'unhide' : 'hide'}" data-pid="${p.id}" title="${p.hidden ? 'Unhide — restore to stock-checks &amp; channel pushes' : 'Hide — park this listing: keep it in inventory but stop stock-checks &amp; channel pushes'}">${p.hidden ? '👁 Unhide' : '🙈 Hide'}</button> <button class="btn btn-ghost btn-sm" data-act="del" data-pid="${p.id}" style="color:var(--red)" title="Delete product">🗑</button></td>
       </tr>
     `;
   }
@@ -4184,7 +4193,10 @@ function renderInventory() {
     const q = el('inv-search').value.toLowerCase();
     const b = el('inv-brand').value;
     const s = el('inv-stock').value;
+    const h = el('inv-hidden') ? el('inv-hidden').value : '';
     const filtered = State.products.filter(p => {
+      if (h === 'active' && p.hidden) return false;
+      if (h === 'hidden' && !p.hidden) return false;
       if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model, ...(p.partNumbers||[]).map(x => x.code))) return false;
       if (b && p.brand !== b) return false;
       const tq = totalQty(p);
@@ -4215,11 +4227,14 @@ function renderInventory() {
     const btn = e.target.closest('button[data-act]');
     if (!btn) return;
     const pid = btn.getAttribute('data-pid');
-    if (btn.getAttribute('data-act') === 'edit') {
+    const act = btn.getAttribute('data-act');
+    if (act === 'edit') {
       openProductModal(pid);
-    } else if (btn.getAttribute('data-act') === 'del') {
+    } else if (act === 'del') {
       const prod = State.products.find(x => String(x.id) === String(pid));
       deleteProduct(pid, prod ? (prod.title || '') : '');
+    } else if (act === 'hide' || act === 'unhide') {
+      toggleHideProduct(pid, act === 'hide');
     }
   });
   tbody.addEventListener('change', (e) => {
@@ -4241,7 +4256,7 @@ function renderInventory() {
   // on every keystroke made typing stutter. Selects stay immediate via 'change'.
   let _invPaintT;
   el('inv-search').addEventListener('input', () => { clearTimeout(_invPaintT); _invPaintT = setTimeout(paint, 160); });
-  ['inv-brand','inv-stock'].forEach(id => el(id).addEventListener('change', paint));
+  ['inv-brand','inv-stock','inv-hidden'].forEach(id => { const e = el(id); if (e) e.addEventListener('change', paint); });
 }
 
 // Diagnose why a SKU that appears in Listing Mirror doesn't show in inventory.
@@ -4375,6 +4390,24 @@ async function bulkDeleteSelected() {
   } catch (e) {
     toast('Bulk delete failed: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+// Hide (park) / unhide a listing. Hidden = kept in inventory but excluded from
+// stock-checks, low-stock alerts and channel stock/price pushes.
+async function toggleHideProduct(id, hide) {
+  const prod = (State.products || []).find(x => String(x.id) === String(id));
+  const title = prod ? (prod.title || prod.sku || '') : '';
+  let reason;
+  if (hide) {
+    if (!confirm(`Hide "${title}"?\n\nIt stays in inventory (filter “Hidden only” to find it) but is left out of stock-checks and stops being pushed to eBay/Shopify. The live listings are not touched. You can Unhide anytime.`)) return;
+    reason = prompt('Optional note (why is it hidden?) — e.g. "damaged, one-off", "not selling for now":', '') || undefined;
+  }
+  try {
+    await Api.post(`/api/products/${id}/${hide ? 'hide' : 'unhide'}`, hide ? { reason } : {});
+    await Store.refresh('products');
+    if (State.page === 'inventory') renderInventory();
+    toast(hide ? '🙈 Listing hidden — excluded from stock-checks & channel pushes' : '👁 Listing unhidden — back to normal', 'success', 4000);
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 async function deleteProduct(id, title) {
@@ -11806,14 +11839,27 @@ async function submitUnifiedUpdate(btn) {
     if (btn) btn.disabled = false;
     return;
   }
-  // Summarise per-channel outcome.
+  // Summarise per-channel outcome — name each eBay STORE so a failed/missing
+  // second account is visible (not lumped into one "eBay ✓").
   const bits = [];
   if (r.shopify?.ok) bits.push('Shopify ✓'); else if (r.shopify?.error) bits.push('Shopify ✗');
-  const ebOk = (r.ebay || []).filter(x => x.ok).length, ebErr = (r.ebay || []).filter(x => x.error).length;
-  if (ebOk) bits.push(`eBay ✓${ebOk > 1 ? ' ×' + ebOk : ''}`);
-  if (ebErr) bits.push('eBay ✗');
+  const storeName = (code) => (State.brand?.stores || []).find(s => s.code === code)?.name || code || 'eBay';
+  const ebayEntries = (r.ebay || []);
+  let ebErr = 0;
+  for (const x of ebayEntries) {
+    if (x.ok) bits.push(`${storeName(x.store)} ✓`);
+    else if (x.error) { bits.push(`${storeName(x.store)} ✗`); ebErr++; }
+    else if (x.skipped === 'no_ebay_link') bits.push('not linked to eBay');
+    else if (x.skipped) bits.push(`${storeName(x.store)} – (${escapeHtml(x.skipped)})`);
+  }
+  // Flag any eBay store that has a token but got no result — likely the product
+  // isn't linked to that account (run Listing Mirror → Link Status → Force match).
+  const pushedCodes = new Set(ebayEntries.filter(x => x.store).map(x => x.store));
+  const missing = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_') && !pushedCodes.has(s.code));
+  if (missing.length && ebayEntries.length) bits.push(`${missing.map(s => storeName(s.code)).join(', ')} — not linked`);
   if (r.images?.ok) bits.push(`Photos ✓ (${r.images.count})`); else if (r.images?.error) bits.push('Photos ✗');
-  toast(`Saved & pushed — Warehouse ✓${bits.length ? ' · ' + bits.join(' · ') : ''}`, ebErr || r.shopify?.error || r.images?.error ? 'warn' : 'success', 8000);
+  const anyBad = ebErr || r.shopify?.error || r.images?.error;   // a store simply not listed is info, not an error
+  toast(`Saved & pushed — Warehouse ✓${bits.length ? ' · ' + bits.join(' · ') : ''}${missing.length ? ' · (to also list on the missing account, use Listing Mirror → Force match or Copy to 2nd store)' : ''}`, anyBad ? 'warn' : 'success', 9000);
   await Store.refresh('products').catch(() => {});
   routeTo('inventory');
 }
