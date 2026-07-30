@@ -16875,7 +16875,7 @@ function renderSettings() {
         <div class="card-head"><h3>🛠 eBay fitment-confirmation messages</h3></div>
         <div class="card-body">
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">
-            Automatically message eBay buyers after they order, asking for their <strong>registration / VIN</strong> (and a photo) so you can check the part fits <em>before</em> dispatch — cutting wrong-fit returns. Sent <strong>once per order</strong> while it's still awaiting dispatch; skips refunded/cancelled/returned orders and anything already dispatched. <span style="color:var(--ink-soft)">Note: eBay's API doesn't let the app read buyers' replies, so it can't detect a reply — it sends one message per order.</span>
+            Automatically message eBay buyers <strong>as soon as their order imports</strong>, asking for their <strong>registration / VIN</strong> (and a photo) so you can check the part fits <em>before</em> dispatch — cutting wrong-fit returns. Sent <strong>once per order</strong> while it's still awaiting dispatch; skips refunded/cancelled/returned orders and anything already dispatched. <span style="color:var(--ink-soft)">Note: eBay's API doesn't let the app read buyers' replies, so it can't detect a reply — it sends one message per order.</span>
           </p>
           <div class="perm-row">
             <div><div class="perm-name">Enabled</div><div class="perm-desc">Master switch. When on, the sweep runs automatically every 2 hours.</div></div>
@@ -16886,7 +16886,7 @@ function renderSettings() {
             <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Keep it friendly. No placeholders needed — it's sent per order.</div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
-            <div class="field"><label>Wait before sending (hours)</label><input id="fm-delay" type="number" min="0" max="240" value="2" title="Give the order a moment to settle before messaging"></div>
+            <div class="field"><label>Catch-up delay (hours)</label><input id="fm-delay" type="number" min="0" max="240" value="0" title="Only the catch-up sweep waits this long; new orders are messaged instantly on import"></div>
             <div class="field"><label>Only orders from last (days)</label><input id="fm-window" type="number" min="1" max="90" value="14"></div>
             <div class="field"><label>Max per run</label><input id="fm-max" type="number" min="1" max="200" value="40"></div>
           </div>

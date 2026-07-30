@@ -41,7 +41,7 @@ async function getConfig() {
     subject: c.subject || DEFAULT_SUBJECT,
     body: c.body || DEFAULT_BODY,
     windowDays: Number.isFinite(+c.windowDays) ? Math.min(90, Math.max(1, +c.windowDays)) : 14,
-    delayHours: Number.isFinite(+c.delayHours) ? Math.min(240, Math.max(0, +c.delayHours)) : 2,
+    delayHours: Number.isFinite(+c.delayHours) ? Math.min(240, Math.max(0, +c.delayHours)) : 0,
     maxPerRun: Number.isFinite(+c.maxPerRun) ? Math.min(200, Math.max(1, +c.maxPerRun)) : 40,
     DEFAULT_SUBJECT, DEFAULT_BODY,
   };
@@ -124,8 +124,63 @@ async function resolveSendTargets(sale) {
 
 const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// Send fitment messages to all currently-eligible orders. Automatic (cron) when
-// enabled; `allowDisabled` lets an admin trigger a run on demand.
+// Send (or skip) the fitment message for ONE sale. Stamps fitment_msg_sent_at so
+// it's at-most-once. Returns { sent | skipped | error }.
+async function sendOneSale(sale, cfg) {
+  const ebay = require('./ebay');
+  const t = await resolveSendTargets(sale);
+  if (t.skip) {
+    // Mark permanently-unsendable orders skipped so we don't re-check them.
+    // Transient lookups (order_lookup_failed) are left to retry next run.
+    if (t.skip === 'no_buyer_userid' || t.skip === 'no_item_link' || t.skip === 'store_unavailable') {
+      await query(`UPDATE sales SET fitment_msg_sent_at = now(), fitment_msg_status = 'skipped', fitment_msg_error = $2 WHERE id = $1`, [sale.id, t.skip]);
+    }
+    return { saleId: sale.id, skipped: t.skip };
+  }
+  try {
+    await ebay.sendMemberMessage(t.store.code, {
+      itemId: t.itemId, recipientId: t.buyerUserId, subject: cfg.subject, body: cfg.body,
+    });
+    await query(`UPDATE sales SET fitment_msg_sent_at = now(), fitment_msg_status = 'sent', fitment_msg_error = NULL WHERE id = $1`, [sale.id]);
+    return { saleId: sale.id, ok: true };
+  } catch (e) {
+    // Stamp even on failure — messaging a buyer twice is worse than missing one,
+    // and most failures here are permanent (bad itemId/recipient).
+    await query(`UPDATE sales SET fitment_msg_sent_at = now(), fitment_msg_status = 'error', fitment_msg_error = $2 WHERE id = $1`, [sale.id, String(e.message).slice(0, 500)]);
+    return { saleId: sale.id, error: e.message };
+  }
+}
+
+// Fire-and-forget: send the fitment message for a single freshly-imported order,
+// straight away. Called from the eBay order sync so buyers are asked to confirm
+// fitment within minutes of ordering (not on a slow sweep). Guards: enabled, the
+// order is a still-open eBay sale, not already messaged, no return/refund. Ignores
+// the delay/window (those only bound the catch-up cron).
+async function sendForSale(saleId) {
+  try {
+    const cfg = await getConfig();
+    if (!cfg.enabled) return { ok: false, skipped: 'disabled' };
+    const ebay = require('./ebay');
+    if (!ebay.isConfigured()) return { ok: false, skipped: 'ebay_not_configured' };
+    const { rows } = await query(
+      `SELECT id, external_order_id, channel FROM sales
+        WHERE id = $1 AND channel LIKE 'ebay_%' AND is_estimate = false AND status = 'paid'
+          AND dispatched_at IS NULL AND collected_at IS NULL
+          AND fitment_msg_sent_at IS NULL AND external_order_id IS NOT NULL
+          AND NOT (COALESCE(refunded_amount,0) > 0)
+          AND NOT EXISTS (SELECT 1 FROM returns r WHERE r.sale_id = sales.id)`, [saleId]);
+    if (!rows[0]) return { ok: false, skipped: 'not_eligible' };
+    return await sendOneSale(rows[0], cfg);
+  } catch (e) {
+    console.warn('[fitment-msg] sendForSale failed:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Catch-up sweep — messages any eligible order the per-order hook missed (e.g.
+// the integration was toggled on after some orders came in, or a send failed
+// transiently). Automatic (short cron) when enabled; `allowDisabled` lets an
+// admin trigger a run on demand.
 async function sendFitmentMessagesCore({ allowDisabled = false } = {}) {
   const cfg = await getConfig();
   if (!cfg.enabled && !allowDisabled) return { ok: true, skipped: 'disabled', sent: 0 };
@@ -139,40 +194,16 @@ async function sendFitmentMessagesCore({ allowDisabled = false } = {}) {
   let sent = 0, skipped = 0, failed = 0;
   const results = [];
   for (const sale of rows) {
-    const t = await resolveSendTargets(sale);
-    if (t.skip) {
-      // At-most-once semantics: mark permanently-unsendable orders skipped so we
-      // don't re-check them every run. Transient lookups (order_lookup_failed)
-      // are left to retry next run.
-      if (t.skip === 'no_buyer_userid' || t.skip === 'no_item_link' || t.skip === 'store_unavailable') {
-        await query(`UPDATE sales SET fitment_msg_sent_at = now(), fitment_msg_status = 'skipped', fitment_msg_error = $2 WHERE id = $1`, [sale.id, t.skip]);
-      }
-      skipped++; results.push({ saleId: sale.id, skipped: t.skip });
-      continue;
-    }
-    try {
-      await ebay.sendMemberMessage(t.store.code, {
-        itemId: t.itemId,
-        recipientId: t.buyerUserId,
-        subject: cfg.subject,
-        body: cfg.body,
-      });
-      // At-most-once: stamp on success so it's never re-sent.
-      await query(`UPDATE sales SET fitment_msg_sent_at = now(), fitment_msg_status = 'sent', fitment_msg_error = NULL WHERE id = $1`, [sale.id]);
-      sent++; results.push({ saleId: sale.id, ok: true });
-    } catch (e) {
-      // Record the error but DO stamp sent_at — messaging a buyer twice is worse
-      // than missing one, and most send failures here are permanent (bad
-      // itemId/recipient). Errors are visible in fitment_msg_error for review.
-      await query(`UPDATE sales SET fitment_msg_sent_at = now(), fitment_msg_status = 'error', fitment_msg_error = $2 WHERE id = $1`, [sale.id, String(e.message).slice(0, 500)]);
-      failed++; results.push({ saleId: sale.id, error: e.message });
-    }
+    const r = await sendOneSale(sale, cfg);
+    if (r.ok) sent++; else if (r.error) failed++; else skipped++;
+    results.push(r);
     await _sleep(1200);   // gentle throttle — eBay member-message rate limits
   }
   return { ok: true, sent, skipped, failed, considered: rows.length, results };
 }
 
 module.exports = {
-  ensureColumns, getConfig, saveConfig, countEligible, sendFitmentMessagesCore,
+  ensureColumns, getConfig, saveConfig, countEligible,
+  sendFitmentMessagesCore, sendForSale,
   DEFAULT_SUBJECT, DEFAULT_BODY,
 };
