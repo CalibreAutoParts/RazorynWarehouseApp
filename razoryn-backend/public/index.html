@@ -16808,8 +16808,18 @@ function renderSettings() {
             <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:8px"><input type="checkbox" id="df-manual-only"> Manual (cash/bank) orders only — exclude eBay &amp; Shopify</label>
             <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:10px">Include orders from the last <input type="number" id="df-sync-days" value="10" min="1" max="3650" style="width:70px;padding:4px 6px;font-size:12px"> days <span style="color:var(--ink-soft)">(matches the Dispatch worklist window)</span></label>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn btn-outline" onclick="diagnoseDropfleet(this)">🔍 Diagnose what would be sent</button>
               <button class="btn btn-outline" onclick="syncUnshippedDropfleet(this)">🚚 Sync unshipped orders to DropFleet</button>
               <span id="df-sync-status" style="font-size:12px;color:var(--ink-soft)"></span>
+            </div>
+            <div id="df-breakdown" style="margin-top:12px"></div>
+          </div>
+
+          <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">Tracking callback (DropFleet → warehouse)</div>
+            <p style="color:var(--ink-soft);font-size:12px;margin-bottom:8px">When DropFleet books an order and assigns a tracking number, point it at this URL. The app records the tracking, marks the order dispatched, and pushes the tracking to eBay/Shopify so the buyer is notified. DropFleet must send header <code>X-Integration-Key</code> = the same key above.</p>
+            <div class="field"><label>Webhook URL</label>
+              <input id="df-webhook-url" readonly onclick="this.select()" style="font-family:ui-monospace,monospace;font-size:12px">
             </div>
           </div>
         </div>
@@ -17471,7 +17481,39 @@ async function loadDropfleetConfig() {
     if (el('df-carrier')) el('df-carrier').value = c.defaultCarrier || '';
     if (el('df-service')) el('df-service').value = c.defaultService || '';
     if (el('df-key-status')) el('df-key-status').textContent = c.configured ? `✓ Key saved (…${c.keyLast4})` : 'No key saved yet';
+    if (el('df-webhook-url')) el('df-webhook-url').value = location.origin + '/api/dropfleet/tracking';
   } catch (_) {}
+}
+
+// Diagnostic: show what the bulk sync WOULD push, bucketed, so over-sends are visible.
+async function diagnoseDropfleet(btn) {
+  const box = el('df-breakdown');
+  if (btn) { btn.disabled = true; }
+  if (box) box.innerHTML = '<div style="font-size:12px;color:var(--ink-soft)">Checking…</div>';
+  try {
+    const manualOnly = el('df-manual-only')?.checked ? '1' : '0';
+    const days = parseInt(el('df-sync-days')?.value) || 10;
+    const r = await Api.get(`/api/dropfleet/pending-breakdown?manualOnly=${manualOnly}&days=${days}`);
+    const chips = (obj) => Object.entries(obj || {}).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `<span class="pill" style="background:var(--line);margin:2px">${escapeHtml(k)}: <strong>${v}</strong></span>`).join('') || '<span style="color:var(--ink-soft)">none</span>';
+    const rows = (r.samples || []).map(s => `<tr>
+        <td style="font-size:11px">#${s.id}</td>
+        <td><span class="pill" style="background:var(--line)">${escapeHtml(s.channel)}</span>${s.gsp ? ' <span class="pill blue" style="font-size:9px">GSP</span>' : ''}</td>
+        <td style="font-size:11px">${escapeHtml(s.customer || '')}</td>
+        <td style="font-size:11px">${escapeHtml(s.carrier || '—')}${s.tracking ? ' · <span style="color:var(--amber)">has tracking!</span>' : ''}</td>
+        <td style="font-size:11px">${escapeHtml(s.fulfillment)}</td>
+        <td style="font-size:11px">${s.ageDays}d</td>
+      </tr>`).join('');
+    box.innerHTML = `<div class="card" style="background:var(--bg)"><div class="card-body" style="padding:14px">
+        <div style="font-weight:600;margin-bottom:6px">${r.total} order(s) would be pushed</div>
+        <div style="font-size:12px;margin-bottom:4px"><strong>By channel:</strong> ${chips(r.byChannel)}</div>
+        <div style="font-size:12px;margin-bottom:4px"><strong>By carrier:</strong> ${chips(r.byCarrier)}</div>
+        <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">${r.gspCount||0} eBay GSP · ${r.withCarrierNoTracking||0} have a carrier set but no tracking (possible already-shipped) · ${r.collectish||0} collection</div>
+        ${r.total ? `<div style="max-height:280px;overflow:auto"><table class="table" style="margin:0"><thead><tr><th>ID</th><th>Channel</th><th>Customer</th><th>Carrier</th><th>Fulfil</th><th>Age</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Shopify rows already fulfilled on Shopify, or rows with a non-DropFleet carrier / existing tracking, are over-sends — the cron readbacks clear these automatically once they run.</div>
+      </div></div>`;
+  } catch (e) {
+    if (box) box.innerHTML = `<div style="font-size:12px;color:var(--red)">Failed: ${escapeHtml(e.data?.message || e.message)}</div>`;
+  } finally { if (btn) btn.disabled = false; }
 }
 async function saveDropfleetConfig(btn) {
   if (btn) btn.disabled = true;

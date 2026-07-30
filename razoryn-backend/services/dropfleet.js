@@ -16,8 +16,10 @@
 
 const axios = require('axios');
 const { query } = require('../db');
+const { isGspExport } = require('../lib/uk-vat');
 
 const INGEST_URL = 'https://www.dropfleet.co.uk/api/integrations/ingest';
+const GSP_HUB_POSTCODE = 'WS13 8UR';
 
 let _migrated = false;
 async function ensureConfigColumn() {
@@ -110,26 +112,73 @@ function parseAddress(sale) {
   return { recipient, streetLines, postcode };
 }
 
-// Map one sale (+ its items) to a DropFleet order object.
+// Normalise the internal sales.channel (shopify | ebay_em | ebay_cl |
+// direct_cash | direct_bank) to the clean channel tag DropFleet expects.
+function channelTag(sale) {
+  const c = String(sale.channel || '').toLowerCase();
+  if (c.startsWith('ebay')) return 'ebay';
+  if (c === 'shopify') return 'shopify';
+  if (c === 'direct_cash' || c === 'direct_bank') return 'direct';
+  return c || undefined;
+}
+
+// Pull the eBay Global Shipping REFERENCE number out of a GSP address block.
+// The hub sorts by this number (NOT the seller's order id). eBay embeds it in
+// the hub address, either labelled ("Reference: 1234567890") or as a bare long
+// numeric token. We deliberately avoid the eBay order id, which is hyphenated
+// (e.g. 12-34567-89012). Returns the reference string, or '' if none is found —
+// in which case the caller leaves order_ref empty and sends the full address so
+// DropFleet can salvage the reference itself.
+function extractGspReference(shippingAddress) {
+  const raw = String(shippingAddress || '');
+  const labelled = raw.match(/\b(?:ref(?:erence)?|gsp)\s*(?:no\.?|number|#|:)?\s*([A-Z0-9]{6,})\b/i);
+  if (labelled) return labelled[1].toUpperCase();
+  // A bare contiguous 9–16 digit token (no hyphens ⇒ not the eBay order id),
+  // that isn't the postcode.
+  for (const tok of raw.split(/[\s,]+/)) {
+    if (/^\d{9,16}$/.test(tok)) return tok;
+  }
+  return '';
+}
+
+// Map one sale (+ its items) to a DropFleet order object. GSP (eBay Global
+// Shipping) exports are special-cased per the DropFleet GSP spec: the physical
+// destination is always the hub (WS13 8UR), the reference — NOT the eBay order
+// id — is what the hub sorts by, and a street address is optional.
 function mapSaleToOrder(sale, items = [], cfg = {}) {
   const { recipient, streetLines, postcode } = parseAddress(sale);
+  const gsp = isGspExport(sale.shipping_address);
   const description = (items || [])
     .map(i => (Number(i.qty) > 1 ? `${i.qty}× ` : '') + (i.title || i.sku || 'item'))
     .join(', ').slice(0, 500);
   const paymentMethod = sale.payment_method
     || (sale.channel === 'direct_cash' ? 'cash' : sale.channel === 'direct_bank' ? 'bank' : undefined);
+
+  // Reference: for GSP, the GSP reference (or empty → DropFleet salvages from the
+  // address); NEVER the eBay order id. For everything else, our invoice/order ref.
+  const gspRef = gsp ? extractGspReference(sale.shipping_address) : '';
+  const orderRef = gsp
+    ? (gspRef || undefined)
+    : (sale.invoice_number || sale.payment_reference || sale.external_order_id || undefined);
+
   const order = {
     // Stable, globally-unique key so re-pushing updates rather than duplicates.
     external_id: 'WH-' + sale.id,
     customer_name: recipient || undefined,
+    // For GSP send every non-postcode address line (the reference may sit on any
+    // of them, and DropFleet ignores the address for delivery but salvages the
+    // reference from it). For normal orders send the first three street lines.
     address: streetLines[0] || undefined,
     address_line2: streetLines[1] || undefined,
-    address_line3: streetLines[2] || undefined,
-    postcode: postcode || undefined,
+    address_line3: gsp ? (streetLines.slice(2).join(', ') || undefined) : (streetLines[2] || undefined),
+    // The hub postcode is the trigger — force it for GSP so a bad parse can't
+    // send the buyer's international postcode instead.
+    postcode: gsp ? GSP_HUB_POSTCODE : (postcode || undefined),
     customer_phone: sale.customer_phone || undefined,
     customer_email: sale.customer_email || undefined,
     description: description || undefined,
-    order_ref: sale.invoice_number || sale.payment_reference || sale.external_order_id || undefined,
+    order_ref: orderRef,
+    channel: gsp ? 'ebay' : channelTag(sale),
     payment_method: paymentMethod,
     carrier: sale.carrier || cfg.defaultCarrier || undefined,
     service: cfg.defaultService || undefined,
@@ -156,7 +205,7 @@ async function pushOrders(orders, cfg) {
         validateStatus: () => true,
       });
       if (r.status === 401) return { ok: false, error: 'invalid_key', status: 401 };
-      if (r.status >= 500)  { lastErr = 'server_error_' + r.status; continue; } // retry
+      if (r.status === 429 || r.status >= 500) { lastErr = 'server_error_' + r.status; continue; } // rate-limit / server — retry
       if (r.status !== 200) return { ok: false, error: 'http_' + r.status, status: r.status };
       return { ok: true, ingested: Number(r.data?.ingested) || 0, status: 200 };
     } catch (e) {
@@ -181,8 +230,13 @@ async function pushSaleIds(saleIds) {
   const orders = [], pushedIds = [], skipped = [];
   for (const s of sales) {
     const o = mapSaleToOrder(s, byId.get(s.id) || [], cfg);
-    if (!o.customer_name || !o.address || !o.postcode) {
-      skipped.push({ id: s.id, ref: s.invoice_number || s.payment_reference || ('#' + s.id), reason: 'missing name, address or postcode' });
+    // GSP hub parcels only need the trigger postcode (WS13 8UR) — a buyer
+    // street address is optional (DropFleet uses the hub label). Everything else
+    // needs a name + street + postcode to be deliverable.
+    const gsp = isGspExport(s.shipping_address);
+    const pushable = gsp ? !!o.postcode : (o.customer_name && o.address && o.postcode);
+    if (!pushable) {
+      skipped.push({ id: s.id, ref: s.invoice_number || s.payment_reference || ('#' + s.id), reason: gsp ? 'GSP order missing hub postcode' : 'missing name, address or postcode' });
       continue;
     }
     orders.push(o);
@@ -190,11 +244,14 @@ async function pushSaleIds(saleIds) {
   }
   if (!orders.length) return { ok: false, error: 'nothing_pushable', skipped };
   const res = await pushOrders(orders, cfg);
-  // Stamp the sales that were accepted so staff can see what's already gone over.
-  if (res.ok && pushedIds.length) {
+  // Stamp only when DropFleet accepted the WHOLE batch — a partial ingest
+  // (ingested < attempted) means some orders didn't land, so we must NOT mark
+  // them all as pushed (they'd never be retried).
+  const fullyIngested = res.ok && (res.ingested == null || res.ingested >= orders.length);
+  if (fullyIngested && pushedIds.length) {
     try { await query(`UPDATE sales SET dropfleet_pushed_at = now() WHERE id = ANY($1::int[])`, [pushedIds]); } catch (_) {}
   }
-  return { ...res, attempted: orders.length, skipped };
+  return { ...res, attempted: orders.length, partial: res.ok && !fullyIngested, skipped };
 }
 
 // WHERE clause for the bulk sync — mirrors the Dispatch "to ship" worklist so
@@ -229,17 +286,22 @@ const _clampDays = (d) => Math.max(1, Math.min(3650, parseInt(d, 10) || 10));
 // order, never duplicate.
 //   manualOnly: restrict to direct cash/bank sales (exclude eBay/Shopify).
 //   days:       recency window (default 10, matching the Dispatch worklist).
-async function pushUnshipped({ manualOnly = false, days = 10 } = {}) {
+const SYNC_HARD_CAP = 5000;   // safety bound; well above any real backlog
+async function pushUnshipped({ manualOnly = false, days = 10, allowDisabled = false } = {}) {
   const cfg = await getConfig();
   if (!cfg.apiKey) return { ok: false, error: 'not_configured' };
+  // Respect the integration toggle for the bulk/auto path (a disabled integration
+  // must not keep pushing). Explicit callers can override with allowDisabled.
+  if (!cfg.enabled && !allowDisabled) return { ok: false, error: 'disabled' };
   const d = _clampDays(days);
   const { rows } = await query(
-    `SELECT id FROM sales ${unshippedWhere(manualOnly)} ORDER BY occurred_at ASC LIMIT 1000`,
+    `SELECT id FROM sales ${unshippedWhere(manualOnly)} ORDER BY occurred_at ASC LIMIT ${SYNC_HARD_CAP}`,
     [String(d)]
   );
   const ids = rows.map(r => r.id);
-  if (!ids.length) return { ok: true, ingested: 0, attempted: 0, total: 0, batches: 0, skipped: [] };
-  let ingested = 0, attempted = 0;
+  const truncated = ids.length >= SYNC_HARD_CAP;
+  if (!ids.length) return { ok: true, ingested: 0, attempted: 0, total: 0, batches: 0, failedBatches: 0, skipped: [], truncated };
+  let ingested = 0, attempted = 0, failedBatches = 0;
   const skipped = [];
   let batches = 0;
   for (let i = 0; i < ids.length; i += 50) {
@@ -247,13 +309,17 @@ async function pushUnshipped({ manualOnly = false, days = 10 } = {}) {
     const r = await pushSaleIds(batch);
     batches++;
     // A key problem aborts the whole run — surface it rather than looping.
-    if (r.error === 'not_configured' || r.error === 'invalid_key') {
-      return { ok: false, error: r.error, ingested, attempted, total: ids.length, batches, skipped };
+    if (r.error === 'not_configured' || r.error === 'invalid_key' || r.error === 'disabled') {
+      return { ok: false, error: r.error, ingested, attempted, total: ids.length, batches, failedBatches, skipped };
     }
     if (r.ok) { ingested += r.ingested || 0; attempted += r.attempted || 0; }
+    // A transient/server failure (network, 5xx, 429 after retries) dropped this
+    // whole batch — count it so the caller never sees a false "all good".
+    else if (r.error !== 'nothing_pushable') failedBatches++;
     if (Array.isArray(r.skipped)) skipped.push(...r.skipped);
   }
-  return { ok: true, ingested, attempted, total: ids.length, batches, skipped };
+  // Not "ok" if any batch was lost — the run was incomplete and should be re-run.
+  return { ok: failedBatches === 0, error: failedBatches ? 'partial_failure' : undefined, ingested, attempted, total: ids.length, batches, failedBatches, skipped, truncated };
 }
 
 // Count how many orders the bulk sync would push (for the confirm dialog).
@@ -293,8 +359,78 @@ async function autoPushSale(saleId) {
   }
 }
 
+// Diagnostic: what WOULD the bulk sync push, and why. Returns the eligible
+// orders bucketed so staff can see (and spot) anything that shouldn't be going to
+// DropFleet — e.g. Shopify orders already shipped on-channel, or items with a
+// non-DropFleet trackable carrier. Read-only; never sends anything.
+async function pendingBreakdown({ manualOnly = false, days = 10 } = {}) {
+  const d = _clampDays(days);
+  const { rows } = await query(
+    `SELECT id, channel, status, occurred_at, payment_method, fulfillment_method,
+            carrier, tracking_number, shipping_address, customer_name, total
+     FROM sales ${unshippedWhere(manualOnly)} ORDER BY occurred_at ASC LIMIT ${SYNC_HARD_CAP}`,
+    [String(d)]
+  );
+  const byChannel = {}, byCarrier = {};
+  let gspCount = 0, withCarrierNoTracking = 0, collectish = 0;
+  const samples = [];
+  for (const s of rows) {
+    const ch = channelTag(s) || 'unknown';
+    byChannel[ch] = (byChannel[ch] || 0) + 1;
+    const car = (s.carrier || '(none)').trim() || '(none)';
+    byCarrier[car] = (byCarrier[car] || 0) + 1;
+    if (isGspExport(s.shipping_address)) gspCount++;
+    // A carrier is set (staff picked a courier) but no tracking captured yet —
+    // often means it went via that trackable courier, not DropFleet.
+    if (s.carrier && !s.tracking_number) withCarrierNoTracking++;
+    const fm = s.fulfillment_method || (s.payment_method === 'cash' ? 'collect' : 'ship');
+    if (fm === 'collect') collectish++;
+    if (samples.length < 60) samples.push({
+      id: s.id, channel: ch, status: s.status, carrier: s.carrier || null,
+      tracking: s.tracking_number || null, fulfillment: fm,
+      gsp: isGspExport(s.shipping_address),
+      ageDays: Math.floor((Date.now() - new Date(s.occurred_at).getTime()) / 86400000),
+      customer: s.customer_name || null,
+    });
+  }
+  return {
+    total: rows.length,
+    byChannel, byCarrier,
+    gspCount, withCarrierNoTracking, collectish,
+    samples,
+    note: 'These would be pushed by the bulk sync. Shopify rows here that were already fulfilled on Shopify, or rows with a non-DropFleet carrier, are likely over-sends.',
+  };
+}
+
+// Withdraw-on-tracking: once an order has a real tracking number (it shipped —
+// via DropFleet, Proovia, or any trackable courier), re-send it so DropFleet
+// marks it shipped and drops it from its pending Integrated Orders list. Safe to
+// call repeatedly (external_id de-dupe). No-op if unconfigured.
+async function notifyShipped(saleId) {
+  try {
+    const cfg = await getConfig();
+    if (!cfg.apiKey) return { ok: false, error: 'not_configured' };
+    const { rows } = await query(`SELECT * FROM sales WHERE id = $1`, [saleId]);
+    const s = rows[0];
+    if (!s) return { ok: false, error: 'not_found' };
+    if (!s.tracking_number) return { ok: false, error: 'no_tracking' };
+    // Only meaningful for orders we actually sent to DropFleet.
+    if (!s.dropfleet_pushed_at) return { ok: false, error: 'not_pushed' };
+    const { rows: items } = await query(`SELECT * FROM sale_items WHERE sale_id = $1`, [saleId]);
+    const order = mapSaleToOrder(s, items, cfg);
+    order.tracking_number = s.tracking_number;
+    order.carrier = s.carrier || order.carrier;
+    order.status = 'shipped';   // hint for DropFleet to withdraw from pending
+    return await pushOrders([order], cfg);
+  } catch (e) {
+    console.warn('[dropfleet] notifyShipped failed:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
 module.exports = {
   INGEST_URL, getConfig, saveConfig, mapSaleToOrder, parseAddress,
+  channelTag, extractGspReference,
   pushOrders, pushSaleIds, testConnection, autoPushSale,
-  pushUnshipped, countUnshipped,
+  pushUnshipped, countUnshipped, pendingBreakdown, notifyShipped,
 };
