@@ -717,7 +717,43 @@ router.get('/whatsapp-link/:saleId', requireAdmin, async (req, res) => {
   res.json({ ok: true, link, normalisedPhone: normalised, original: phone });
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// Automated eBay "confirm fitment" messages (services/fitment-messages.js).
+// ──────────────────────────────────────────────────────────────────────────
+const fitment = require('../services/fitment-messages');
+
+router.get('/fitment/config', requireAdmin, async (req, res) => {
+  try {
+    const c = await fitment.getConfig();
+    res.json({ ...c, pending: await fitment.countEligible() });
+  } catch (e) { res.status(500).json({ error: 'load_failed', message: e.message }); }
+});
+
+router.put('/fitment/config', requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const patch = {};
+    for (const k of ['enabled', 'subject', 'body', 'windowDays', 'delayHours', 'maxPerRun']) {
+      if (b[k] !== undefined) patch[k] = b[k];
+    }
+    const c = await fitment.saveConfig(patch);
+    await audit(req, 'update_fitment_msg_config', null, null, { enabled: c.enabled });
+    res.json({ ok: true, ...c });
+  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+});
+
+// Manual trigger — runs a send pass now even if the auto toggle is off, so an
+// admin can test/flush the queue. Returns per-order results.
+router.post('/fitment/run', requireAdmin, async (req, res) => {
+  try {
+    const r = await fitment.sendFitmentMessagesCore({ allowDisabled: true });
+    if (r.sent) await audit(req, 'fitment_msg_run', null, null, { sent: r.sent, failed: r.failed, skipped: r.skipped });
+    res.json(r);
+  } catch (e) { res.status(500).json({ ok: false, error: 'run_failed', message: e.message }); }
+});
+
 module.exports = router;
+module.exports.sendFitmentMessagesCore = fitment.sendFitmentMessagesCore;
 module.exports.BUILTIN_TEMPLATES = BUILTIN_TEMPLATES;
 module.exports.buildContext = buildContext;
 module.exports.renderTemplate = renderTemplate;

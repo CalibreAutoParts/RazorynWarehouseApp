@@ -16872,6 +16872,33 @@ function renderSettings() {
       </div>
 
       <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>🛠 eBay fitment-confirmation messages</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">
+            Automatically message eBay buyers after they order, asking for their <strong>registration / VIN</strong> (and a photo) so you can check the part fits <em>before</em> dispatch — cutting wrong-fit returns. Sent <strong>once per order</strong> while it's still awaiting dispatch; skips refunded/cancelled/returned orders and anything already dispatched. <span style="color:var(--ink-soft)">Note: eBay's API doesn't let the app read buyers' replies, so it can't detect a reply — it sends one message per order.</span>
+          </p>
+          <div class="perm-row">
+            <div><div class="perm-name">Enabled</div><div class="perm-desc">Master switch. When on, the sweep runs automatically every 2 hours.</div></div>
+            <label class="switch"><input type="checkbox" id="fm-enabled"><span></span></label>
+          </div>
+          <div class="field" style="margin-top:10px"><label>Subject</label><input id="fm-subject" placeholder="Quick check so your part fits first time"></div>
+          <div class="field"><label>Message</label><textarea id="fm-body" rows="7" placeholder="Message body…"></textarea>
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Keep it friendly. No placeholders needed — it's sent per order.</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+            <div class="field"><label>Wait before sending (hours)</label><input id="fm-delay" type="number" min="0" max="240" value="2" title="Give the order a moment to settle before messaging"></div>
+            <div class="field"><label>Only orders from last (days)</label><input id="fm-window" type="number" min="1" max="90" value="14"></div>
+            <div class="field"><label>Max per run</label><input id="fm-max" type="number" min="1" max="200" value="40"></div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px">
+            <button class="btn btn-primary btn-sm" onclick="saveFitmentConfig(this)">Save</button>
+            <button class="btn btn-outline btn-sm" onclick="runFitmentNow(this)" title="Send to all eligible orders now (works even if disabled)">✉ Send now</button>
+            <span id="fm-status" style="font-size:12px;color:var(--ink-soft)"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>eBay description template</h3></div>
         <div class="card-body">
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">
@@ -17516,6 +17543,49 @@ function renderSettings() {
   loadEbayTemplate();
   loadInvoiceHubStatus();
   loadDropfleetConfig();
+  loadFitmentConfig();
+}
+
+// ── eBay fitment-confirmation messages ──
+async function loadFitmentConfig() {
+  try {
+    const c = await Api.get('/api/messages/fitment/config');
+    if (el('fm-enabled')) el('fm-enabled').checked = !!c.enabled;
+    if (el('fm-subject')) el('fm-subject').value = c.subject || '';
+    if (el('fm-body')) el('fm-body').value = c.body || '';
+    if (el('fm-delay')) el('fm-delay').value = c.delayHours ?? 2;
+    if (el('fm-window')) el('fm-window').value = c.windowDays ?? 14;
+    if (el('fm-max')) el('fm-max').value = c.maxPerRun ?? 40;
+    if (el('fm-status')) el('fm-status').textContent = c.enabled ? `On — ${c.pending} order(s) awaiting a message` : `Off — ${c.pending} eligible order(s)`;
+  } catch (_) {}
+}
+async function saveFitmentConfig(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const c = await Api.put('/api/messages/fitment/config', {
+      enabled: el('fm-enabled').checked,
+      subject: (el('fm-subject').value || '').trim(),
+      body: (el('fm-body').value || '').trim(),
+      delayHours: parseInt(el('fm-delay').value) || 0,
+      windowDays: parseInt(el('fm-window').value) || 14,
+      maxPerRun: parseInt(el('fm-max').value) || 40,
+    });
+    if (el('fm-status')) el('fm-status').textContent = c.enabled ? `On — ${c.pending ?? '?'} awaiting` : 'Off';
+    toast('Fitment-message settings saved', 'success');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) btn.disabled = false; }
+}
+async function runFitmentNow(btn) {
+  if (!confirm('Send the fitment message to all eligible eBay orders now? This messages real buyers.')) return;
+  const s = el('fm-status');
+  if (btn) btn.disabled = true;
+  if (s) { s.textContent = 'Sending…'; s.style.color = 'var(--ink-soft)'; }
+  try {
+    const r = await Api.post('/api/messages/fitment/run', {});
+    if (s) { s.textContent = `Done — ${r.sent||0} sent, ${r.failed||0} failed, ${r.skipped||0} skipped`; s.style.color = (r.failed ? 'var(--amber)' : 'var(--green)'); }
+    loadFitmentConfig();
+  } catch (e) { if (s) { s.textContent = '✗ ' + (e.data?.message || e.message); s.style.color = 'var(--red)'; } }
+  finally { if (btn) btn.disabled = false; }
 }
 
 // ── DropFleet delivery integration ──
