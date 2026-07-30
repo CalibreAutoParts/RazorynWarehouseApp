@@ -376,6 +376,23 @@ if (cron.validate(followupCronExpr)) {
   console.error(`[boot] ⚠️  invalid PAYMENT_FOLLOWUP_CRON "${followupCronExpr}" — daily payment reminders disabled.`);
 }
 
+// Automated eBay fitment-confirmation messages — asks buyers for their reg/VIN
+// (+ photo) so we can check the part fits before dispatch, cutting wrong-fit
+// returns. No-op unless enabled in Settings. Every 2h by default (FITMENT_MSG_CRON).
+const fitmentCronExpr = (process.env.FITMENT_MSG_CRON || '0 */2 * * *').trim();
+if (cron.validate(fitmentCronExpr)) {
+  cron.schedule(fitmentCronExpr, async () => {
+    try {
+      const fitment = require('./services/fitment-messages');
+      const r = await fitment.sendFitmentMessagesCore();
+      if (r && r.sent) console.log(`[cron fitment] sent ${r.sent} fitment message(s) (${r.failed || 0} failed, ${r.skipped || 0} skipped)`);
+    } catch (e) {
+      if (!/ebay_not_configured/.test(e.message)) console.error('[cron fitment] failed:', e.message);
+    }
+  });
+  console.log(`[boot] eBay fitment-message sweep scheduled: ${fitmentCronExpr}`);
+}
+
 // Back-in-stock sweep — email customers waiting on a product once its stock
 // returns (qty_on_hand > 0). Every 20 min by default (BACK_IN_STOCK_CRON).
 const bisCronExpr = (process.env.BACK_IN_STOCK_CRON || '*/20 * * * *').trim();

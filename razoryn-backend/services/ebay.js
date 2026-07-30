@@ -1127,6 +1127,35 @@ async function completeSale(storeArg, opts = {}) {
   throw new Error(`CompleteSale ${ack} [${errCode}]: ${errMsg}`);
 }
 
+// AddMemberMessageAAQToPartner — send a seller→buyer "Ask a question" style
+// member message about a specific listing/transaction. Used for the automated
+// fitment-confirmation messages and the manual message button.
+async function sendMemberMessage(storeArg, { itemId, recipientId, subject, body, questionType = 'General' } = {}) {
+  if (!itemId) throw new Error('itemId required');
+  if (!recipientId) throw new Error('recipientId (buyer username) required');
+  if (!body) throw new Error('body required');
+  const bodyInner = `
+    <ItemID>${escapeXml(String(itemId))}</ItemID>
+    <MemberMessage>
+      <Subject>${escapeXml(String(subject || 'About your order')).slice(0, 200)}</Subject>
+      <Body>${escapeXml(String(body)).slice(0, 2000)}</Body>
+      <QuestionType>${escapeXml(questionType)}</QuestionType>
+      <RecipientID>${escapeXml(String(recipientId))}</RecipientID>
+    </MemberMessage>`;
+  let xml;
+  try {
+    xml = await tradingCall('AddMemberMessageAAQToPartner', bodyInner, storeArg);
+  } catch (e) {
+    const b = e.response?.data || '';
+    throw new Error(`AddMemberMessage HTTP error: ${e.message}${typeof b === 'string' && b.includes('<ShortMessage>') ? ' / ' + (b.match(/<ShortMessage>([^<]+)<\/ShortMessage>/)?.[1] || '') : ''}`);
+  }
+  const ack = extractOne(xml, 'Ack') || '';
+  if (ack === 'Success' || ack === 'Warning') return { ok: true, ack };
+  const errCode = extractOne(xml, 'ErrorCode') || 'unknown';
+  const errMsg  = extractOne(xml, 'ShortMessage') || extractOne(xml, 'LongMessage') || 'eBay returned Failure';
+  throw new Error(`AddMemberMessage ${ack} [${errCode}]: ${errMsg}`);
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // addItem — create a new fixed-price listing on eBay using the Trading API
 // AddItem call. Uses per-store Auth'n'Auth tokens so it works for both
@@ -1934,6 +1963,7 @@ module.exports = {
   reviseItem,
   endItem,
   completeSale,
+  sendMemberMessage,
   addItem,
   getStoreCategories,
   promoteListing,
