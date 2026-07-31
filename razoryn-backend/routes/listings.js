@@ -1880,11 +1880,19 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
   // and the eBay gallery order.
   const imgSrcs = (shopifyProduct?.images || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0)).map(im => im.src).filter(Boolean);
   result.imageUrls = imgSrcs;
+  // Cost price + parcel size/weight (all optional).
+  const costPrice = (b.costPrice != null && b.costPrice !== '') ? parseFloat(b.costPrice) : null;
+  const pkgL = (b.pkgLengthCm != null && b.pkgLengthCm !== '') ? parseFloat(b.pkgLengthCm) : null;
+  const pkgW = (b.pkgWidthCm  != null && b.pkgWidthCm  !== '') ? parseFloat(b.pkgWidthCm)  : null;
+  const pkgH = (b.pkgHeightCm != null && b.pkgHeightCm !== '') ? parseFloat(b.pkgHeightCm) : null;
+  const pkgG = (b.pkgWeightG  != null && b.pkgWeightG  !== '') ? parseInt(b.pkgWeightG)    : null;
+  try { await require('./products').ensureProductLocationColumns?.(); } catch (_) {}
   const ins = await query(`
     INSERT INTO products (sku, title, barcode, part_number, qty_on_hand, price_ebay, price_shopify, image_url,
                           shopify_product_id, shopify_variant_id, shopify_inventory_id, active,
-                          is_prelisted, preorder_active, preorder_eta, ebay_scheduled_at, ebay_prelist_payload, ebay_prelist_status)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17) RETURNING id`,
+                          is_prelisted, preorder_active, preorder_eta, ebay_scheduled_at, ebay_prelist_payload, ebay_prelist_status,
+                          cost_price, pkg_length_cm, pkg_width_cm, pkg_height_cm, pkg_weight_g)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING id`,
     [sku, title, barcode, partNumber, qty, ebayPrice, shopifyPrice, imgSrcs[0] || null,
      shopifyProduct ? String(shopifyProduct.id) : null,
      v?.id ? String(v.id) : null,
@@ -1894,7 +1902,8 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
      preorderEta,
      ebayScheduledAt,
      ebayPrelistPayload ? JSON.stringify(ebayPrelistPayload) : null,
-     ebayPrelistPayload ? 'scheduled' : null]);
+     ebayPrelistPayload ? 'scheduled' : null,
+     costPrice, pkgL, pkgW, pkgH, pkgG]);
   const productId = ins.rows[0].id;
 
   // Store the alternate / sub part numbers against the new product (searchable).

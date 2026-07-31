@@ -11732,6 +11732,7 @@ async function renderCreateListing() {
       <div class="page-head">
         <div><h1>Create listing</h1><div class="desc">Build a new product in the Warehouse (master) and push it to Shopify + eBay in one go. eBay price is the master; Shopify = eBay − [%].</div></div>
         <div class="actions">
+          <button class="btn btn-outline" onclick="clCopyPickerOpen()" title="Copy an existing product as a template — prefills everything so you just set a new SKU and tweak the details, then create it on all channels">📋 Copy existing</button>
           <button class="btn btn-ghost" onclick="backfillPreorderPresentation(this)" title="Clean up existing pre-order listings: remove any text baked into titles, ensure the pre-order tag/ETA + collection">🧹 Tidy pre-order listings</button>
           <button class="btn btn-outline" onclick="routeTo('mirror')">Cancel</button>
           <button class="btn btn-outline" onclick="clSaveDraft(this)" title="Save everything to the warehouse without listing on eBay/Shopify. Come back to finish it (e.g. when photos arrive).">💾 Save as draft</button>
@@ -11968,8 +11969,21 @@ function clCoreHtml() {
         : 'Uploaded to Shopify; the same photos are reused on the eBay listing.'}</div>
       <div id="cl-photos" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"></div>
     </div>
-    <div class="field"><label>Shopify price <span style="color:var(--ink-soft);font-weight:400">— auto eBay − ${pct}%</span></label>
-      <input id="cl-shop" disabled style="background:var(--bg-soft)" placeholder="set the eBay price in the eBay panel →"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="field"><label>Shopify price <span style="color:var(--ink-soft);font-weight:400">— auto eBay − ${pct}%</span></label>
+        <input id="cl-shop" disabled style="background:var(--bg-soft)" placeholder="set the eBay price in the eBay panel →"></div>
+      <div class="field"><label>Cost price (£) <span style="color:var(--ink-soft);font-weight:400">— your landed cost</span></label>
+        <input id="cl-cost" type="number" step="0.01" min="0" placeholder="e.g. 42.00">
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Used for margins in Costs &amp; margins. Optional.</div></div>
+    </div>
+    <div class="field"><label>📦 Parcel size &amp; weight <span style="color:var(--ink-soft);font-weight:400">— pushed to eBay + Shopify for shipping rates. Optional.</span></label>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">
+        <div><input type="number" step="0.1" min="0" id="cl-pkg-l" placeholder="L cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Length</div></div>
+        <div><input type="number" step="0.1" min="0" id="cl-pkg-w" placeholder="W cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Width</div></div>
+        <div><input type="number" step="0.1" min="0" id="cl-pkg-h" placeholder="H cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Height</div></div>
+        <div><input type="number" step="1" min="0" id="cl-pkg-g" placeholder="grams"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (g)</div></div>
+      </div>
+    </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Tags (comma-separated)</label><input id="cl-tags" placeholder="MO18, grille"></div>
       <div class="field"><label>Shopify status</label><select id="cl-status">${editing ? '<option value="">— Keep current —</option>' : ''}<option value="draft">Draft</option><option value="active">Active</option></select></div>
@@ -12091,12 +12105,20 @@ async function submitUnifiedCreate(btn, overrides = {}) {
       barcode: overrides.barcode,                      // shared barcode for multi-fitment siblings
       description: (el('cl-desc')?.value || '').trim() || null,
       ebayPrice, qty: parseInt(el('ce-qty')?.value) || 0,
+      costPrice: (el('cl-cost')?.value || '') !== '' ? parseFloat(el('cl-cost').value) : null,
+      pkgLengthCm: (el('cl-pkg-l')?.value || '') !== '' ? parseFloat(el('cl-pkg-l').value) : null,
+      pkgWidthCm: (el('cl-pkg-w')?.value || '') !== '' ? parseFloat(el('cl-pkg-w').value) : null,
+      pkgHeightCm: (el('cl-pkg-h')?.value || '') !== '' ? parseFloat(el('cl-pkg-h').value) : null,
+      pkgWeightG: (el('cl-pkg-g')?.value || '') !== '' ? parseInt(el('cl-pkg-g').value) : null,
       tags: (el('cl-tags')?.value || '').trim() || null,
       status: el('cl-status')?.value || 'draft',
       taxable: el('cl-taxable') ? el('cl-taxable').checked : true,
       templateSuffix: el('cl-template')?.value || null,
       shippingProfileId: el('cl-shipprofile')?.value || null,
-      imagesBase64: CL.images || [],
+      // Split copied photos (http URLs) from freshly-uploaded ones (base64) so the
+      // backend hosts each correctly on the new Shopify product.
+      imagesBase64: (CL.images || []).filter(u => !/^https?:/i.test(String(u))),
+      imageUrls: (CL.images || []).filter(u => /^https?:/i.test(String(u))),
       categoryId: CL.categoryId || null,
       subPartNumbers: (el('cl-subpn')?.value || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean),
       metafields,
@@ -12183,6 +12205,65 @@ function clPromptMultiFitment(attemptedSku, existing, btn) {
 // After a successful create, offer to make another listing from the same info
 // instead of bouncing straight back to the mirror. Keeps the form data so the
 // user can tweak a few fields (SKU, Left/Right, make/model) and submit again.
+// ── Copy an existing product as a template for a NEW listing ──
+function clCopyPickerOpen() {
+  modal({
+    title: '📋 Copy an existing product',
+    body: `<p style="margin:0 0 8px;color:var(--ink-soft);font-size:13px">Pick a product to use as a template. Its title, part number, category, item specifics, price, cost, parcel size and photos are copied into the form — you just set a <strong>new unique SKU</strong> and tweak anything (e.g. make/model), then Create &amp; push.</p>
+      <input id="cl-copy-search" placeholder="Search by name, SKU, part #…" style="width:100%;margin-bottom:8px">
+      <div id="cl-copy-results" style="max-height:340px;overflow:auto"></div>`,
+    actions: [{ label: 'Cancel', onClick: closeModal }],
+  });
+  const paint = () => {
+    const q = (el('cl-copy-search')?.value || '').toLowerCase().trim();
+    const list = (State.products || []).filter(p => !q || matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model)).slice(0, 60);
+    el('cl-copy-results').innerHTML = list.length ? list.map(p => `
+      <div onclick="clCopyFromProduct(${p.id})" style="display:flex;align-items:center;gap:10px;padding:8px;border-bottom:1px solid var(--line-2);cursor:pointer">
+        ${p.imageUrl ? `<img src="${escapeAttr(p.imageUrl)}" style="width:34px;height:34px;object-fit:cover;border-radius:5px">` : '<div style="width:34px;height:34px;border-radius:5px;background:var(--line-2)"></div>'}
+        <div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(p.title || '')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')}</div></div>
+      </div>`).join('') : '<div style="padding:16px;text-align:center;color:var(--ink-soft)">No matches.</div>';
+  };
+  paint();
+  el('cl-copy-search')?.addEventListener('input', paint);
+}
+async function clCopyFromProduct(productId) {
+  closeModal();
+  const taskId = Task.start('Loading template…');
+  let detail;
+  try { detail = await Api.get('/api/listings/listing-detail/' + productId); Task.done(taskId, 'Loaded'); }
+  catch (e) { Task.fail(taskId, 'Failed'); toast('Couldn’t load that listing: ' + (e.data?.message || e.message), 'error'); return; }
+  const p = detail.product || {}, sh = detail.shopify || {}, eb = detail.ebay || {};
+  const specs = {}; const placements = [];
+  (eb.specifics || []).forEach(s => {
+    if (!s.name) return;
+    const val = Array.isArray(s.value) ? s.value.join(', ') : s.value;
+    if (/placement/i.test(s.name)) (Array.isArray(s.value) ? s.value : [s.value]).forEach(x => x && placements.push(String(x)));
+    else specs[s.name] = val;
+  });
+  const snap = {
+    fields: {
+      'cl-partnumber': p.part_number || '',
+      'cl-title': sh.title || p.title || '',
+      'cl-desc': sh.description || '',
+      'cl-tags': sh.tags || '',
+      'cl-cost': p.cost_price != null ? p.cost_price : '',
+      'cl-pkg-l': p.pkg_length_cm ?? '', 'cl-pkg-w': p.pkg_width_cm ?? '', 'cl-pkg-h': p.pkg_height_cm ?? '', 'cl-pkg-g': p.pkg_weight_g ?? '',
+      'cl-subpn': (detail.subPartNumbers || []).join('\n'),
+      'ce-title': eb.title || sh.title || p.title || '',
+      'ce-price': (eb.price != null ? eb.price : p.price_ebay) ?? '',
+      'ce-qty': p.qty_on_hand ?? 1,
+      'ce-desc': eb.description || '',
+    },
+    checks: {}, specs, placements, metafields: [],
+    ebayCategoryId: eb.categoryId || p.ebay_category_id || '',
+    clCategoryId: '', clCategoryName: '',
+    images: Array.isArray(sh.imageUrls) ? sh.imageUrls.slice() : (p.image_url ? [p.image_url] : []),
+  };
+  CL_REPEAT = snap;
+  await renderCreateListing();
+  toast('Copied ✓ — enter a NEW unique SKU, tweak anything, then "Create & push everywhere".', 'success', 9000);
+}
+
 function clOfferRepeat(r) {
   const snap = clCaptureSnapshot();
   modal({
