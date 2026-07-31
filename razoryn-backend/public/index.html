@@ -13403,7 +13403,10 @@ function renderCosts() {
         <select class="filter-select" id="ct-brand"><option value="">All makes</option></select>
         <select class="filter-select" id="ct-filter">
           <option value="">All items</option>
-          <option value="below">Below floor only</option>
+          <option value="below">Below floor (any channel)</option>
+          <option value="below_ebay">Below floor — eBay</option>
+          <option value="below_shopify">Below floor — Shopify</option>
+          <option value="loss_cash">Cash margin &lt; 0</option>
           <option value="overstock">Overstock only</option>
           <option value="nocost">Missing cost</option>
         </select>
@@ -13463,6 +13466,9 @@ function ctFiltered() {
     if (q && !matchesKeywords(q, p.title, p.sku)) return false;
     if (brand && p.brand !== brand) return false;
     if (f === 'below' && !(p.belowFloorEbay || p.belowFloorShopify)) return false;
+    if (f === 'below_ebay' && !p.belowFloorEbay) return false;
+    if (f === 'below_shopify' && !p.belowFloorShopify) return false;
+    if (f === 'loss_cash' && !(p.cashMarginPct != null && p.cashMarginPct < 0)) return false;
     if (f === 'overstock' && !p.overstock) return false;
     if (f === 'nocost' && p.costPrice != null) return false;
     return true;
@@ -13605,9 +13611,20 @@ function ctRecoBox(p) {
     ${p.priceEbay != null ? row('Current price', ctMoney(p.priceEbay), p.marginEbayPct != null ? `margin ${ctPct(p.marginEbayPct)}` : '') : ''}
     ${p.offerEbayPct != null ? row(`After −${off}% offer`, ctMoney(p.offerEbayPrice), `${p.offerBelowBreakevenEbay ? '❌ loses money' : '✓ margin ' + ctPct(p.offerEbayPct)}`) : ''}
   </div>
+  <div style="font-size:12px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px;display:grid;gap:3px">
+    <div style="font-weight:700;margin-bottom:2px">Other channels (at current prices)</div>
+    ${row('🛒 Shopify / website', ctMoney(p.priceShopify), `rec ${ctMoney(p.floorShopify)}${p.marginShopifyPct != null ? ' · margin ' + ctPct(p.marginShopifyPct) : ''}`)}
+    ${row('💵 Cash', ctMoney(p.cashPrice), p.cashMarginPct != null ? `margin ${ctPct(p.cashMarginPct)}` : 'set an eBay price first')}
+    ${p.tradePrice != null ? row('🤝 Trade', ctMoney(p.tradePrice), p.tradeMarginPct != null ? `margin ${ctPct(p.tradeMarginPct)}` : '') : ''}
+  </div>
   <div style="font-size:12px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-      <span style="font-weight:700">Test a price</span>
+      <span style="font-weight:700">Test a price on</span>
+      <select id="ct-testchannel" onchange="ctRenderBreakdown(el('ct-testprice').value, CT.items.find(x=>x.id===${p.id}))" style="padding:4px 6px;font-size:13px">
+        <option value="ebay">eBay</option>
+        <option value="shopify">Shopify / website</option>
+        <option value="direct">Cash / bank (direct)</option>
+      </select>
       <span style="color:var(--ink-soft)">£</span>
       <input id="ct-testprice" type="number" step="0.01" min="0" value="${testDefault}" style="width:110px" placeholder="price">
       ${p.floorEbay != null ? `<button type="button" class="btn btn-ghost btn-sm" onclick="el('ct-testprice').value='${p.floorEbay}';ctRenderBreakdown('${p.floorEbay}',CT.items.find(x=>x.id===${p.id}))" title="Fill with the recommended price">use recommended</button>` : ''}
@@ -13690,26 +13707,17 @@ function ctPostageFor(p) {
 // Full £ breakdown of an eBay sale at a given price — so you see exactly what each
 // fee costs (and how much a high-return penalty is hurting). Pure client maths from
 // CT.settings, so the "test a price" box updates instantly.
-function ctComputeBreakdown(price, p) {
+function ctComputeBreakdown(price, p, channel = 'ebay') {
   const s = CT.settings || {};
   const B = parseFloat(price) || 0;
   const goods = p.costPrice != null ? parseFloat(p.costPrice) : 0;
-  // Effective cost: real landed if we have it, else goods grossed up by the uplift %.
   const uplift = s.landedUpliftPct || 0;
   const v = s.vatRegistered ? (s.vatRate / 100) / (1 + s.vatRate / 100) : 0;
   const inPrice = (p.postageInPrice == null) ? !p.largePanel : !!p.postageInPrice;
-  const postageVal = ctPostageFor(p);
-  const postage = inPrice ? postageVal : 0;
+  const postage = inPrice ? ctPostageFor(p) : 0;
   const packaging = s.packagingCost || 0;
-  const fvf = B * (s.ebayFvfPct || 0) / 100;
-  const reg = B * (s.ebayRegulatoryPct || 0) / 100;
-  const hr = B * (s.ebayHighReturnPct || 0) / 100;
-  const ad = B * (s.adRatePct || 0) / 100;
-  const per = s.ebayPerOrderFee || 0;
-  const feeBase = fvf + reg + hr + ad + per;
-  const feeVat = s.feesVatOnEbay ? feeBase * ((s.feesVatPct || 20) / 100) : 0;
-  const saleVat = B * v;
-  // Cost rows: actual landed (one line) or goods + estimated freight/duty (two lines).
+  const overhead = s.overheadPerUnit || 0;
+  const extAd = B * (s.externalAdPct || 0) / 100;
   const rows = [];
   let costTotal;
   if (p.landedKnown && p.landedCost != null) {
@@ -13723,20 +13731,39 @@ function ctComputeBreakdown(price, p) {
   }
   rows.push(inPrice ? ['Postage', postage] : ['Postage (buyer pays separately)', 0, false, true]);
   rows.push(['Packaging', packaging]);
-  rows.push([`eBay final value fee (${s.ebayFvfPct ?? 9.5}%)`, fvf]);
-  rows.push([`Regulatory operating fee (${s.ebayRegulatoryPct ?? 0.35}%)`, reg]);
-  if ((s.ebayHighReturnPct || 0) > 0) rows.push([`High return-rate penalty (${s.ebayHighReturnPct}%)`, hr, true]);
-  if ((s.adRatePct || 0) > 0) rows.push([`Ad rate (${s.adRatePct}%)`, ad]);
-  rows.push(['Per-order fee', per]);
-  if (feeVat > 0) rows.push([`VAT on eBay fees (${s.feesVatPct ?? 20}%)`, feeVat]);
+  // Channel-specific marketplace fees.
+  let feeBase = 0, feeVat = 0;
+  if (channel === 'ebay') {
+    const fvf = B * (s.ebayFvfPct || 0) / 100, reg = B * (s.ebayRegulatoryPct || 0) / 100;
+    const hr = B * (s.ebayHighReturnPct || 0) / 100, ad = B * (s.adRatePct || 0) / 100, per = s.ebayPerOrderFee || 0;
+    feeBase = fvf + reg + hr + ad + per;
+    feeVat = s.feesVatOnEbay ? feeBase * ((s.feesVatPct || 20) / 100) : 0;
+    rows.push([`eBay final value fee (${s.ebayFvfPct ?? 9.5}%)`, fvf]);
+    rows.push([`Regulatory operating fee (${s.ebayRegulatoryPct ?? 0.35}%)`, reg]);
+    if ((s.ebayHighReturnPct || 0) > 0) rows.push([`High return-rate penalty (${s.ebayHighReturnPct}%)`, hr, true]);
+    if ((s.adRatePct || 0) > 0) rows.push([`Ad rate (${s.adRatePct}%)`, ad]);
+    rows.push(['Per-order fee', per]);
+    if (feeVat > 0) rows.push([`VAT on eBay fees (${s.feesVatPct ?? 20}%)`, feeVat]);
+  } else if (channel === 'shopify') {
+    const sf = B * (s.shopifyFeePct || 0) / 100, sff = s.shopifyFixedFee || 0;
+    feeBase = sf + sff;
+    feeVat = s.feesVatOnShopify ? feeBase * ((s.feesVatPct || 20) / 100) : 0;
+    rows.push([`Shopify fee (${s.shopifyFeePct ?? 1.9}%)`, sf]);
+    rows.push(['Shopify fixed fee', sff]);
+    if (feeVat > 0) rows.push([`VAT on Shopify fees`, feeVat]);
+  } // cash/direct: no marketplace fee
+  if (overhead > 0) rows.push(['Overhead per unit', overhead]);
+  if (extAd > 0) rows.push([`External ads (${s.externalAdPct}%)`, extAd]);
+  const saleVat = B * v;
   if (saleVat > 0) rows.push([`VAT on the sale (${s.vatRate ?? 20}%)`, saleVat]);
-  const net = B - costTotal - postage - packaging - feeBase - feeVat - saleVat;
+  const net = B - costTotal - postage - packaging - feeBase - feeVat - overhead - extAd - saleVat;
   const marginPct = B > 0 ? (net / B) * 100 : 0;
   return { price: B, net, marginPct, rows };
 }
-function ctRenderBreakdown(price, p) {
+function ctRenderBreakdown(price, p, channel) {
   const wrap = el('ct-breakdown'); if (!wrap) return;
-  const b = ctComputeBreakdown(price, p);
+  const ch = channel || el('ct-testchannel')?.value || 'ebay';
+  const b = ctComputeBreakdown(price, p, ch);
   const col = b.marginPct < 0 ? 'var(--red)' : b.marginPct < 10 ? 'var(--amber)' : 'var(--green)';
   wrap.innerHTML = `
     <div style="display:flex;justify-content:space-between;font-weight:700;margin-bottom:4px"><span>Sale price</span><span>${ctMoney(b.price)}</span></div>
