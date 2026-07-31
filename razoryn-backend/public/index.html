@@ -4173,7 +4173,7 @@ function renderInventory() {
           ${(p.incomingQty > 0 || p.isPrelisted) ? `<div style="font-size:11px;margin-top:3px"><span class="pill" style="background:var(--amber-light);color:var(--amber);font-size:10px;font-weight:600">${(p.isPrelisted || tq===0)?'Pre-order':'+'+p.incomingQty+' incoming'}</span>${(p.preorderEta || p.incomingEta) ? `<div style="color:var(--ink-soft);font-size:10px;margin-top:2px">ETA ~${new Date(p.preorderEta || p.incomingEta).toLocaleDateString('en-GB')}</div>` : ''}${p.isPrelisted && p.ebayPrelistStatus==='scheduled' ? `<div style="color:var(--ink-soft);font-size:10px;margin-top:2px">eBay: scheduled</div>` : ''}</div>` : ''}
         </td>
         <td class="num">${gbp(p.priceShopify)}</td>
-        <td style="white-space:nowrap">${(p.isPrelisted && p.ebayPrelistStatus === 'scheduled') ? `<button class="btn btn-primary btn-sm" onclick="pushPrelistingLive(${p.id})" title="Publish the held eBay listing now">⚡ Push live</button> ` : ''}<button class="btn btn-outline btn-sm" data-act="edit" data-pid="${p.id}">Edit</button> <button class="btn btn-ghost btn-sm" data-act="${p.hidden ? 'unhide' : 'hide'}" data-pid="${p.id}" title="${p.hidden ? 'Unhide — restore to stock-checks &amp; channel pushes' : 'Hide — park this listing: keep it in inventory but stop stock-checks &amp; channel pushes'}">${p.hidden ? '👁 Unhide' : '🙈 Hide'}</button> <button class="btn btn-ghost btn-sm" data-act="del" data-pid="${p.id}" style="color:var(--red)" title="Delete product">🗑</button></td>
+        <td style="white-space:nowrap">${(p.isPrelisted && p.ebayPrelistStatus === 'scheduled') ? `<button class="btn btn-primary btn-sm" onclick="pushPrelistingLive(${p.id})" title="Publish the held eBay listing now">⚡ Push live</button> ` : ''}<button class="btn btn-outline btn-sm" data-act="edit" data-pid="${p.id}">Edit</button> ${p.shopifyProductId ? `<button class="btn btn-ghost btn-sm" data-act="imgpush" data-pid="${p.id}" title="Re-push this product's current Shopify photos to its eBay listing(s)">📷→eBay</button> ` : ''}<button class="btn btn-ghost btn-sm" data-act="${p.hidden ? 'unhide' : 'hide'}" data-pid="${p.id}" title="${p.hidden ? 'Unhide — restore to stock-checks &amp; channel pushes' : 'Hide — park this listing: keep it in inventory but stop stock-checks &amp; channel pushes'}">${p.hidden ? '👁 Unhide' : '🙈 Hide'}</button> <button class="btn btn-ghost btn-sm" data-act="del" data-pid="${p.id}" style="color:var(--red)" title="Delete product">🗑</button></td>
       </tr>
     `;
   }
@@ -4252,6 +4252,8 @@ function renderInventory() {
       deleteProduct(pid, prod ? (prod.title || '') : '');
     } else if (act === 'hide' || act === 'unhide') {
       toggleHideProduct(pid, act === 'hide');
+    } else if (act === 'imgpush') {
+      repushEbayImages(pid);
     }
   });
   tbody.addEventListener('change', (e) => {
@@ -14964,7 +14966,9 @@ async function repushEbayImages(productId) {
   try {
     const r = await Api.post('/api/listings/repush-ebay-images', { productId });
     Task.done(taskId, r.pushed ? 'Pushed' : 'No change');
-    toast(r.pushed ? `✓ Pushed ${r.images} photo(s) to ${r.pushed} eBay listing${r.pushed > 1 ? 's' : ''}` : 'No images pushed', r.pushed ? 'success' : 'warn', 6000);
+    const errMsg = (r.errors && r.errors.length) ? ' · ⚠ ' + r.errors.join(' · ') : '';
+    if (r.pushed) toast(`✓ Pushed ${r.images} photo(s) to ${r.pushed} eBay listing${r.pushed > 1 ? 's' : ''}${errMsg}`, errMsg ? 'warn' : 'success', errMsg ? 12000 : 6000);
+    else toast(`No photos pushed to eBay${errMsg || ' — no linked eBay listing found (link it via Listing Mirror → Force match).'}`, 'warn', 12000);
     if (r.errors && r.errors.length) console.warn('repush-ebay-images', r.errors);
   } catch (e) {
     Task.fail(taskId, 'Failed');
