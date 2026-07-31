@@ -2124,7 +2124,20 @@ function enterApp() {
       // refreshed data stays in State and paints on the next idle tick.
       const a = document.activeElement;
       const typing = a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && document.getElementById('content')?.contains(a);
-      if (repaintMap[State.page] && !typing) repaintMap[State.page]();
+      // On the Inventory page the repaint rebuilds #content and resets the search
+      // box, filters AND scroll position — so if the user has an active
+      // search/filter or has scrolled down, DON'T repaint out from under them
+      // (this was the "scrolling resets my search/filters" annoyance). The fresh
+      // data is already in State and shows on their next action / navigation.
+      let disruptive = false;
+      if (State.page === 'inventory') {
+        const hasFilter = (el('inv-search')?.value || '').trim() !== ''
+          || (el('inv-brand')?.value || '') !== ''
+          || (el('inv-stock')?.value || '') !== ''
+          || (el('inv-hidden')?.value || '') !== '';
+        disruptive = hasFilter || window.scrollY > 150;
+      }
+      if (repaintMap[State.page] && !typing && !disruptive) repaintMap[State.page]();
       refreshNavCounts();
     } catch (e) {
       // silent — surfacing every poll failure would be noisy
@@ -7529,9 +7542,12 @@ function renderSales() {
       <div class="toolbar" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <input type="search" class="search-input" id="sales-search" placeholder="Search invoice / reference, customer, item, order #…" value="${escapeAttr(State.salesSearch || '')}" style="flex:1;min-width:220px">
         <select id="sales-period" onchange="salesSetPeriod(this.value)" style="padding:6px 8px;font-size:13px">
-          ${[['all','All time'],['7d','Last 7 days'],['1m','Last month'],['3m','Last 3 months'],['6m','Last 6 months'],['year','This year'],['custom','Custom…']]
+          ${[['all','All time'],['7d','Last 7 days'],['30d','Last 30 days'],['tm','This month'],['lm','Last month'],['tq','This quarter'],['lq','Last quarter'],['year','This year'],['ly','Last year'],['custom','Custom…']]
             .map(([v,l]) => `<option value="${v}" ${(State.salesPeriod||'all')===v?'selected':''}>${l}</option>`).join('')}
         </select>
+        <label style="font-size:12px;display:${(State.salesPeriod && !['all','custom'].includes(State.salesPeriod))?'inline-flex':'none'};align-items:center;gap:5px" id="sales-compare-wrap" title="Compare this period's totals against the one before it">
+          <input type="checkbox" id="sales-compare" ${State.salesCompare?'checked':''} onchange="State.salesCompare=this.checked;salesReload()"> vs previous
+        </label>
         <span id="sales-custom-range" style="display:${State.salesPeriod==='custom'?'inline-flex':'none'};gap:6px;align-items:center">
           <input type="date" id="sales-from" value="${escapeAttr(State.salesFrom||'')}" style="padding:5px;font-size:12px">
           <span style="font-size:12px;color:var(--ink-soft)">→</span>
@@ -7617,8 +7633,16 @@ function renderSales() {
       : filter === 'preorders'
       ? `<div class="stat"><div class="label">Pre-orders</div><div class="value">${preorders.length}</div><div class="delta">${gbp(preorderValue)} reserved · not yet revenue</div></div>`
       : `<div class="stat"><div class="label">Direct (cash + bank)</div><div class="value">${gbp(totalDirect)}</div><div class="delta">${livePaid.filter(s=>s.channel==='cash'||s.channel==='bank').length} orders${refDirect ? ` · −${gbp(refDirect)}` : ''}</div></div>`;
+    // Period-over-period comparison line for the Net-revenue tile.
+    let cmpLine = '';
+    if (State.salesComparison) {
+      const prev = State.salesComparison.net;
+      const delta = prev ? ((netTotal - prev) / Math.abs(prev)) * 100 : (netTotal > 0 ? 100 : 0);
+      const up = delta >= 0;
+      cmpLine = `<div style="font-size:11px;font-weight:600;color:${up ? 'var(--green)' : 'var(--red)'};margin-top:2px">${up ? '▲' : '▼'} ${Math.abs(delta).toFixed(0)}% vs previous (${gbp(prev)})</div>`;
+    }
     el('sales-stats').innerHTML = `
-      <div class="stat"><div class="label">Net revenue</div><div class="value">${gbp(netTotal)}</div><div class="delta">${livePaid.length} sales${refTotal ? ` · −${gbp(refTotal)} refunded/returned${openRet ? ` (incl. ${gbp(openRet)} open returns)` : ''}` : ''}</div></div>
+      <div class="stat"><div class="label">Net revenue</div><div class="value">${gbp(netTotal)}</div><div class="delta">${livePaid.length} sales${refTotal ? ` · −${gbp(refTotal)} refunded/returned${openRet ? ` (incl. ${gbp(openRet)} open returns)` : ''}` : ''}</div>${cmpLine}</div>
       <div class="stat"><div class="label">Store</div><div class="value">${gbp(totalShop)}</div><div class="delta">${livePaid.filter(s=>s.channel==='shopify').length} orders${refShop ? ` · −${gbp(refShop)}` : ''}</div></div>
       <div class="stat"><div class="label">eBay${(State.brand?.stores||[]).length > 1 ? ' (all)' : ''}</div><div class="value">${gbp(totalEby)}</div><div class="delta">${ebyCount} orders${refEby ? ` · −${gbp(refEby)}` : ''}</div></div>
       ${fourthTile}
@@ -7739,13 +7763,19 @@ function salesSetPeriod(v) {
   State.salesPeriod = v;
   const custom = el('sales-custom-range');
   if (custom) custom.style.display = v === 'custom' ? 'inline-flex' : 'none';
+  const cmp = el('sales-compare-wrap');
+  if (cmp) cmp.style.display = (!['all', 'custom'].includes(v)) ? 'inline-flex' : 'none';
   if (v === 'custom') return; // wait for the Apply button
   salesReload();
 }
-function salesPeriodRange() {
-  const v = State.salesPeriod || 'all';
+// Resolve a period code to a { from, to } ISO window with CORRECT calendar
+// semantics. `back` shifts to the previous equivalent period (for comparison):
+// back=1 → the month/quarter/year (or rolling window) immediately before.
+function salesPeriodRange(code, back = 0) {
+  const v = code || State.salesPeriod || 'all';
   const now = new Date();
   const iso = d => d.toISOString();
+  const Y = now.getFullYear(), M = now.getMonth();
   if (v === 'custom') {
     const f = (el('sales-from')?.value || State.salesFrom || '');
     const t = (el('sales-to')?.value || State.salesTo || '');
@@ -7753,13 +7783,40 @@ function salesPeriodRange() {
     return { from: f || null, to: t ? t + 'T23:59:59' : null };
   }
   if (v === 'all') return { from: null, to: null };
-  const d = new Date(now);
-  if (v === '7d') d.setDate(d.getDate() - 7);
-  else if (v === '1m') d.setMonth(d.getMonth() - 1);
-  else if (v === '3m') d.setMonth(d.getMonth() - 3);
-  else if (v === '6m') d.setMonth(d.getMonth() - 6);
-  else if (v === 'year') return { from: iso(new Date(now.getFullYear(), 0, 1)), to: null };
-  return { from: iso(d), to: null };
+  const endOfDay = d => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
+  if (v === '7d' || v === '30d') {
+    const days = v === '7d' ? 7 : 30;
+    const to = new Date(now); to.setDate(to.getDate() - back * days);
+    const from = new Date(to); from.setDate(from.getDate() - days);
+    return { from: iso(from), to: back ? iso(to) : null };
+  }
+  if (v === 'tm' || v === 'lm') {
+    const offset = (v === 'lm' ? 1 : 0) + back;
+    const from = new Date(Y, M - offset, 1);
+    const to = new Date(Y, M - offset + 1, 0);   // last day of that month
+    return { from: iso(from), to: (v === 'lm' || back) ? iso(endOfDay(to)) : null };
+  }
+  if (v === 'tq' || v === 'lq') {
+    const q = Math.floor(M / 3);
+    const offset = (v === 'lq' ? 1 : 0) + back;
+    const from = new Date(Y, (q - offset) * 3, 1);
+    const to = new Date(Y, (q - offset) * 3 + 3, 0);
+    return { from: iso(from), to: (v === 'lq' || back) ? iso(endOfDay(to)) : null };
+  }
+  if (v === 'year' || v === 'ly') {
+    const yr = Y - (v === 'ly' ? 1 : 0) - back;
+    const from = new Date(yr, 0, 1);
+    const to = new Date(yr, 11, 31);
+    return { from: iso(from), to: (v === 'ly' || back) ? iso(endOfDay(to)) : null };
+  }
+  return { from: null, to: null };
+}
+// Net revenue of a fetched sales result (mirrors paintStats: paid, non-estimate,
+// non-preorder gross minus the window's refund total).
+function salesNetFromResult(list, refundsTotal) {
+  const allPaid = (list || []).filter(s => !s.isEstimate && !s.isPreorder && s.isPaid !== false);
+  const gross = allPaid.reduce((a, b) => a + (b.amount || 0), 0);
+  return { net: +(gross - (refundsTotal || 0)).toFixed(2), orders: allPaid.filter(s => !s.isRefunded).length };
 }
 async function salesReload() {
   const { from, to } = salesPeriodRange();
@@ -7772,6 +7829,20 @@ async function salesReload() {
     State.salesRefundsByChannel = r.refundsByChannel || {};
     State.salesRefundsTotal = r.refundsTotal || 0;
     State.salesOpenReturnsTotal = r.openReturnsTotal || 0;
+    // Period-over-period comparison: fetch the immediately-preceding equivalent
+    // window and stash its net revenue for the stats tiles.
+    State.salesComparison = null;
+    const per = State.salesPeriod || 'all';
+    if (State.salesCompare && !['all', 'custom'].includes(per)) {
+      try {
+        const pr = salesPeriodRange(per, 1);
+        const q2 = new URLSearchParams({ pageSize: '5000', includeUnpaid: '1' });
+        if (pr.from) q2.set('from', pr.from);
+        if (pr.to) q2.set('to', pr.to);
+        const r2 = await Api.get('/api/sales?' + q2.toString());
+        State.salesComparison = salesNetFromResult((r2.sales || []).map(adaptSale), r2.refundsTotal || 0);
+      } catch (_) {}
+    }
     renderSales();
   } catch (e) {
     toast('Failed to load sales: ' + (e.data?.message || e.message), 'error');
