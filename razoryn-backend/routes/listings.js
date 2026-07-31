@@ -3343,6 +3343,10 @@ async function doCreateEbay(b, { req } = {}) {
     brand: ebayBrand,
     mpn: mpnFromProduct(product),
     itemSpecifics: mergedSpecifics,
+    // Parcel size + weight (for eBay calculated postage / shipping platforms).
+    packageDetails: (product.pkg_length_cm || product.pkg_width_cm || product.pkg_height_cm || product.pkg_weight_g)
+      ? { lengthCm: product.pkg_length_cm, widthCm: product.pkg_width_cm, heightCm: product.pkg_height_cm, weightG: product.pkg_weight_g }
+      : null,
     // Shop/store category — per-listing choice, else the saved default.
     storeCategoryId: b.storeCategoryId || settings.ebay_default_store_category_id || null,
     // VAT — per-listing override, else dedicated eBay VAT %, else the general

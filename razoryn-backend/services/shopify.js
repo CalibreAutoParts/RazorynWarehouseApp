@@ -480,6 +480,21 @@ async function setVariantPrice(shopifyProductId, price) {
   return { ok: true, productId: String(shopifyProductId), price: +p.toFixed(2) };
 }
 
+// Lightweight weight-only update — sets the first variant's weight (grams) so
+// Shopify + connected shipping apps can quote rates. No-op for 0/blank.
+async function setVariantWeight(shopifyProductId, grams) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const g = parseInt(grams);
+  if (!Number.isFinite(g) || g <= 0) return { ok: false, skipped: 'no_weight' };
+  const ex = await shopifyRequest('get', `/products/${encodeURIComponent(shopifyProductId)}.json`);
+  const variant = ex.data.product?.variants?.[0];
+  if (!variant) throw new Error('no_variant_for_product');
+  await shopifyRequest('put', `/variants/${variant.id}.json`, {
+    data: { variant: { id: variant.id, grams: g, weight: +(g / 1000).toFixed(3), weight_unit: 'kg' } },
+  });
+  return { ok: true, productId: String(shopifyProductId), grams: g };
+}
+
 // List delivery (shipping) profiles. Returns [{id, name}].
 let cachedProfiles = null;
 async function getDeliveryProfiles() {
@@ -1188,6 +1203,7 @@ module.exports = {
   updateProduct,
   deleteProduct,
   setVariantPrice,
+  setVariantWeight,
   setVariantSku,
   setPartNumberMetafield,
   setProductImages,
