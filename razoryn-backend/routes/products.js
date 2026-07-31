@@ -47,6 +47,15 @@ async function ensureProductLocationColumns() {
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT false`);
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS hidden_at TIMESTAMPTZ`);
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS hidden_reason TEXT`);
+    // Parcel size + weight (base units: cm + grams). Pushed to eBay
+    // (ShippingPackageDetails) and Shopify (variant weight) so integrated shipping
+    // platforms can quote national/international rates; also gives a per-item
+    // volume for warehouse space planning. Nullable — many items have no final
+    // box size yet (standardised boxes are being rolled out).
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS pkg_length_cm NUMERIC(7,1)`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS pkg_width_cm  NUMERIC(7,1)`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS pkg_height_cm NUMERIC(7,1)`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS pkg_weight_g  INTEGER`);
     // Actual landed cost (goods + apportioned container freight/duty). Set when a
     // container is received; null = estimate landed via the global uplift %.
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS landed_cost NUMERIC(12,4)`);
@@ -568,17 +577,20 @@ router.post('/', requireAdmin, async (req, res) => {
   const p = req.body || {};
   if (!p.sku || !p.title) return res.status(400).json({ error: 'sku_and_title_required' });
   try {
+    await ensureProductLocationColumns();
     const { rows } = await query(
       `INSERT INTO products (sku, title, brand, model, part_number, position, barcode,
                              qty_on_hand, low_stock_threshold, price_shopify, price_ebay,
-                             cost_price, location_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                             cost_price, location_id,
+                             pkg_length_cm, pkg_width_cm, pkg_height_cm, pkg_weight_g)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
        RETURNING *`,
       [p.sku, p.title, p.brand || null, p.model || null, p.partNumber || null,
        p.position || null, p.barcode || null,
        p.qtyOnHand || 0, p.lowStockThreshold || 2,
        p.priceShopify || null, p.priceEbay || null, p.costPrice || null,
-       p.locationId || null]
+       p.locationId || null,
+       p.pkgLengthCm ?? null, p.pkgWidthCm ?? null, p.pkgHeightCm ?? null, p.pkgWeightG ?? null]
     );
     await audit(req, 'create_product', 'product', rows[0].id, { sku: p.sku });
     res.status(201).json({ product: rows[0] });
@@ -593,7 +605,8 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
                    'low_stock_threshold', 'price_shopify', 'price_ebay', 'cost_price',
                    'location_id', 'active', 'location_note', 'location_photo_data_url',
-                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked', 'shipping_band', 'shipping_cost', 'postage_in_price'];
+                   'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked', 'shipping_band', 'shipping_cost', 'postage_in_price',
+                   'pkg_length_cm', 'pkg_width_cm', 'pkg_height_cm', 'pkg_weight_g'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
@@ -602,7 +615,8 @@ router.patch('/:id', requireAdmin, async (req, res) => {
                 itemPhotoDataUrl: 'item_photo_data_url',
                 locationPhotoDataUrl2: 'location_photo_data_url_2',
                 primaryPhoto: 'primary_photo', largePanel: 'large_panel', priceLocked: 'price_locked',
-                shippingBand: 'shipping_band', shippingCost: 'shipping_cost', postageInPrice: 'postage_in_price' };
+                shippingBand: 'shipping_band', shippingCost: 'shipping_cost', postageInPrice: 'postage_in_price',
+                pkgLengthCm: 'pkg_length_cm', pkgWidthCm: 'pkg_width_cm', pkgHeightCm: 'pkg_height_cm', pkgWeightG: 'pkg_weight_g' };
   const sets = [], params = [];
   // Always ensure the per-product location/photo columns (incl. updated_at)
   // exist before we touch them — cheap (cached after first run).
@@ -630,6 +644,16 @@ router.patch('/:id', requireAdmin, async (req, res) => {
     params
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+  // If the parcel weight was set/changed and the product is on Shopify, push the
+  // weight so Shopify + connected shipping apps can quote rates (best-effort).
+  if (('pkgWeightG' in (req.body || {}) || 'pkg_weight_g' in (req.body || {})) && rows[0].shopify_product_id && rows[0].pkg_weight_g) {
+    try {
+      const shopify = require('../services/shopify');
+      if (shopify.isConfigured() && typeof shopify.setVariantWeight === 'function') {
+        await shopify.setVariantWeight(rows[0].shopify_product_id, rows[0].pkg_weight_g);
+      }
+    } catch (e) { console.warn('[products] shopify weight push failed:', e.message); }
+  }
   // Audit without the huge base64 blobs
   const auditBody = { ...req.body };
   for (const f of ['itemPhotoDataUrl', 'locationPhotoDataUrl', 'locationPhotoDataUrl2']) {

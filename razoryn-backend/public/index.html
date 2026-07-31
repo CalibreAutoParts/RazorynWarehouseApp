@@ -1328,6 +1328,10 @@ function adaptProduct(p) {
     stockGroupCode: p.stock_group_code || null,
     hidden: !!p.hidden,
     hiddenReason: p.hidden_reason || null,
+    pkgLengthCm: p.pkg_length_cm != null ? parseFloat(p.pkg_length_cm) : null,
+    pkgWidthCm: p.pkg_width_cm != null ? parseFloat(p.pkg_width_cm) : null,
+    pkgHeightCm: p.pkg_height_cm != null ? parseFloat(p.pkg_height_cm) : null,
+    pkgWeightG: p.pkg_weight_g != null ? parseInt(p.pkg_weight_g) : null,
   };
 }
 function adaptSale(s) {
@@ -4497,6 +4501,14 @@ function openProductModal(id) {
       <div class="field"><label>Storage notes</label><textarea id="m-locdesc" rows="2">${p.locationDesc||''}</textarea></div>
       <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="m-lp" ${p.largePanel?'checked':''}><span></span></label> Large panel (needs special courier — flags any order containing it)</label></div>
       <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="m-plock" ${p.priceLocked?'checked':''}><span></span></label> Lock price (keep manual — automated price tools won't overwrite this product)</label></div>
+      <div class="field"><label>📦 Parcel size &amp; weight <span style="font-weight:400;color:var(--ink-soft)">— pushed to eBay + Shopify so shipping platforms can quote UK &amp; international rates. Leave blank if the box size isn't fixed yet.</span></label>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">
+          <div><input type="number" step="0.1" min="0" id="m-pkg-l" value="${p.pkgLengthCm ?? ''}" placeholder="L cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Length</div></div>
+          <div><input type="number" step="0.1" min="0" id="m-pkg-w" value="${p.pkgWidthCm ?? ''}" placeholder="W cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Width</div></div>
+          <div><input type="number" step="0.1" min="0" id="m-pkg-h" value="${p.pkgHeightCm ?? ''}" placeholder="H cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Height</div></div>
+          <div><input type="number" step="1" min="0" id="m-pkg-g" value="${p.pkgWeightG ?? ''}" placeholder="grams"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (g)</div></div>
+        </div>
+      </div>
       ${id ? `<div class="field"><label>Sub part numbers <span style="font-weight:400;color:var(--ink-soft)">— alternate factory / country codes. All are searchable and resolve to the SKU above (the printed master code).</span></label><div id="m-subpn">Loading…</div></div>` : `<div class="field" style="font-size:11px;color:var(--ink-soft)">Save the product first, then re-open it to add alternate (sub) part numbers.</div>`}
       ${id ? `<div class="field"><label>Shopify shop categories (collections)</label><div id="m-collections" style="font-size:12px;color:var(--ink-soft)">Loading…</div></div>` : ''}
     `,
@@ -4509,6 +4521,10 @@ function openProductModal(id) {
           priceShopify: +el('m-pshop').value, priceEbay: +el('m-peby').value,
           largePanel: el('m-lp')?.checked || false,
           priceLocked: el('m-plock')?.checked || false,
+          pkgLengthCm: el('m-pkg-l')?.value !== '' ? +el('m-pkg-l').value : null,
+          pkgWidthCm: el('m-pkg-w')?.value !== '' ? +el('m-pkg-w').value : null,
+          pkgHeightCm: el('m-pkg-h')?.value !== '' ? +el('m-pkg-h').value : null,
+          pkgWeightG: el('m-pkg-g')?.value !== '' ? +el('m-pkg-g').value : null,
         };
         try {
           let newProduct = null;

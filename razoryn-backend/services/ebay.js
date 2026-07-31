@@ -1189,6 +1189,7 @@ async function addItem(storeArg, opts = {}) {
     // listings (which pass none of these) build exactly as before.
     storeCategoryId = null,   // eBay shop/store category (Storefront)
     vatPercent = null,        // VAT percent charged on the item (e.g. 20)
+    packageDetails = null,    // { lengthCm, widthCm, heightCm, weightG } — parcel size + weight
     // verify=true runs VerifyAddItem instead of AddItem: same validation +
     // fee preview, but creates NO live listing. eBay's Trading API has no
     // Seller-Hub "draft" concept, so this is the safe dry-run equivalent.
@@ -1267,6 +1268,26 @@ async function addItem(storeArg, opts = {}) {
     ? `<VATDetails><VATPercent>${vatNum.toFixed(1)}</VATPercent></VATDetails>`
     : '';
 
+  // Parcel size + weight (metric). Lets eBay quote calculated postage and lets
+  // integrated shipping platforms pull dimensions. Only emitted when supplied.
+  let packageXml = '';
+  if (packageDetails) {
+    const L = parseFloat(packageDetails.lengthCm), W = parseFloat(packageDetails.widthCm), H = parseFloat(packageDetails.heightCm);
+    const g = parseInt(packageDetails.weightG);
+    const dimTags = [];
+    if (Number.isFinite(L) && L > 0) dimTags.push(`<PackageLength unit="centimeters">${L.toFixed(1)}</PackageLength>`);
+    if (Number.isFinite(W) && W > 0) dimTags.push(`<PackageWidth unit="centimeters">${W.toFixed(1)}</PackageWidth>`);
+    if (Number.isFinite(H) && H > 0) dimTags.push(`<PackageDepth unit="centimeters">${H.toFixed(1)}</PackageDepth>`);
+    let weightTags = '';
+    if (Number.isFinite(g) && g > 0) {
+      const kg = Math.floor(g / 1000), gm = g % 1000;
+      weightTags = `<WeightMajor unit="kg">${kg}</WeightMajor><WeightMinor unit="gm">${gm}</WeightMinor>`;
+    }
+    if (dimTags.length || weightTags) {
+      packageXml = `<ShippingPackageDetails>${dimTags.join('')}${weightTags}</ShippingPackageDetails>`;
+    }
+  }
+
   // AddItem XML body. ListingDuration GTC = Good Till Cancelled, the standard
   // for fixed-price listings. DispatchTimeMax=1 means we ship within 1 business day.
   const bodyInner = `
@@ -1289,6 +1310,7 @@ async function addItem(storeArg, opts = {}) {
       ${itemSpecificsXml}
       ${storefrontXml}
       ${vatXml}
+      ${packageXml}
       ${policiesXml}
     </Item>`;
 
