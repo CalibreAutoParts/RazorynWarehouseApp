@@ -101,15 +101,33 @@ async function resolveSendTargets(sale) {
   const store = brand.stores.find(s => s.channelCode === sale.channel);
   if (!store || !store.token) return { skip: 'store_unavailable' };
 
-  const firstItem = (await query(`SELECT sku FROM sale_items WHERE sale_id = $1 ORDER BY id LIMIT 1`, [sale.id])).rows[0];
+  // Find the eBay ItemID (on THIS store's account) for the first line item.
+  // Reliable path: sale_item → product.shopify_product_id → mirror_links for this
+  // store. Fall back to a SKU match on the mirror_links' last-synced SKU.
+  const fi = (await query(
+    `SELECT si.sku, p.shopify_product_id
+       FROM sale_items si LEFT JOIN products p ON p.id = si.product_id
+      WHERE si.sale_id = $1 ORDER BY si.id LIMIT 1`, [sale.id])).rows[0];
   let itemId = null;
-  if (firstItem?.sku) {
+  if (fi?.shopify_product_id) {
+    // Legacy NULL store_code links belong to the primary store, so accept them
+    // only when THIS store is the primary.
+    const nullClause = store.primary ? 'OR store_code IS NULL' : '';
     const link = await query(
-      `SELECT ebay_item_id FROM mirror_links WHERE LOWER(last_synced_sku) = LOWER($1) AND ebay_item_id IS NOT NULL AND store_code = $2 LIMIT 1`,
-      [firstItem.sku, store.code]);
-    itemId = link.rows[0]?.ebay_item_id
-      || (await query(`SELECT ebay_item_id FROM mirror_links WHERE LOWER(last_synced_sku) = LOWER($1) AND ebay_item_id IS NOT NULL LIMIT 1`, [firstItem.sku])).rows[0]?.ebay_item_id
-      || null;
+      `SELECT ebay_item_id FROM mirror_links
+        WHERE shopify_product_id::text = $1 AND ebay_item_id IS NOT NULL
+          AND (store_code = $2 ${nullClause})
+        ORDER BY (store_code = $2) DESC NULLS LAST LIMIT 1`,
+      [String(fi.shopify_product_id), store.code]);
+    itemId = link.rows[0]?.ebay_item_id || null;
+  }
+  if (!itemId && fi?.sku) {
+    const link = await query(
+      `SELECT ml.ebay_item_id FROM mirror_links ml
+        WHERE LOWER(ml.last_synced_sku) = LOWER($1) AND ml.ebay_item_id IS NOT NULL
+          AND (ml.store_code = $2 ${store.primary ? 'OR ml.store_code IS NULL' : ''}) LIMIT 1`,
+      [fi.sku, store.code]);
+    itemId = link.rows[0]?.ebay_item_id || null;
   }
   if (!itemId) return { skip: 'no_item_link' };
 
@@ -130,9 +148,12 @@ async function sendOneSale(sale, cfg) {
   const ebay = require('./ebay');
   const t = await resolveSendTargets(sale);
   if (t.skip) {
-    // Mark permanently-unsendable orders skipped so we don't re-check them.
-    // Transient lookups (order_lookup_failed) are left to retry next run.
-    if (t.skip === 'no_buyer_userid' || t.skip === 'no_item_link' || t.skip === 'store_unavailable') {
+    // Only truly-unsendable orders are stamped permanently: an anonymised buyer
+    // (eBay hides the username ~30 days after the order) can never be messaged.
+    // FIXABLE reasons (no linked ItemID yet, the store's token missing/disabled,
+    // a transient order lookup) are NOT stamped, so they retry once the link is
+    // created / the account is enabled, instead of being silently skipped forever.
+    if (t.skip === 'no_buyer_userid') {
       await query(`UPDATE sales SET fitment_msg_sent_at = now(), fitment_msg_status = 'skipped', fitment_msg_error = $2 WHERE id = $1`, [sale.id, t.skip]);
     }
     return { saleId: sale.id, skipped: t.skip };
@@ -202,8 +223,20 @@ async function sendFitmentMessagesCore({ allowDisabled = false } = {}) {
   return { ok: true, sent, skipped, failed, considered: rows.length, results };
 }
 
+// Clear the at-most-once stamp on orders that were skipped/errored but NEVER
+// actually sent, so they become eligible again (e.g. after fixing the ItemID
+// lookup or linking listings). Never touches rows that were genuinely 'sent'.
+async function resetUnsent() {
+  await ensureColumns();
+  const r = await query(
+    `UPDATE sales SET fitment_msg_sent_at = NULL, fitment_msg_status = NULL, fitment_msg_error = NULL
+      WHERE channel LIKE 'ebay_%' AND fitment_msg_sent_at IS NOT NULL
+        AND fitment_msg_status IS DISTINCT FROM 'sent'`);
+  return r.rowCount || 0;
+}
+
 module.exports = {
   ensureColumns, getConfig, saveConfig, countEligible,
-  sendFitmentMessagesCore, sendForSale,
+  sendFitmentMessagesCore, sendForSale, resetUnsent,
   DEFAULT_SUBJECT, DEFAULT_BODY,
 };

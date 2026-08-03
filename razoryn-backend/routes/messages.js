@@ -746,9 +746,15 @@ router.put('/fitment/config', requireAdmin, async (req, res) => {
 // admin can test/flush the queue. Returns per-order results.
 router.post('/fitment/run', requireAdmin, async (req, res) => {
   try {
+    // Re-queue any order that was skipped/errored but never actually sent, so a
+    // manual run re-attempts everything after a fix (e.g. links created).
+    const requeued = await fitment.resetUnsent();
     const r = await fitment.sendFitmentMessagesCore({ allowDisabled: true });
+    // Break down WHY orders were skipped, so the admin can diagnose "not sending".
+    const skipReasons = {};
+    for (const x of (r.results || [])) { if (x.skipped) skipReasons[x.skipped] = (skipReasons[x.skipped] || 0) + 1; }
     if (r.sent) await audit(req, 'fitment_msg_run', null, null, { sent: r.sent, failed: r.failed, skipped: r.skipped });
-    res.json(r);
+    res.json({ ...r, requeued, skipReasons });
   } catch (e) { res.status(500).json({ ok: false, error: 'run_failed', message: e.message }); }
 });
 
