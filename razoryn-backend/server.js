@@ -84,6 +84,7 @@ app.use('/api/notes',        require('./routes/notes'));
 app.use('/api/brand',        require('./routes/brand'));
 app.use('/api/dispatch',     require('./routes/dispatch'));
 app.use('/api/dropfleet',    require('./routes/dropfleet'));
+app.use('/api/thumbnail',    require('./routes/thumbnail'));
 app.use('/api/messages',     require('./routes/messages'));
 app.use('/api/customers',    require('./routes/customers'));
 app.use('/api/desktop',      require('./routes/desktop'));
