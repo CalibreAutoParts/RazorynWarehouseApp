@@ -12,12 +12,21 @@
 // their own requireAdmin guard.
 
 const express = require('express');
+const crypto = require('crypto');
 const { query } = require('../db');
-const { requireAdmin } = require('../middleware/auth');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 const shopify = require('../services/shopify');
 
 const router = express.Router();
+
+// Constant-time string comparison (hash both sides so unequal lengths don't
+// throw or leak).
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
 
 // Self-healing migration (convention: routes own their columns/tables).
 let _migrated = false;
@@ -46,7 +55,7 @@ async function requireIntegrationKey(req, res, next) {
   try {
     const expected = await getIntegrationKey();
     const provided = String(req.get('X-Integration-Key') || '').trim();
-    if (!expected || !provided || provided !== expected) {
+    if (!expected || !provided || !safeEqual(provided, expected)) {
       return res.status(401).json({ error: 'unauthorized' });
     }
     next();
@@ -57,7 +66,7 @@ async function requireIntegrationKey(req, res, next) {
 
 // ── Admin config (browser, session-guarded) ────────────────────────────────
 
-router.get('/config', requireAdmin, async (req, res) => {
+router.get('/config', requireAuth, requireAdmin, async (req, res) => {
   await ensureThumbnailSchema();
   const r = await query(`SELECT thumbnail_integration_key FROM app_settings LIMIT 1`);
   const stored = (r.rows[0]?.thumbnail_integration_key || '').trim();
@@ -70,7 +79,7 @@ router.get('/config', requireAdmin, async (req, res) => {
   });
 });
 
-router.post('/config', requireAdmin, async (req, res) => {
+router.post('/config', requireAuth, requireAdmin, async (req, res) => {
   await ensureThumbnailSchema();
   const apiKey = String(req.body?.apiKey || '').trim();
   await query(`UPDATE app_settings SET thumbnail_integration_key = $1`, [apiKey || null]);
@@ -201,20 +210,48 @@ router.post('/products/:sku/images', async (req, res) => {
   }
   if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
 
-  // Replay protection: same idempotency key → return the recorded outcome.
+  // Replay protection, claimed ATOMICALLY before any Shopify/eBay write so a
+  // concurrent duplicate can't double-apply: first request inserts the key
+  // (response NULL = in flight), duplicates either replay the stored response
+  // or get 409 while the original is still running. Failure paths release the
+  // claim so a genuine retry can proceed.
+  let claimed = false;
+  const releaseClaim = async () => {
+    if (!claimed) return;
+    claimed = false;
+    try {
+      await query(
+        `DELETE FROM thumbnail_pushes WHERE idempotency_key = $1 AND response IS NULL`,
+        [idempotencyKey]
+      );
+    } catch (e) { /* best-effort */ }
+  };
   if (idempotencyKey) {
-    const prev = await query(
-      `SELECT response FROM thumbnail_pushes WHERE idempotency_key = $1`, [idempotencyKey]
+    const claim = await query(
+      `INSERT INTO thumbnail_pushes (idempotency_key) VALUES ($1)
+       ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`,
+      [idempotencyKey]
     );
-    if (prev.rows.length) return res.json({ ...prev.rows[0].response, replayed: true });
+    if (claim.rows.length) {
+      claimed = true;
+    } else {
+      const prev = await query(
+        `SELECT response FROM thumbnail_pushes WHERE idempotency_key = $1`, [idempotencyKey]
+      );
+      const stored = prev.rows[0]?.response;
+      if (stored) return res.json({ ...stored, replayed: true });
+      return res.status(409).json({ error: 'push_in_progress' });
+    }
   }
 
+  try {
   const pr = await query(
     `SELECT id, sku, shopify_product_id FROM products WHERE upper(sku) = upper($1)`, [skuParam]
   );
   const product = pr.rows[0];
-  if (!product) return res.status(404).json({ error: 'not_found' });
+  if (!product) { await releaseClaim(); return res.status(404).json({ error: 'not_found' }); }
   if (!product.shopify_product_id) {
+    await releaseClaim();
     return res.status(400).json({ error: 'no_shopify_product', message: 'Product is not linked to Shopify.' });
   }
 
@@ -224,9 +261,11 @@ router.post('/products/:sku/images', async (req, res) => {
   try {
     cdnUrls = await shopify.replaceProductImagesOrdered(product.shopify_product_id, images);
   } catch (e) {
+    await releaseClaim();
     return res.status(502).json({ error: 'shopify_error', message: e.message });
   }
   if (!cdnUrls.length) {
+    await releaseClaim();
     return res.status(502).json({ error: 'shopify_no_images', message: 'Shopify accepted no images.' });
   }
   await query(`UPDATE products SET image_url = $1, updated_at = now() WHERE id = $2`,
@@ -274,10 +313,9 @@ router.post('/products/:sku/images', async (req, res) => {
     shopifyImages: cdnUrls,
     ebay: ebayResult,
   };
-  if (idempotencyKey) {
+  if (idempotencyKey && claimed) {
     await query(
-      `INSERT INTO thumbnail_pushes (idempotency_key, product_id, response)
-       VALUES ($1, $2, $3) ON CONFLICT (idempotency_key) DO NOTHING`,
+      `UPDATE thumbnail_pushes SET product_id = $2, response = $3 WHERE idempotency_key = $1`,
       [idempotencyKey, product.id, JSON.stringify(response)]
     );
   }
@@ -285,6 +323,11 @@ router.post('/products/:sku/images', async (req, res) => {
     sku: product.sku, images: images.length, ebayPushed: ebayResult.pushed,
   });
   res.json(response);
+  } catch (e) {
+    // Never strand an in-flight idempotency claim — a retry must be able to run.
+    await releaseClaim();
+    res.status(500).json({ error: 'server_error', message: e.message });
+  }
 });
 
 module.exports = router;
