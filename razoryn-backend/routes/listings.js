@@ -2702,7 +2702,7 @@ function buildStyledDescBody(product, specifics) {
   }
   const rows = [];
   const add = (label, val) => { if (val && String(val).trim()) rows.push([label, String(val).trim()]); };
-  add('Part number', product.part_number || specMap['manufacturer part number']);
+  add('Part number', specMap['manufacturer part number'] || mpnFromProduct(product));
   add('Interchange / alt part numbers', specMap['interchange part number']);
   add('Brand', specMap['brand']);
   add('Fits make', specMap['make'] || product.brand);
@@ -2817,7 +2817,7 @@ async function composeEbayDescription(product, { specifics, storeCode, rawBody, 
 
   const tpl = await getDescTemplate();
   return wrapDesc(body, tpl, {
-    title: product.title, sku: product.sku, partno: product.part_number || product.sku, vehicle, related,
+    title: product.title, sku: product.sku, partno: mpnFromProduct(product), vehicle, related,
     logo: logoHtml, returns: returnsText, delivery: deliveryText,
   });
 }
@@ -3302,12 +3302,21 @@ async function doCreateEbay(b, { req } = {}) {
   // every new listing looks designed (header/trust bar/spec table/similar-items
   // CTA/payment+delivery+returns/footer). Skip wrapping only if the caller opts
   // out (b.wrapDescription === false) or already sent a pre-wrapped body.
+  // ALWAYS include the styled spec table (Part number, Interchange, Placement,
+  // Make/Model rows) — even when a Shopify/form body is present — so the key
+  // fitment data never goes missing from the eBay description (previously the
+  // spec table was dropped whenever a Shopify description existed). Safe to append
+  // here because this is the CREATE path; edits go through update-listing.
+  const specTableHtml = buildStyledDescBody({ ...product, title }, mergedSpecifics);
+  const finalBody = (rawBody && String(rawBody).trim())
+    ? (unwrapDesc(rawBody) + specTableHtml)   // Shopify/form body, THEN the spec table
+    : specTableHtml;
   if (b.wrapDescription === false) {
-    description = (rawBody && String(rawBody).trim()) ? unwrapDesc(rawBody) : buildStyledDescBody(product, mergedSpecifics);
+    description = finalBody;
   } else {
     description = await composeEbayDescription(
-      { ...product, title, part_number: product.part_number || product.sku },
-      { specifics: mergedSpecifics, storeCode: store.code, rawBody });
+      { ...product, title },
+      { specifics: mergedSpecifics, storeCode: store.code, rawBody: finalBody });
   }
 
   // eBay "Brand" = who MADE the part (company name / "Unbranded"), NOT the
@@ -3320,7 +3329,7 @@ async function doCreateEbay(b, { req } = {}) {
   if (!b.skipSpecificsCheck) {
     try {
       const { specifics } = await ebay.getCategorySpecifics(store.code, categoryId);
-      const provided = new Set(mergedSpecifics.filter(s => s.name && s.value).map(s => s.name.toLowerCase()));
+      const provided = new Set(mergedSpecifics.filter(s => s.name && specValues(s).length).map(s => s.name.toLowerCase()));
       provided.add('brand');  // we always send a Brand (default/override)
       if (product.part_number || product.sku) provided.add('manufacturer part number');
       const missing = specifics.filter(s => s.required && !provided.has(s.name.toLowerCase())).map(s => s.name);

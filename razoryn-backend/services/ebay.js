@@ -1216,9 +1216,14 @@ async function addItem(storeArg, opts = {}) {
   // Vehicle" — e.g. ["Front","Left"]). Stored as arrays internally.
   const specsByName = new Map();
   for (const s of itemSpecifics) {
-    if (!s.name || s.value == null) continue;
-    const vals = (Array.isArray(s.value) ? s.value : [s.value])
-      .map(v => String(v).trim()).filter(Boolean);
+    if (!s || !s.name) continue;
+    // A specific may carry its value(s) as `values: [...]` (multi-value aspects,
+    // e.g. Placement on Vehicle ["Front","Left"], Interchange with several codes)
+    // OR as a single/array `value`. Accept BOTH — previously only `value` was read,
+    // so every multi-value aspect was silently dropped from the listing.
+    const raw = Array.isArray(s.values) ? s.values
+      : (Array.isArray(s.value) ? s.value : (s.value != null ? [s.value] : []));
+    const vals = raw.map(v => String(v).trim()).filter(Boolean);
     if (vals.length) specsByName.set(s.name, vals);
   }
   if (brand && !specsByName.has('Brand')) specsByName.set('Brand', [String(brand)]);
