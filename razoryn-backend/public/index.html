@@ -12672,6 +12672,7 @@ function renderMirror() {
           <div class="desc">Every eBay listing, Shopify product &amp; warehouse item in one place — see what's linked, connect what isn't, and catch duplicates. Creating &amp; pushing listings lives in <a href="#" onclick="MirrorState.sourceTab='ebay';routeTo('bulk');return false" style="color:var(--brand-primary);font-weight:600">eBay → Shopify</a> / <a href="#" onclick="MirrorState.sourceTab='shopify';routeTo('bulk');return false" style="color:var(--brand-primary);font-weight:600">Shopify → eBay</a> (the Bulk Editor).</div>
         </div>
         <div class="actions" id="mirror-page-actions">
+          <button class="btn btn-outline" onclick="bulkRefreshEbay(this)" title="Re-push the corrected item specifics (incl. Placement/Interchange) + rebuilt description to every linked eBay listing. Fixes existing listings in bulk.">🔧 Fix all eBay listings</button>
           <button class="btn btn-outline" onclick="scanShopifyDuplicates()">🔍 Scan Shopify for duplicates</button>
           <button class="btn btn-outline" onclick="importShopifyToWarehouse(this)" title="Create warehouse records for any Shopify product that's missing one — so it shows in Inventory and the stock-take">⇩ Import Shopify into warehouse</button>
           <button class="btn btn-outline" onclick="refreshLinks(true)">⟳ Refresh</button>
@@ -15404,6 +15405,44 @@ async function cleanupDisabledStoreLinks() {
     Task.fail(taskId, 'Failed');
     toast('Cleanup failed: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+// Bulk-refresh EVERY linked eBay listing: re-push corrected item specifics
+// (incl. the multi-value aspects that were being dropped) + a rebuilt description
+// with the spec table. Runs in throttled batches with a live progress modal.
+async function bulkRefreshEbay(btn) {
+  let cand;
+  try { cand = await Api.get('/api/listings/refresh-candidates'); }
+  catch (e) { toast('Couldn’t load listings: ' + (e.data?.message || e.message), 'error'); return; }
+  const ids = cand.productIds || [];
+  if (!ids.length) { toast('No linked eBay listings found to refresh.', 'warn'); return; }
+  if (!confirm(`Re-push corrected item specifics + description to ${ids.length} linked eBay listing(s)?\n\nThis fixes existing listings (multi-value specifics like Placement/Interchange, and the description spec table). It's read-then-revise per listing, so it takes a little while — you can keep working; progress shows here.`)) return;
+
+  let ok = 0, failed = 0, skipped = 0, done = 0;
+  const errs = [];
+  const paint = () => modal({
+    title: '🔧 Fixing eBay listings',
+    body: `<div style="font-size:13px;margin-bottom:8px">${done < ids.length ? 'Working…' : 'Done.'} <strong>${done}</strong>/${ids.length} products · <span style="color:var(--green)">${ok} revised</span> · <span style="color:var(--red)">${failed} failed</span>${skipped ? ` · ${skipped} unlinked` : ''}</div>
+      <div style="height:8px;background:var(--line);border-radius:4px;overflow:hidden"><div style="height:100%;width:${Math.round(done / ids.length * 100)}%;background:var(--brand-primary);transition:width .3s"></div></div>
+      ${errs.length ? `<div style="margin-top:10px;max-height:160px;overflow:auto;font-size:11px;color:var(--ink-soft)">${errs.slice(-20).map(e => escapeHtml(e)).join('<br>')}</div>` : ''}`,
+    actions: done < ids.length ? [] : [{ label: 'Close', primary: true, onClick: () => { closeModal(); refreshLinks(true); } }],
+  });
+  paint();
+  for (let i = 0; i < ids.length; i += 20) {
+    const batch = ids.slice(i, i + 20);
+    let r;
+    try { r = await Api.post('/api/listings/bulk-refresh-ebay', { productIds: batch }); }
+    catch (e) { errs.push('Batch failed: ' + (e.data?.message || e.message)); done += batch.length; paint(); continue; }
+    for (const res of (r.results || [])) {
+      if (res.ok) ok++;
+      else if (res.skipped) skipped++;
+      else if (res.error) { failed++; errs.push(`${res.sku || res.productId}: ${res.error}`); }
+    }
+    done = Math.min(ids.length, i + batch.length);
+    paint();
+  }
+  paint();
+  toast(`Fix complete — ${ok} listing(s) revised${failed ? `, ${failed} failed` : ''}`, failed ? 'warn' : 'success', 9000);
 }
 
 async function forceMatchLinks() {

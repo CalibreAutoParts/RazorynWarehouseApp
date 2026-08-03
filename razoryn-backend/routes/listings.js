@@ -2891,6 +2891,82 @@ router.post('/apply-ebay-template', requireAdmin, async (req, res) => {
   res.json({ ok: true, results, summary: { total: items.length, ok: results.filter(r => r.ok).length } });
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// BULK-REFRESH existing eBay listings — re-push the FULL, corrected item
+// specifics (incl. multi-value aspects that were previously dropped) and a
+// rebuilt description (branded template + spec table), so live listings get the
+// bug fixes without re-creating them. Rebuilds per listing:
+//   specifics = live listing < saved < derived-from-warehouse  (never wipes)
+//   description = Shopify body (if any) + styled spec table, wrapped in template
+// Read-then-ReviseItem per linked store. Frontend drives it in throttled batches.
+// ──────────────────────────────────────────────────────────────────────────
+async function _refreshEbayListingContent(product, link, store) {
+  const shopifyLib = require('../services/shopify');
+  // Full specifics with a trustworthy baseline so nothing set only on eBay is lost.
+  let liveSpecifics = [], liveOk = false;
+  try { const det = await ebay.getItemDetails(link.ebay_item_id, store.code); if (det && Array.isArray(det.specifics)) { liveSpecifics = det.specifics; liveOk = true; } } catch (_) {}
+  const storedSpecifics = Array.isArray(product.ebay_item_specifics) ? product.ebay_item_specifics : [];
+  const derivedNow = await deriveEbaySpecifics(product);
+  const fullSpecifics = mergeSpecificsByName(liveSpecifics, storedSpecifics, derivedNow);
+  const haveBaseline = liveOk || storedSpecifics.length > 0;
+  const specificsToSend = (haveBaseline && fullSpecifics.length) ? fullSpecifics : undefined;
+  // Description: Shopify body (if any) + the styled spec table, wrapped.
+  let rawBody = '';
+  if (product.shopify_product_id) {
+    try { const sp = await shopifyLib.getShopifyProductFull(product.shopify_product_id); if (sp.description) rawBody = sp.description; } catch (_) {}
+  }
+  const specTable = buildStyledDescBody(product, fullSpecifics);
+  const finalBody = (rawBody && String(rawBody).trim()) ? (unwrapDesc(rawBody) + specTable) : specTable;
+  const description = await composeEbayDescription({ ...product }, { specifics: fullSpecifics, storeCode: store.code, rawBody: finalBody });
+  await ebay.reviseItem(link.ebay_item_id, { description, itemSpecifics: specificsToSend }, store.code);
+  // Persist the recomputed specifics so future edits keep the full set.
+  try { await query(`UPDATE products SET ebay_item_specifics = $1::jsonb, updated_at = now() WHERE id = $2`, [JSON.stringify(fullSpecifics), product.id]); } catch (_) {}
+  return { specifics: fullSpecifics.length };
+}
+
+// GET /api/listings/refresh-candidates — active, non-hidden products that have a
+// linked eBay listing (the set the bulk refresh would touch).
+router.get('/refresh-candidates', requireAdmin, async (req, res) => {
+  await ensureMirrorLinksColumns();
+  const { rows } = await query(`
+    SELECT p.id, p.sku, p.title FROM products p
+    WHERE p.active = true AND COALESCE(p.hidden,false) = false
+      AND EXISTS (SELECT 1 FROM mirror_links ml WHERE ml.shopify_product_id::text = p.shopify_product_id)
+    ORDER BY p.title`);
+  res.json({ total: rows.length, productIds: rows.map(r => r.id) });
+});
+
+// POST /api/listings/bulk-refresh-ebay { productIds: [] } — one throttled batch.
+router.post('/bulk-refresh-ebay', requireAdmin, async (req, res) => {
+  if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
+  await ensureMirrorLinksColumns();
+  const ids = Array.isArray(req.body?.productIds) ? req.body.productIds.slice(0, 20) : [];
+  if (!ids.length) return res.status(400).json({ error: 'no_products' });
+  const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const results = [];
+  for (const pid of ids) {
+    const pr = await query(`SELECT * FROM products WHERE id = $1`, [pid]);
+    const product = pr.rows[0];
+    if (!product) { results.push({ productId: pid, error: 'not_found' }); continue; }
+    const links = await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [product.shopify_product_id]);
+    if (!links.rows.length) { results.push({ productId: pid, sku: product.sku, skipped: 'no_link' }); continue; }
+    for (const link of links.rows) {
+      const store = stores.find(s => s.code === link.store_code) || (link.store_code ? null : (stores.find(s => s.primary) || stores[0]));
+      if (!store) { results.push({ productId: pid, sku: product.sku, itemId: link.ebay_item_id, error: 'store_unavailable' }); continue; }
+      try {
+        const r = await _refreshEbayListingContent(product, link, store);
+        results.push({ productId: pid, sku: product.sku, itemId: link.ebay_item_id, store: store.code, ok: true, specifics: r.specifics });
+      } catch (e) {
+        results.push({ productId: pid, sku: product.sku, itemId: link.ebay_item_id, store: store.code, error: e.message });
+      }
+      await sleep(400);   // gentle throttle between ReviseItem calls
+    }
+  }
+  await audit(req, 'bulk_refresh_ebay', null, null, { products: ids.length, revised: results.filter(r => r.ok).length });
+  res.json({ ok: true, results, summary: { revised: results.filter(r => r.ok).length, failed: results.filter(r => r.error).length } });
+});
+
 // Bulk title edit. Frontend computes each new title (find/replace or prefix);
 // we push to eBay (ReviseItem) and, if linked, Shopify (product title).
 router.post('/bulk-title', requireAdmin, async (req, res) => {
