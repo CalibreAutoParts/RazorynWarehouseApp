@@ -17171,6 +17171,7 @@ function renderSettings() {
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px">
             <button class="btn btn-primary btn-sm" onclick="saveFitmentConfig(this)">Save</button>
             <button class="btn btn-outline btn-sm" onclick="runFitmentNow(this)" title="Send to all eligible orders now (works even if disabled)">✉ Send now</button>
+            <button class="btn btn-outline btn-sm" onclick="diagnoseFitment(this)" title="Read-only check of recent orders — shows exactly why messages aren't sending. Sends nothing.">🔍 Diagnose</button>
             <span id="fm-status" style="font-size:12px;color:var(--ink-soft)"></span>
           </div>
         </div>
@@ -17853,6 +17854,36 @@ async function saveFitmentConfig(btn) {
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
   finally { if (btn) btn.disabled = false; }
 }
+// Read-only diagnosis — shows per-order exactly where the sender stops.
+async function diagnoseFitment(btn) {
+  if (btn) btn.disabled = true;
+  const s = el('fm-status'); if (s) { s.textContent = 'Diagnosing…'; s.style.color = 'var(--ink-soft)'; }
+  try {
+    const r = await Api.get('/api/messages/fitment/diagnose');
+    const storeLine = (r.stores || []).map(st => `${escapeHtml(st.code)} (${escapeHtml(st.channelCode)}): ${st.hasToken ? 'token ✓' : 'NO TOKEN'}${st.disabled ? ' · disabled' : ''}`).join(' · ');
+    const rows = (r.orders || []).map(o => {
+      const good = /WOULD SEND/.test(o.result || '');
+      return `<tr>
+        <td style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(o.orderId || '')}</td>
+        <td>${escapeHtml(o.channel || '')} → ${escapeHtml(o.store || '—')}${o.hasToken ? '' : ' <span style="color:var(--red)">no token</span>'}</td>
+        <td style="font-size:11px">${o.buyer ? '👤 ' + escapeHtml(o.buyer) : '—'} ${o.itemId ? '· 🏷 ' + escapeHtml(o.itemId) : ''}</td>
+        <td style="font-size:11px;color:${good ? 'var(--green)' : 'var(--amber)'};font-weight:600">${escapeHtml(o.result || '')}</td>
+      </tr>`;
+    }).join('');
+    modal({
+      title: '🔍 Fitment message diagnosis',
+      body: `<div style="font-size:12px;margin-bottom:8px">Enabled: <strong>${r.enabled ? 'yes' : 'NO'}</strong> · window ${r.windowDays} days · checked ${r.ordersChecked} recent order(s)</div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">Stores: ${storeLine || 'none'}</div>
+        ${r.orders && r.orders.length ? `<div style="max-height:340px;overflow:auto"><table class="table" style="margin:0"><thead><tr><th>Order</th><th>Channel → store</th><th>Buyer / item</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table></div>
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">"WOULD SEND ✓" = fine. Common blockers: <strong>no token</strong> = that account's token isn't set / it's disabled; <strong>order_lookup_failed</strong> = eBay rejected the order fetch (token/scope for that account); <strong>no_buyer_userid</strong> = order &gt;~30 days (buyer anonymised); <strong>no_item_link</strong> = couldn't find the item.</div>`
+          : '<div style="color:var(--ink-soft)">No recent paid, undispatched eBay orders in the window to check.</div>'}`,
+      actions: [{ label: 'Close', primary: true, onClick: closeModal }],
+    });
+    if (s) s.textContent = '';
+  } catch (e) { if (s) { s.textContent = '✗ ' + (e.data?.message || e.message); s.style.color = 'var(--red)'; } }
+  finally { if (btn) btn.disabled = false; }
+}
+
 async function runFitmentNow(btn) {
   if (!confirm('Send the fitment message to all eligible eBay orders now? This messages real buyers.')) return;
   const s = el('fm-status');

@@ -779,6 +779,12 @@ router.get('/fitment/last-run', requireAdmin, async (req, res) => {
   res.json({ ..._fitmentLastRun, pending: await fitment.countEligible().catch(() => null) });
 });
 
+// Read-only diagnostic — pinpoints why messages aren't sending (per order).
+router.get('/fitment/diagnose', requireAdmin, async (req, res) => {
+  try { res.json(await fitment.diagnose()); }
+  catch (e) { res.status(500).json({ error: 'diagnose_failed', message: e.message }); }
+});
+
 module.exports = router;
 module.exports.sendFitmentMessagesCore = fitment.sendFitmentMessagesCore;
 module.exports.BUILTIN_TEMPLATES = BUILTIN_TEMPLATES;
