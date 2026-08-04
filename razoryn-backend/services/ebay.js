@@ -413,6 +413,7 @@ function mapTradingOrderXml(oXml) {
     const item = extractOne(tx, 'Item') || '';
     return {
       lineItemId: extractOne(tx, 'TransactionID'),
+      itemId: extractOne(item, 'ItemID') || null,   // the exact listing the buyer bought
       sku: decodeEntities(extractOne(item, 'SKU') || ''),
       title: decodeEntities(extractOne(item, 'Title') || ''),
       quantity: parseInt(extractOne(tx, 'QuantityPurchased') || '1'),

@@ -101,42 +101,33 @@ async function resolveSendTargets(sale) {
   const store = brand.stores.find(s => s.channelCode === sale.channel);
   if (!store || !store.token) return { skip: 'store_unavailable' };
 
-  // Find the eBay ItemID (on THIS store's account) for the first line item.
-  // Reliable path: sale_item → product.shopify_product_id → mirror_links for this
-  // store. Fall back to a SKU match on the mirror_links' last-synced SKU.
-  const fi = (await query(
-    `SELECT si.sku, p.shopify_product_id
-       FROM sale_items si LEFT JOIN products p ON p.id = si.product_id
-      WHERE si.sale_id = $1 ORDER BY si.id LIMIT 1`, [sale.id])).rows[0];
-  let itemId = null;
-  if (fi?.shopify_product_id) {
-    // Legacy NULL store_code links belong to the primary store, so accept them
-    // only when THIS store is the primary.
-    const nullClause = store.primary ? 'OR store_code IS NULL' : '';
-    const link = await query(
-      `SELECT ebay_item_id FROM mirror_links
-        WHERE shopify_product_id::text = $1 AND ebay_item_id IS NOT NULL
-          AND (store_code = $2 ${nullClause})
-        ORDER BY (store_code = $2) DESC NULLS LAST LIMIT 1`,
-      [String(fi.shopify_product_id), store.code]);
-    itemId = link.rows[0]?.ebay_item_id || null;
-  }
-  if (!itemId && fi?.sku) {
-    const link = await query(
-      `SELECT ml.ebay_item_id FROM mirror_links ml
-        WHERE LOWER(ml.last_synced_sku) = LOWER($1) AND ml.ebay_item_id IS NOT NULL
-          AND (ml.store_code = $2 ${store.primary ? 'OR ml.store_code IS NULL' : ''}) LIMIT 1`,
-      [fi.sku, store.code]);
-    itemId = link.rows[0]?.ebay_item_id || null;
+  // Pull the order from eBay — one call gives BOTH the buyer's username AND the
+  // exact ItemID(s) the buyer actually purchased. Using the order's own ItemID
+  // (not a lookup) means the message threads under the SAME item conversation the
+  // buyer bought on — the correct listing, on the correct account.
+  let od;
+  try { od = await ebay.getOrderDetail(sale.external_order_id, store.code); }
+  catch (e) { return { skip: 'order_lookup_failed', error: e.message }; }
+  const buyerUserId = od?.buyer?.username || null;
+  if (!buyerUserId) return { skip: 'no_buyer_userid' };   // anonymised (order >~30 days old)
+
+  let itemId = (od.lineItems || []).map(li => li.itemId).find(Boolean) || null;
+  // Fallback only if the order didn't carry an ItemID: our mirror_links for this store.
+  if (!itemId) {
+    const fi = (await query(
+      `SELECT p.shopify_product_id FROM sale_items si LEFT JOIN products p ON p.id = si.product_id
+        WHERE si.sale_id = $1 AND p.shopify_product_id IS NOT NULL ORDER BY si.id LIMIT 1`, [sale.id])).rows[0];
+    if (fi?.shopify_product_id) {
+      const nullClause = store.primary ? 'OR store_code IS NULL' : '';
+      const link = await query(
+        `SELECT ebay_item_id FROM mirror_links
+          WHERE shopify_product_id::text = $1 AND ebay_item_id IS NOT NULL AND (store_code = $2 ${nullClause})
+          ORDER BY (store_code = $2) DESC NULLS LAST LIMIT 1`,
+        [String(fi.shopify_product_id), store.code]);
+      itemId = link.rows[0]?.ebay_item_id || null;
+    }
   }
   if (!itemId) return { skip: 'no_item_link' };
-
-  let buyerUserId = null;
-  try {
-    const od = await ebay.getOrderDetail(sale.external_order_id, store.code);
-    buyerUserId = od?.buyer?.username || null;
-  } catch (e) { return { skip: 'order_lookup_failed', error: e.message }; }
-  if (!buyerUserId) return { skip: 'no_buyer_userid' };   // anonymised (old order) — can't message
   return { store, buyerUserId, itemId };
 }
 
