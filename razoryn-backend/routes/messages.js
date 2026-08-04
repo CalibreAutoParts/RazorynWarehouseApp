@@ -744,18 +744,39 @@ router.put('/fitment/config', requireAdmin, async (req, res) => {
 
 // Manual trigger — runs a send pass now even if the auto toggle is off, so an
 // admin can test/flush the queue. Returns per-order results.
+let _fitmentLastRun = { running: false, at: null, sent: 0, failed: 0, skipped: 0, skipReasons: {}, requeued: 0 };
+
 router.post('/fitment/run', requireAdmin, async (req, res) => {
   try {
+    if (_fitmentLastRun.running) return res.json({ ok: true, started: false, alreadyRunning: true });
     // Re-queue any order that was skipped/errored but never actually sent, so a
     // manual run re-attempts everything after a fix (e.g. links created).
     const requeued = await fitment.resetUnsent();
-    const r = await fitment.sendFitmentMessagesCore({ allowDisabled: true });
-    // Break down WHY orders were skipped, so the admin can diagnose "not sending".
-    const skipReasons = {};
-    for (const x of (r.results || [])) { if (x.skipped) skipReasons[x.skipped] = (skipReasons[x.skipped] || 0) + 1; }
-    if (r.sent) await audit(req, 'fitment_msg_run', null, null, { sent: r.sent, failed: r.failed, skipped: r.skipped });
-    res.json({ ...r, requeued, skipReasons });
+    const eligible = await fitment.countEligible();
+    _fitmentLastRun = { running: true, at: null, sent: 0, failed: 0, skipped: 0, skipReasons: {}, requeued, eligible };
+    // Run in the BACKGROUND — each message is a slow eBay round-trip + a rate-limit
+    // pause, so a synchronous run of the backlog would blow the gateway timeout
+    // ("Application failed to respond"). The UI polls /fitment/last-run.
+    setImmediate(async () => {
+      try {
+        const r = await fitment.sendFitmentMessagesCore({ allowDisabled: true });
+        const skipReasons = {};
+        for (const x of (r.results || [])) { if (x.skipped) skipReasons[x.skipped] = (skipReasons[x.skipped] || 0) + 1; }
+        _fitmentLastRun = { running: false, at: Date.now(), sent: r.sent || 0, failed: r.failed || 0, skipped: r.skipped || 0, skipReasons, requeued };
+        console.log(`[fitment.manual] sent ${r.sent}, failed ${r.failed}, skipped ${r.skipped}`, JSON.stringify(skipReasons));
+      } catch (e) {
+        _fitmentLastRun = { running: false, at: Date.now(), error: e.message, sent: 0, failed: 0, skipped: 0, skipReasons: {}, requeued };
+        console.warn('[fitment.manual] failed:', e.message);
+      }
+    });
+    await audit(req, 'fitment_msg_run', null, null, { requeued, eligible });
+    res.json({ ok: true, started: true, requeued, eligible });
   } catch (e) { res.status(500).json({ ok: false, error: 'run_failed', message: e.message }); }
+});
+
+// Poll for the background run's progress/result.
+router.get('/fitment/last-run', requireAdmin, async (req, res) => {
+  res.json({ ..._fitmentLastRun, pending: await fitment.countEligible().catch(() => null) });
 });
 
 module.exports = router;

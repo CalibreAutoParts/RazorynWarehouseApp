@@ -139,12 +139,12 @@ async function sendOneSale(sale, cfg) {
   const ebay = require('./ebay');
   const t = await resolveSendTargets(sale);
   if (t.skip) {
-    // Only truly-unsendable orders are stamped permanently: an anonymised buyer
-    // (eBay hides the username ~30 days after the order) can never be messaged.
-    // FIXABLE reasons (no linked ItemID yet, the store's token missing/disabled,
-    // a transient order lookup) are NOT stamped, so they retry once the link is
-    // created / the account is enabled, instead of being silently skipped forever.
-    if (t.skip === 'no_buyer_userid') {
+    // Stamp skips (so the pending count clears and we don't re-scan them every
+    // sweep) EXCEPT a transient order-lookup failure, which retries next run. A
+    // manual "Send now" calls resetUnsent() first, so fixable skips (no_item_link,
+    // store_unavailable) get another attempt after you link the item / enable the
+    // account.
+    if (t.skip !== 'order_lookup_failed') {
       await query(`UPDATE sales SET fitment_msg_sent_at = now(), fitment_msg_status = 'skipped', fitment_msg_error = $2 WHERE id = $1`, [sale.id, t.skip]);
     }
     return { saleId: sale.id, skipped: t.skip };
@@ -209,7 +209,7 @@ async function sendFitmentMessagesCore({ allowDisabled = false } = {}) {
     const r = await sendOneSale(sale, cfg);
     if (r.ok) sent++; else if (r.error) failed++; else skipped++;
     results.push(r);
-    await _sleep(1200);   // gentle throttle — eBay member-message rate limits
+    await _sleep(700);   // gentle throttle — eBay member-message rate limits
   }
   return { ok: true, sent, skipped, failed, considered: rows.length, results };
 }
