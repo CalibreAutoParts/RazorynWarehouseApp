@@ -17857,21 +17857,30 @@ async function runFitmentNow(btn) {
   if (!confirm('Send the fitment message to all eligible eBay orders now? This messages real buyers.')) return;
   const s = el('fm-status');
   if (btn) btn.disabled = true;
-  if (s) { s.textContent = 'Sending…'; s.style.color = 'var(--ink-soft)'; }
+  if (s) { s.textContent = 'Starting…'; s.style.color = 'var(--ink-soft)'; }
   try {
-    const r = await Api.post('/api/messages/fitment/run', {});
-    // Explain skips so "0 sent" is diagnosable. Reasons:
-    //  no_item_link = order's item isn't linked to an eBay listing (Force match);
-    //  store_unavailable = that eBay account has no token / is disabled;
-    //  no_buyer_userid = eBay anonymised the buyer (order >~30 days old);
-    //  order_lookup_failed = eBay order fetch failed (token/scope).
-    const reasons = Object.entries(r.skipReasons || {}).map(([k, v]) => `${k}: ${v}`).join(' · ');
-    if (s) {
-      s.textContent = `Done — ${r.sent||0} sent, ${r.failed||0} failed, ${r.skipped||0} skipped${reasons ? ' (' + reasons + ')' : ''}`;
-      s.style.color = (r.failed || (r.sent === 0 && r.skipped)) ? 'var(--amber)' : 'var(--green)';
-    }
-    if (r.sent === 0 && (r.skipReasons?.no_item_link)) toast('Not sending because orders aren’t linked to eBay listings — run Listing Mirror → Force match, then Send now again.', 'warn', 12000);
-    loadFitmentConfig();
+    const start = await Api.post('/api/messages/fitment/run', {});
+    if (start.alreadyRunning) { if (s) { s.textContent = 'A send is already running — check back shortly.'; s.style.color = 'var(--ink-soft)'; } if (btn) btn.disabled = false; return; }
+    if (s) { s.textContent = `Sending to ${start.eligible || 0} order(s) in the background…`; s.style.color = 'var(--ink-soft)'; }
+    // Poll the background run until it finishes, then show the result + skip reasons.
+    let tries = 0;
+    const poll = async () => {
+      tries++;
+      let r; try { r = await Api.get('/api/messages/fitment/last-run'); } catch (_) { if (tries < 40) return setTimeout(poll, 3000); return; }
+      if (r.running && tries < 60) { if (s) s.textContent = `Sending… ${r.sent || 0} sent so far`; return setTimeout(poll, 3000); }
+      // Done. Reasons: no_item_link = item not linked to eBay (Force match);
+      // store_unavailable = account token missing/disabled; no_buyer_userid =
+      // buyer anonymised (order >~30 days); order_lookup_failed = eBay fetch failed.
+      const reasons = Object.entries(r.skipReasons || {}).map(([k, v]) => `${k}: ${v}`).join(' · ');
+      if (s) {
+        s.textContent = r.error ? ('✗ ' + r.error)
+          : `Done — ${r.sent || 0} sent, ${r.failed || 0} failed, ${r.skipped || 0} skipped${reasons ? ' (' + reasons + ')' : ''}`;
+        s.style.color = (r.error || r.failed || (r.sent === 0 && r.skipped)) ? 'var(--amber)' : 'var(--green)';
+      }
+      if (r.sent === 0 && r.skipReasons?.no_item_link) toast('Not sending because those orders aren’t linked to eBay listings — run Listing Mirror → Force match, then Send now again.', 'warn', 12000);
+      loadFitmentConfig();
+    };
+    setTimeout(poll, 2500);
   } catch (e) { if (s) { s.textContent = '✗ ' + (e.data?.message || e.message); s.style.color = 'var(--red)'; } }
   finally { if (btn) btn.disabled = false; }
 }
