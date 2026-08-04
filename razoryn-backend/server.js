@@ -379,21 +379,57 @@ if (cron.validate(followupCronExpr)) {
 
 // Automated eBay fitment-confirmation messages. The PRIMARY trigger is per-order
 // on import (services/sync.js), so buyers are messaged within minutes. This cron
-// is only a catch-up net for orders the hook missed (integration toggled on
-// after they arrived, or a transient send failure). No-op unless enabled in
-// Settings. Every 15 min by default (FITMENT_MSG_CRON).
-const fitmentCronExpr = (process.env.FITMENT_MSG_CRON || '*/15 * * * *').trim();
-if (cron.validate(fitmentCronExpr)) {
-  cron.schedule(fitmentCronExpr, async () => {
-    try {
-      const fitment = require('./services/fitment-messages');
-      const r = await fitment.sendFitmentMessagesCore();
-      if (r && r.sent) console.log(`[cron fitment] sent ${r.sent} fitment message(s) (${r.failed || 0} failed, ${r.skipped || 0} skipped)`);
-    } catch (e) {
-      if (!/ebay_not_configured/.test(e.message)) console.error('[cron fitment] failed:', e.message);
-    }
+// is a catch-up net for orders the hook missed (integration toggled on after they
+// arrived, or a transient send failure). No-op unless enabled in Settings.
+//
+// Cadence is TIME-OF-DAY aware (UK/Europe-London local time, so it tracks BST/GMT):
+//   • 07:00–13:00  → sweep every 10–15 min, speeding up as noon approaches. The
+//                    closer to 12:00, the quicker we chase — buyers get their
+//                    fitment ask with the most time to reply before the midday
+//                    dispatch cut-off. (15 min at 07:00 → 10 min at/after noon.)
+//   • any other time → every 2 hours (orders can still wait; nobody's dispatching).
+// Set FITMENT_MSG_CRON to a fixed cron expression to override with a static schedule.
+function fitmentSweepIntervalMs(when) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(when);
+  const hh = parseInt(parts.find(p => p.type === 'hour').value, 10) || 0;
+  const mm = parseInt(parts.find(p => p.type === 'minute').value, 10) || 0;
+  const minsOfDay = hh * 60 + mm;
+  const START = 7 * 60, END = 13 * 60, NOON = 12 * 60;
+  if (minsOfDay >= START && minsOfDay < END) {
+    const minsUntilNoon = Math.max(0, NOON - minsOfDay);      // 300 at 07:00 → 0 at/after noon
+    const frac = minsUntilNoon / (NOON - START);              // 1.0 far from noon → 0 at noon
+    const mins = Math.round(10 + 5 * frac);                   // 15 min → 10 min as noon nears
+    return mins * 60 * 1000;
+  }
+  return 120 * 60 * 1000;                                     // every 2 hours off-window
+}
+
+async function runFitmentSweep() {
+  try {
+    const fitment = require('./services/fitment-messages');
+    const r = await fitment.sendFitmentMessagesCore();
+    if (r && r.sent) console.log(`[cron fitment] sent ${r.sent} fitment message(s) (${r.failed || 0} failed, ${r.skipped || 0} skipped)`);
+  } catch (e) {
+    if (!/ebay_not_configured/.test(e.message)) console.error('[cron fitment] failed:', e.message);
+  }
+}
+
+const fitmentStaticCron = (process.env.FITMENT_MSG_CRON || '').trim();
+if (fitmentStaticCron && cron.validate(fitmentStaticCron)) {
+  cron.schedule(fitmentStaticCron, runFitmentSweep);
+  console.log(`[boot] eBay fitment-message sweep scheduled (static override): ${fitmentStaticCron}`);
+} else {
+  // Tick every minute; actually sweep only once the time-of-day interval has elapsed.
+  let lastSweepMs = 0;
+  cron.schedule('* * * * *', async () => {
+    const now = Date.now();
+    if (now - lastSweepMs < fitmentSweepIntervalMs(new Date(now))) return;
+    lastSweepMs = now;
+    await runFitmentSweep();
   });
-  console.log(`[boot] eBay fitment-message sweep scheduled: ${fitmentCronExpr}`);
+  console.log('[boot] eBay fitment-message sweep scheduled: dynamic (07:00–13:00 UK every 10–15 min, faster toward noon; otherwise every 2h)');
 }
 
 // Back-in-stock sweep — email customers waiting on a product once its stock
