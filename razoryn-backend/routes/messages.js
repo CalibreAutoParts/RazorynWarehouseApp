@@ -574,7 +574,7 @@ router.post('/ebay/:saleId', requireAdmin, async (req, res) => {
   // to extract it from a recent-orders cache).
   let buyerUserId = null;
   try {
-    const od = await ebay.getOrderDetail(sale.external_order_id, store.code);
+    const od = await ebay.getOrderDetailParsed(sale.external_order_id, store.code);
     buyerUserId = od?.buyer?.username || null;
   } catch (e) {
     return res.status(502).json({

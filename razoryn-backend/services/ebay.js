@@ -1010,6 +1010,7 @@ async function getUserCasesViaTrading(storeArg) {
 }
 
 // Single-order detail via Trading-API GetOrders with a specific OrderID filter.
+// Returns RAW XML (some callers regex the address block out of it directly).
 async function getOrderDetail(orderId, storeArg) {
   const bodyInner = `
     <OrderIDArray><OrderID>${orderId}</OrderID></OrderIDArray>
@@ -1017,6 +1018,17 @@ async function getOrderDetail(orderId, storeArg) {
     <IncludeFinalValueFee>true</IncludeFinalValueFee>`;
   const xml = await tradingCall('GetOrders', bodyInner, storeArg);
   return xml;
+}
+
+// Same call, but PARSED into our normalised order object ({ buyer:{username,…},
+// lineItems:[{itemId,…}], … }) via mapTradingOrderXml. Use this whenever you need
+// the buyer username / purchased ItemID — getOrderDetail returns a raw string, so
+// reading `.buyer.username` off it silently yields undefined.
+async function getOrderDetailParsed(orderId, storeArg) {
+  const xml = await getOrderDetail(orderId, storeArg);
+  const orderBlock = extractOne(xml, 'Order');
+  if (!orderBlock) return null;
+  return mapTradingOrderXml(orderBlock);
 }
 
 // Returns raw XML for debugging — sanitises auth token from output.
@@ -1981,6 +1993,7 @@ module.exports = {
   getOrdersBetween,
   orderRefundInfo,
   getOrderDetail,
+  getOrderDetailParsed,
   dumpOrderXml,
   getOpenReturns,
   getAllRecentReturns,

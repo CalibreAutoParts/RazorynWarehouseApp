@@ -2047,6 +2047,17 @@ function enterApp() {
   } catch (e) {}
 
   let lastSalesIds = new Set((State.sales || []).map(s => s.id));
+  // Baseline so we only ever announce GENUINELY new sales. The sales list is
+  // re-fetched under whatever date filter the user picks, so an ID that's "not in
+  // the previous set" is NOT proof it's new — switching to a wider/older window
+  // pulls in hundreds of historical orders that were simply not loaded before.
+  // (This caused the phantom "291 new orders" sound + toast on old orders.) A real
+  // new order has an order time at/after when we started watching; anything older
+  // is history surfaced by a filter change and must never ring. 10-min grace so an
+  // order placed moments before load still counts.
+  const salesWatchStartMs = Date.now() - 10 * 60 * 1000;
+  const isGenuinelyNewSale = (s, prevIds) =>
+    !prevIds.has(s.id) && !!s.date && new Date(s.date).getTime() >= salesWatchStartMs;
   // Returns tracking — { id → status } so we can detect both new returns *and*
   // status transitions (e.g. an open return becoming closed). On first poll we
   // just snapshot to avoid replaying historical changes as notifications.
@@ -2065,7 +2076,7 @@ function enterApp() {
       if (State.page === 'dashboard') {
         await Store.refresh('sales');
         const currentIds = new Set((State.sales || []).map(s => s.id));
-        const newOnes = (State.sales || []).filter(s => !lastSalesIds.has(s.id));
+        const newOnes = (State.sales || []).filter(s => isGenuinelyNewSale(s, lastSalesIds));
         if (newOnes.length && lastSalesIds.size > 0) notifyNewSalesBatch(newOnes);
         lastSalesIds = currentIds;
       } else if (State.page === 'sales') {
@@ -2078,7 +2089,7 @@ function enterApp() {
         if (!busy && typeof salesReload === 'function') {
           const prev = lastSalesIds;
           try { await salesReload(); } catch (_) {}
-          const newOnes = (State.sales || []).filter(s => !prev.has(s.id));
+          const newOnes = (State.sales || []).filter(s => isGenuinelyNewSale(s, prev));
           if (newOnes.length && prev.size > 0) notifyNewSalesBatch(newOnes);
           lastSalesIds = new Set((State.sales || []).map(s => s.id));
         }
