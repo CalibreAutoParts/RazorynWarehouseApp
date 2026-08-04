@@ -106,7 +106,7 @@ async function resolveSendTargets(sale) {
   // (not a lookup) means the message threads under the SAME item conversation the
   // buyer bought on — the correct listing, on the correct account.
   let od;
-  try { od = await ebay.getOrderDetail(sale.external_order_id, store.code); }
+  try { od = await ebay.getOrderDetailParsed(sale.external_order_id, store.code); }
   catch (e) { return { skip: 'order_lookup_failed', error: e.message }; }
   const buyerUserId = od?.buyer?.username || null;
   if (!buyerUserId) return { skip: 'no_buyer_userid' };   // anonymised (order >~30 days old)
@@ -239,7 +239,7 @@ async function diagnose(limit = 12) {
     if (!store) { row.result = 'no_store_for_channel'; out.push(row); continue; }
     if (!store.token) { row.result = 'store_unavailable (no token / disabled)'; out.push(row); continue; }
     try {
-      const od = await ebay.getOrderDetail(s.external_order_id, store.code);
+      const od = await ebay.getOrderDetailParsed(s.external_order_id, store.code);
       row.orderLookup = 'ok';
       row.buyer = od?.buyer?.username || null;
       row.itemId = (od.lineItems || []).map(li => li.itemId).find(Boolean) || null;
