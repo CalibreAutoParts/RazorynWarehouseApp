@@ -214,6 +214,42 @@ async function sendFitmentMessagesCore({ allowDisabled = false } = {}) {
   return { ok: true, sent, skipped, failed, considered: rows.length, results };
 }
 
+// Read-only diagnostic: for recent paid, undispatched eBay orders, report exactly
+// what the sender would do (which store, token present, order lookup, buyer
+// username, ItemID) WITHOUT sending anything — so "not sending" is pinpointable.
+async function diagnose(limit = 12) {
+  await ensureColumns();
+  const cfg = await getConfig();
+  const ebay = require('./ebay');
+  const brand = require('../lib/brand');
+  const { rows } = await query(
+    `SELECT id, external_order_id, channel, customer_name, fitment_msg_status, fitment_msg_error
+       FROM sales
+      WHERE channel LIKE 'ebay_%' AND is_estimate = false AND status = 'paid'
+        AND dispatched_at IS NULL AND collected_at IS NULL AND external_order_id IS NOT NULL
+        AND occurred_at >= now() - ($1 || ' days')::interval
+      ORDER BY occurred_at DESC LIMIT $2`, [String(cfg.windowDays), limit]);
+  const stores = brand.stores.map(s => ({ code: s.code, channelCode: s.channelCode, hasToken: !!s.token, disabled: !!s.disabled }));
+  const out = [];
+  for (const s of rows) {
+    const row = { saleId: s.id, orderId: s.external_order_id, channel: s.channel, lastStatus: s.fitment_msg_status || null, lastError: s.fitment_msg_error || null };
+    const store = brand.stores.find(st => st.channelCode === s.channel);
+    row.store = store?.code || null;
+    row.hasToken = !!store?.token;
+    if (!store) { row.result = 'no_store_for_channel'; out.push(row); continue; }
+    if (!store.token) { row.result = 'store_unavailable (no token / disabled)'; out.push(row); continue; }
+    try {
+      const od = await ebay.getOrderDetail(s.external_order_id, store.code);
+      row.orderLookup = 'ok';
+      row.buyer = od?.buyer?.username || null;
+      row.itemId = (od.lineItems || []).map(li => li.itemId).find(Boolean) || null;
+      row.result = !row.buyer ? 'no_buyer_userid (anonymised?)' : (!row.itemId ? 'no_item_link' : 'WOULD SEND ✓');
+    } catch (e) { row.orderLookup = 'ERROR'; row.result = 'order_lookup_failed: ' + e.message; }
+    out.push(row);
+  }
+  return { enabled: cfg.enabled, windowDays: cfg.windowDays, stores, ordersChecked: out.length, orders: out };
+}
+
 // Clear the at-most-once stamp on orders that were skipped/errored but NEVER
 // actually sent, so they become eligible again (e.g. after fixing the ItemID
 // lookup or linking listings). Never touches rows that were genuinely 'sent'.
@@ -228,6 +264,6 @@ async function resetUnsent() {
 
 module.exports = {
   ensureColumns, getConfig, saveConfig, countEligible,
-  sendFitmentMessagesCore, sendForSale, resetUnsent,
+  sendFitmentMessagesCore, sendForSale, resetUnsent, diagnose,
   DEFAULT_SUBJECT, DEFAULT_BODY,
 };
