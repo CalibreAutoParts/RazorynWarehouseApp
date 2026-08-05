@@ -108,7 +108,7 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
   if (!b.saleId || !Array.isArray(b.items) || !b.items.length) {
     return res.status(400).json({ error: 'saleId_and_items_required' });
   }
-  const saleRes = await query('SELECT id, channel, status FROM sales WHERE id = $1', [b.saleId]);
+  const saleRes = await query('SELECT id, channel, status, total FROM sales WHERE id = $1', [b.saleId]);
   const sale = saleRes.rows[0];
   if (!sale) return res.status(404).json({ error: 'sale_not_found' });
 
@@ -121,6 +121,24 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
       return res.status(409).json({ error: 'duplicate_return', message: 'A return was just logged for this order a moment ago — refresh to see it. (Prevented a duplicate.)' });
     }
   } catch (_) { /* non-fatal */ }
+
+  // Over-refund guard: never let cumulative refunds exceed the order value. This is
+  // what stopped a mistaken re-book from refunding "more than it was". Sums the
+  // refund already booked (processed/closed returns) + what's being booked now.
+  const orderTotal = Math.round((parseFloat(sale.total) || 0) * 100) / 100;
+  const priorRes = await query(
+    `SELECT COALESCE(SUM(refund_amount), 0)::numeric AS s FROM returns
+      WHERE sale_id = $1 AND status IN ('processed','closed') AND refund_amount IS NOT NULL`, [b.saleId]);
+  const alreadyRefunded = Math.round((parseFloat(priorRes.rows[0].s) || 0) * 100) / 100;
+  const newRefundTotal = Math.round(
+    b.items.reduce((a, it) => a + (it.refundAmount != null && it.refundAmount !== '' ? parseFloat(it.refundAmount) || 0 : 0), 0) * 100) / 100;
+  if (orderTotal > 0 && alreadyRefunded + newRefundTotal > orderTotal + 0.01) {
+    return res.status(409).json({
+      error: 'over_refund',
+      alreadyRefunded, orderTotal, remaining: Math.max(0, Math.round((orderTotal - alreadyRefunded) * 100) / 100),
+      message: `This order is £${orderTotal.toFixed(2)} and £${alreadyRefunded.toFixed(2)} has already been refunded — only £${Math.max(0, orderTotal - alreadyRefunded).toFixed(2)} is left to refund, but you're trying to refund £${newRefundTotal.toFixed(2)}. Lower the amount or remove an earlier return first.`,
+    });
+  }
 
   // Global restock default (back-compat). Each item may override with it.restock,
   // so you can restock some returned lines and not others (e.g. keep a faulty one
@@ -144,10 +162,10 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
         .filter(Boolean).join(' · ') || null;
       const r = await c.query(
         `INSERT INTO returns (sale_id, product_id, channel, qty, reason, resolution,
-                              refund_amount, status, notes, handled_by, closed_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'processed',$8,$9, now()) RETURNING id`,
+                              refund_amount, status, notes, handled_by, item_title, closed_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'processed',$8,$9,$10, now()) RETURNING id`,
         [sale.id, it.productId || null, sale.channel, qty, b.reason || null, resolution,
-         refundAmount, noteStr, req.user.id]
+         refundAmount, noteStr, req.user.id, (it.title ? String(it.title).slice(0, 300) : null)]
       );
       created++;
       if (doRestock) {
@@ -168,7 +186,9 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
   await audit(req, 'return_from_sale', 'sale', b.saleId, result);
   // Fold this refund onto the sale so it drops out of revenue/sales totals (and
   // Dispatch, once fully refunded). Best-effort — never fail the return.
-  try { await reconcileSaleRefund(sale.id); } catch (e) { console.warn('[returns] reconcile:', e.message); }
+  let reconciled = null;
+  try { reconciled = await reconcileSaleRefund(sale.id); } catch (e) { console.warn('[returns] reconcile:', e.message); }
+  if (reconciled) { result.refundedTotal = reconciled.refunded; result.orderTotal = reconciled.total; result.fullyRefunded = reconciled.fully; }
   // Forward refunds of our own direct bank/cash sales to the Invoice Hub so its
   // books and VAT stay correct (cash refunds, like cash sales, stay internal /
   // owner-only on the Hub side). Out-of-scope sales (eBay/Shopify/card) are a

@@ -515,8 +515,17 @@ router.get('/:id', requireAdmin, async (req, res, next) => {
   const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   const items = await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id]);
+  // Booked returns/refunds against this order so the detail view can SHOW what's
+  // already been refunded (and let staff remove a mistaken one) instead of
+  // re-booking blindly. item_title falls back to the linked product's title.
+  const returns = await query(
+    `SELECT r.id, r.product_id, r.qty, r.reason, r.resolution, r.refund_amount,
+            r.status, r.notes, r.created_at,
+            COALESCE(p.title, r.item_title) AS item_title
+       FROM returns r LEFT JOIN products p ON p.id = r.product_id
+      WHERE r.sale_id = $1 ORDER BY r.created_at DESC`, [req.params.id]);
   await audit(req, 'view_sale', 'sale', req.params.id);  // GDPR: log customer-data read
-  res.json({ sale: s.rows[0], items: items.rows });
+  res.json({ sale: s.rows[0], items: items.rows, returns: returns.rows });
 });
 
 // POST /api/sales — record a manual sale or estimate.
