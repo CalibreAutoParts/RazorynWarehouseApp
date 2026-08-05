@@ -512,6 +512,10 @@ router.get('/:id', requireAdmin, async (req, res, next) => {
   // Sale ids are numeric. Let non-numeric paths (e.g. /vat-report, /vat-report.csv)
   // fall through to their dedicated handlers instead of being treated as an id.
   if (!/^\d+$/.test(req.params.id)) return next();
+  // Self-heal the stored refunded_amount from the actual booked returns every time
+  // the order is opened, so a stale/zero column (e.g. a return booked before a
+  // reconcile ran) can never show the full value as if nothing was refunded.
+  try { await require('../lib/refunds').reconcileSaleRefund(parseInt(req.params.id, 10)); } catch (_) {}
   const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   const items = await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id]);
