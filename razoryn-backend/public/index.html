@@ -8081,6 +8081,16 @@ async function openSaleDetail(id) {
   const items = data.items || [];
   const bookedReturns = data.returns || [];
   const fmt = (n) => '£' + parseFloat(n || 0).toFixed(2);
+  // Source of truth for the refunded figure = the actual booked returns (never a
+  // possibly-stale refunded_amount column). Use the larger of the two so a
+  // channel-reported refund (eBay/Shopify) isn't lost either.
+  const orderTotalNum = parseFloat(s.total) || 0;
+  const returnsRefunded = bookedReturns
+    .filter(r => ['processed', 'closed'].includes(r.status))
+    .reduce((a, r) => a + (parseFloat(r.refund_amount) || 0), 0);
+  const effectiveRefunded = Math.min(orderTotalNum, Math.max(parseFloat(s.refunded_amount) || 0, returnsRefunded));
+  const isFullyRefunded = s.status === 'refunded' || (orderTotalNum > 0 && effectiveRefunded >= orderTotalNum - 0.005);
+  const hasRefund = effectiveRefunded > 0 || s.status === 'refunded';
   const channelLabel = (s.channel || '').replace(/_/g, ' ');
   const escape = (v) => v == null ? '' : String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const paymentLabel = (() => {
@@ -8162,10 +8172,10 @@ async function openSaleDetail(id) {
         ${parseFloat(s.shipping) > 0 ? `<div style="text-align:right;color:var(--ink-soft)">Shipping</div><div style="text-align:right">${fmt(s.shipping)}</div>` : ''}
         <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px">Total</div>
         <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px">${fmt(s.total)}</div>
-        ${(parseFloat(s.refunded_amount) > 0 || s.status === 'refunded') ? `
-          <div style="text-align:right;color:var(--amber)">Returned / refunded</div><div style="text-align:right;color:var(--amber)">−${fmt(s.status === 'refunded' ? s.total : s.refunded_amount)}</div>
+        ${hasRefund ? `
+          <div style="text-align:right;color:var(--amber)">Returned / refunded</div><div style="text-align:right;color:var(--amber)">−${fmt(isFullyRefunded ? s.total : effectiveRefunded)}</div>
           <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px">${s.is_paid === false ? 'Now to pay' : 'Net value'}</div>
-          <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px;color:var(--green)">${fmt(s.status === 'refunded' ? 0 : (parseFloat(s.total) - parseFloat(s.refunded_amount || 0)))}</div>` : ''}
+          <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px;color:var(--green)">${fmt(isFullyRefunded ? 0 : (orderTotalNum - effectiveRefunded))}</div>` : ''}
       </div>
 
       ${bookedReturns.length ? `
@@ -8193,7 +8203,7 @@ async function openSaleDetail(id) {
     actions: [
       { label: 'Close', onClick: closeModal },
       ...(!s.is_estimate ? [{ label: '↩ Log return', onClick: () => openReturnFromSale(id) }] : []),
-      ...(!s.is_estimate && (parseFloat(s.refunded_amount) > 0 || s.status === 'refunded') ? [{ label: '↩ Undo returns / reopen', onClick: () => undoReturnsForSale(id) }] : []),
+      ...(!s.is_estimate && hasRefund ? [{ label: '↩ Undo returns / reopen', onClick: () => undoReturnsForSale(id) }] : []),
       { label: '✉ Email', onClick: () => { closeModal(); emailSingleInvoice(id); } },
       { label: '🖨 Print / PDF', primary: true, onClick: () => { closeModal(); printSingleInvoice(id); } },
     ],
