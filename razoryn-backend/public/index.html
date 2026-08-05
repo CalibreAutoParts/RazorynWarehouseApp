@@ -8067,72 +8067,10 @@ function autoOpenInvoice(id) {
   if (!w) toast('Pop-up blocked — open the document from the Sales list (🖨)', 'warn', 5000);
 }
 
-// #7 — log a return against an existing sale: pick items, refund amount, restock.
-async function openReturnFromSale(saleId) {
-  let data;
-  try { data = await Api.get('/api/sales/' + saleId); }
-  catch (e) { toast('Failed to load sale: ' + e.message, 'error'); return; }
-  const s = data.sale, items = data.items || [];
-  if (!items.length) { toast('This sale has no line items to return', 'warn'); return; }
-  const rows = items.map((it, i) => `
-    <tr>
-      <td><input type="checkbox" class="rfs-pick" data-i="${i}" checked></td>
-      <td><div style="font-weight:600;font-size:13px">${escapeHtml(it.title)}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')}</div></td>
-      <td><input type="number" class="rfs-qty" data-i="${i}" min="1" max="${it.qty}" value="${it.qty}" style="width:64px"></td>
-      <td><input type="number" class="rfs-refund" data-i="${i}" min="0" step="0.01" value="${parseFloat(it.line_total||0).toFixed(2)}" style="width:90px"></td>
-    </tr>`).join('');
-  // Stash items so submit can read productId per row.
-  State._rfsItems = items.map(it => ({ productId: it.product_id || null }));
-  modal({
-    title: '↩ Log return — #' + (s.invoice_number || s.payment_reference || s.id),
-    body: `
-      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Tick the items returned, set quantity and the refund amount for each, then choose whether to put them back into stock.</div>
-      <div class="table-wrap" style="max-height:300px;overflow:auto">
-        <table class="table" style="font-size:12px">
-          <thead><tr><th style="width:26px"></th><th>Item</th><th>Qty</th><th>Refund £</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="rfs-restock" checked> Put returned items back into stock</label>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="rfs-mark-refunded"> Mark whole order as refunded</label>
-        <div class="field"><label>Reason / notes (optional)</label><input id="rfs-reason" placeholder="e.g. wrong part, faulty, changed mind"></div>
-      </div>
-    `,
-    actions: [
-      { label: 'Cancel', onClick: closeModal },
-      { label: 'Log return', primary: true, onClick: () => submitReturnFromSale(saleId) },
-    ],
-  });
-}
-async function submitReturnFromSale(saleId) {
-  const picks = [...document.querySelectorAll('.rfs-pick:checked')].map(c => parseInt(c.getAttribute('data-i')));
-  if (!picks.length) { toast('Pick at least one item', 'warn'); return; }
-  const items = picks.map(i => ({
-    productId: State._rfsItems?.[i]?.productId || null,
-    qty: parseInt(document.querySelector(`.rfs-qty[data-i="${i}"]`)?.value) || 1,
-    refundAmount: document.querySelector(`.rfs-refund[data-i="${i}"]`)?.value || null,
-  }));
-  const payload = {
-    saleId,
-    items,
-    restock: !!el('rfs-restock')?.checked,
-    markSaleRefunded: !!el('rfs-mark-refunded')?.checked,
-    reason: el('rfs-reason')?.value || null,
-  };
-  const taskId = Task.start('Logging return…');
-  try {
-    const r = await Api.post('/api/returns/from-sale', payload);
-    Task.done(taskId, 'Return logged');
-    toast(`Return logged · ${r.created} item(s)${r.restocked ? ', ' + r.restocked + ' restocked' : ''}${r.totalRefund ? ', £' + r.totalRefund.toFixed(2) + ' refunded' : ''}`, 'success', 6000);
-    closeModal();
-    await Store.refresh('sales'); await Store.refresh('products');
-    renderSales();
-  } catch (e) {
-    Task.fail(taskId, 'Failed');
-    toast('Failed: ' + (e.data?.message || e.message), 'error');
-  }
-}
+// NOTE: the canonical, enhanced openReturnFromSale / submitReturnFromSale (with
+// the per-item restocking-fee + partial-refund UI) live further down this file —
+// a second top-level definition there shadows anything here, so there is a single
+// source of truth. This earlier duplicate was removed to avoid confusion.
 
 async function openSaleDetail(id) {
   let data;
@@ -19414,41 +19352,94 @@ async function submitEditSale(id) {
   }
 }
 
-// Book a return / refund against a cash/bank/card sale. Reuses the existing
-// /api/returns/from-sale endpoint, which restocks (optional), marks the sale
-// refunded (optional) and nets the refund off the cash/bank revenue figures so
-// the takings aren't over-stated.
+// Book a return / partial refund against any sale (cash/bank/card, eBay, Shopify).
+// Per item you pick the qty returned, an optional RESTOCKING FEE we keep (the
+// refund fills in automatically as line − fee), and whether the item goes back
+// into stock. Refund and fee are two views of the same split, so editing either
+// updates the other; editing qty rescales the line and keeps the fee. Leave items
+// un-ticked to refund only part of a bundle. Custom/unlinked lines still refund —
+// they just can't restock (no warehouse product to put back). Refunds are netted
+// off revenue by reconcileSaleRefund so takings aren't over-stated.
 async function openReturnFromSale(saleId) {
   let data;
   try { data = await Api.get('/api/sales/' + saleId); }
   catch (e) { toast('Could not load order: ' + (e.data?.message || e.message), 'error'); return; }
   const sale = data.sale || {}; const items = data.items || [];
+  if (!items.length) { toast('This order has no line items to return', 'warn'); return; }
   const ref = sale.invoice_number || sale.payment_reference || ('#' + sale.id);
-  const rows = items.map((it, i) => `
+  // Stash per-row facts the live reconciler + submit need.
+  window._rfsItems = items.map(it => ({
+    productId: it.product_id || null,
+    unitPrice: parseFloat(it.unit_price || 0) || 0,
+    maxQty: parseInt(it.qty) || 1,
+  }));
+  const rows = items.map((it, i) => {
+    const linked = !!it.product_id;
+    const line = (parseFloat(it.unit_price || 0) || 0) * (parseInt(it.qty) || 1);
+    return `
     <tr>
-      <td style="padding:4px"><input type="checkbox" class="rfs-pick" data-i="${i}" checked></td>
+      <td style="padding:4px"><input type="checkbox" class="rfs-pick" data-i="${i}" checked onchange="rfsOn(${i},'pick')"></td>
       <td style="padding:4px"><div style="font-weight:500;font-size:13px">${escapeHtml(it.title)}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')}</div></td>
-      <td style="padding:4px"><input type="number" class="rfs-qty" data-i="${i}" value="${it.qty}" min="1" max="${it.qty}" style="width:56px"></td>
-      <td style="padding:4px"><span style="color:var(--ink-soft)">£</span><input type="number" class="rfs-ref" data-i="${i}" value="${(+it.line_total).toFixed(2)}" step="0.01" min="0" style="width:80px"></td>
-    </tr>`).join('');
-  window._rfsItems = items;
+      <td style="padding:4px"><input type="number" class="rfs-qty" data-i="${i}" value="${it.qty}" min="1" max="${it.qty}" style="width:52px" oninput="rfsOn(${i},'qty')"></td>
+      <td style="padding:4px;text-align:center">${linked
+        ? `<input type="checkbox" class="rfs-restock" data-i="${i}" checked title="Put this item back into stock">`
+        : `<span class="rfs-norestock" data-i="${i}" title="Custom line — no warehouse product to put back into stock" style="color:var(--ink-soft);font-size:11px">n/a</span>`}</td>
+      <td style="padding:4px"><span style="color:var(--ink-soft)">£</span><input type="number" class="rfs-fee" data-i="${i}" value="0.00" step="0.01" min="0" style="width:64px" oninput="rfsOn(${i},'fee')"></td>
+      <td style="padding:4px"><span style="color:var(--ink-soft)">£</span><input type="number" class="rfs-ref" data-i="${i}" value="${line.toFixed(2)}" step="0.01" min="0" style="width:76px" oninput="rfsOn(${i},'refund')"></td>
+    </tr>`;
+  }).join('');
   modal({
-    title: 'Book return — ' + ref,
+    title: 'Return / refund — ' + ref,
     body: `
-      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">${escapeHtml(sale.customer_name || '')} · ${channelPill(sale.channel === 'direct_cash' ? 'direct_cash' : sale.channel)} · refunding reduces the cash/bank takings so revenue isn't over-stated.</div>
-      <table class="table" style="margin-bottom:12px"><thead><tr><th></th><th>Item</th><th>Qty</th><th>Refund £</th></tr></thead><tbody>${rows}</tbody></table>
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">${escapeHtml(sale.customer_name || '')} · ${channelPill(sale.channel === 'direct_cash' ? 'direct_cash' : sale.channel)} · tick what's coming back. Set a <b>restocking fee</b> we keep (refund auto-fills) or type the <b>refund</b> directly. Untick <b>✓ Restock</b> to keep an item out of stock (e.g. faulty).</div>
+      <div class="table-wrap" style="max-height:280px;overflow:auto">
+        <table class="table" style="margin-bottom:8px"><thead><tr><th></th><th>Item</th><th>Qty</th><th title="Put item back into stock">✓ Restock</th><th>Fee £</th><th>Refund £</th></tr></thead><tbody>${rows}</tbody></table>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:18px;margin:2px 4px 12px;font-size:13px">
+        <div>Fee kept: <b id="rfs-sum-fee">£0.00</b></div>
+        <div>Refund total: <b id="rfs-sum-refund" style="color:var(--amber)">£0.00</b></div>
+      </div>
       <div class="field"><label>Reason</label>
         <select id="rfs-reason"><option>Customer changed mind</option><option>Faulty / damaged</option><option>Wrong part</option><option>Didn't fit</option><option>Other</option></select></div>
       <div class="field"><label>Notes (optional)</label><input id="rfs-notes" placeholder="e.g. refunded in cash, part back on shelf"></div>
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:6px"><input type="checkbox" id="rfs-restock" checked> Put the item(s) back into stock</label>
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:6px"><input type="checkbox" id="rfs-refunded"> Void the WHOLE invoice (full return — nothing left to pay)</label>
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Leave the box <strong>off</strong> for a partial return: the invoice stays open for the items the customer kept, and its value drops by what you returned so you can mark the rest paid.</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Leave the box <strong>off</strong> for a partial return: the invoice stays open for the items the customer kept, and its value drops by what you refunded so you can mark the rest paid.</div>
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
       { label: '↩ Book return', primary: true, onClick: (ev) => submitReturnFromSale(saleId, ev) },
     ],
   });
+  setTimeout(rfsSummary, 0);
+}
+// Live reconciler for the return/refund modal. refund = qty×unitPrice − fee, so
+// editing fee sets refund and vice-versa; editing qty rescales the line, keeping
+// the fee. Setting an input's .value programmatically does NOT fire oninput — no loop.
+function rfsLineForQty(i) {
+  const it = (window._rfsItems || [])[i]; if (!it) return 0;
+  const q = parseInt(document.querySelector(`.rfs-qty[data-i="${i}"]`)?.value) || 0;
+  return Math.round(it.unitPrice * q * 100) / 100;
+}
+function rfsOn(i, field) {
+  const line = rfsLineForQty(i);
+  const feeEl = document.querySelector(`.rfs-fee[data-i="${i}"]`);
+  const refEl = document.querySelector(`.rfs-ref[data-i="${i}"]`);
+  const clamp = (v) => Math.max(0, Math.min(line, Math.round((parseFloat(v) || 0) * 100) / 100));
+  if (field === 'fee') { const fee = clamp(feeEl.value); if (refEl) refEl.value = (line - fee).toFixed(2); }
+  else if (field === 'refund') { const rr = clamp(refEl.value); if (feeEl) feeEl.value = (line - rr).toFixed(2); }
+  else if (field === 'qty') { const fee = Math.min(line, Math.max(0, parseFloat(feeEl?.value) || 0)); if (refEl) refEl.value = (line - fee).toFixed(2); if (feeEl) feeEl.value = fee.toFixed(2); }
+  rfsSummary();
+}
+function rfsSummary() {
+  let refund = 0, fee = 0;
+  document.querySelectorAll('.rfs-pick:checked').forEach(c => {
+    const i = c.getAttribute('data-i');
+    refund += parseFloat(document.querySelector(`.rfs-ref[data-i="${i}"]`)?.value) || 0;
+    fee += parseFloat(document.querySelector(`.rfs-fee[data-i="${i}"]`)?.value) || 0;
+  });
+  const r = el('rfs-sum-refund'), f = el('rfs-sum-fee');
+  if (r) r.textContent = '£' + refund.toFixed(2);
+  if (f) f.textContent = '£' + fee.toFixed(2);
 }
 let _rfsBusy = false;   // guards against a double-click booking the return twice
 async function submitReturnFromSale(saleId, ev) {
@@ -19456,10 +19447,14 @@ async function submitReturnFromSale(saleId, ev) {
   const items = (window._rfsItems || []).map((it, i) => {
     const picked = document.querySelector(`.rfs-pick[data-i="${i}"]`)?.checked;
     if (!picked) return null;
+    const restockBox = document.querySelector(`.rfs-restock[data-i="${i}"]`);
     return {
-      productId: it.product_id,
-      qty: parseInt(document.querySelector(`.rfs-qty[data-i="${i}"]`)?.value) || it.qty,
+      productId: it.productId || null,
+      qty: parseInt(document.querySelector(`.rfs-qty[data-i="${i}"]`)?.value) || it.maxQty || 1,
       refundAmount: parseFloat(document.querySelector(`.rfs-ref[data-i="${i}"]`)?.value) || 0,
+      restockingFee: parseFloat(document.querySelector(`.rfs-fee[data-i="${i}"]`)?.value) || 0,
+      // Per-item restock: honour the box; custom lines (no box) can't restock.
+      restock: restockBox ? !!restockBox.checked : false,
     };
   }).filter(Boolean);
   if (!items.length) { toast('Pick at least one item to return', 'warn'); return; }
@@ -19471,13 +19466,13 @@ async function submitReturnFromSale(saleId, ev) {
     const r = await Api.post('/api/returns/from-sale', {
       saleId,
       items,
-      restock: el('rfs-restock')?.checked,
       markSaleRefunded: el('rfs-refunded')?.checked,
       reason: el('rfs-reason')?.value || 'Customer return',
       notes: el('rfs-notes')?.value || null,
     });
     Task.done(taskId, 'Returned');
-    toast(`Return booked · £${Number(r.totalRefund || 0).toFixed(2)} deducted${r.restocked ? ' · stock restored' : ''}`, 'success', 6000);
+    const feeMsg = r.totalFee ? ` · £${Number(r.totalFee).toFixed(2)} fee kept` : '';
+    toast(`Return booked · £${Number(r.totalRefund || 0).toFixed(2)} refunded${r.restocked ? ' · ' + r.restocked + ' restocked' : ''}${feeMsg}`, 'success', 6000);
     closeModal();
     await Store.refresh('sales');
     await Store.refresh('products').catch(() => {});
