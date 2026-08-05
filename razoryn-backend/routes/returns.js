@@ -122,24 +122,35 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
     }
   } catch (_) { /* non-fatal */ }
 
-  const restock = b.restock !== false;
+  // Global restock default (back-compat). Each item may override with it.restock,
+  // so you can restock some returned lines and not others (e.g. keep a faulty one
+  // out of stock) — and a restocking FEE we keep, which reduces the refund.
+  const globalRestock = b.restock !== false;
   const result = await withTx(async (c) => {
-    let created = 0, restocked = 0, totalRefund = 0;
+    let created = 0, restocked = 0, totalRefund = 0, totalFee = 0;
     for (const it of b.items) {
       const qty = parseInt(it.qty) || 0;
       if (qty <= 0) continue;
       const refundAmount = it.refundAmount != null && it.refundAmount !== '' ? parseFloat(it.refundAmount) : null;
       if (refundAmount) totalRefund += refundAmount;
-      const resolution = restock ? 'restock' : 'refund';
+      const fee = it.restockingFee != null && it.restockingFee !== '' ? parseFloat(it.restockingFee) : 0;
+      if (fee > 0) totalFee += fee;
+      // Per-item restock: honour it.restock when provided, else the global toggle.
+      // A line with no linked product can never restock.
+      const doRestock = (it.restock !== undefined ? !!it.restock : globalRestock) && !!it.productId;
+      const resolution = doRestock ? 'restock' : 'refund';
+      // Fold the fee into the return note so it's visible on the Returns tab.
+      const noteStr = [b.notes || null, fee > 0 ? `restocking fee £${(+fee).toFixed(2)}` : null]
+        .filter(Boolean).join(' · ') || null;
       const r = await c.query(
         `INSERT INTO returns (sale_id, product_id, channel, qty, reason, resolution,
                               refund_amount, status, notes, handled_by, closed_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,'processed',$8,$9, now()) RETURNING id`,
         [sale.id, it.productId || null, sale.channel, qty, b.reason || null, resolution,
-         refundAmount, b.notes || null, req.user.id]
+         refundAmount, noteStr, req.user.id]
       );
       created++;
-      if (restock && it.productId) {
+      if (doRestock) {
         await c.query(`UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2`, [qty, it.productId]);
         await c.query(
           `INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by)
@@ -152,7 +163,7 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
     if (b.markSaleRefunded) {
       await c.query(`UPDATE sales SET status = 'refunded' WHERE id = $1`, [sale.id]);
     }
-    return { created, restocked, totalRefund: +totalRefund.toFixed(2) };
+    return { created, restocked, totalRefund: +totalRefund.toFixed(2), totalFee: +totalFee.toFixed(2) };
   });
   await audit(req, 'return_from_sale', 'sale', b.saleId, result);
   // Fold this refund onto the sale so it drops out of revenue/sales totals (and
