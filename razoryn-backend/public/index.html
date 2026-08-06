@@ -3442,10 +3442,14 @@ function renderDashboard() {
   // A fully refunded order is not a live sale; a partial refund still counts but
   // only for what was kept (netAmount). So refunds — same-day or later — never
   // inflate today's revenue.
-  const todayPaid = sales.filter(s => s && isToday(s.date) && !s.isEstimate && !s.isPreorder && s.isPaid !== false && !s.isRefunded);
+  const todayPaid = sales.filter(s => s && isToday(s.date) && !s.isEstimate && !s.isPreorder && s.isPaid !== false && !s.isRefunded && s.status !== 'cancelled');
   const todayRev = todayPaid.reduce((a,b)=>a+(b.netAmount != null ? b.netAmount : (b.amount||0)),0);
   const totalUnits = products.reduce((a,b)=>a+totalQty(b),0);
-  const todaySales = sales.filter(s => s && isToday(s.date));
+  // Recent-sales list: exclude estimates, cancelled orders and fully returned/
+  // refunded orders — those aren't live sales and shouldn't clutter the feed or
+  // imply revenue. (Partial refunds stay: the order is still a real sale for the
+  // part the customer kept.)
+  const todaySales = sales.filter(s => s && isToday(s.date) && !s.isEstimate && !s.isRefunded && s.status !== 'cancelled');
   const pendingReturns = returns.filter(r => r && (r.status === 'open' || r.status === 'pending')).length;
 
   el('content').innerHTML = `
@@ -3559,7 +3563,9 @@ function renderDashboard() {
                   <td>${channelPill(s.channel)}</td>
                   <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
                   <td>${s.customer}</td>
-                  <td class="num"><strong>${gbp(s.amount)}</strong></td>
+                  <td class="num">${s.isPartlyRefunded
+                    ? `<s style="color:var(--ink-soft);font-weight:400">${gbp(s.amount)}</s> <strong>${gbp(s.netAmount)}</strong>`
+                    : `<strong>${gbp(s.amount)}</strong>`}</td>
                 </tr>
               `).join('') : '<tr><td colspan="5"><div class="empty"><div class="t">No sales yet today</div></div></td></tr>'}
             </tbody>
