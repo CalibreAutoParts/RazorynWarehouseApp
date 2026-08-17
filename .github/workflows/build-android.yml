@@ -1,15 +1,15 @@
 name: Build Android app
 
-# Builds the Warehouse Hub Android APK on a GitHub runner (the Android SDK can't
-# run in the Linux container the web app is developed in). The app is a thin
-# native shell that loads the live site, so this APK rarely needs rebuilding —
-# only for a new icon/name/URL or a Capacitor upgrade. The web app itself updates
-# automatically because the shell always loads the latest deployed site.
+# Builds the Warehouse Hub Android APKs on a GitHub runner (the Android SDK can't
+# run in the Linux container the web app is developed in). One APK per brand —
+# Calibre and Razoryn — each with its own icon, name and live URL. The app is a
+# thin native shell that loads the live site, so these APKs rarely need
+# rebuilding; the web app updates automatically because the shell always loads the
+# latest deployed site.
 #
 # Trigger: push a tag like `android-v1.0.0`, or run manually from the Actions tab
-# (optionally overriding the site URL, e.g. to build a Razoryn/staging variant).
-# The signed-for-debug APK is attached to the run as an artifact you can download
-# and sideload onto the JR-927M devices.
+# (optionally pick a single brand). Each brand's APK is attached to the run as an
+# artifact you can download and sideload onto the JR-927M devices.
 
 on:
   push:
@@ -17,17 +17,36 @@ on:
       - 'android-v*'
   workflow_dispatch:
     inputs:
-      app_url:
-        description: 'Site URL the app should load (blank = value in capacitor.config.json)'
-        required: false
-        default: ''
+      brand:
+        description: 'Which brand(s) to build'
+        type: choice
+        default: both
+        options: [both, calibre, razoryn]
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  # Resolve the brand matrix from the manual choice (default: both brands).
+  matrix:
     runs-on: ubuntu-latest
+    outputs:
+      brands: ${{ steps.pick.outputs.brands }}
+    steps:
+      - id: pick
+        run: |
+          B='${{ github.event.inputs.brand }}'
+          if [ "$B" = "calibre" ]; then echo 'brands=["calibre"]' >> "$GITHUB_OUTPUT";
+          elif [ "$B" = "razoryn" ]; then echo 'brands=["razoryn"]' >> "$GITHUB_OUTPUT";
+          else echo 'brands=["calibre","razoryn"]' >> "$GITHUB_OUTPUT"; fi
+
+  build:
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        brand: ${{ fromJSON(needs.matrix.outputs.brands) }}
     defaults:
       run:
         working-directory: mobile
@@ -50,34 +69,35 @@ jobs:
       - name: Install Capacitor deps
         run: npm install
 
-      - name: Override site URL (optional)
-        if: ${{ github.event.inputs.app_url != '' }}
-        run: |
-          node -e "const f='capacitor.config.json';const c=require('./'+f);c.server=c.server||{};c.server.url='${{ github.event.inputs.app_url }}';require('fs').writeFileSync(f, JSON.stringify(c,null,2));console.log('Loading URL set to', c.server.url)"
+      - name: Prepare brand (config + icon)
+        run: node scripts/prepare.js ${{ matrix.brand }}
 
       - name: Add Android platform
         run: npx cap add android
 
-      - name: Sync web assets + config into the Android project
+      - name: Generate launcher icons from the brand logo
+        run: npx capacitor-assets generate --android
+
+      - name: Sync web config into the Android project
         run: npx cap sync android
 
       - name: Build debug APK
         run: cd android && chmod +x ./gradlew && ./gradlew assembleDebug --no-daemon
 
       - name: Rename APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk warehouse-hub.apk
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk warehouse-${{ matrix.brand }}.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: warehouse-hub-apk
-          path: mobile/warehouse-hub.apk
+          name: warehouse-${{ matrix.brand }}-apk
+          path: mobile/warehouse-${{ matrix.brand }}.apk
           if-no-files-found: error
 
       - name: Attach APK to release (tag builds)
         if: startsWith(github.ref, 'refs/tags/android-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: mobile/warehouse-hub.apk
+          files: mobile/warehouse-${{ matrix.brand }}.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

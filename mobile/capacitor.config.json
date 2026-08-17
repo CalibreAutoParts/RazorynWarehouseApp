@@ -1,6 +1,6 @@
 {
   "appId": "uk.co.calibreautoparts.warehouse",
-  "appName": "Warehouse Hub",
+  "appName": "Calibre Warehouse",
   "webDir": "www",
   "server": {
     "url": "https://warehouse.calibreautoparts.co.uk",
