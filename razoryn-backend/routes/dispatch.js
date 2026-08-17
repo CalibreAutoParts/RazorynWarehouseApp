@@ -761,6 +761,57 @@ async function syncEbayDispatchCore({ days = 14 } = {}) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// eBay CANCELLATION / REFUND sync — drops orders cancelled or refunded on eBay
+// off the dispatch worklist. syncEbayDispatchCore only catches SHIPPED orders, so
+// an order the buyer cancelled (or that was refunded) still looked "to dispatch"
+// locally. We pull recent orders per store, read eBay's cancel/refund status, and
+// fold it onto the sale (reconcileSaleRefund flips a fully-refunded/cancelled
+// order to 'refunded', which the worklist query already excludes).
+// ──────────────────────────────────────────────────────────────────────────
+async function syncEbayCancellationsCore({ days = 14 } = {}) {
+  const ebay = require('../services/ebay');
+  const brand = require('../lib/brand');
+  const { reconcileSaleRefund } = require('../lib/refunds');
+  if (!ebay.isConfigured()) return { checked: 0, cleared: 0, skipped: 'ebay_not_configured' };
+  const sinceISO = new Date(Date.now() - days * 86400000).toISOString();
+
+  const refundByOrder = {};
+  const seen = new Set();
+  for (const store of brand.stores.filter(s => s.token)) {
+    let orders = [];
+    try { orders = (await ebay.getRecentOrders(sinceISO, store)) || []; }
+    catch (e) { console.warn('[dispatch] cancel-sync getRecentOrders failed:', store.code, e.message); continue; }
+    for (const o of orders) {
+      if (!o || !o.orderId || seen.has(o.orderId)) continue;
+      seen.add(o.orderId);
+      const info = ebay.orderRefundInfo(o);
+      if (info.amount > 0 || info.fullyRefunded) refundByOrder[o.orderId] = info;
+    }
+  }
+  const ids = Object.keys(refundByOrder);
+  if (!ids.length) return { checked: 0, cleared: 0 };
+
+  const { rows } = await query(
+    `SELECT id, external_order_id, total FROM sales
+      WHERE channel IN ('ebay_em','ebay_cl') AND is_estimate = false
+        AND dispatched_at IS NULL AND collected_at IS NULL
+        AND status NOT IN ('refunded','cancelled')
+        AND external_order_id = ANY($1)`,
+    [ids]
+  );
+  let cleared = 0, partial = 0;
+  for (const sale of rows) {
+    const info = refundByOrder[sale.external_order_id];
+    const channelRefund = info.fullyRefunded ? (parseFloat(sale.total) || 0) : info.amount;
+    try {
+      const r = await reconcileSaleRefund(sale.id, { channelRefund });
+      if (r && r.fully) cleared++; else if (r && r.refunded > 0) partial++;
+    } catch (_) {}
+  }
+  return { checked: rows.length, cleared, partial };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Shopify dispatch sync — the Shopify counterpart to syncEbayDispatchCore.
 // Orders FULFILLED on Shopify (shipped there, any courier) must drop off the
 // warehouse worklist automatically — otherwise they look "unshipped" locally and
@@ -911,8 +962,11 @@ router.post('/sync-ebay', requireAdmin, async (req, res) => {
   try {
     const days = Math.min(90, Math.max(1, parseInt(req.body?.days) || 14));
     const result = await syncEbayDispatchCore({ days });
-    if (result.dispatched) await audit(req, 'ebay_dispatch_sync', null, null, result);
-    res.json({ ok: true, ...result });
+    // Also drop cancelled/refunded eBay orders off the worklist.
+    let cancelled = { cleared: 0 };
+    try { cancelled = await syncEbayCancellationsCore({ days }); } catch (e) { console.warn('[dispatch] cancel-sync:', e.message); }
+    if (result.dispatched || cancelled.cleared) await audit(req, 'ebay_dispatch_sync', null, null, { ...result, cancelled });
+    res.json({ ok: true, ...result, cancelledCleared: cancelled.cleared || 0 });
   } catch (e) {
     res.status(500).json({ error: 'sync_failed', message: e.message });
   }
@@ -923,6 +977,7 @@ module.exports.trackingUrlFor = trackingUrlFor;
 module.exports.CARRIERS = CARRIERS;
 module.exports.EBAY_NATIVE_CARRIERS = EBAY_NATIVE_CARRIERS;
 module.exports.syncEbayDispatchCore = syncEbayDispatchCore;
+module.exports.syncEbayCancellationsCore = syncEbayCancellationsCore;
 module.exports.syncShopifyDispatchCore = syncShopifyDispatchCore;
 module.exports.flagStaleShipments = flagStaleShipments;
 module.exports.refreshTrackingStatuses = refreshTrackingStatuses;

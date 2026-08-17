@@ -361,6 +361,14 @@ if (cron.validate(dispatchCronExpr)) {
         const result = await dispatch.syncEbayDispatchCore({ days: 14 });
         if (result.dispatched) console.log(`[cron dispatch] auto-dispatched ${result.dispatched} eBay order(s)`);
       }
+      // Drop cancelled/refunded eBay orders off the worklist (they aren't shipped,
+      // so the shipped-sync above won't clear them).
+      if (typeof dispatch.syncEbayCancellationsCore === 'function') {
+        try {
+          const cr = await dispatch.syncEbayCancellationsCore({ days: 14 });
+          if (cr.cleared) console.log(`[cron dispatch] cleared ${cr.cleared} cancelled/refunded eBay order(s) from the worklist`);
+        } catch (e) { if (!/ebay_not_configured/.test(e.message)) console.warn('[cron dispatch] cancel-sync failed:', e.message); }
+      }
       // Shopify counterpart — mark orders fulfilled on Shopify as dispatched so
       // they drop off the worklist and aren't wrongly pushed to DropFleet.
       if (typeof dispatch.syncShopifyDispatchCore === 'function') {
