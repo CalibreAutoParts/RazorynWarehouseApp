@@ -824,6 +824,36 @@
   /* "Copy to 2nd store" — only when the brand has more than one eBay store. */
   body:not(.is-multistore) .nav-item.multistore-only { display: none !important; }
 
+  /* ==================== NATIVE APP SHELL (handheld) ====================
+     Applied only inside the Android APK shell (body.is-app). Bigger touch targets,
+     fit-to-screen, a persistent bottom quick-bar, and safe-area padding for the
+     device's system bars. Kept scoped so the browser/desktop experience is
+     untouched. */
+  body.is-app { -webkit-tap-highlight-color: transparent; }
+  /* Roomier tap targets for gloved warehouse hands. */
+  body.is-app .nav-item { padding: 13px 14px; font-size: 15px; }
+  body.is-app .btn { min-height: 44px; }
+  body.is-app input, body.is-app select, body.is-app textarea { min-height: 44px; font-size: 16px; } /* 16px stops iOS/Android zoom-on-focus */
+  /* Never let content sit under the fixed bottom quick-bar. */
+  body.is-app .content { padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px)); }
+  /* Bottom quick-bar */
+  #app-tabbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    display: none; align-items: stretch; justify-content: space-around;
+    background: var(--surface, #fff); border-top: 1px solid var(--line);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    box-shadow: 0 -2px 10px rgba(0,0,0,.06);
+  }
+  body.is-app #app-tabbar { display: flex; }
+  #app-tabbar .app-tab {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 3px; padding: 8px 4px 6px; background: none; border: 0; cursor: pointer;
+    color: var(--ink-soft); font-size: 11px; font-weight: 600; min-height: 60px;
+  }
+  #app-tabbar .app-tab svg { width: 22px; height: 22px; }
+  #app-tabbar .app-tab.active { color: var(--brand-primary); }
+  #app-tabbar .app-tab:active { background: var(--line-2); }
+
   /* ==================== PROGRESS BAR ====================
      Top-of-screen task indicator. A thin brand-coloured stripe shows long-running
      work is in progress; a small label pill below the topbar tells the user what's
@@ -2019,6 +2049,9 @@ function enterApp() {
   document.body.classList.toggle('is-admin', State.user.role === 'admin');
   document.body.classList.toggle('can-competitors',
     State.user.role === 'admin' || !!(State.user.permissions && State.user.permissions.competitors));
+  // Are we running inside the native handheld app shell? (Set before nav so the
+  // page-permission guard + app-mode nav filtering apply from the first render.)
+  State.appShell = detectAppShell();
 
   document.getElementById('user-avatar').textContent = State.user.name.charAt(0).toUpperCase();
   document.getElementById('user-name').textContent = State.user.name;
@@ -2027,9 +2060,12 @@ function enterApp() {
   bindNav();
   bindHeader();
   initKiosk();
+  applyAppMode();           // strip to warehouse pages + bottom quick-bar in the app shell
+  initHardwareScanner();    // global keyboard-wedge scanner capture (JR-927M etc.)
   initEditingTracker();
   initTableLabeller();
-  routeTo(State.kiosk && !KIOSK_PAGES.has('dashboard') ? 'inventory' : 'dashboard');
+  routeTo(State.appShell && !APP_PAGES.has('dashboard') ? 'dashboard'
+         : (State.kiosk && !KIOSK_PAGES.has('dashboard') ? 'inventory' : 'dashboard'));
   refreshNavCounts();
   refreshClockDot();
   refreshCostFloors();   // admin-only cost floors for app-wide price warnings
@@ -2641,6 +2677,121 @@ function initKiosk() {
   applyKioskClass();
 }
 
+// ── Native app shell (JR-927M handheld / Capacitor APK) ─────────────────────
+// The APK is a thin native shell that loads the live site, so any web deploy is
+// instantly live with no re-download. In that shell we strip the app down to the
+// warehouse workflow: operational pages + Settings only (no marketing/admin
+// management), a bottom quick-bar for one-tap Scan/Inventory/Dispatch/Returns,
+// bigger touch targets, and global hardware-scanner capture.
+const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','scan','stocktake','locations','returns','dispatch','notifications','settings']);
+// Pages surfaced in the bottom quick-bar (order = left→right). Only shown if the
+// user has permission for them.
+const APP_TAB_BAR = [
+  { page: 'scan',      label: 'Scan',    icon: 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h0M12 7v10M17 12h0' },
+  { page: 'inventory', label: 'Stock',   icon: 'M20 7 12 3 4 7l8 4 8-4zM4 7v10l8 4 8-4V7M12 11v10' },
+  { page: 'dispatch',  label: 'Dispatch',icon: 'M1 3h15v13H1zM16 8h4l3 3v5h-7V8zM5.5 18.5a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM16.5 18.5a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0z' },
+  { page: 'returns',   label: 'Returns', icon: 'M3 7v6h6M3 13a9 9 0 1 0 3-7.7L3 8' },
+  { page: 'dashboard', label: 'Home',    icon: 'M3 12l9-9 9 9M5 10v10h14V10' },
+];
+function detectAppShell() {
+  try {
+    if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform()) return true;
+    if (/RazorynApp|CalibreApp|WarehouseHubApp/i.test(navigator.userAgent || '')) return true;
+    const u = new URLSearchParams(location.search);
+    if (u.get('app') === '1') { try { localStorage.setItem('rzn_appmode', '1'); } catch (_) {} return true; }
+    if (localStorage.getItem('rzn_appmode') === '1') return true;
+  } catch (_) {}
+  return false;
+}
+function applyAppMode() {
+  if (!State.appShell) return;
+  document.body.classList.add('is-app');
+  // Hide any nav item that isn't part of the handheld workflow.
+  document.querySelectorAll('.nav-item[data-page]').forEach(n => {
+    if (!APP_PAGES.has(n.dataset.page)) n.style.display = 'none';
+  });
+  // Collapse nav-section headers that end up empty (e.g. Resources), but keep the
+  // Admin section because Settings still lives there.
+  document.querySelectorAll('.nav-section').forEach(sec => {
+    const anyVisible = [...sec.querySelectorAll('.nav-item[data-page]')].some(n => n.style.display !== 'none');
+    if (!anyVisible) sec.style.display = 'none';
+  });
+  buildAppTabBar();
+}
+// Bottom quick-bar for the handheld — one-tap to the core warehouse pages.
+function buildAppTabBar() {
+  if (!State.appShell || document.getElementById('app-tabbar')) return;
+  const bar = document.createElement('nav');
+  bar.id = 'app-tabbar';
+  bar.setAttribute('aria-label', 'Quick actions');
+  const items = APP_TAB_BAR.filter(t => typeof hasPerm !== 'function' || hasPerm(t.page));
+  bar.innerHTML = items.map(t => `
+    <button class="app-tab" data-tab="${t.page}" onclick="routeTo('${t.page}')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${t.icon}"/></svg>
+      <span>${t.label}</span>
+    </button>`).join('');
+  document.body.appendChild(bar);
+  syncAppTabBar();
+}
+function syncAppTabBar() {
+  document.querySelectorAll('#app-tabbar .app-tab').forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === State.page);
+  });
+}
+
+// ── Hardware barcode scanner (keyboard-wedge) global capture ────────────────
+// The JR-927M's built-in scanner types the barcode as fast keystrokes ending in
+// Enter. We capture that stream ANYWHERE in the app (even with no field focused)
+// so a trigger-pull works from any page. Heuristic: characters arriving faster
+// than a human types (<35ms apart) that end in Enter = a scan, not typing.
+// If the user is actively typing in a text field, we leave it alone.
+let _scanBuf = '', _scanLastTs = 0, _scanTimer = null;
+function initHardwareScanner() {
+  if (window._hwScannerInit) return; window._hwScannerInit = true;
+  document.addEventListener('keydown', (e) => {
+    // Ignore modifier combos and the app's own shortcuts.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const now = Date.now();
+    const gap = now - _scanLastTs;
+    _scanLastTs = now;
+    // A big gap means a fresh sequence — reset the buffer.
+    if (gap > 120) _scanBuf = '';
+    if (e.key === 'Enter') {
+      const code = _scanBuf.trim();
+      _scanBuf = '';
+      // Only treat as a scan if it's a plausible barcode captured quickly and the
+      // focus isn't a multi-line/search field the user is deliberately editing.
+      const active = document.activeElement;
+      const inField = active && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName);
+      if (code.length >= 4 && !inField) { e.preventDefault(); onHardwareScan(code); }
+      return;
+    }
+    if (e.key.length === 1) {
+      // Fast, contiguous characters = scanner. Append; slow typing naturally
+      // resets via the gap check above so human input never accumulates here.
+      if (gap < 35 || _scanBuf === '') _scanBuf += e.key;
+      else _scanBuf = e.key;   // too slow → assume human, start fresh
+    }
+  }, true);
+}
+// Route a hardware scan to the most useful place: if we're on Scan/Stocktake let
+// their own handler take it; otherwise jump to inventory search for the code.
+function onHardwareScan(code) {
+  try {
+    // On the pages built around scanning, hand the code to their own handler so
+    // the trigger works exactly like the USB/keyboard box on those screens.
+    if (State.page === 'stocktake' && typeof handleStScan === 'function') { handleStScan(code); return; }
+    if (State.page === 'scan' && typeof handleScan === 'function') { handleScan(code); return; }
+    // Anywhere else: jump to Inventory filtered to the scanned code — the fastest
+    // "what/where is this part" lookup from a trigger-pull.
+    routeTo('inventory');
+    setTimeout(() => {
+      const box = el('inv-search'); if (box) { box.value = code; box.dispatchEvent(new Event('input', { bubbles: true })); }
+    }, 80);
+    toast('Scanned: ' + code, 'info', 2500);
+  } catch (e) { console.warn('[scan] handler failed:', e.message); }
+}
+
 // ── Clock in/out (staff work hours) ─────────────────────────────────────────
 function clockFmt(mins) { mins = Math.max(0, Math.round(mins || 0)); const h = Math.floor(mins / 60), m = mins % 60; return (h ? h + 'h ' : '') + m + 'm'; }
 function clockTime(iso) { return iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '—'; }
@@ -2736,6 +2887,9 @@ async function clockOut(btn) {
 
 function hasPerm(page) {
   if (!State.user) return false;
+  // Native app shell (handheld): warehouse workflow + Settings only, regardless of
+  // role — the admin/marketing management pages aren't part of on-device use.
+  if (State.appShell && !APP_PAGES.has(page)) return false;
   // Kiosk view locks the app to a small, customer-safe set of pages regardless of role.
   if (State.kiosk && !KIOSK_PAGES.has(page)) return false;
   if (State.user.role === 'admin') return true;
@@ -2810,6 +2964,7 @@ function routeTo(page) {
     const active = n.dataset.page === page && (!n.dataset.source || n.dataset.source === (MirrorState.sourceTab || 'ebay'));
     n.classList.toggle('active', active);
   });
+  if (typeof syncAppTabBar === 'function') syncAppTabBar();
   // Close mobile sidebar
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('sb-backdrop').classList.remove('open');
