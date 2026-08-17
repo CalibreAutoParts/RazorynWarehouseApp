@@ -75,6 +75,30 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
+      - name: Add Firebase config for native push (optional)
+        # Native FCM push needs a google-services.json per brand, added as a repo
+        # secret (base64). Name the secret GOOGLE_SERVICES_JSON_CALIBRE /
+        # GOOGLE_SERVICES_JSON_RAZORYN. If absent, the app still builds — it just
+        # won't have native push until the secret is added.
+        env:
+          GS_CALIBRE: ${{ secrets.GOOGLE_SERVICES_JSON_CALIBRE }}
+          GS_RAZORYN: ${{ secrets.GOOGLE_SERVICES_JSON_RAZORYN }}
+        run: |
+          if [ "${{ matrix.brand }}" = "calibre" ]; then SECRET="$GS_CALIBRE"; else SECRET="$GS_RAZORYN"; fi
+          if [ -n "$SECRET" ]; then
+            echo "$SECRET" | base64 -d > android/app/google-services.json
+            # Apply the Google Services Gradle plugin so the JSON is processed.
+            # (Capacitor doesn't add this automatically.) Patch the generated
+            # project: add the classpath to the buildscript, apply the plugin.
+            sed -i "0,/dependencies {/s//dependencies {\n        classpath 'com.google.gms:google-services:4.4.2'/" android/build.gradle
+            if ! grep -q "com.google.gms.google-services" android/app/build.gradle; then
+              echo "apply plugin: 'com.google.gms.google-services'" >> android/app/build.gradle
+            fi
+            echo "google-services.json + Gradle plugin added for ${{ matrix.brand }}"
+          else
+            echo "No google-services.json secret for ${{ matrix.brand }} — building WITHOUT native push."
+          fi
+
       - name: Generate launcher icons from the brand logo
         run: npx capacitor-assets generate --android
 

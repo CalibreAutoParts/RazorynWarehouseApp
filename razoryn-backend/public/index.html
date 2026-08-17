@@ -2062,6 +2062,7 @@ function enterApp() {
   initKiosk();
   applyAppMode();           // strip to warehouse pages + bottom quick-bar in the app shell
   initHardwareScanner();    // global keyboard-wedge scanner capture (JR-927M etc.)
+  initNativeApp();          // register device + native push (FCM) when in the APK
   initEditingTracker();
   initTableLabeller();
   routeTo(State.appShell && !APP_PAGES.has('dashboard') ? 'dashboard'
@@ -2751,6 +2752,60 @@ function trackUsage(page) {
     if (page === _lastUsagePage && now - _lastUsagePingMs < 60000) return;
     _lastUsagePingMs = now; _lastUsagePage = page;
     Api.post('/api/usage/ping', { page, appShell: !!State.appShell }).catch(() => {});
+  } catch (_) {}
+}
+
+// ── Native app: device registration + native push (FCM) ─────────────────────
+// Runs only inside the Capacitor APK (plugins injected by the shell). Registers
+// the device (id/model/app version → admin device list) and, once Firebase is
+// configured, the FCM push token so the OS delivers notifications when closed.
+// Everything is guarded so an older APK without a given plugin just skips it.
+async function initNativeApp() {
+  try {
+    const Cap = window.Capacitor;
+    if (!Cap || !Cap.isNativePlatform || !Cap.isNativePlatform()) return;
+    const P = Cap.Plugins || {};
+    State.device = { deviceId: null, model: null, platform: 'android', appVersion: null };
+    try {
+      if (P.Device) {
+        const id = await P.Device.getId(); State.device.deviceId = id.identifier || id.uuid || null;
+        const info = await P.Device.getInfo(); State.device.model = info.model || null; State.device.platform = info.platform || 'android';
+      }
+      if (P.App && P.App.getInfo) { const a = await P.App.getInfo(); State.device.appVersion = `${a.version || ''}${a.build ? ' (' + a.build + ')' : ''}`.trim() || null; }
+    } catch (_) {}
+    // Register the device now (no push token yet) so it appears in the admin list
+    // even if push permission is denied / Firebase isn't set up.
+    registerDevice();
+    // Native push (FCM) — request permission, register, listen for the token.
+    try {
+      const Push = P.PushNotifications;
+      if (Push) {
+        const perm = await Push.requestPermissions();
+        if (perm && perm.receive === 'granted') {
+          Push.addListener('registration', (t) => { if (t && t.value) registerDevice(t.value); });
+          Push.addListener('registrationError', (e) => console.warn('[push] reg error', e));
+          Push.addListener('pushNotificationReceived', (n) => {
+            // App is open — surface it in-app + play the matching sound.
+            try { const cat = n?.data?.category; if (cat && window.Sounds) Sounds._playDebounced(cat); } catch (_) {}
+            try { const t = n?.title, b = n?.body; if (t) toast(b ? `${t} — ${b}` : t, 'info', 6000); } catch (_) {}
+          });
+          Push.addListener('pushNotificationActionPerformed', (a) => {
+            try { const url = a?.notification?.data?.url; if (url && url.startsWith('/')) { /* deep-link handled by the SPA */ } } catch (_) {}
+          });
+          await Push.register();
+        }
+      }
+    } catch (e) { console.warn('[push] native register failed:', e.message); }
+  } catch (e) { console.warn('[native] init failed:', e.message); }
+}
+function registerDevice(pushToken) {
+  try {
+    const d = State.device || {};
+    if (!d.deviceId) return;
+    Api.post('/api/devices/register', {
+      deviceId: d.deviceId, model: d.model, platform: d.platform,
+      appVersion: d.appVersion, pushToken: pushToken || undefined,
+    }).catch(() => {});
   } catch (_) {}
 }
 
@@ -11098,6 +11153,10 @@ function renderActivity() {
         <div class="card-head"><h3 style="margin:0">App / device usage</h3></div>
         <div class="table-wrap"><table class="table"><thead><tr><th>Staff</th><th>Last seen</th><th class="num">Active days</th><th class="num">On app</th><th class="num">On browser</th><th>Last page</th></tr></thead><tbody id="act-usage"><tr><td colspan="6"><div class="empty"><div class="t">Loading…</div></div></td></tr></tbody></table></div>
       </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3 style="margin:0">Registered app devices</h3></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>Device</th><th>Signed in</th><th>App version</th><th>Push</th><th>Last seen</th></tr></thead><tbody id="act-devices"><tr><td colspan="5"><div class="empty"><div class="t">Loading…</div></div></td></tr></tbody></table></div>
+      </div>
       <div class="card">
         <div class="card-head" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
           <h3 style="margin:0">Recent activity</h3>
@@ -11130,8 +11189,27 @@ async function loadActivity() {
     if (sel) sel.innerHTML = '<option value="">All staff</option>' + staff.filter(s => s.userId).map(s => `<option value="${s.userId}">${escapeHtml(s.name)}</option>`).join('');
     loadActivityFeed();
     loadUsage();
+    loadDevices();
   } catch (e) {
     el('act-summary').innerHTML = `<div class="empty"><div class="t">Failed: ${escapeHtml(e.data?.message || e.message)}</div></div>`;
+  }
+}
+// Registered native-app devices (from the Android app's self-registration).
+async function loadDevices() {
+  const body = el('act-devices'); if (!body) return;
+  try {
+    const r = await Api.get('/api/devices');
+    const devices = r.devices || [];
+    body.innerHTML = devices.length ? devices.map(d => `
+      <tr>
+        <td>${escapeHtml(d.model || 'Device')}<div style="font-size:10px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml((d.device_id || '').slice(0, 12))}…</div></td>
+        <td>${escapeHtml(d.user_name || '—')}</td>
+        <td style="font-size:12px">${escapeHtml(d.app_version || '—')}</td>
+        <td>${d.push_enabled ? '<span style="color:var(--green)">● on</span>' : '<span style="color:var(--ink-soft)">off</span>'}</td>
+        <td style="white-space:nowrap">${d.last_seen ? fmtDate(d.last_seen) : '—'}</td>
+      </tr>`).join('') : `<tr><td colspan="5"><div class="empty"><div class="t">No app devices registered yet${r.pushConfigured === false ? ' · native push not configured' : ''}</div></div></td></tr>`;
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5"><div class="empty"><div class="t">Failed to load devices</div></div></td></tr>`;
   }
 }
 // Per-user app/device usage rollup (native handheld vs browser).

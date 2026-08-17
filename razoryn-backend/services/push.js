@@ -84,6 +84,9 @@ async function sendToAll({ title, body, url, tag, category, force } = {}) {
       if (Date.now() - last < PUSH_COOLDOWN_MS) return { sent: 0, throttled: true };
       _lastPushByCategory[category] = Date.now();
     }
+    // Also deliver to native Android app devices via FCM (no-op until Firebase is
+    // configured). Best-effort — never let native push break web push.
+    try { require('./fcm').sendToAll({ title, body, url, category }); } catch (_) {}
     await ensureSetup();
     const { rows } = await query(`SELECT endpoint, p256dh, auth FROM push_subscriptions`);
     if (!rows.length) return { sent: 0, total: 0 };

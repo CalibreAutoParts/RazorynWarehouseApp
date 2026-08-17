@@ -76,6 +76,7 @@ app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/staff',        require('./routes/staff'));
 app.use('/api/audit',        require('./routes/audit'));
 app.use('/api/usage',        require('./routes/usage'));
+app.use('/api/devices',      require('./routes/devices'));
 app.use('/api/pricing',      require('./routes/pricing'));
 app.use('/api/settings',     require('./routes/settings'));
 app.use('/api/costs',        require('./routes/costs'));
