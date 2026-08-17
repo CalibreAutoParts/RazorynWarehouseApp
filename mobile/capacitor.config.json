@@ -1,0 +1,21 @@
+{
+  "appId": "uk.co.calibreautoparts.warehouse",
+  "appName": "Warehouse Hub",
+  "webDir": "www",
+  "server": {
+    "url": "https://warehouse.calibreautoparts.co.uk",
+    "cleartext": false,
+    "androidScheme": "https",
+    "allowNavigation": [
+      "warehouse.calibreautoparts.co.uk",
+      "*.calibreautoparts.co.uk",
+      "*.railway.app"
+    ]
+  },
+  "appendUserAgent": "CalibreApp",
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false
+  }
+}
