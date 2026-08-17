@@ -852,14 +852,20 @@
   /* Never let content sit under the fixed bottom quick-bar. */
   body.is-app .content { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
   /* Top bar in app mode: logo centred (tap → Home); drop the kiosk toggle, the
-     top notifications button (there's a tab) and the top quick-scan button. */
+     top notifications button (there's a tab), the top quick-scan button, and the
+     user avatar/name chip (you already know who's logged in). Removing the chip
+     also frees the right side so the theme toggle no longer overlaps the logo. */
   body.is-app .topbar #kiosk-toggle,
   body.is-app .topbar #notif-btn,
-  body.is-app .topbar #quick-scan-btn { display: none !important; }
+  body.is-app .topbar #quick-scan-btn,
+  body.is-app .topbar .user-chip { display: none !important; }
+  /* Compact, centred logo (image only, tap → Home). Hiding the sub-text keeps it
+     narrow so it never overlaps the buttons on either side. */
   body.is-app .topbar .logo {
     position: absolute; left: 50%; transform: translateX(-50%);
-    cursor: pointer;
+    cursor: pointer; max-width: 55%;
   }
+  body.is-app .topbar .logo .sub { display: none; }
   /* Bottom quick-bar — theme-aware (uses --white so dark mode updates it). */
   #app-tabbar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
@@ -1778,7 +1784,37 @@ function fmtDate(iso) {
   if (diffH < 24) return Math.round(diffH) + 'h ago';
   return d.toLocaleDateString('en-GB', { day:'numeric', month:'short' });
 }
-function gbp(n) { return '£' + Number(n).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+// Money is admin-only. Warehouse staff never see sale prices / totals / refunds —
+// gbp() masks for them, and a mutation observer (initMoneyMask) scrubs any inline
+// "£x.xx" that a local formatter produced, so nothing leaks on any screen.
+function canSeeMoney() { return !State.user || State.user.role === 'admin'; }
+function gbp(n) {
+  if (State.user && State.user.role !== 'admin') return '£•••';
+  return '£' + Number(n).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+const MONEY_RE = /£\s?\d[\d,]*\.\d{2}/g;
+function initMoneyMask() {
+  if (canSeeMoney()) return;
+  if (window._moneyMaskObs) return;
+  const scrub = (node) => {
+    if (node.nodeType === 3) { if (MONEY_RE.test(node.nodeValue)) node.nodeValue = node.nodeValue.replace(MONEY_RE, '£•••'); return; }
+    if (node.nodeType !== 1) return;
+    const w = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, null);
+    const hits = []; let t;
+    while ((t = w.nextNode())) { MONEY_RE.lastIndex = 0; if (MONEY_RE.test(t.nodeValue)) hits.push(t); }
+    hits.forEach(n => { n.nodeValue = n.nodeValue.replace(MONEY_RE, '£•••'); });
+  };
+  const targets = ['content', 'modal-body'].map(id => document.getElementById(id)).filter(Boolean);
+  targets.forEach(scrub);
+  const obs = new MutationObserver(muts => {
+    for (const m of muts) {
+      if (m.type === 'characterData') { scrub(m.target); continue; }
+      for (const node of m.addedNodes) scrub(node);
+    }
+  });
+  targets.forEach(t => obs.observe(t, { childList: true, subtree: true, characterData: true }));
+  window._moneyMaskObs = obs;
+}
 
 /* ==========================================================
    INIT
@@ -2087,6 +2123,7 @@ function enterApp() {
   applyAppMode();           // strip to warehouse pages + bottom quick-bar in the app shell
   initHardwareScanner();    // global keyboard-wedge scanner capture (JR-927M etc.)
   initCopyTap();            // tap a part number / SKU to copy it
+  initMoneyMask();          // hide all £ amounts from non-admin (warehouse) staff
   initNativeApp();          // register device + native push (FCM) when in the APK
   initEditingTracker();
   initTableLabeller();

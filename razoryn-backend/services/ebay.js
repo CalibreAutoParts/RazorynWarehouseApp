@@ -387,6 +387,21 @@ function mapTradingOrderXml(oXml) {
   const shippingCost = parseFloat(extractOne(extractOne(oXml, 'ShippingServiceSelected') || '', 'ShippingServiceCost') || '0');
   const buyerUserId = decodeEntities(extractOne(oXml, 'BuyerUserID') || '');
   const checkoutStatus = extractOne(extractOne(oXml, 'CheckoutStatus') || '', 'Status');
+  // Order/cancel status so a cancellation or refund on eBay drops the order off the
+  // dispatch worklist. OrderStatus ∈ Active/Completed/Cancelled/Inactive/CancelPending;
+  // CancelStatus ∈ NotApplicable/CancelPending/CancelComplete/CancelClosed…
+  const orderStatusRaw = (extractOne(oXml, 'OrderStatus') || '').trim();
+  const cancelStatusRaw = (extractOne(oXml, 'CancelStatus') || '').trim();
+  const eBayPaymentStatus = (extractOne(oXml, 'eBayPaymentStatus') || '').trim();
+  const isCancelled = /^(Cancelled|Inactive|CancelPending)$/i.test(orderStatusRaw)
+    || (/Cancel/i.test(cancelStatusRaw) && !/NotApplicable/i.test(cancelStatusRaw));
+  const isRefunded = /Refund/i.test(eBayPaymentStatus);
+  // Refund amount from MonetaryDetails/Refund entries, if present.
+  let refundTotal = 0;
+  for (const rf of extractAll(oXml, 'Refund')) {
+    const amt = parseFloat(extractOne(rf, 'RefundAmount') || extractOne(rf, 'Amount') || '0') || 0;
+    if (amt) refundTotal += amt;
+  }
 
   const shipBlock = extractOne(oXml, 'ShippingAddress') || '';
   let street2Raw = decodeEntities(extractOne(shipBlock, 'Street2') || '');
@@ -430,6 +445,11 @@ function mapTradingOrderXml(oXml) {
       deliveryCost: { value: shippingCost }, tax: { value: 0 },
     },
     lineItems, checkoutStatus,
+    // Normalised so orderRefundInfo() works the same for Trading + Fulfillment orders.
+    orderStatus: orderStatusRaw || null,
+    orderPaymentStatus: isRefunded ? 'FULLY_REFUNDED' : null,
+    cancelStatus: isCancelled ? { cancelState: 'CANCELED' } : null,
+    paymentSummary: refundTotal > 0 ? { refunds: [{ amount: { value: refundTotal } }] } : null,
   };
 }
 
