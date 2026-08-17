@@ -513,4 +513,13 @@ app.listen(PORT, () => {
     const { query } = require('./db');
     require('./lib/howto-guides').seedHowtoGuides(query);
   } catch (e) { console.warn('[boot] howto seed failed:', e.message); }
+  // One-shot self-heal: reconcile every order that has a return so any stale/zero
+  // refunded_amount (e.g. a partial refund booked before a reconcile ran) is
+  // corrected — past orders reflect their true net value + drop from revenue.
+  // Deferred so it never delays the health check / first requests.
+  setTimeout(() => {
+    require('./lib/refunds').reconcileAllWithReturns()
+      .then(r => console.log(`[boot] refund reconcile: scanned ${r.scanned} order(s), ${r.updated} with a refund`))
+      .catch(e => console.warn('[boot] refund reconcile failed:', e.message));
+  }, 8000);
 });
