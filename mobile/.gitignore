@@ -1,0 +1,7 @@
+# Capacitor generates the native Android project fresh in CI (and locally) from
+# capacitor.config.json — it is large and machine-specific, so it is NOT committed.
+/android/
+/ios/
+node_modules/
+*.log
+.DS_Store

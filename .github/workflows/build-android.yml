@@ -1,0 +1,83 @@
+name: Build Android app
+
+# Builds the Warehouse Hub Android APK on a GitHub runner (the Android SDK can't
+# run in the Linux container the web app is developed in). The app is a thin
+# native shell that loads the live site, so this APK rarely needs rebuilding —
+# only for a new icon/name/URL or a Capacitor upgrade. The web app itself updates
+# automatically because the shell always loads the latest deployed site.
+#
+# Trigger: push a tag like `android-v1.0.0`, or run manually from the Actions tab
+# (optionally overriding the site URL, e.g. to build a Razoryn/staging variant).
+# The signed-for-debug APK is attached to the run as an artifact you can download
+# and sideload onto the JR-927M devices.
+
+on:
+  push:
+    tags:
+      - 'android-v*'
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: 'Site URL the app should load (blank = value in capacitor.config.json)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Capacitor deps
+        run: npm install
+
+      - name: Override site URL (optional)
+        if: ${{ github.event.inputs.app_url != '' }}
+        run: |
+          node -e "const f='capacitor.config.json';const c=require('./'+f);c.server=c.server||{};c.server.url='${{ github.event.inputs.app_url }}';require('fs').writeFileSync(f, JSON.stringify(c,null,2));console.log('Loading URL set to', c.server.url)"
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Sync web assets + config into the Android project
+        run: npx cap sync android
+
+      - name: Build debug APK
+        run: cd android && chmod +x ./gradlew && ./gradlew assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk warehouse-hub.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: warehouse-hub-apk
+          path: mobile/warehouse-hub.apk
+          if-no-files-found: error
+
+      - name: Attach APK to release (tag builds)
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mobile/warehouse-hub.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
