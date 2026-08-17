@@ -43,12 +43,18 @@ router.post('/', requireAdmin, async (req, res) => {
 });
 
 // PATCH /api/schedule/:id
-router.patch('/:id', requirePermission('schedule'), async (req, res) => {
+router.patch('/:id', async (req, res) => {
   const b = req.body || {};
-  const updates = {
+  const isAdmin = req.user?.role === 'admin' || (req.user?.permissions && req.user.permissions.schedule);
+  // Any signed-in staff member can tick a task done / reopen it (they carry out the
+  // assigned/daily tasks on the handheld). Editing a task's content — title, dates,
+  // assignee, type, recurrence — stays admin/permission-only.
+  const updates = isAdmin ? {
     title: b.title, description: b.description, task_type: b.taskType,
     scheduled_for: b.scheduledFor, due_time: b.dueTime,
     assigned_to: b.assignedTo, status: b.status, recurrence: b.recurrence,
+  } : {
+    status: b.status,
   };
   const sets = [], params = [];
   for (const [k, v] of Object.entries(updates)) {
