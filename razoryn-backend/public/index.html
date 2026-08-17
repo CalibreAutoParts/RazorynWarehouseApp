@@ -2739,6 +2739,21 @@ function syncAppTabBar() {
   });
 }
 
+// ── Usage tracking by user ──────────────────────────────────────────────────
+// Fire-and-forget ping as staff move around, so admins can see who's on the app,
+// how much, and on which device (native handheld vs browser). Throttled so it's
+// at most one call per minute per page — never blocks navigation.
+let _lastUsagePingMs = 0, _lastUsagePage = '';
+function trackUsage(page) {
+  try {
+    if (!State.user) return;
+    const now = Date.now();
+    if (page === _lastUsagePage && now - _lastUsagePingMs < 60000) return;
+    _lastUsagePingMs = now; _lastUsagePage = page;
+    Api.post('/api/usage/ping', { page, appShell: !!State.appShell }).catch(() => {});
+  } catch (_) {}
+}
+
 // ── Hardware barcode scanner (keyboard-wedge) global capture ────────────────
 // The JR-927M's built-in scanner types the barcode as fast keystrokes ending in
 // Enter. We capture that stream ANYWHERE in the app (even with no field focused)
@@ -2965,6 +2980,7 @@ function routeTo(page) {
     n.classList.toggle('active', active);
   });
   if (typeof syncAppTabBar === 'function') syncAppTabBar();
+  if (typeof trackUsage === 'function') trackUsage(page);
   // Close mobile sidebar
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('sb-backdrop').classList.remove('open');
@@ -11078,6 +11094,10 @@ function renderActivity() {
         </div>
       </div>
       <div id="act-summary" style="margin-bottom:16px"></div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3 style="margin:0">App / device usage</h3></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>Staff</th><th>Last seen</th><th class="num">Active days</th><th class="num">On app</th><th class="num">On browser</th><th>Last page</th></tr></thead><tbody id="act-usage"><tr><td colspan="6"><div class="empty"><div class="t">Loading…</div></div></td></tr></tbody></table></div>
+      </div>
       <div class="card">
         <div class="card-head" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
           <h3 style="margin:0">Recent activity</h3>
@@ -11109,8 +11129,29 @@ async function loadActivity() {
     const sel = el('act-user');
     if (sel) sel.innerHTML = '<option value="">All staff</option>' + staff.filter(s => s.userId).map(s => `<option value="${s.userId}">${escapeHtml(s.name)}</option>`).join('');
     loadActivityFeed();
+    loadUsage();
   } catch (e) {
     el('act-summary').innerHTML = `<div class="empty"><div class="t">Failed: ${escapeHtml(e.data?.message || e.message)}</div></div>`;
+  }
+}
+// Per-user app/device usage rollup (native handheld vs browser).
+async function loadUsage() {
+  const body = el('act-usage'); if (!body) return;
+  const days = el('act-days')?.value || '30';
+  try {
+    const r = await Api.get('/api/usage/summary?days=' + days);
+    const users = r.users || [];
+    body.innerHTML = users.length ? users.map(u => `
+      <tr>
+        <td>${escapeHtml(u.name)}${u.role ? ` <span style="font-size:10px;color:var(--ink-soft)">${escapeHtml(u.role)}</span>` : ''}</td>
+        <td style="white-space:nowrap">${u.last_seen ? fmtDate(u.last_seen) : '—'}</td>
+        <td class="num">${u.active_days || 0}</td>
+        <td class="num">${u.app_pings ? `<strong style="color:var(--brand-primary)">${u.app_pings}</strong>` : '0'}</td>
+        <td class="num">${u.web_pings || 0}</td>
+        <td style="color:var(--ink-soft);font-size:12px">${escapeHtml(u.last_page || '—')}</td>
+      </tr>`).join('') : '<tr><td colspan="6"><div class="empty"><div class="t">No app usage recorded in this period</div></div></td></tr>';
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="t">Failed to load usage</div></div></td></tr>`;
   }
 }
 async function loadActivityFeed() {
