@@ -830,25 +830,49 @@
      device's system bars. Kept scoped so the browser/desktop experience is
      untouched. */
   body.is-app { -webkit-tap-highlight-color: transparent; }
+  /* No long-press context menu (copy/message/call) or accidental text selection
+     on the handheld — it gets in the way of quick scanning. Inputs stay editable,
+     and anything marked .copyable stays tappable-to-copy (handled in JS). */
+  body.is-app, body.is-app * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+  body.is-app input, body.is-app textarea, body.is-app select, body.is-app [contenteditable] {
+    -webkit-user-select: text; user-select: text;
+  }
+  .copyable { cursor: pointer; }
+  /* Desktop/admin-only controls (eBay pull, channel syncs, print, etc.) — hidden
+     inside the app, which auto-refreshes and is a lean warehouse tool. */
+  body.is-app .app-hide { display: none !important; }
+  /* Toolbars: search gets a full-width row (no more cut-off), filters wrap below. */
+  body.is-app .toolbar { flex-wrap: wrap; gap: 8px; }
+  body.is-app .toolbar .search-input { flex: 1 1 100%; width: 100%; min-width: 0; font-size: 16px; }
+  body.is-app .toolbar .filter-select { flex: 1 1 45%; min-width: 0; }
   /* Roomier tap targets for gloved warehouse hands. */
   body.is-app .nav-item { padding: 13px 14px; font-size: 15px; }
   body.is-app .btn { min-height: 44px; }
   body.is-app input, body.is-app select, body.is-app textarea { min-height: 44px; font-size: 16px; } /* 16px stops iOS/Android zoom-on-focus */
   /* Never let content sit under the fixed bottom quick-bar. */
-  body.is-app .content { padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px)); }
-  /* Bottom quick-bar */
+  body.is-app .content { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
+  /* Top bar in app mode: logo centred (tap → Home); drop the kiosk toggle, the
+     top notifications button (there's a tab) and the top quick-scan button. */
+  body.is-app .topbar #kiosk-toggle,
+  body.is-app .topbar #notif-btn,
+  body.is-app .topbar #quick-scan-btn { display: none !important; }
+  body.is-app .topbar .logo {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    cursor: pointer;
+  }
+  /* Bottom quick-bar — theme-aware (uses --white so dark mode updates it). */
   #app-tabbar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
     display: none; align-items: stretch; justify-content: space-around;
-    background: var(--surface, #fff); border-top: 1px solid var(--line);
+    background: var(--white); border-top: 1px solid var(--line);
     padding-bottom: env(safe-area-inset-bottom, 0px);
-    box-shadow: 0 -2px 10px rgba(0,0,0,.06);
+    box-shadow: 0 -2px 10px rgba(0,0,0,.10);
   }
   body.is-app #app-tabbar { display: flex; }
   #app-tabbar .app-tab {
     flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 3px; padding: 8px 4px 6px; background: none; border: 0; cursor: pointer;
-    color: var(--ink-soft); font-size: 11px; font-weight: 600; min-height: 60px;
+    color: var(--ink-soft); font-size: 11px; font-weight: 600; min-height: 62px;
   }
   #app-tabbar .app-tab svg { width: 22px; height: 22px; }
   #app-tabbar .app-tab.active { color: var(--brand-primary); }
@@ -973,7 +997,7 @@
     <button class="menu-btn icon-btn" id="menu-toggle" aria-label="Menu">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
-    <div class="logo">
+    <div class="logo" onclick="if(window.State&&State.user)routeTo('dashboard')" title="Home">
       <img class="brand-logo light" src="/logo.png" alt="" data-brand-logo-light>
       <img class="brand-logo dark" src="/logo-dark.png" alt="" data-brand-logo-dark>
       <span class="sub">Warehouse Hub</span>
@@ -2062,6 +2086,7 @@ function enterApp() {
   initKiosk();
   applyAppMode();           // strip to warehouse pages + bottom quick-bar in the app shell
   initHardwareScanner();    // global keyboard-wedge scanner capture (JR-927M etc.)
+  initCopyTap();            // tap a part number / SKU to copy it
   initNativeApp();          // register device + native push (FCM) when in the APK
   initEditingTracker();
   initTableLabeller();
@@ -2163,6 +2188,9 @@ function enterApp() {
         lastLowStockIds = currentLow;
       }
       if (State.page === 'schedule') await Store.refresh('schedule');
+      // Dispatch auto-refreshes (the app has no manual sync/refresh button) so the
+      // worklist stays live as orders come in and get shipped/collected.
+      if (State.page === 'dispatch' && typeof loadDispatch === 'function') { try { await loadDispatch(); } catch (_) {} }
       // Repaint the current page so changes are visible
       const repaintMap = {
         dashboard: typeof renderDashboard === 'function' ? renderDashboard : null,
@@ -2684,15 +2712,16 @@ function initKiosk() {
 // warehouse workflow: operational pages + Settings only (no marketing/admin
 // management), a bottom quick-bar for one-tap Scan/Inventory/Dispatch/Returns,
 // bigger touch targets, and global hardware-scanner capture.
-const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','scan','stocktake','locations','returns','dispatch','notifications','settings']);
-// Pages surfaced in the bottom quick-bar (order = left→right). Only shown if the
-// user has permission for them.
+const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','locations','returns','dispatch','notifications','schedule','settings']);
+// Pages surfaced in the bottom quick-bar (order = left→right). Home is leftmost.
+// Only shown if the user has permission for them. Scan lives inside Stock Check
+// now (hardware scanner is automatic), so there's no separate Scan tab.
 const APP_TAB_BAR = [
-  { page: 'scan',      label: 'Scan',    icon: 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h0M12 7v10M17 12h0' },
-  { page: 'inventory', label: 'Stock',   icon: 'M20 7 12 3 4 7l8 4 8-4zM4 7v10l8 4 8-4V7M12 11v10' },
-  { page: 'dispatch',  label: 'Dispatch',icon: 'M1 3h15v13H1zM16 8h4l3 3v5h-7V8zM5.5 18.5a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM16.5 18.5a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0z' },
-  { page: 'returns',   label: 'Returns', icon: 'M3 7v6h6M3 13a9 9 0 1 0 3-7.7L3 8' },
-  { page: 'dashboard', label: 'Home',    icon: 'M3 12l9-9 9 9M5 10v10h14V10' },
+  { page: 'dashboard', label: 'Home',     icon: 'M3 12l9-9 9 9M5 10v10h14V10' },
+  { page: 'stocktake', label: 'Stock',    icon: 'M20 7 12 3 4 7l8 4 8-4zM4 7v10l8 4 8-4V7M12 11v10' },
+  { page: 'dispatch',  label: 'Dispatch', icon: 'M1 3h15v13H1zM16 8h4l3 3v5h-7V8zM5.5 18.5a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM16.5 18.5a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0z' },
+  { page: 'returns',   label: 'Returns',  icon: 'M3 7v6h6M3 13a9 9 0 1 0 3-7.7L3 8' },
+  { page: 'schedule',  label: 'Tasks',    icon: 'M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9' },
 ];
 function detectAppShell() {
   try {
@@ -2844,6 +2873,35 @@ function initHardwareScanner() {
     }
   }, true);
 }
+// Tap-to-copy: since long-press/text-selection is disabled in the app, a single
+// tap on a part number / SKU (anything marked .copyable or [data-copy]) copies it
+// to the clipboard. Delegated, so it also covers content rendered later.
+function initCopyTap() {
+  if (window._copyTapInit) return; window._copyTapInit = true;
+  document.addEventListener('click', (e) => {
+    const t = e.target.closest && e.target.closest('[data-copy], .copyable');
+    if (!t) return;
+    const text = (t.getAttribute('data-copy') || t.textContent || '').trim();
+    if (!text) return;
+    copyToClipboard(text);
+  });
+}
+function copyToClipboard(text) {
+  const done = () => { try { toast('Copied: ' + text, 'success', 1800); } catch (_) {} };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done)); }
+    else fallbackCopy(text, done);
+  } catch (_) { fallbackCopy(text, done); }
+}
+function fallbackCopy(text, done) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    if (done) done();
+  } catch (_) {}
+}
+
 // Route a hardware scan to the most useful place: if we're on Scan/Stocktake let
 // their own handler take it; otherwise jump to inventory search for the code.
 function onHardwareScan(code) {
@@ -2957,9 +3015,13 @@ async function clockOut(btn) {
 
 function hasPerm(page) {
   if (!State.user) return false;
-  // Native app shell (handheld): warehouse workflow + Settings only, regardless of
-  // role — the admin/marketing management pages aren't part of on-device use.
-  if (State.appShell && !APP_PAGES.has(page)) return false;
+  // Native app shell (handheld): only the warehouse workflow pages exist.
+  if (State.appShell) {
+    if (!APP_PAGES.has(page)) return false;
+    if (page === 'settings') return State.user.role === 'admin';  // staff: no Settings
+    if (page === 'schedule') return true;                          // Tasks visible to all staff
+    // other pages fall through to the normal role/permission checks below
+  }
   // Kiosk view locks the app to a small, customer-safe set of pages regardless of role.
   if (State.kiosk && !KIOSK_PAGES.has(page)) return false;
   if (State.user.role === 'admin') return true;
@@ -3074,8 +3136,8 @@ function renderStockTake() {
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
-        <div><h1>Monthly stock-take</h1><div class="desc">Walk the warehouse and tick off each item as you count it — progress is saved.</div></div>
-        <div class="actions">
+        <div><h1>Stock Check</h1><div class="desc">Walk the warehouse and tick off each item as you count it — progress is saved${State.appShell ? '. Scan an item with the device to jump straight to it.' : '.'}</div></div>
+        <div class="actions app-hide">
           <button class="btn btn-outline" onclick="stPrintForm()" title="Print a paper count sheet of the items currently shown (use the filters to choose 'remaining', 'all', or a location)">🖨 Print form</button>
           <button class="btn btn-outline admin-only" onclick="stOpenRestore()" title="Fix items whose stock was wrongly re-inflated by a stock-take (e.g. sold-out items showing stock again)">⚠️ Fix inflated counts</button>
           <button class="btn btn-outline admin-only" onclick="stResetCheck(this)" title="Start a brand-new stock check — everything goes back to 'left to check'. History is kept.">🔄 Start new check</button>
@@ -3092,8 +3154,8 @@ function renderStockTake() {
         <div style="height:10px;background:var(--line-2);border-radius:6px;overflow:hidden"><div id="st-progress-bar" style="height:100%;width:0;background:var(--brand-primary);transition:width .25s"></div></div>
       </div></div>
       <div class="toolbar">
-        <input type="search" class="search-input" id="st-search" placeholder="Search by name, SKU, part #...">
-        <button class="btn btn-outline" onclick="stStartScan()" title="Scan an item barcode with the camera to jump straight to counting it">📷 Scan</button>
+        <input type="search" class="search-input" id="st-search" placeholder="Search name, SKU, part #...">
+        <button class="btn btn-outline app-hide" onclick="stStartScan()" title="Scan an item barcode with the camera to jump straight to counting it">📷 Scan</button>
         <select class="filter-select" id="st-filter">
           <option value="remaining">Remaining to count</option>
           <option value="all">All items</option>
@@ -3115,6 +3177,9 @@ function renderStockTake() {
     </div>`;
 
   State._stChecked = State._stChecked || new Set();
+  // In the app, default to "All items" (Show all) so staff can find anything to
+  // count without switching the filter first.
+  if (State.appShell) { const f = el('st-filter'); if (f) f.value = 'all'; }
   stPopulateFilters();
   // Pull BOTH a fresh product catalogue and this month's counted IDs before
   // painting. The take list is built from State.products, which is otherwise the
@@ -3686,7 +3751,7 @@ function renderDashboard() {
           <div class="desc">${new Date().toLocaleDateString('en-GB', { weekday:'long', day:'numeric', month:'long' })} · ${escapeHtml(State.brand?.name || 'Warehouse Hub')}</div>
         </div>
         <div class="actions">
-          <button class="btn btn-outline" onclick="syncNow()">
+          <button class="btn btn-outline app-hide" onclick="syncNow()">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             Sync now
           </button>
@@ -4340,8 +4405,8 @@ function renderInventory() {
       <div class="page-head">
         <div><h1>Inventory</h1><div class="desc">Live stock synced across Shopify and eBay</div></div>
         <div class="actions">
-          <button class="btn btn-outline" onclick="routeTo('labels')" title="Generate thermal barcode labels">🏷 Labels</button>
-          <button class="btn btn-outline" onclick="syncNow()">↻ Sync</button>
+          <button class="btn btn-outline app-hide" onclick="routeTo('labels')" title="Generate thermal barcode labels">🏷 Labels</button>
+          <button class="btn btn-outline app-hide" onclick="syncNow()">↻ Sync</button>
           <button class="btn btn-primary admin-only" onclick="openProductModal()">+ Add product</button>
         </div>
       </div>
@@ -6434,8 +6499,8 @@ function renderReturns() {
       <div class="page-head">
         <div><h1>Returns</h1><div class="desc">Auto-synced from eBay every 15 min. New cases &amp; state changes appear in 🔔 notifications. Click any card for details.</div></div>
         <div class="actions">
-          <button class="btn btn-outline" onclick="relinkReturns()" title="Fix wrong product matches, re-link unmatched returns, and re-sync open/closed statuses">🔧 Repair</button>
-          <button class="btn btn-outline" onclick="syncEbayReturns()" title="Pull return cases from eBay right now">↩️ Pull from eBay</button>
+          <button class="btn btn-outline app-hide" onclick="relinkReturns()" title="Fix wrong product matches, re-link unmatched returns, and re-sync open/closed statuses">🔧 Repair</button>
+          <button class="btn btn-outline app-hide" onclick="syncEbayReturns()" title="Pull return cases from eBay right now">↩️ Pull from eBay</button>
           <button class="btn btn-primary" onclick="openReturnModal()">+ Log return</button>
         </div>
       </div>
@@ -6776,6 +6841,9 @@ function setDispatchChannel(key) {
 function renderDispatch() {
   if (!State.dispatchSelected) State.dispatchSelected = new Set();
   if (!State.dispatchChannel) State.dispatchChannel = 'all';
+  // Native app: a lean, warehouse-only Dispatch — two tabs (package & ship /
+  // prepare for collection), no channel split, no past orders, no sync buttons.
+  if (State.appShell) { renderDispatchApp(); return; }
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
@@ -6986,6 +7054,7 @@ async function loadDispatch() {
 // Paint the three sections. Each adopts a common "order row" pattern with
 // channel pill, age, customer, items, total, action button.
 function paintDispatch() {
+  if (State.appShell) { paintDispatchApp(); return; }
   const data = State.dispatch || {};
   const toShip = (data.toShip || []).filter(s => dispatchChannelMatch(s.channel));
   const toCollect = (data.toCollect || []).filter(s => dispatchChannelMatch(s.channel));
@@ -7096,6 +7165,74 @@ function paintDispatch() {
       </div>
     </details>
   `;
+}
+
+// ── Mobile Dispatch (native app) ────────────────────────────────────────────
+// Warehouse staff just need: what to take out and package for shipping, and what
+// to get ready for collection (no packaging). Two tabs, card list, one big action
+// per order. No channels, no past orders, no eBay pull — it auto-refreshes.
+function renderDispatchApp() {
+  if (!State.dispatchAppTab) State.dispatchAppTab = 'ship';
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head"><div><h1>Dispatch</h1><div class="desc">Take out and package for shipping, or get ready for collection.</div></div></div>
+      <div id="disp-tabs" style="display:flex;gap:8px;margin-bottom:14px">
+        <button class="disp-tab" data-tab="ship" onclick="setDispatchAppTab('ship')">📦 To package &amp; ship <span class="disp-count" id="disp-count-ship">0</span></button>
+        <button class="disp-tab" data-tab="collect" onclick="setDispatchAppTab('collect')">🤝 For collection <span class="disp-count" id="disp-count-collect">0</span></button>
+      </div>
+      <div id="dispatch-content"><div class="empty"><div class="t">Loading…</div></div></div>
+    </div>
+    <style>
+      #disp-tabs .disp-tab{flex:1;padding:11px 8px;border:1px solid var(--line);background:var(--white);color:var(--ink-soft);
+        border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px}
+      #disp-tabs .disp-tab.active{background:var(--brand-primary);color:#fff;border-color:var(--brand-primary)}
+      #disp-tabs .disp-count{background:rgba(0,0,0,.12);border-radius:10px;padding:1px 7px;font-size:12px}
+      #disp-tabs .disp-tab.active .disp-count{background:rgba(255,255,255,.25)}
+      .disp-card{display:flex;align-items:center;gap:12px;padding:14px;border-bottom:1px solid var(--line)}
+      .disp-card .disp-main{flex:1;min-width:0}
+      .disp-card .disp-ref{font-family:ui-monospace,monospace;font-size:12px;color:var(--ink-soft)}
+      .disp-card .disp-title{font-weight:600;font-size:14px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .disp-card .disp-sub{font-size:12px;color:var(--ink-soft);margin-top:2px}
+    </style>`;
+  loadDispatch();
+}
+function setDispatchAppTab(tab) {
+  State.dispatchAppTab = tab;
+  document.querySelectorAll('#disp-tabs .disp-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  paintDispatchApp();
+}
+function paintDispatchApp() {
+  const data = State.dispatch || {};
+  const toShip = data.toShip || [];
+  const toCollect = data.toCollect || [];
+  const cs = el('disp-count-ship'); if (cs) cs.textContent = toShip.length;
+  const cc = el('disp-count-collect'); if (cc) cc.textContent = toCollect.length;
+  document.querySelectorAll('#disp-tabs .disp-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === State.dispatchAppTab));
+  const list = State.dispatchAppTab === 'collect' ? toCollect : toShip;
+  const isCollect = State.dispatchAppTab === 'collect';
+  const box = el('dispatch-content'); if (!box) return;
+  if (!list.length) {
+    box.innerHTML = `<div class="card"><div class="empty" style="padding:40px 16px"><div class="t">${isCollect ? 'No collections to prepare' : 'Nothing to package'}</div><div style="font-size:12px;color:var(--ink-soft)">New paid orders appear here automatically.</div></div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="card"><div style="padding:0">${list.map(s => {
+    const ref = s.invoice_number || s.payment_reference || s.external_order_id || '#' + s.id;
+    const itemLabel = s.first_item_title
+      ? (s.item_count > 1 ? `${escapeHtml(s.first_item_title)} +${s.item_count - 1}` : escapeHtml(s.first_item_title))
+      : '(no items)';
+    const age = describeAge(s.age_hours, true);
+    const action = isCollect
+      ? `<button class="btn btn-primary" onclick="event.stopPropagation();openCollectModal('${s.id}')">✓ Collected</button>`
+      : `<button class="btn btn-primary" onclick="event.stopPropagation();openDispatchModal('${s.id}')">📦 Shipped</button>`;
+    return `<div class="disp-card" onclick="openSaleDetail('${s.id}')">
+      <div class="disp-main">
+        <div class="disp-ref copyable">${escapeHtml(ref)}</div>
+        <div class="disp-title">${itemLabel}</div>
+        <div class="disp-sub">${escapeHtml(s.customer_name || '—')}${isCollect && s.customer_phone ? ' · ' + escapeHtml(s.customer_phone) : ''} · ${age}</div>
+      </div>
+      ${action}
+    </div>`;
+  }).join('')}</div></div>`;
 }
 
 function renderDispatchRow(s, kind) {
@@ -17895,6 +18032,20 @@ function renderSettings() {
             <a id="desktop-linux" class="btn btn-outline" href="/api/desktop/download?platform=linux" style="display:none">⬇ Download for Linux</a>
           </div>
           <div id="desktop-help" style="display:none;font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
+        </div>
+      </div>
+
+      <!-- Android app download -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>📱 Android app (handheld)</h3>
+          <div class="card-desc">Install the warehouse app on the JR-927M handheld scanners. It runs as its own app and updates automatically.</div>
+        </div>
+        <div class="card-body">
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <a class="btn btn-primary" href="/app">⬇ Download Android app</a>
+          </div>
+          <div style="font-size:12px;color:var(--ink-soft);margin-top:8px">Or open <strong>${(State.brand?.appHost || location.host)}/app</strong> on the device itself and tap Download.</div>
         </div>
       </div>
 
