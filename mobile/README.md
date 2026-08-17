@@ -4,6 +4,25 @@ A native Android app (Capacitor) that wraps the live Warehouse Hub. It installs
 and runs like any downloaded app — its own icon, full-screen, standalone — **not**
 a browser tab. It's built for the rugged **JR-927M** handheld scanners.
 
+## Two branded apps
+
+The build produces a separate APK per brand, each with its **own launcher icon,
+name and live URL** — so a device gets the right one:
+
+| Brand   | App name           | Loads                                   | Icon source |
+|---------|--------------------|-----------------------------------------|-------------|
+| Calibre | Calibre Warehouse  | `warehouse.calibreautoparts.co.uk`      | `razoryn-backend/public/icons/calibre-1024.png` |
+| Razoryn | Razoryn Warehouse  | `warehouse.razoryn.co.uk`               | `razoryn-backend/public/icons/razoryn-1024.png` |
+
+Each brand's settings live in `brands/<brand>.json` (app id, name, URL, icon).
+`scripts/prepare.js <brand>` writes `capacitor.config.json` and stages that
+brand's logo; `capacitor-assets` then generates the Android launcher icons from
+it. Because both are just shells over the live site, the two apps can be installed
+side by side and each always shows its own brand's latest deployed web app.
+
+> Razoryn's URL defaults to `warehouse.razoryn.co.uk` — if that host differs,
+> change it in `brands/razoryn.json` (or override with `APP_URL=` when building).
+
 ## How updates work (no re-downloading the APK)
 
 - **The app content** — every page, feature, fix and price change — updates
@@ -57,11 +76,12 @@ Built automatically by GitHub Actions.
    git tag android-v1.0.0
    git push origin android-v1.0.0
    ```
-   …or run the **Build Android app** workflow from the **Actions** tab (you can
-   optionally override the site URL there to build a Razoryn/staging variant).
-2. When it finishes, download **`warehouse-hub-apk`** from the run's **Artifacts**
-   (tag builds also attach the APK to a GitHub Release).
-3. Sideload onto each device: copy `warehouse-hub.apk` over, enable **Install
+   …or run the **Build Android app** workflow from the **Actions** tab (pick
+   `both`, `calibre` or `razoryn`).
+2. When it finishes, download the APK for the brand you want from the run's
+   **Artifacts** — **`warehouse-calibre-apk`** and/or **`warehouse-razoryn-apk`**
+   (tag builds also attach each APK to a GitHub Release).
+3. Sideload onto each device: copy `warehouse-<brand>.apk` over, enable **Install
    unknown apps** for your file manager, tap to install. Installing a newer APK
    over the old one keeps its data.
 
@@ -72,11 +92,15 @@ Requires Node 20+, JDK 17 and the Android SDK.
 ```
 cd mobile
 npm install
-npx cap add android      # generates the native project (git-ignored)
+node scripts/prepare.js calibre   # or: razoryn  → writes config + stages the icon
+npx cap add android               # generates the native project (git-ignored)
+npx capacitor-assets generate --android   # brand launcher icons
 npx cap sync android
 cd android && ./gradlew assembleDebug
 # → android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Or use the shortcuts: `npm run build:calibre` / `npm run build:razoryn`.
 
 ## Configuration
 
@@ -95,10 +119,11 @@ config on every build, so config is the single source of truth.
 
 ## App icon (branding)
 
-The default build uses Capacitor's placeholder icon. To brand it, drop a square
-**1024×1024 PNG** logo and run `@capacitor/assets` (generates every Android
-density), or replace the icons under `android/app/src/main/res/mipmap-*` after
-`npx cap add android`, then rebuild.
+Each brand's launcher icon is generated automatically from its logo
+(`brands/<brand>.json` → `icon`), which points at the existing brand logos in
+`razoryn-backend/public/icons/` (`calibre-1024.png`, `razoryn-1024.png`). To
+change an icon, replace that PNG (keep it square, 1024×1024) — the next build
+regenerates every Android density from it. No manual icon steps needed.
 
 ## Signed release (before wide rollout)
 

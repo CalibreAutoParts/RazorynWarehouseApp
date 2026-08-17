@@ -1,15 +1,19 @@
 {
-  "name": "calibre-warehouse-mobile",
+  "name": "warehouse-hub-mobile",
   "version": "1.0.0",
-  "description": "Calibre Auto Parts — Warehouse Hub Android app (native shell around the live web app)",
+  "description": "Warehouse Hub Android app — native shell around the live web app (Calibre + Razoryn brands)",
   "author": "Calibre Auto Parts Ltd",
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
+    "prepare:calibre": "node scripts/prepare.js calibre",
+    "prepare:razoryn": "node scripts/prepare.js razoryn",
+    "icons": "capacitor-assets generate --android",
     "add:android": "cap add android",
     "sync": "cap sync android",
     "open": "cap open android",
-    "build:apk": "cap sync android && cd android && ./gradlew assembleDebug"
+    "build:calibre": "node scripts/prepare.js calibre && cap sync android && npm run icons && cd android && ./gradlew assembleDebug",
+    "build:razoryn": "node scripts/prepare.js razoryn && cap sync android && npm run icons && cd android && ./gradlew assembleDebug"
   },
   "dependencies": {
     "@capacitor/android": "^6.2.0",
@@ -17,6 +21,7 @@
     "@capacitor/core": "^6.2.0"
   },
   "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
     "@capacitor/cli": "^6.2.0"
   }
 }

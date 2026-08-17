@@ -1,0 +1,12 @@
+{
+  "appId": "uk.co.calibreautoparts.warehouse",
+  "appName": "Calibre Warehouse",
+  "url": "https://warehouse.calibreautoparts.co.uk",
+  "userAgentTag": "CalibreApp",
+  "icon": "../razoryn-backend/public/icons/calibre-1024.png",
+  "allowNavigation": [
+    "warehouse.calibreautoparts.co.uk",
+    "*.calibreautoparts.co.uk",
+    "*.railway.app"
+  ]
+}

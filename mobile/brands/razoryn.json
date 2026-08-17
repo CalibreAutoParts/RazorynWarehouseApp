@@ -1,0 +1,12 @@
+{
+  "appId": "uk.co.razoryn.warehouse",
+  "appName": "Razoryn Warehouse",
+  "url": "https://warehouse.razoryn.co.uk",
+  "userAgentTag": "RazorynApp",
+  "icon": "../razoryn-backend/public/icons/razoryn-1024.png",
+  "allowNavigation": [
+    "warehouse.razoryn.co.uk",
+    "*.razoryn.co.uk",
+    "*.railway.app"
+  ]
+}
