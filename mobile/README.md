@@ -53,6 +53,21 @@ agent / Capacitor) and automatically switches to **app mode**:
 
 No app-mode work is needed here — it's all in the web app and ships automatically.
 
+## Native push notifications + device/usage tracking
+
+This is a real native Android app, so it does native things beyond the web UI:
+
+- **Native push (FCM):** the app registers for Firebase Cloud Messaging and sends
+  its token to the server; every notification the system already raises (new
+  order, return, low stock, …) is then delivered to the handheld by Android even
+  when the app is closed. Turning it on is a one-time Firebase setup — see
+  **[FIREBASE_PUSH_SETUP.md](FIREBASE_PUSH_SETUP.md)**. Until it's configured the
+  app still works; it just won't get OS push while closed.
+- **Device + usage tracking:** on launch the app registers its device (model, id,
+  app version, signed-in user) — visible to admins under **Activity → Registered
+  app devices** — and reports page activity, so admins see **what each user is
+  doing and on which device** (Activity → App/device usage). No GPS.
+
 ## The built-in scanner
 
 The JR-927M's scanner works as a **keyboard wedge** (a trigger-pull "types" the
