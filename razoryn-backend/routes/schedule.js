@@ -8,7 +8,9 @@ const router = express.Router();
 router.use(requireAuth);
 
 // GET /api/schedule?date=YYYY-MM-DD&from=&to=
-router.get('/', requirePermission('schedule'), async (req, res) => {
+// Any signed-in staff member can VIEW tasks (they need to see what's assigned /
+// due on the handheld). Creating/editing tasks stays admin-only below.
+router.get('/', async (req, res) => {
   const { date, from, to } = req.query;
   const where = [], params = [];
   if (date)  { params.push(date); where.push(`scheduled_for = $${params.length}`); }
