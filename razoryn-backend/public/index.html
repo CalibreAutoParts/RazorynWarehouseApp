@@ -841,6 +841,10 @@
   /* Desktop/admin-only controls (eBay pull, channel syncs, print, etc.) — hidden
      inside the app, which auto-refreshes and is a lean warehouse tool. */
   body.is-app .app-hide { display: none !important; }
+  /* Toolbars: search gets a full-width row (no more cut-off), filters wrap below. */
+  body.is-app .toolbar { flex-wrap: wrap; gap: 8px; }
+  body.is-app .toolbar .search-input { flex: 1 1 100%; width: 100%; min-width: 0; font-size: 16px; }
+  body.is-app .toolbar .filter-select { flex: 1 1 45%; min-width: 0; }
   /* Roomier tap targets for gloved warehouse hands. */
   body.is-app .nav-item { padding: 13px 14px; font-size: 15px; }
   body.is-app .btn { min-height: 44px; }
@@ -2184,6 +2188,9 @@ function enterApp() {
         lastLowStockIds = currentLow;
       }
       if (State.page === 'schedule') await Store.refresh('schedule');
+      // Dispatch auto-refreshes (the app has no manual sync/refresh button) so the
+      // worklist stays live as orders come in and get shipped/collected.
+      if (State.page === 'dispatch' && typeof loadDispatch === 'function') { try { await loadDispatch(); } catch (_) {} }
       // Repaint the current page so changes are visible
       const repaintMap = {
         dashboard: typeof renderDashboard === 'function' ? renderDashboard : null,
@@ -3129,8 +3136,8 @@ function renderStockTake() {
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
-        <div><h1>Monthly stock-take</h1><div class="desc">Walk the warehouse and tick off each item as you count it — progress is saved.</div></div>
-        <div class="actions">
+        <div><h1>Stock Check</h1><div class="desc">Walk the warehouse and tick off each item as you count it — progress is saved${State.appShell ? '. Scan an item with the device to jump straight to it.' : '.'}</div></div>
+        <div class="actions app-hide">
           <button class="btn btn-outline" onclick="stPrintForm()" title="Print a paper count sheet of the items currently shown (use the filters to choose 'remaining', 'all', or a location)">🖨 Print form</button>
           <button class="btn btn-outline admin-only" onclick="stOpenRestore()" title="Fix items whose stock was wrongly re-inflated by a stock-take (e.g. sold-out items showing stock again)">⚠️ Fix inflated counts</button>
           <button class="btn btn-outline admin-only" onclick="stResetCheck(this)" title="Start a brand-new stock check — everything goes back to 'left to check'. History is kept.">🔄 Start new check</button>
@@ -3147,8 +3154,8 @@ function renderStockTake() {
         <div style="height:10px;background:var(--line-2);border-radius:6px;overflow:hidden"><div id="st-progress-bar" style="height:100%;width:0;background:var(--brand-primary);transition:width .25s"></div></div>
       </div></div>
       <div class="toolbar">
-        <input type="search" class="search-input" id="st-search" placeholder="Search by name, SKU, part #...">
-        <button class="btn btn-outline" onclick="stStartScan()" title="Scan an item barcode with the camera to jump straight to counting it">📷 Scan</button>
+        <input type="search" class="search-input" id="st-search" placeholder="Search name, SKU, part #...">
+        <button class="btn btn-outline app-hide" onclick="stStartScan()" title="Scan an item barcode with the camera to jump straight to counting it">📷 Scan</button>
         <select class="filter-select" id="st-filter">
           <option value="remaining">Remaining to count</option>
           <option value="all">All items</option>
@@ -3170,6 +3177,9 @@ function renderStockTake() {
     </div>`;
 
   State._stChecked = State._stChecked || new Set();
+  // In the app, default to "All items" (Show all) so staff can find anything to
+  // count without switching the filter first.
+  if (State.appShell) { const f = el('st-filter'); if (f) f.value = 'all'; }
   stPopulateFilters();
   // Pull BOTH a fresh product catalogue and this month's counted IDs before
   // painting. The take list is built from State.products, which is otherwise the
@@ -4395,8 +4405,8 @@ function renderInventory() {
       <div class="page-head">
         <div><h1>Inventory</h1><div class="desc">Live stock synced across Shopify and eBay</div></div>
         <div class="actions">
-          <button class="btn btn-outline" onclick="routeTo('labels')" title="Generate thermal barcode labels">🏷 Labels</button>
-          <button class="btn btn-outline" onclick="syncNow()">↻ Sync</button>
+          <button class="btn btn-outline app-hide" onclick="routeTo('labels')" title="Generate thermal barcode labels">🏷 Labels</button>
+          <button class="btn btn-outline app-hide" onclick="syncNow()">↻ Sync</button>
           <button class="btn btn-primary admin-only" onclick="openProductModal()">+ Add product</button>
         </div>
       </div>
@@ -6489,8 +6499,8 @@ function renderReturns() {
       <div class="page-head">
         <div><h1>Returns</h1><div class="desc">Auto-synced from eBay every 15 min. New cases &amp; state changes appear in 🔔 notifications. Click any card for details.</div></div>
         <div class="actions">
-          <button class="btn btn-outline" onclick="relinkReturns()" title="Fix wrong product matches, re-link unmatched returns, and re-sync open/closed statuses">🔧 Repair</button>
-          <button class="btn btn-outline" onclick="syncEbayReturns()" title="Pull return cases from eBay right now">↩️ Pull from eBay</button>
+          <button class="btn btn-outline app-hide" onclick="relinkReturns()" title="Fix wrong product matches, re-link unmatched returns, and re-sync open/closed statuses">🔧 Repair</button>
+          <button class="btn btn-outline app-hide" onclick="syncEbayReturns()" title="Pull return cases from eBay right now">↩️ Pull from eBay</button>
           <button class="btn btn-primary" onclick="openReturnModal()">+ Log return</button>
         </div>
       </div>
@@ -6831,6 +6841,9 @@ function setDispatchChannel(key) {
 function renderDispatch() {
   if (!State.dispatchSelected) State.dispatchSelected = new Set();
   if (!State.dispatchChannel) State.dispatchChannel = 'all';
+  // Native app: a lean, warehouse-only Dispatch — two tabs (package & ship /
+  // prepare for collection), no channel split, no past orders, no sync buttons.
+  if (State.appShell) { renderDispatchApp(); return; }
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
@@ -7041,6 +7054,7 @@ async function loadDispatch() {
 // Paint the three sections. Each adopts a common "order row" pattern with
 // channel pill, age, customer, items, total, action button.
 function paintDispatch() {
+  if (State.appShell) { paintDispatchApp(); return; }
   const data = State.dispatch || {};
   const toShip = (data.toShip || []).filter(s => dispatchChannelMatch(s.channel));
   const toCollect = (data.toCollect || []).filter(s => dispatchChannelMatch(s.channel));
@@ -7151,6 +7165,74 @@ function paintDispatch() {
       </div>
     </details>
   `;
+}
+
+// ── Mobile Dispatch (native app) ────────────────────────────────────────────
+// Warehouse staff just need: what to take out and package for shipping, and what
+// to get ready for collection (no packaging). Two tabs, card list, one big action
+// per order. No channels, no past orders, no eBay pull — it auto-refreshes.
+function renderDispatchApp() {
+  if (!State.dispatchAppTab) State.dispatchAppTab = 'ship';
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head"><div><h1>Dispatch</h1><div class="desc">Take out and package for shipping, or get ready for collection.</div></div></div>
+      <div id="disp-tabs" style="display:flex;gap:8px;margin-bottom:14px">
+        <button class="disp-tab" data-tab="ship" onclick="setDispatchAppTab('ship')">📦 To package &amp; ship <span class="disp-count" id="disp-count-ship">0</span></button>
+        <button class="disp-tab" data-tab="collect" onclick="setDispatchAppTab('collect')">🤝 For collection <span class="disp-count" id="disp-count-collect">0</span></button>
+      </div>
+      <div id="dispatch-content"><div class="empty"><div class="t">Loading…</div></div></div>
+    </div>
+    <style>
+      #disp-tabs .disp-tab{flex:1;padding:11px 8px;border:1px solid var(--line);background:var(--white);color:var(--ink-soft);
+        border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px}
+      #disp-tabs .disp-tab.active{background:var(--brand-primary);color:#fff;border-color:var(--brand-primary)}
+      #disp-tabs .disp-count{background:rgba(0,0,0,.12);border-radius:10px;padding:1px 7px;font-size:12px}
+      #disp-tabs .disp-tab.active .disp-count{background:rgba(255,255,255,.25)}
+      .disp-card{display:flex;align-items:center;gap:12px;padding:14px;border-bottom:1px solid var(--line)}
+      .disp-card .disp-main{flex:1;min-width:0}
+      .disp-card .disp-ref{font-family:ui-monospace,monospace;font-size:12px;color:var(--ink-soft)}
+      .disp-card .disp-title{font-weight:600;font-size:14px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .disp-card .disp-sub{font-size:12px;color:var(--ink-soft);margin-top:2px}
+    </style>`;
+  loadDispatch();
+}
+function setDispatchAppTab(tab) {
+  State.dispatchAppTab = tab;
+  document.querySelectorAll('#disp-tabs .disp-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  paintDispatchApp();
+}
+function paintDispatchApp() {
+  const data = State.dispatch || {};
+  const toShip = data.toShip || [];
+  const toCollect = data.toCollect || [];
+  const cs = el('disp-count-ship'); if (cs) cs.textContent = toShip.length;
+  const cc = el('disp-count-collect'); if (cc) cc.textContent = toCollect.length;
+  document.querySelectorAll('#disp-tabs .disp-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === State.dispatchAppTab));
+  const list = State.dispatchAppTab === 'collect' ? toCollect : toShip;
+  const isCollect = State.dispatchAppTab === 'collect';
+  const box = el('dispatch-content'); if (!box) return;
+  if (!list.length) {
+    box.innerHTML = `<div class="card"><div class="empty" style="padding:40px 16px"><div class="t">${isCollect ? 'No collections to prepare' : 'Nothing to package'}</div><div style="font-size:12px;color:var(--ink-soft)">New paid orders appear here automatically.</div></div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="card"><div style="padding:0">${list.map(s => {
+    const ref = s.invoice_number || s.payment_reference || s.external_order_id || '#' + s.id;
+    const itemLabel = s.first_item_title
+      ? (s.item_count > 1 ? `${escapeHtml(s.first_item_title)} +${s.item_count - 1}` : escapeHtml(s.first_item_title))
+      : '(no items)';
+    const age = describeAge(s.age_hours, true);
+    const action = isCollect
+      ? `<button class="btn btn-primary" onclick="event.stopPropagation();openCollectModal('${s.id}')">✓ Collected</button>`
+      : `<button class="btn btn-primary" onclick="event.stopPropagation();openDispatchModal('${s.id}')">📦 Shipped</button>`;
+    return `<div class="disp-card" onclick="openSaleDetail('${s.id}')">
+      <div class="disp-main">
+        <div class="disp-ref copyable">${escapeHtml(ref)}</div>
+        <div class="disp-title">${itemLabel}</div>
+        <div class="disp-sub">${escapeHtml(s.customer_name || '—')}${isCollect && s.customer_phone ? ' · ' + escapeHtml(s.customer_phone) : ''} · ${age}</div>
+      </div>
+      ${action}
+    </div>`;
+  }).join('')}</div></div>`;
 }
 
 function renderDispatchRow(s, kind) {
