@@ -77,4 +77,19 @@ async function reconcileSaleRefund(saleId, opts = {}) {
   return { refunded, fully, total };
 }
 
-module.exports = { ensureRefundColumns, reconcileSaleRefund, round2 };
+// Reconcile EVERY sale that has a return, healing any stale/zero refunded_amount
+// (e.g. partial refunds booked before a reconcile ran). DB-only, no channel calls
+// — safe + cheap to run on boot so historical orders self-correct on deploy.
+async function reconcileAllWithReturns() {
+  await ensureRefundColumns();
+  const { rows } = await query(`SELECT DISTINCT sale_id FROM returns WHERE sale_id IS NOT NULL`);
+  let updated = 0, scanned = 0;
+  for (const r of rows) {
+    scanned++;
+    try { const out = await reconcileSaleRefund(r.sale_id); if (out && out.refunded > 0) updated++; }
+    catch (e) { console.warn('[refunds] reconcileAll sale', r.sale_id, e.message); }
+  }
+  return { scanned, updated };
+}
+
+module.exports = { ensureRefundColumns, reconcileSaleRefund, reconcileAllWithReturns, round2 };
