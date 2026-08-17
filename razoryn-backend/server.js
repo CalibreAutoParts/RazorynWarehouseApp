@@ -156,6 +156,87 @@ app.get('/app-icon.svg', (req, res) => {
   res.type('image/svg+xml').set('Cache-Control', 'public, max-age=3600').send(svg);
 });
 
+// ---------- Android app: public install page + APK download ----------
+// So staff can install the handheld app by just visiting <site>/app on the device
+// and tapping Download — no GitHub, no cables. APKs live in public/downloads/.
+// Public (no login) so a fresh device can grab it before anyone signs in.
+const DOWNLOADS_DIR = path.join(__dirname, 'public', 'downloads');
+function listApks() {
+  try {
+    return fs.readdirSync(DOWNLOADS_DIR)
+      .filter(f => f.toLowerCase().endsWith('.apk'))
+      .map(f => {
+        const st = fs.statSync(path.join(DOWNLOADS_DIR, f));
+        // "razoryn-warehouse.apk" → "Razoryn Warehouse"
+        const label = f.replace(/\.apk$/i, '').replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        return { file: f, label, sizeMB: (st.size / 1048576).toFixed(1), mtime: st.mtime };
+      })
+      .sort((a, b) => a.label.localeCompare(b.label));
+  } catch (_) { return []; }
+}
+
+// Force a proper APK download (correct MIME + attachment) — validated filename,
+// no path traversal. Defined before the static handler so headers are guaranteed.
+app.get('/downloads/:name', (req, res, next) => {
+  const name = req.params.name || '';
+  if (!/^[A-Za-z0-9._-]+\.apk$/.test(name)) return next();
+  const file = path.join(DOWNLOADS_DIR, name);
+  if (!fs.existsSync(file)) return res.status(404).send('Not found');
+  res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(file);
+});
+
+// Simple, brand-aware install page.
+app.get('/app', (req, res) => {
+  const brand = require('./lib/brand');
+  const apks = listApks();
+  // Current brand's APK first (match on the brand code appearing in the filename).
+  const code = (brand.code || '').toLowerCase();
+  apks.sort((a, b) => (b.file.toLowerCase().includes(code) ? 1 : 0) - (a.file.toLowerCase().includes(code) ? 1 : 0));
+  const accent = /^#[0-9a-fA-F]{3,8}$/.test(brand.primaryColor || '') ? brand.primaryColor : '#0D1B2A';
+  const cards = apks.length ? apks.map(a => `
+    <a class="dl" href="/downloads/${encodeURIComponent(a.file)}">
+      <div class="dl-main"><span class="dl-name">${a.label}</span><span class="dl-meta">${a.sizeMB} MB · Android</span></div>
+      <span class="dl-btn">Download</span>
+    </a>`).join('') : '<p style="opacity:.7">No app builds are available yet.</p>';
+  res.type('html').send(`<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Install ${brand.name || 'Warehouse'} App</title>
+<style>
+  :root{--accent:${accent}}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0b1220;color:#e7edf5;
+    min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:28px 18px}
+  .wrap{width:100%;max-width:440px}
+  h1{font-size:22px;margin:8px 0 4px;text-align:center}
+  .sub{opacity:.65;font-size:13px;text-align:center;margin-bottom:22px}
+  .dl{display:flex;align-items:center;justify-content:space-between;gap:12px;text-decoration:none;color:inherit;
+    background:#141f33;border:1px solid #22304a;border-radius:14px;padding:16px 18px;margin-bottom:12px}
+  .dl:active{transform:scale(.99)}
+  .dl-name{display:block;font-weight:700;font-size:16px}
+  .dl-meta{display:block;opacity:.6;font-size:12px;margin-top:2px}
+  .dl-btn{background:var(--accent);color:#fff;font-weight:700;font-size:14px;padding:10px 16px;border-radius:10px;white-space:nowrap}
+  .steps{margin-top:22px;background:#101a2b;border:1px solid #1e2b42;border-radius:14px;padding:16px 18px}
+  .steps h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;opacity:.6;margin:0 0 10px}
+  ol{margin:0;padding-left:20px;font-size:14px;line-height:1.7}
+</style></head><body><div class="wrap">
+  <h1>${brand.name || 'Warehouse'} App</h1>
+  <div class="sub">Install on the handheld device — tap Download, then open the file.</div>
+  ${cards}
+  <div class="steps">
+    <h2>How to install</h2>
+    <ol>
+      <li>Tap <b>Download</b> above.</li>
+      <li>Open the downloaded <b>.apk</b> (from the notification or your Files app).</li>
+      <li>If asked, allow <b>Install unknown apps</b> for your browser/Files app, then tap <b>Install</b>.</li>
+      <li>Open the app and sign in. Updates are automatic — you won't need to reinstall for normal changes.</li>
+    </ol>
+  </div>
+</div></body></html>`);
+});
+
 // ---------- Static: PWA ----------
 app.use(express.static(path.join(__dirname, 'public'), {
   // index.html should not be aggressively cached — it changes on every deploy
