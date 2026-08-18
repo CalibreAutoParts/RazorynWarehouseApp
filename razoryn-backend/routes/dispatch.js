@@ -13,7 +13,7 @@
 
 const express = require('express');
 const { query, withTx } = require('../db');
-const { requireAuth, requireAdmin } = require('../middleware/auth');
+const { requireAuth, requireAdmin, requirePermission } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 
 const router = express.Router();
@@ -137,7 +137,7 @@ async function sendCustomerShippingEmail(saleId, kind) {
 // dispatched_at is null — happens when a sale was synced from eBay/Shopify with
 // a "shipped" status before our dispatch tracking columns existed.
 // ──────────────────────────────────────────────────────────────────────────
-router.get('/outstanding', requireAdmin, async (req, res) => {
+router.get('/outstanding', requirePermission('dispatch'), async (req, res) => {
   await ensureDispatchColumns();
   const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 10));
   try {
@@ -309,7 +309,7 @@ router.post('/bulk-mark-dispatched', requireAdmin, async (req, res) => {
 //    record is still saved and channel_push_state captures the error for
 //    later retry.
 // ──────────────────────────────────────────────────────────────────────────
-router.post('/:saleId/mark-dispatched', requireAdmin, async (req, res) => {
+router.post('/:saleId/mark-dispatched', requirePermission('dispatch'), async (req, res) => {
   await ensureDispatchColumns();
   const { carrier, trackingNumber, notes, pushToChannel } = req.body || {};
   if (!carrier) return res.status(400).json({ error: 'carrier_required' });
@@ -374,7 +374,7 @@ router.post('/:saleId/mark-dispatched', requireAdmin, async (req, res) => {
 
 // POST /api/dispatch/:saleId/notify-ready — email a collection customer that their
 // order is ready to collect. Direct (bank/cash/card) collections only.
-router.post('/:saleId/notify-ready', requireAdmin, async (req, res) => {
+router.post('/:saleId/notify-ready', requirePermission('dispatch'), async (req, res) => {
   await ensureDispatchColumns();
   const out = await sendCustomerShippingEmail(req.params.saleId, 'collection');
   if (out.ok) { await audit(req, 'notify_ready_collect', 'sale', req.params.saleId, {}); return res.json({ ok: true }); }
@@ -387,7 +387,7 @@ router.post('/:saleId/notify-ready', requireAdmin, async (req, res) => {
 // that the customer picked the part up.
 // Body: { notes? }
 // ──────────────────────────────────────────────────────────────────────────
-router.post('/:saleId/mark-collected', requireAdmin, async (req, res) => {
+router.post('/:saleId/mark-collected', requirePermission('dispatch'), async (req, res) => {
   await ensureDispatchColumns();
   const { notes } = req.body || {};
 
@@ -455,7 +455,7 @@ function channelGroup(channel) {
 // POST /api/dispatch/:saleId/set-fulfillment  { method: 'ship'|'collect' }
 // Re-classify an order between Deliveries and Collections. Fixes a mis-bucketed
 // order (e.g. a bank pickup that defaulted to "ship" and was demanding a carrier).
-router.post('/:saleId/set-fulfillment', requireAdmin, async (req, res) => {
+router.post('/:saleId/set-fulfillment', requirePermission('dispatch'), async (req, res) => {   // any signed-in staff (operational)
   await ensureDispatchColumns();
   const method = req.body?.method === 'collect' ? 'collect' : req.body?.method === 'ship' ? 'ship' : null;
   if (!method) return res.status(400).json({ error: 'method_required', message: "method must be 'ship' or 'collect'." });
