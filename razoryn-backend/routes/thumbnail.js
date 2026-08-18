@@ -132,6 +132,27 @@ router.post('/config', requireAuth, requireAdmin, async (req, res) => {
 // app by part number (or title search) and pull their public image URLs
 // straight into the listing's photo list.
 
+// Round-trip check: proves the app URL is reachable AND the shared key is
+// accepted by the studio's inbound integration.
+router.get('/studio/test', requireAuth, async (req, res) => {
+  try {
+    const r = await studioFetch('/health');
+    const body = await r.json().catch(() => ({}));
+    if (r.status === 401) {
+      return res.json({ ok: false, message: 'Studio reachable but the key was rejected — it must equal the studio\'s warehouse integration key.' });
+    }
+    if (!r.ok) {
+      return res.json({ ok: false, message: `Studio responded HTTP ${r.status} — check the app URL points at the thumbnail app.` });
+    }
+    res.json({ ok: true, service: body.service || 'thumbnail' });
+  } catch (e) {
+    if (e.status === 400) {
+      return res.json({ ok: false, message: 'Not configured — set the Thumbnail app URL (and key) first.' });
+    }
+    res.json({ ok: false, message: `Could not reach the studio: ${e.message}` });
+  }
+});
+
 router.get('/studio/match', requireAuth, async (req, res) => {
   try {
     const partNumber = String(req.query.partNumber || '').trim();
