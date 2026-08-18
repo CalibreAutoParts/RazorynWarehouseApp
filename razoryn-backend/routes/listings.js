@@ -2213,16 +2213,23 @@ router.post('/repush-ebay-images', requireAdmin, async (req, res) => {
   if (!links.rows.length) return res.status(400).json({ error: 'no_ebay_link', message: 'This product has no linked eBay listing.' });
 
   const ebay = require('../services/ebay');
-  const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
-  let pushed = 0; const errors = [];
+  const allStores = ebay.listStores();
+  const stores = allStores.filter(s => s.hasToken && !s.disabled);
+  let pushed = 0, skippedDisabled = 0; const errors = [];
   for (const link of links.rows) {
     const store = stores.find(s => s.code === link.store_code) || (link.store_code ? null : (stores.find(s => s.primary) || stores[0]));
-    if (!store) { errors.push(`${link.ebay_item_id}: store unavailable`); continue; }
+    if (!store) {
+      // A link to a store that EXISTS but is disabled / has no token is a
+      // deliberately-paused account (e.g. the old Razoryn login) — an expected
+      // skip, not a failure. Only a link to an unknown store is a real error.
+      if (allStores.find(s => s.code === link.store_code)) { skippedDisabled++; continue; }
+      errors.push(`${link.ebay_item_id}: no store for this link`); continue;
+    }
     try { await ebay.reviseItem(link.ebay_item_id, { pictureUrls: imageUrls }, store.code); pushed++; }
     catch (e) { errors.push(`${link.ebay_item_id}: ${e.message}`); }
   }
-  await audit(req, 'repush_ebay_images', 'product', product.id, { pushed, images: imageUrls.length });
-  res.json({ ok: pushed > 0, pushed, images: imageUrls.length, errors });
+  await audit(req, 'repush_ebay_images', 'product', product.id, { pushed, images: imageUrls.length, skippedDisabled });
+  res.json({ ok: pushed > 0, pushed, images: imageUrls.length, skippedDisabled, errors });
 });
 
 // POST /api/listings/resync-images — one-click re-push of the SELECTED images only.

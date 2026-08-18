@@ -4883,6 +4883,11 @@ function openProductModal(id) {
           <div><input type="number" step="1" min="0" id="m-pkg-g" value="${p.pkgWeightG ?? ''}" placeholder="grams"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (g)</div></div>
         </div>
       </div>
+      ${id ? `<div class="field"><label>Shared stock pool <span style="font-weight:400;color:var(--ink-soft)">— link listings that sell the same physical part so they share one stock count.</span></label>
+        ${p.stockGroupId
+          ? `<div style="display:flex;align-items:center;gap:8px"><span class="pill" style="background:var(--bg-soft);font-family:ui-monospace,monospace">${escapeHtml(p.stockGroupCode || ('pool #' + p.stockGroupId))}</span><button class="btn btn-ghost btn-sm" onclick="closeModal();routeTo('sharedstock')">Manage pools →</button></div>`
+          : `<button class="btn btn-outline btn-sm" onclick="sgAddProductToPool(${p.id})">🔗 Add to shared pool…</button>`}
+      </div>` : ''}
       ${id ? `<div class="field"><label>Sub part numbers <span style="font-weight:400;color:var(--ink-soft)">— alternate factory / country codes. All are searchable and resolve to the SKU above (the printed master code).</span></label><div id="m-subpn">Loading…</div></div>` : `<div class="field" style="font-size:11px;color:var(--ink-soft)">Save the product first, then re-open it to add alternate (sub) part numbers.</div>`}
       ${id ? `<div class="field"><label>Shopify shop categories (collections)</label><div id="m-collections" style="font-size:12px;color:var(--ink-soft)">Loading…</div></div>` : ''}
     `,
@@ -14043,7 +14048,7 @@ function sgOpenPicker({ title, mode, gid }) {
   modal({
     title,
     body: `${codeField}
-      <div class="field"><label>${mode === 'create' ? 'Pick at least 2 listings' : 'Pick listings to add'}</label>
+      <div class="field"><label>${mode === 'create' ? 'Pick the listings for this pool (1 is fine — add more later)' : 'Pick listings to add'}</label>
         <input id="sg-pick-search" placeholder="Search by title, SKU, part #…" autocomplete="off" oninput="sgPickSearch()">
       </div>
       <div id="sg-pick-chosen" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
@@ -14055,7 +14060,7 @@ function sgOpenPicker({ title, mode, gid }) {
         if (mode === 'create') {
           const code = (el('sg-code')?.value || '').trim();
           if (!code) { toast('Enter the shared part number', 'warn'); return; }
-          if (ids.length < 2) { toast('Pick at least 2 listings', 'warn'); return; }
+          if (ids.length < 1) { toast('Pick at least 1 listing', 'warn'); return; }
           try { await Api.post('/api/products/stock-groups', { code, productIds: ids });
             toast('Shared pool created', 'success'); closeModal(); await Store.refresh('products').catch(() => {}); loadSharedStock();
           } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
@@ -14103,6 +14108,51 @@ function sgPickToggle(id) {
 }
 function sgOpenCreateModal() { sgOpenPicker({ title: 'New shared stock pool', mode: 'create' }); }
 function sgAddMembers(gid) { sgOpenPicker({ title: 'Add listings to pool', mode: 'add', gid }); }
+
+// Inventory entry point: add ONE product to a shared pool — pick an existing pool
+// or create a new one seeded with just this listing (add the rest later). Opened
+// from the product edit modal's "Add to shared pool…" button.
+async function sgAddProductToPool(productId) {
+  closeModal();
+  let groups = [];
+  try { groups = (await Api.get('/api/products/stock-groups')).groups || []; } catch (_) {}
+  const p = (State.products || []).find(x => x.id == productId);
+  const done = async (msg) => {
+    toast(msg, 'success'); closeModal();
+    await Store.refresh('products').catch(() => {});
+    if (State.page === 'sharedstock' && typeof loadSharedStock === 'function') loadSharedStock();
+    if (State.page === 'inventory' && typeof renderInventory === 'function') renderInventory();
+  };
+  modal({
+    title: '🔗 Add to shared pool',
+    body: `
+      <div style="font-size:13px;margin-bottom:12px"><strong>${escapeHtml(p?.title || 'This listing')}</strong>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p?.sku || '')}${p?.partNumber ? ' · ' + escapeHtml(p.partNumber) : ''}</div></div>
+      ${groups.length ? `
+      <div class="field"><label>Add to an existing pool</label>
+        <select id="sg-inv-pool">${groups.map(g => `<option value="${g.id}">${escapeHtml(g.code)} · ${(g.members || []).length} listing${(g.members || []).length === 1 ? '' : 's'} · qty ${g.qty_on_hand ?? 0}</option>`).join('')}</select>
+      </div>
+      <div style="text-align:center;color:var(--ink-soft);font-size:11px;margin:8px 0">— or —</div>` : ''}
+      <div class="field"><label>Create a new pool — shared part number</label>
+        <input id="sg-inv-code" value="${escapeAttr(p?.partNumber || '')}" placeholder="e.g. 9829694880" style="font-family:ui-monospace,monospace">
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Creates the pool with just this listing — add the other model listings later (here or on the Shared parts page).</div>
+      </div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      ...(groups.length ? [{ label: '➕ Add to selected pool', onClick: async () => {
+        const gid = el('sg-inv-pool')?.value; if (!gid) return;
+        try { await Api.post('/api/products/stock-groups/' + gid + '/members', { productIds: [productId] }); await done('Added to shared pool'); }
+        catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+      } }] : []),
+      { label: '🆕 Create pool', primary: true, onClick: async () => {
+        const code = (el('sg-inv-code')?.value || '').trim();
+        if (!code) { toast('Enter the shared part number', 'warn'); return; }
+        try { await Api.post('/api/products/stock-groups', { code, productIds: [productId] }); await done('Shared pool created with this listing'); }
+        catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+      } },
+    ],
+  });
+}
 
 /* ==================== COSTS & MARGINS BACKROOM (admin) ==================== */
 // Track true landed cost per item, see per-channel breakeven/floor, supplier
@@ -15690,8 +15740,10 @@ async function repushEbayImages(productId) {
     const r = await Api.post('/api/listings/repush-ebay-images', { productId });
     Task.done(taskId, r.pushed ? 'Pushed' : 'No change');
     const errMsg = (r.errors && r.errors.length) ? ' · ⚠ ' + r.errors.join(' · ') : '';
-    if (r.pushed) toast(`✓ Pushed ${r.images} photo(s) to ${r.pushed} eBay listing${r.pushed > 1 ? 's' : ''}${errMsg}`, errMsg ? 'warn' : 'success', errMsg ? 12000 : 6000);
-    else toast(`No photos pushed to eBay${errMsg || ' — no linked eBay listing found (link it via Listing Mirror → Force match).'}`, 'warn', 12000);
+    // Links on a deliberately-disabled eBay account are expected skips, not errors.
+    const disMsg = r.skippedDisabled ? ` · ${r.skippedDisabled} old-account link${r.skippedDisabled > 1 ? 's' : ''} ignored (account disabled)` : '';
+    if (r.pushed) toast(`✓ Pushed ${r.images} photo(s) to ${r.pushed} eBay listing${r.pushed > 1 ? 's' : ''}${disMsg}${errMsg}`, errMsg ? 'warn' : 'success', errMsg ? 12000 : 6000);
+    else toast(`No photos pushed to eBay${errMsg || disMsg || ' — no linked eBay listing found (link it via Listing Mirror → Force match).'}`, 'warn', 12000);
     if (r.errors && r.errors.length) console.warn('repush-ebay-images', r.errors);
   } catch (e) {
     Task.fail(taskId, 'Failed');
@@ -21034,6 +21086,13 @@ async function testEbayConnection() {
     const stores = data.stores || [];
     if (!stores.length) { if (resultEl) resultEl.innerHTML = '<div style="font-size:13px;color:var(--ink-soft)">No eBay stores configured.</div>'; return; }
     const cards = stores.map(s => {
+      // Deliberately-disabled store → neutral "paused" card, not a red error.
+      if (s.disabled) {
+        return `<div style="padding:10px 12px;background:var(--bg-soft);color:var(--ink-soft);border-radius:8px;font-size:13px;margin-bottom:8px">
+          ⏸ ${escapeHtml(s.name || s.code || 'eBay')} — <strong>disabled on purpose</strong>
+          <div style="font-size:11px;margin-top:4px">${escapeHtml(s.disabledReason || 'Switched off via EBAY_STORE_DISABLED')}. Not an error — remove it from EBAY_STORE_DISABLED in Railway to re-enable.</div>
+        </div>`;
+      }
       const ok = s.ok;
       const bg = ok ? 'var(--green-light)' : 'var(--red-light)';
       const fg = ok ? 'var(--green)' : 'var(--red)';
