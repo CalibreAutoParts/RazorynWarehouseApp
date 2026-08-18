@@ -339,6 +339,8 @@ async function getRecentOrders(sinceISO, storeArg) {
         buyer: o.buyer,
         pricingSummary: o.pricingSummary,
         lineItems: o.lineItems,
+        // Local pickup / click-and-collect → the "for collection" bucket.
+        fulfillmentMethod: /PICKUP/i.test((o.fulfillmentStartInstructions || [])[0]?.fulfillmentInstructionsType || '') ? 'collect' : 'ship',
         // Refund / cancellation signals (kept so sync can net them off revenue
         // + drop them from dispatch). paymentSummary.refunds[] carries the money;
         // orderPaymentStatus / cancelStatus flag a fully-reversed order.
@@ -421,6 +423,12 @@ function mapTradingOrderXml(oXml) {
   const buyerName = decodeEntities(extractOne(shipBlock, 'Name') || '') || buyerUserId || null;
   const buyerEmail = decodeEntities(extractOne(oXml, 'Email') || '') || null;
   const buyerPhone = decodeEntities(extractOne(shipBlock, 'Phone') || '') || null;
+  // Collection vs delivery: eBay local pickup / click-and-collect orders must go in
+  // the "for collection" bucket, not "to ship". Signalled by a PickupMethodSelected
+  // block or a pickup/collection shipping service.
+  const shippingService = decodeEntities(extractOne(extractOne(oXml, 'ShippingServiceSelected') || '', 'ShippingService') || '');
+  const isCollection = !!extractOne(oXml, 'PickupMethodSelected')
+    || /pick[\s-]*up|collect|local\s*collection/i.test(shippingService);
 
   const txArray = extractOne(oXml, 'TransactionArray') || '';
   const txBlocks = extractAll(txArray, 'Transaction');
@@ -445,6 +453,7 @@ function mapTradingOrderXml(oXml) {
       deliveryCost: { value: shippingCost }, tax: { value: 0 },
     },
     lineItems, checkoutStatus,
+    fulfillmentMethod: isCollection ? 'collect' : 'ship',
     // Normalised so orderRefundInfo() works the same for Trading + Fulfillment orders.
     orderStatus: orderStatusRaw || null,
     orderPaymentStatus: isRefunded ? 'FULLY_REFUNDED' : null,

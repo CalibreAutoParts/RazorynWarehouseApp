@@ -452,12 +452,13 @@ async function importEbayOrderRow(order, store, { vatRegistered, vatRate, adjust
     const sale = await c.query(
       `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
                           subtotal, vat, shipping, total, status, occurred_at, shipping_address,
-                          payment_method, payment_reference, order_number, invoice_number)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'paid',$10,$11,$12,$13,$14,$15) RETURNING id`,
+                          payment_method, payment_reference, order_number, invoice_number, fulfillment_method)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'paid',$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
       [channelCode, order.orderId,
        order.buyer?.name || order.buyer?.username || null, order.buyer?.email || null, order.buyer?.phone || null,
        subtotal, vat, shipping, total, order.creationDate, order.shippingAddress || null,
-       'ebay', paymentRef, order.orderId, paymentRef]);
+       'ebay', paymentRef, order.orderId, paymentRef,
+       order.fulfillmentMethod === 'collect' ? 'collect' : 'ship']);
     newSaleId = sale.rows[0].id;
     for (const li of order.lineItems || []) {
       const matched = await resolveProductBySku(c, li.sku);

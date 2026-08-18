@@ -1841,10 +1841,12 @@ async function init() {
     }
     const me = await Api.auth.me();
     State.user = me;
-    await Store.refreshAll();
-    try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (e) {}
     try { await Sounds.loadPrefs(); } catch (e) {}
+    // Show the app IMMEDIATELY, then load the heavy data (products/sales/…) in the
+    // background — the big upfront load over a handheld network made login slow.
     enterApp();
+    Store.refreshAll().then(repaintCurrent).catch(() => {});
+    Api.get('/api/settings/pricing-config').then(c => { State.pricingConfig = c; }).catch(() => {});
     return;
   } catch (e) {
     // Not logged in — show login screen
@@ -2085,10 +2087,12 @@ function bindLogin() {
     try {
       const user = await Api.auth.login(username, pwd, remember);
       State.user = user;
-      await Store.refreshAll();
-      try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (e) {}
       try { await Sounds.loadPrefs(); } catch (e) {}
+      // Show the app straight away; load the heavy data in the background so login
+      // isn't blocked on the full product/sales fetch.
       enterApp();
+      Store.refreshAll().then(repaintCurrent).catch(() => {});
+      Api.get('/api/settings/pricing-config').then(c => { State.pricingConfig = c; }).catch(() => {});
     } catch (e) {
       const msg = e.status === 401 ? 'Invalid username or password' : 'Login failed — check your connection';
       if (errEl) { errEl.textContent = msg; setTimeout(() => { errEl.textContent = ''; }, 3000); }
@@ -2101,6 +2105,26 @@ function bindLogin() {
     const inp = document.getElementById(id);
     if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   });
+}
+
+// Re-render the current page after the background data load finishes, so the UI
+// that showed instantly (from empty State) fills in with real data.
+function repaintCurrent() {
+  try {
+    if (!State.user) return;
+    refreshNavCounts();
+    const a = document.activeElement;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;
+    if (document.getElementById('modal-overlay')?.classList.contains('open')) return;
+    const fns = {
+      dashboard: typeof renderDashboard === 'function' ? renderDashboard : null,
+      inventory: typeof renderInventory === 'function' ? renderInventory : null,
+      returns:   typeof renderReturns === 'function' ? renderReturns : null,
+      schedule:  typeof renderSchedule === 'function' ? renderSchedule : null,
+    };
+    const f = fns[State.page];
+    if (f) f();
+  } catch (_) {}
 }
 
 function enterApp() {
@@ -7261,11 +7285,15 @@ function paintDispatchApp() {
     const action = isCollect
       ? `<button class="btn btn-primary" onclick="event.stopPropagation();openCollectModal('${s.id}')">✓ Collected</button>`
       : `<button class="btn btn-primary" onclick="event.stopPropagation();openDispatchModal('${s.id}')">📦 Shipped</button>`;
+    const moveLink = isCollect
+      ? `<a href="#" onclick="event.stopPropagation();reclassifyOrder('${s.id}','ship');return false" style="font-size:11px;color:var(--ink-soft)">↪ Move to shipping</a>`
+      : `<a href="#" onclick="event.stopPropagation();reclassifyOrder('${s.id}','collect');return false" style="font-size:11px;color:var(--ink-soft)">↪ It's a collection</a>`;
     return `<div class="disp-card" onclick="openSaleDetail('${s.id}')">
       <div class="disp-main">
         <div class="disp-ref copyable">${escapeHtml(ref)}</div>
         <div class="disp-title">${itemLabel}</div>
         <div class="disp-sub">${escapeHtml(s.customer_name || '—')}${isCollect && s.customer_phone ? ' · ' + escapeHtml(s.customer_phone) : ''} · ${age}</div>
+        <div style="margin-top:4px">${moveLink}</div>
       </div>
       ${action}
     </div>`;
