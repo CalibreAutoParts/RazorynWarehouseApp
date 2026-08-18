@@ -4884,9 +4884,12 @@ function openProductModal(id) {
         </div>
       </div>
       ${id ? `<div class="field"><label>Shared stock pool <span style="font-weight:400;color:var(--ink-soft)">— link listings that sell the same physical part so they share one stock count.</span></label>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         ${p.stockGroupId
-          ? `<div style="display:flex;align-items:center;gap:8px"><span class="pill" style="background:var(--bg-soft);font-family:ui-monospace,monospace">${escapeHtml(p.stockGroupCode || ('pool #' + p.stockGroupId))}</span><button class="btn btn-ghost btn-sm" onclick="closeModal();routeTo('sharedstock')">Manage pools →</button></div>`
+          ? `<span class="pill" style="background:var(--bg-soft);font-family:ui-monospace,monospace">${escapeHtml(p.stockGroupCode || ('pool #' + p.stockGroupId))}</span><button class="btn btn-ghost btn-sm app-hide" onclick="closeModal();routeTo('sharedstock')">Manage pools →</button>`
           : `<button class="btn btn-outline btn-sm" onclick="sgAddProductToPool(${p.id})">🔗 Add to shared pool…</button>`}
+        <button class="btn btn-outline btn-sm admin-only app-hide" onclick="clCopyFromProduct(${p.id})" title="Start a NEW listing pre-filled from this one — photos, part number, category, item specifics and price carry over; just set a new SKU and change the make/model. Keeping the same part number auto-joins the shared pool.">📋 Copy as new listing…</button>
+        </div>
       </div>` : ''}
       ${id ? `<div class="field"><label>Sub part numbers <span style="font-weight:400;color:var(--ink-soft)">— alternate factory / country codes. All are searchable and resolve to the SKU above (the printed master code).</span></label><div id="m-subpn">Loading…</div></div>` : `<div class="field" style="font-size:11px;color:var(--ink-soft)">Save the product first, then re-open it to add alternate (sub) part numbers.</div>`}
       ${id ? `<div class="field"><label>Shopify shop categories (collections)</label><div id="m-collections" style="font-size:12px;color:var(--ink-soft)">Loading…</div></div>` : ''}
@@ -12906,8 +12909,19 @@ async function clCopyFromProduct(productId) {
     images: Array.isArray(sh.imageUrls) ? sh.imageUrls.slice() : (p.image_url ? [p.image_url] : []),
   };
   CL_REPEAT = snap;
-  await renderCreateListing();
-  toast('Copied ✓ — enter a NEW unique SKU, tweak anything, then "Create & push everywhere".', 'success', 9000);
+  // Callable from anywhere (Inventory, Shared parts) — jump to the Create-listing
+  // page if we're not already on it, so nav state stays correct.
+  if (State.page !== 'createlisting') {
+    routeTo('createlisting');
+    // routeTo can abort (no permission, or the user cancels the unsaved-changes
+    // confirm). If we didn't actually land on the create page, DISARM the copied
+    // snapshot — otherwise it would silently pre-fill the form next time the page
+    // opens — and don't claim success.
+    if (State.page !== 'createlisting') { CL_REPEAT = null; return; }
+  } else {
+    await renderCreateListing();
+  }
+  toast('Copied ✓ — enter a NEW unique SKU, tweak anything (e.g. make/model), then "Create & push everywhere". Same part number = it auto-joins the shared stock pool.', 'success', 10000);
 }
 
 function clOfferRepeat(r) {
@@ -13984,7 +13998,8 @@ function sharedStockHtml(groups, suggestions) {
             <label style="font-size:11px;color:var(--ink-soft)">Shared qty</label>
             <input id="sg-qty-${g.id}" type="number" min="0" value="${Number(g.qty_on_hand) || 0}" style="width:80px">
             <button class="btn btn-primary btn-sm" onclick="sgSetQty(${g.id})">Set</button>
-            <button class="btn btn-outline btn-sm" onclick="sgAddMembers(${g.id})" title="Add another listing to this pool">+ Add</button>
+            <button class="btn btn-outline btn-sm" onclick="sgAddMembers(${g.id})" title="Add an EXISTING listing to this pool">+ Add</button>
+            <button class="btn btn-outline btn-sm" onclick="sgCopyListing(${g.id})" title="Create a NEW listing copied from one in this pool — photos, part number, category, specifics and price carry over; just set a new SKU and change the model. It auto-joins this pool.">📋 Copy listing</button>
             <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="sgDissolve(${g.id})" title="Stop sharing — unlink all listings">Dissolve</button>
           </div>
         </div>
@@ -14151,6 +14166,28 @@ async function sgAddProductToPool(productId) {
         catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
       } },
     ],
+  });
+}
+
+// "📋 Copy listing" on a pool card: start a NEW listing using one of the pool's
+// members as the template (photos, part number, category, specifics, price all
+// carry over — set a new SKU, change the make/model). Because the part number is
+// kept, the new listing auto-joins this pool on create. One member → copy it
+// straight away; several → pick which one to copy from.
+function sgCopyListing(gid) {
+  const g = ((State.sharedStock || {}).groups || []).find(x => x.id === gid);
+  const members = (g && g.members) || [];
+  if (!members.length) { toast('This pool has no listings to copy yet', 'warn'); return; }
+  if (members.length === 1) { clCopyFromProduct(members[0].id); return; }
+  modal({
+    title: '📋 Copy a listing from this pool',
+    body: `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Pick which listing to use as the template. Everything carries over — you set a new SKU and change the make/model, and the new listing auto-joins this pool via the shared part number.</div>` +
+      members.map(m => `
+      <div onclick="clCopyFromProduct(${m.id})" style="display:flex;align-items:center;gap:10px;padding:8px;border-bottom:1px solid var(--line-2);cursor:pointer">
+        ${m.image_url ? `<img src="${escapeAttr(m.image_url)}" style="width:34px;height:34px;object-fit:cover;border-radius:5px">` : '<div style="width:34px;height:34px;border-radius:5px;background:var(--line-2)"></div>'}
+        <div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(m.title || '')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(m.sku || '')}</div></div>
+      </div>`).join(''),
+    actions: [{ label: 'Cancel', onClick: closeModal }],
   });
 }
 
