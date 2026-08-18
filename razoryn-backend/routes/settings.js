@@ -839,6 +839,9 @@ router.get('/ebay-health', requireAdmin, async (req, res) => {
   try { stores = ebay.listStores(); } catch (_) { stores = []; }
   const results = [];
   for (const s of stores) {
+    // A store switched off on purpose (EBAY_STORE_DISABLED) isn't an error — report
+    // it as disabled so the UI shows a neutral "paused" card, not a scary red one.
+    if (s.disabled) { results.push({ code: s.code, name: s.name, ok: false, disabled: true, disabledReason: s.disabledReason || 'disabled' }); continue; }
     try { results.push(await ebay.checkConnection(s.code)); }
     catch (e) { results.push({ code: s.code, name: s.name, ok: false, error: e.message }); }
   }

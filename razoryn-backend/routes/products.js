@@ -356,14 +356,16 @@ router.get('/stock-groups/suggestions', requirePermission('inventory'), async (r
   res.json({ suggestions });
 });
 
-// POST /api/products/stock-groups — create a pool from a code + 2+ products.
+// POST /api/products/stock-groups — create a pool from a code + 1+ products.
+// A single-listing pool is valid: it's a pool prepared ahead of time — the other
+// model listings get added later (from Inventory or the Shared parts page).
 router.post('/stock-groups', requireAdmin, async (req, res) => {
   await ensureStockGroupsSchema();
   const code = String(req.body?.code || '').trim();
   const note = req.body?.note ? String(req.body.note).trim() : null;
   const productIds = Array.isArray(req.body?.productIds) ? req.body.productIds.map(Number).filter(Boolean) : [];
   if (!code) return res.status(400).json({ error: 'code_required' });
-  if (productIds.length < 2) return res.status(400).json({ error: 'need_two_products' });
+  if (productIds.length < 1) return res.status(400).json({ error: 'product_required' });
   const out = await withTx(async (c) => {
     const g = await c.query(`INSERT INTO stock_groups (code, note) VALUES ($1, $2) RETURNING id`, [code, note]);
     const gid = g.rows[0].id;
