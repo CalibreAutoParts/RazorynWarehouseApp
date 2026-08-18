@@ -7352,6 +7352,7 @@ function renderDispatchRow(s, kind) {
         <td>${ageBadge}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
           <button class="btn btn-ghost btn-sm" onclick="openSaleDetail('${s.id}')" title="Preview what's in this order">🧾</button>
+          <button class="btn btn-ghost btn-sm" onclick="printCollectionLabel('${s.id}')" title="Print 6×4 collection label(s) — customer, item, piece count + QR. No address.">🏷 Label</button>
           <button class="btn btn-primary btn-sm" onclick="openCollectModal('${s.id}')">✓ Mark collected</button>
           ${isDirect && s.customer_email ? `<button class="btn btn-ghost btn-sm" onclick="notifyReady('${s.id}',this)" title="Email the customer that their order is ready to collect">📧 Notify ready</button>` : ''}
           <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','ship');return false" style="color:var(--ink-soft)">↪ It's a delivery</a></div>
@@ -7699,6 +7700,8 @@ function openCollectModal(saleId) {
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
+      // Printing is a desktop thing — the handheld has no printer.
+      ...(!State.appShell ? [{ label: '🏷 Print label', onClick: () => printCollectionLabel(saleId) }] : []),
       { label: '✓ Confirm collected', primary: true, onClick: () => submitCollect(saleId) },
     ],
   });
@@ -7718,6 +7721,164 @@ async function submitCollect(saleId) {
     Task.fail(taskId, 'Failed');
     toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+// ── 6×4 collection label ────────────────────────────────────────────────────
+// Prints one 6×4in landscape label per physical unit of a COLLECTION order, so
+// the order can be picked, labelled and staged on the collection shelf ahead of
+// time instead of being grabbed last-minute. Shows: big customer name, order ref,
+// the item, "1 OF N" piece count, sold date and a QR linking to the website.
+// Deliberately NO address (it's a collection — the eBay-shown address is
+// irrelevant and shouldn't sit on a shelf) and NO prices.
+// Media note: same trick as product labels — thermal 4×6 printers feed portrait
+// media, so the landscape content is laid out 152.4×101.6 and rotated 90° onto a
+// 101.6×152.4 page. QR drawn client-side via qrcode-generator (JsBarcode is
+// 1D-only); if the QR lib fails to load the label still prints, just without it.
+async function printCollectionLabel(saleId) {
+  // Open the window SYNCHRONOUSLY inside the click gesture — a window.open after
+  // an await is popup-blocked on Safari always and on Chrome/Firefox once the
+  // ~5s activation window lapses (same pattern as labelsPrint). Content is
+  // written in once the data arrives.
+  const w = window.open('', '_blank', 'width=900,height=700');
+  if (!w) { toast('Pop-up blocked. Allow pop-ups for this site.', 'error'); return; }
+  try { w.document.write('<title>Collection label</title><body style="font-family:sans-serif;padding:24px;color:#666">Preparing label…</body>'); } catch (_) {}
+  let data;
+  // Light dispatch-permission endpoint (name/ref/items only — no address, no money)
+  // so warehouse staff can print labels, not just admins.
+  try { data = await Api.get('/api/dispatch/' + saleId + '/label-data'); }
+  catch (e) { try { w.close(); } catch (_) {} toast('Could not load order: ' + (e.data?.message || e.message), 'error'); return; }
+  const sale = data.sale || {};
+  const items = data.items || [];
+
+  // One label per physical unit (line item × qty) → "1 OF N".
+  const units = [];
+  for (const it of items) { const q = Math.max(1, parseInt(it.qty) || 1); for (let i = 0; i < q; i++) units.push(it); }
+  if (!units.length) units.push({ title: 'Order', sku: '' });
+  const N = units.length;
+  if (N > 40 && !confirm(`This order has ${N} units — print ${N} labels?`)) { try { w.close(); } catch (_) {} return; }
+
+  const ref = sale.invoice_number || sale.payment_reference || sale.external_order_id || ('#' + sale.id);
+  const customer = sale.customer_name || 'Collection customer';
+  const soldDate = sale.occurred_at ? new Date(sale.occurred_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+
+  const b = State.brand || {};
+  const brandColor = b.primaryColor || '#c8202d';
+  const uploadedLogo = State.pricingConfig?.logoDataUrl || State.settings?.logoDataUrl || null;
+  const logoUrl = uploadedLogo || (window.location.origin + (b.logoUrl || '/logo.png'));
+  const brandName = b.name || 'Warehouse';
+  const domain = (b.domain || '').replace(/^https?:\/\//, '').replace(/\/+$/, '') || location.host;
+  const siteUrl = 'https://' + domain;
+
+  const labelHtml = units.map((it, i) => `
+    <div class="page-wrap"><div class="label">
+      <div class="head">
+        <img class="logo" src="${logoUrl}" alt="${escapeHtml(brandName)}" onerror="this.style.display='none'">
+        <div class="collect-banner">COLLECTION</div>
+      </div>
+      <div class="mid">
+        <div class="who">
+          <div class="lbl">Customer</div>
+          <div class="customer">${escapeHtml(customer)}</div>
+          <div class="ref">${escapeHtml(ref)}${soldDate ? ` · sold ${escapeHtml(soldDate)}` : ''}</div>
+          <div class="lbl" style="margin-top:3mm">Item</div>
+          <div class="title">${escapeHtml(it.title || 'Order item')}</div>
+          ${it.sku ? `<div class="sku">${escapeHtml(it.sku)}</div>` : ''}
+        </div>
+        <div class="side">
+          <div class="count">${i + 1}<span> OF ${N}</span></div>
+          <div class="qr-wrap"><div class="qr-box"></div><div class="qr-cap">${escapeHtml(domain)}</div></div>
+        </div>
+      </div>
+      <div class="foot">AWAITING COLLECTION — DO NOT SHIP · ${escapeHtml(brandName)}</div>
+    </div></div>`).join('');
+
+  w.document.open();   // reset the "Preparing label…" placeholder (its write stream is still open)
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Collection label — ${escapeHtml(ref)}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"><\/script>
+<style>
+  @page { size: 101.6mm 152.4mm; margin: 0; }
+  @media print {
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; margin: 0; background: white; }
+    .page-wrap { page-break-after: always; margin: 0 !important; box-shadow: none !important; }
+    .page-wrap:last-child { page-break-after: auto; }
+    .actions { display: none; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0; font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif; background: #ddd; }
+  .actions { padding: 12px; text-align: center; background: white; border-bottom: 1px solid #ccc; position: sticky; top: 0; z-index: 10; }
+  .actions button { padding: 8px 18px; background: #111; color: white; border: none; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; margin: 0 4px; }
+  .actions button.ghost { background: white; color: #111; border: 1px solid #ccc; }
+  .actions .info { display: inline-block; margin-right: 12px; font-size: 12px; color: #666; vertical-align: middle; }
+  /* 6×4 landscape content rotated onto 4×6 portrait media (same as product labels). */
+  .page-wrap { width: 101.6mm; height: 152.4mm; position: relative; overflow: hidden;
+    background: white; margin: 10px auto; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+  .label { width: 152.4mm; height: 101.6mm; background: white; overflow: hidden;
+    display: flex; flex-direction: column; padding: 6mm 8mm;
+    position: absolute; top: 0; left: 0; transform-origin: top left;
+    transform: translateX(101.6mm) rotate(90deg); }
+  .head { display: flex; justify-content: space-between; align-items: center;
+    padding-bottom: 3mm; border-bottom: 2.5px solid ${brandColor}; flex-shrink: 0; }
+  .logo { height: 12mm; max-width: 55mm; object-fit: contain; }
+  .collect-banner { background: ${brandColor}; color: #fff; font-weight: 800; font-size: 17pt;
+    letter-spacing: 0.12em; padding: 2mm 5mm; border-radius: 2mm; }
+  .mid { flex: 1 1 auto; min-height: 0; display: flex; gap: 6mm; padding: 4mm 0 3mm; overflow: hidden; }
+  .who { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .lbl { font-size: 8pt; font-weight: 700; letter-spacing: 0.1em; color: #888; text-transform: uppercase; }
+  .customer { font-size: 24pt; font-weight: 800; line-height: 1.05; color: #111; overflow: hidden; }
+  .ref { font-family: ui-monospace, Menlo, monospace; font-size: 11pt; font-weight: 700; color: #333; margin-top: 1mm; }
+  .title { font-size: 13pt; font-weight: 600; line-height: 1.15; color: #222; overflow: hidden; flex: 0 1 auto; min-height: 0; }
+  .sku { font-family: ui-monospace, Menlo, monospace; font-size: 9.5pt; color: #666; margin-top: 0.5mm; }
+  .side { flex-shrink: 0; width: 34mm; display: flex; flex-direction: column; align-items: center; justify-content: space-between; }
+  .count { border: 2.5px solid #111; border-radius: 2.5mm; padding: 1.5mm 3mm; font-size: 22pt; font-weight: 800;
+    line-height: 1; text-align: center; white-space: nowrap; }
+  .count span { font-size: 11pt; font-weight: 800; }
+  .qr-wrap { text-align: center; margin-top: 2mm; }
+  .qr-box { width: 26mm; height: 26mm; margin: 0 auto; }
+  .qr-box svg { width: 100%; height: 100%; display: block; }
+  .qr-cap { font-size: 7.5pt; color: #666; margin-top: 1mm; letter-spacing: 0.02em; }
+  .foot { border-top: 1px solid #ddd; padding-top: 2mm; flex-shrink: 0;
+    font-size: 9pt; font-weight: 700; letter-spacing: 0.06em; color: #444; }
+</style></head><body>
+<div class="actions">
+  <span class="info">${N} label${N === 1 ? '' : 's'} · ${escapeHtml(ref)} · 6×4 in</span>
+  <button onclick="window.print()">Print</button>
+  <button class="ghost" onclick="window.close()">Close</button>
+</div>
+${labelHtml}
+<script>
+  // QR → the website. If the QR lib doesn't load (offline), hide the QR and print anyway.
+  function makeQrs() {
+    try {
+      if (typeof qrcode !== 'function') throw new Error('qr lib missing');
+      var qr = qrcode(0, 'M');
+      qr.addData(${JSON.stringify(siteUrl)});
+      qr.make();
+      var svg = qr.createSvgTag({ cellSize: 2, margin: 0, scalable: true });
+      document.querySelectorAll('.qr-box').forEach(function (box) { box.innerHTML = svg; });
+    } catch (e) {
+      document.querySelectorAll('.qr-wrap').forEach(function (elm) { elm.style.display = 'none'; });
+    }
+  }
+  // Auto-fit long customer names / item titles (shrink, never truncate).
+  function fitOne(sel, label, min) {
+    var t = label.querySelector(sel);
+    if (!t || !t.textContent.trim()) return;
+    t.style.fontSize = '';
+    var boxes = [t, t.parentElement, label];
+    var over = function () { return boxes.some(function (e) { return e.scrollHeight > e.clientHeight + 1; }); };
+    var fs = parseFloat(getComputedStyle(t).fontSize), guard = 200;
+    while (over() && fs > min && guard-- > 0) { fs -= 0.5; t.style.fontSize = fs + 'px'; }
+  }
+  function fitAll() {
+    document.querySelectorAll('.label').forEach(function (l) { fitOne('.customer', l, 12); fitOne('.title', l, 9); });
+  }
+  window.addEventListener('load', function () { makeQrs(); fitAll(); });
+  if (document.readyState === 'complete') { makeQrs(); fitAll(); }
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitAll);
+<\/script>
+</body></html>`);
+  w.document.close();
 }
 
 // Edit tracking on an already-dispatched order. Same modal shape as dispatch

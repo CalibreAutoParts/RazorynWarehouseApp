@@ -455,6 +455,26 @@ function channelGroup(channel) {
 // POST /api/dispatch/:saleId/set-fulfillment  { method: 'ship'|'collect' }
 // Re-classify an order between Deliveries and Collections. Fixes a mis-bucketed
 // order (e.g. a bank pickup that defaulted to "ship" and was demanding a carrier).
+// GET /api/dispatch/:saleId/label-data — the minimal fields the 6×4 collection
+// label needs: customer name, order ref, date, and the items (title/sku/qty).
+// Deliberately EXCLUDES the address and all money, so it's safe for warehouse
+// staff (dispatch permission, not admin) and matches what the label may show.
+router.get('/:saleId/label-data', requirePermission('dispatch'), async (req, res) => {
+  try {
+    if (!/^\d+$/.test(req.params.saleId)) return res.status(400).json({ error: 'bad_id' });
+    const s = await query(
+      `SELECT id, invoice_number, payment_reference, external_order_id, customer_name, occurred_at, channel
+         FROM sales WHERE id = $1 AND is_estimate = false`, [req.params.saleId]);
+    if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
+    const items = await query(`SELECT title, sku, qty FROM sale_items WHERE sale_id = $1 ORDER BY id`, [req.params.saleId]);
+    res.json({ sale: s.rows[0], items: items.rows });
+  } catch (e) {
+    // Express 4 doesn't forward async rejections to the error middleware — an
+    // uncaught one here would take down the whole process on Node >=20.
+    res.status(500).json({ error: 'label_data_failed', message: e.message });
+  }
+});
+
 router.post('/:saleId/set-fulfillment', requirePermission('dispatch'), async (req, res) => {   // any signed-in staff (operational)
   await ensureDispatchColumns();
   const method = req.body?.method === 'collect' ? 'collect' : req.body?.method === 'ship' ? 'ship' : null;
