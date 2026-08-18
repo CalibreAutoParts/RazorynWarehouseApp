@@ -2145,7 +2145,7 @@ function enterApp() {
   bindHeader();
   initKiosk();
   applyAppMode();           // strip to warehouse pages + bottom quick-bar in the app shell
-  initHardwareScanner();    // global keyboard-wedge scanner capture (JR-927M etc.)
+  if (State.appShell) initHardwareScanner();  // global keyboard-wedge scanner capture — app only, so it can't intercept keys on desktop
   initCopyTap();            // tap a part number / SKU to copy it
   initMoneyMask();          // hide all £ amounts from non-admin (warehouse) staff
   initNativeApp();          // register device + native push (FCM) when in the APK
