@@ -33,6 +33,7 @@ let _migrated = false;
 async function ensureThumbnailSchema() {
   if (_migrated) return;
   await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS thumbnail_integration_key TEXT`);
+  await query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS thumbnail_app_url TEXT`);
   await query(`CREATE TABLE IF NOT EXISTS thumbnail_pushes (
     id              SERIAL PRIMARY KEY,
     idempotency_key TEXT UNIQUE NOT NULL,
@@ -41,6 +42,31 @@ async function ensureThumbnailSchema() {
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
   _migrated = true;
+}
+
+// Base URL of the Thumbnail Maker deployment (for importing studio photos
+// into listings). Same convention as the key: env wins, settings fallback.
+async function getThumbnailAppUrl() {
+  await ensureThumbnailSchema();
+  const envUrl = (process.env.THUMBNAIL_APP_URL || '').trim();
+  if (envUrl) return envUrl.replace(/\/$/, '');
+  const r = await query(`SELECT thumbnail_app_url FROM app_settings LIMIT 1`);
+  return (r.rows[0]?.thumbnail_app_url || '').trim().replace(/\/$/, '');
+}
+
+// Call the thumbnail app's inbound integration API with the shared key.
+async function studioFetch(path, { method = 'GET' } = {}) {
+  const [appUrl, key] = await Promise.all([getThumbnailAppUrl(), getIntegrationKey()]);
+  if (!appUrl || !key) {
+    const err = new Error('studio_not_configured');
+    err.status = 400;
+    throw err;
+  }
+  const res = await fetch(`${appUrl}/api/integration/warehouse${path}`, {
+    method,
+    headers: { 'X-Integration-Key': key },
+  });
+  return res;
 }
 
 async function getIntegrationKey() {
@@ -72,19 +98,89 @@ router.get('/config', requireAuth, requireAdmin, async (req, res) => {
   const stored = (r.rows[0]?.thumbnail_integration_key || '').trim();
   const envSet = !!(process.env.THUMBNAIL_INTEGRATION_KEY || '').trim();
   const active = envSet ? (process.env.THUMBNAIL_INTEGRATION_KEY || '').trim() : stored;
+  const appUrl = await getThumbnailAppUrl();
   res.json({
     keySet: !!active,
     keyLast4: active ? active.slice(-4) : null,
     source: envSet ? 'env' : (stored ? 'settings' : null),
+    appUrl: appUrl || null,
+    appUrlSource: (process.env.THUMBNAIL_APP_URL || '').trim() ? 'env' : (appUrl ? 'settings' : null),
   });
 });
 
 router.post('/config', requireAuth, requireAdmin, async (req, res) => {
   await ensureThumbnailSchema();
-  const apiKey = String(req.body?.apiKey || '').trim();
-  await query(`UPDATE app_settings SET thumbnail_integration_key = $1`, [apiKey || null]);
+  // Only touch the key when the field is present — omitting it keeps the
+  // stored key (the settings form leaves it blank to mean "no change").
+  const apiKey = (req.body && 'apiKey' in req.body) ? String(req.body.apiKey || '').trim() : null;
+  if (req.body && 'apiKey' in req.body) {
+    await query(`UPDATE app_settings SET thumbnail_integration_key = $1`, [apiKey || null]);
+  }
+  if (req.body && 'appUrl' in req.body) {
+    const appUrl = String(req.body.appUrl || '').trim().replace(/\/$/, '');
+    if (appUrl && !/^https?:\/\//i.test(appUrl)) {
+      return res.status(400).json({ error: 'invalid_app_url' });
+    }
+    await query(`UPDATE app_settings SET thumbnail_app_url = $1`, [appUrl || null]);
+  }
   await audit(req, 'thumbnail.config', 'settings', null, { keySet: !!apiKey });
   res.json({ ok: true, keySet: !!apiKey });
+});
+
+// ── Studio photo import (browser, session-guarded) ─────────────────────────
+// While creating/editing a listing, find finished photo sets in the thumbnail
+// app by part number (or title search) and pull their public image URLs
+// straight into the listing's photo list.
+
+router.get('/studio/match', requireAuth, async (req, res) => {
+  try {
+    const partNumber = String(req.query.partNumber || '').trim();
+    const q = String(req.query.q || '').trim();
+    if (!partNumber && !q) return res.json({ photoSets: [], configured: true });
+    const params = new URLSearchParams();
+    if (partNumber) params.set('part_number', partNumber);
+    if (q) params.set('q', q);
+    const r = await studioFetch(`/photo-sets?${params.toString()}`);
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      return res.status(502).json({ error: 'studio_error', message: body.detail?.error || `HTTP ${r.status}` });
+    }
+    const body = await r.json();
+    res.json({ configured: true, photoSets: body.photo_sets || [] });
+  } catch (e) {
+    if (e.status === 400) return res.json({ configured: false, photoSets: [] });
+    res.status(500).json({ error: 'server_error', message: e.message });
+  }
+});
+
+router.get('/studio/sets/:id/thumb', requireAuth, async (req, res) => {
+  try {
+    const r = await studioFetch(`/photo-sets/${parseInt(req.params.id, 10)}/thumb`);
+    if (!r.ok) return res.status(404).end();
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'private, max-age=300');
+    res.send(Buffer.from(await r.arrayBuffer()));
+  } catch (e) {
+    res.status(e.status === 400 ? 400 : 500).end();
+  }
+});
+
+router.post('/studio/sets/:id/image-urls', requireAuth, async (req, res) => {
+  try {
+    const r = await studioFetch(`/photo-sets/${parseInt(req.params.id, 10)}/image-urls`, { method: 'POST' });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      return res.status(502).json({
+        error: 'studio_error',
+        message: body.detail?.message || body.detail?.error || `HTTP ${r.status}`,
+      });
+    }
+    await audit(req, 'thumbnail.studio.import', 'photo_set', req.params.id, { images: (body.images || []).length });
+    res.json({ images: body.images || [], sku: body.sku || null });
+  } catch (e) {
+    if (e.status === 400) return res.status(400).json({ error: 'studio_not_configured', message: 'Set the Thumbnail app URL and key in Settings → Thumbnail integration.' });
+    res.status(500).json({ error: 'server_error', message: e.message });
+  }
 });
 
 // Everything below is machine-to-machine.
