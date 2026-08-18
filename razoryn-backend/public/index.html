@@ -2145,7 +2145,7 @@ function enterApp() {
   bindHeader();
   initKiosk();
   applyAppMode();           // strip to warehouse pages + bottom quick-bar in the app shell
-  initHardwareScanner();    // global keyboard-wedge scanner capture (JR-927M etc.)
+  if (State.appShell) initHardwareScanner();  // global keyboard-wedge scanner capture — app only, so it can't intercept keys on desktop
   initCopyTap();            // tap a part number / SKU to copy it
   initMoneyMask();          // hide all £ amounts from non-admin (warehouse) staff
   initNativeApp();          // register device + native push (FCM) when in the APK
@@ -2786,11 +2786,14 @@ const APP_TAB_BAR = [
 ];
 function detectAppShell() {
   try {
+    // The real native app: Capacitor runtime, or our user-agent tag (both are
+    // reliably present inside the APK and survive in-app navigation).
     if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform()) return true;
     if (/RazorynApp|CalibreApp|WarehouseHubApp/i.test(navigator.userAgent || '')) return true;
-    const u = new URLSearchParams(location.search);
-    if (u.get('app') === '1') { try { localStorage.setItem('rzn_appmode', '1'); } catch (_) {} return true; }
-    if (localStorage.getItem('rzn_appmode') === '1') return true;
+    // ?app=1 is a TRANSIENT override for testing app mode in a browser — this-load
+    // only. It is deliberately NOT persisted: persisting it to localStorage would
+    // trap a normal desktop browser in app mode forever after one visit.
+    if (new URLSearchParams(location.search).get('app') === '1') return true;
   } catch (_) {}
   return false;
 }
