@@ -11,6 +11,15 @@ const cron = require('node-cron');
 const app = express();
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 
+// Safety net: Express 4 does NOT forward a rejected promise from an async route
+// handler to the error middleware, and on Node >=20 an unhandled rejection kills
+// the whole process — so one transient DB error inside any of the many async
+// handlers would take the entire backend down (verified by live repro). Log it
+// instead; the one affected request may time out, everything else keeps working.
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', (err && err.stack) || err);
+});
+
 // ---------- Middleware ----------
 app.set('trust proxy', 1); // Railway sits behind a proxy
 // 25mb so create/edit listing can carry several base64 photo uploads at once
