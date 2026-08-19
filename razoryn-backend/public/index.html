@@ -12732,6 +12732,11 @@ function clCoreHtml() {
         ? 'Remove a watermarked photo (×), add clean ones, and drag the main one first (◀ ▶). Saving replaces the photos on <strong>both Shopify &amp; eBay</strong>.'
         : 'Uploaded to Shopify; the same photos are reused on the eBay listing.'}</div>
       <div id="cl-photos" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"></div>
+      <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <button type="button" class="btn btn-outline btn-sm" onclick="clFindStudioPhotos()">🎨 Import from photo studio</button>
+        <span style="font-size:11px;color:var(--ink-soft)">Finds finished image sets matching the part number / SKU (or title).</span>
+      </div>
+      <div id="cl-studio-matches" style="margin-top:6px"></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Shopify price <span style="color:var(--ink-soft);font-weight:400">— auto eBay − ${pct}%</span></label>
@@ -13256,6 +13261,73 @@ async function clAddPhotos(input) {
   clRenderPhotos();
 }
 function clRemovePhoto(i) { CL.images.splice(i, 1); CL.imagesDirty = true; clRenderPhotos(); }
+
+// ── Studio photo import — pull finished image sets from the thumbnail app ──
+async function clFindStudioPhotos() {
+  const wrap = el('cl-studio-matches'); if (!wrap) return;
+  const partNumber = (el('cl-partnumber')?.value || '').trim() || (el('cl-sku')?.value || '').trim();
+  const q = (el('ce-title')?.value || el('cl-title')?.value || '').trim();
+  if (!partNumber && !q) {
+    wrap.innerHTML = `<div style="font-size:12px;color:var(--amber)">Enter the part number, SKU or title first — matching uses those.</div>`;
+    return;
+  }
+  wrap.innerHTML = `<div style="font-size:12px;color:var(--ink-soft)">Searching the photo studio…</div>`;
+  try {
+    const r = await Api.get(`/api/thumbnail/studio/match?partNumber=${encodeURIComponent(partNumber)}&q=${encodeURIComponent(q)}`);
+    if (r.configured === false) {
+      wrap.innerHTML = `<div style="font-size:12px;color:var(--amber)">Photo studio not connected — an admin needs to set the Thumbnail app URL &amp; key (Settings → Thumbnail integration).</div>`;
+      return;
+    }
+    const sets = r.photoSets || [];
+    if (!sets.length) {
+      wrap.innerHTML = `<div style="font-size:12px;color:var(--ink-soft)">No matching photo sets in the studio${partNumber ? ` for “${escapeHtml(partNumber)}”` : ''}.</div>`;
+      return;
+    }
+    wrap.innerHTML = sets.map(s => `
+      <div style="display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;margin-top:6px">
+        ${s.has_thumb ? `<img src="/api/thumbnail/studio/sets/${s.id}/thumb" style="width:44px;height:44px;object-fit:contain;border-radius:6px;background:#fff;border:1px solid var(--line)">` : `<div style="width:44px;height:44px;border-radius:6px;background:var(--bg-soft);display:flex;align-items:center;justify-content:center;font-size:18px">📷</div>`}
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(s.title || s.sku || `Set #${s.id}`)}</div>
+          <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(s.part_number || s.sku || '')}${s.image_count ? ` · ${s.image_count} finished image${s.image_count === 1 ? '' : 's'}` : ' · <span style="color:var(--amber)">no finished renders yet</span>'}</div>
+        </div>
+        <button type="button" class="btn btn-primary btn-sm" ${s.image_count ? '' : 'disabled'} onclick="clImportStudioPhotos(${s.id}, this)">Import</button>
+      </div>`).join('');
+  } catch (e) {
+    wrap.innerHTML = `<div style="font-size:12px;color:var(--red)">Studio search failed: ${escapeHtml(e.message || 'error')}</div>`;
+  }
+}
+async function clImportStudioPhotos(setId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+  try {
+    const r = await Api.post(`/api/thumbnail/studio/sets/${setId}/image-urls`, {});
+    const urls = (r.images || []).filter(u => /^https:\/\//i.test(u) && !(CL.images || []).includes(u));
+    if (!urls.length) throw new Error('no images returned');
+    CL.images = CL.images || [];
+    CL.images.push(...urls);
+    CL.imagesDirty = true;
+    clRenderPhotos();
+    // Part numbers captured at photo time flow into the listing too: fill the
+    // main part number if empty, merge alternates into "sub part numbers".
+    let pnsAdded = 0;
+    const pnEl = el('cl-partnumber');
+    if (r.part_number && pnEl && !pnEl.value.trim()) { pnEl.value = r.part_number; pnsAdded++; }
+    const alts = Array.isArray(r.alt_part_numbers) ? r.alt_part_numbers : [];
+    const subEl = el('cl-subpn');
+    if (alts.length && subEl) {
+      const existing = (subEl.value || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+      const have = new Set(existing.map(s => s.toUpperCase()));
+      for (const pn of alts) {
+        const v = String(pn).trim();
+        if (v && !have.has(v.toUpperCase())) { existing.push(v); have.add(v.toUpperCase()); pnsAdded++; }
+      }
+      subEl.value = existing.join('\n');
+    }
+    if (btn) btn.textContent = `✓ ${urls.length} photo${urls.length === 1 ? '' : 's'}${pnsAdded ? ` + ${pnsAdded} part №` : ''}`;
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Import'; }
+    alert('Import failed: ' + (e.message || 'error'));
+  }
+}
 function clDerivedShopify(eb) { return eb ? eb * (1 - clPct() / 100) : 0; }
 function clUpdateDerived() {
   const eb = parseFloat(el('cl-ebay')?.value) || 0;
@@ -17995,6 +18067,32 @@ function renderSettings() {
       </div>
 
       <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>🎨 Photo studio (Thumbnail Maker) integration</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">
+            Connects this warehouse to the photo studio app. The studio pushes finished image sets here, and the
+            <strong>Import from photo studio</strong> button on the listing form pulls matching images in by part number or title.
+            The key must equal the studio's warehouse integration key (same shared secret both ways).
+          </p>
+          <div class="grid-2" style="grid-template-columns:1fr 1fr">
+            <div class="field"><label>Thumbnail app URL</label>
+              <input id="tn-app-url" placeholder="https://images.yourbrand.co.uk" autocomplete="off">
+              <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">The studio deployment for THIS brand. The THUMBNAIL_APP_URL Railway variable overrides this field.</div>
+            </div>
+            <div class="field"><label>Integration key</label>
+              <input id="tn-key" type="password" placeholder="leave blank to keep current" autocomplete="off">
+              <div id="tn-key-status" style="font-size:11px;color:var(--ink-soft);margin-top:2px"></div>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+            <button class="btn btn-primary" onclick="saveThumbnailConfig(this)">Save</button>
+            <button class="btn btn-outline" onclick="testThumbnailStudio(this)">🔌 Test connection</button>
+            <span id="tn-status" style="font-size:13px"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>🛠 eBay fitment-confirmation messages</h3></div>
         <div class="card-body">
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">
@@ -18681,6 +18779,7 @@ function renderSettings() {
   loadEbayTemplate();
   loadInvoiceHubStatus();
   loadDropfleetConfig();
+  loadThumbnailConfig();
   loadFitmentConfig();
 }
 
@@ -18773,6 +18872,50 @@ async function runFitmentNow(btn) {
     setTimeout(poll, 2500);
   } catch (e) { if (s) { s.textContent = '✗ ' + (e.data?.message || e.message); s.style.color = 'var(--red)'; } }
   finally { if (btn) btn.disabled = false; }
+}
+
+// ── Photo studio (Thumbnail Maker) integration ──
+async function loadThumbnailConfig() {
+  try {
+    const c = await Api.get('/api/thumbnail/config');
+    if (el('tn-app-url')) {
+      el('tn-app-url').value = c.appUrl || '';
+      el('tn-app-url').disabled = c.appUrlSource === 'env';
+      if (c.appUrlSource === 'env') el('tn-app-url').title = 'Set by the THUMBNAIL_APP_URL Railway variable';
+    }
+    if (el('tn-key-status')) el('tn-key-status').textContent = c.keySet ? `✓ Key saved (…${c.keyLast4})${c.source === 'env' ? ' — from Railway variables' : ''}` : 'No key saved yet';
+  } catch (_) {}
+}
+async function saveThumbnailConfig(btn) {
+  if (btn) btn.disabled = true;
+  const status = el('tn-status');
+  try {
+    const body = { appUrl: (el('tn-app-url')?.value || '').trim() };
+    const key = (el('tn-key')?.value || '').trim();
+    if (key) body.apiKey = key; // blank = keep the stored key
+    await Api.post('/api/thumbnail/config', body);
+    if (el('tn-key')) el('tn-key').value = '';
+    if (status) { status.textContent = '✓ Saved'; status.style.color = 'var(--green)'; }
+    loadThumbnailConfig();
+  } catch (e) {
+    if (status) { status.textContent = 'Failed: ' + (e.message || 'error'); status.style.color = 'var(--red)'; }
+  } finally { if (btn) btn.disabled = false; }
+}
+
+async function testThumbnailStudio(btn) {
+  if (btn) btn.disabled = true;
+  const status = el('tn-status');
+  if (status) { status.textContent = 'Testing…'; status.style.color = 'var(--ink-soft)'; }
+  try {
+    const r = await Api.get('/api/thumbnail/studio/test');
+    if (r.ok) {
+      if (status) { status.textContent = `✓ Connected (${r.service})`; status.style.color = 'var(--green)'; }
+    } else {
+      if (status) { status.textContent = '✗ ' + (r.message || 'failed'); status.style.color = 'var(--red)'; }
+    }
+  } catch (e) {
+    if (status) { status.textContent = '✗ ' + (e.message || 'failed'); status.style.color = 'var(--red)'; }
+  } finally { if (btn) btn.disabled = false; }
 }
 
 // ── DropFleet delivery integration ──
