@@ -106,6 +106,45 @@ router.get('/', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// GET /api/customers/profile?name=… — a trade customer's buying profile derived
+// from their past invoices, used by the manual-sale form to auto-fill:
+//   • paymentMethod — how they usually pay (e.g. always bank)
+//   • prices        — the LAST unit price they paid per product ("customer price"
+//                     — regulars often buy below the base cash/bank rates)
+// Matches by customer name (case-insensitive, trimmed) across all non-estimate
+// direct sales. Read-only.
+// ──────────────────────────────────────────────────────────────────────────
+router.get('/profile', requireAdmin, async (req, res) => {
+  try {
+    const name = String(req.query.name || '').trim();
+    if (name.length < 2) return res.status(400).json({ error: 'name_required' });
+    const pm = await query(
+      `SELECT payment_method, COUNT(*)::int AS n FROM sales
+        WHERE LOWER(TRIM(customer_name)) = LOWER($1) AND is_estimate = false
+          AND payment_method IN ('cash','bank','card')
+        GROUP BY payment_method ORDER BY n DESC, MAX(occurred_at) DESC LIMIT 1`, [name]);
+    const prices = await query(
+      `SELECT DISTINCT ON (si.product_id) si.product_id, si.unit_price, s.occurred_at
+         FROM sale_items si JOIN sales s ON s.id = si.sale_id
+        WHERE LOWER(TRIM(s.customer_name)) = LOWER($1) AND s.is_estimate = false
+          AND si.product_id IS NOT NULL AND si.unit_price > 0
+        ORDER BY si.product_id, s.occurred_at DESC
+        LIMIT 500`, [name]);
+    const priceMap = {};
+    for (const r of prices.rows) priceMap[r.product_id] = parseFloat(r.unit_price);
+    const oc = await query(
+      `SELECT COUNT(*)::int AS n FROM sales WHERE LOWER(TRIM(customer_name)) = LOWER($1) AND is_estimate = false`, [name]);
+    res.json({
+      name,
+      orderCount: oc.rows[0]?.n || 0,
+      paymentMethod: pm.rows[0]?.payment_method || null,
+      prices: priceMap,
+      priceCount: Object.keys(priceMap).length,
+    });
+  } catch (e) { res.status(500).json({ error: 'profile_failed', message: e.message }); }
+});
+
+// ──────────────────────────────────────────────────────────────────────────
 // GET /api/customers/from-sales — repeat-customer directory derived straight
 // from the sales table (no customers table needed). Groups every past sale by
 // customer email (falling back to name), so historical/unlinked orders are all
