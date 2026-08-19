@@ -18175,6 +18175,15 @@ function renderSettings() {
             </div>
             <div id="barcode-sync-result" style="font-size:12px;color:var(--ink-soft);margin-top:10px"></div>
           </div>
+
+          <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">Part number on the storefront</div>
+            <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">The website's "Part no" comes from Shopify's Part Number metafield. An older tool wrote the <strong>SKU</strong> there (e.g. "9820422880CITROEN"), so product pages showed the SKU instead of the real part number. Run this once to re-stamp every product's Part Number metafield from the warehouse part number.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-primary" onclick="fixPartNumbers(this)">🔧 Fix part numbers on Shopify</button>
+            </div>
+            <div id="pn-fix-result" style="font-size:12px;color:var(--ink-soft);margin-top:10px"></div>
+          </div>
         </div>
       </div>
 
@@ -19257,6 +19266,31 @@ async function barcodeSkuPreview() {
     if (out) out.innerHTML = '<span style="color:var(--red)">Failed: ' + (e.data?.message || e.message) + '</span>';
   }
 }
+// One-click repair: re-stamp every linked Shopify product's "Part Number"
+// metafield from the warehouse part number (an older tool wrote the SKU there,
+// so storefront pages showed "Part no: <SKU>"). Background job + live progress.
+async function fixPartNumbers(btn) {
+  const out = el('pn-fix-result');
+  try {
+    const r = await Api.post('/api/listings/fix-part-number-metafields', {});
+    if (r.alreadyRunning) toast('Already running — watching progress.', 'info');
+    else toast(`Re-stamping part numbers on ${r.total} product(s)…`, 'success');
+    if (btn) btn.disabled = true;
+    const poll = setInterval(async () => {
+      try {
+        const s = await Api.get('/api/listings/fix-part-number-metafields/status');
+        if (out) out.textContent = s.state === 'running'
+          ? `Working… ${s.done}/${s.total} (${s.updated} updated, ${s.skipped} skipped${s.errors ? ', ' + s.errors + ' errors' : ''})`
+          : `Done ✓ — ${s.updated} updated, ${s.skipped} skipped${s.errors ? ', ' + s.errors + ' errors' : ''} of ${s.total}. Product pages now show the real part number.`;
+        if (s.state !== 'running') { clearInterval(poll); if (btn) btn.disabled = false; }
+      } catch (_) { clearInterval(poll); if (btn) btn.disabled = false; }
+    }, 2500);
+  } catch (e) {
+    toast('Failed to start: ' + (e.data?.message || e.message), 'error');
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function barcodeSkuPush() {
   if (!confirm('Set barcode = SKU on EVERY matching Shopify variant? This writes to Shopify. Run Preview first if unsure.')) return;
   const out = el('barcode-sync-result');
