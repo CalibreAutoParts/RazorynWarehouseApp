@@ -14,6 +14,29 @@ router.use(requireAuth);
 // no backfill that could re-flip intentionally-unpaid rows). paid_at records
 // when payment was taken.
 let _paidColReady = false;
+// Partial payments: a ledger of what a customer has paid against an invoice
+// (trade customers often pay a portion now, the rest before their next order).
+// sales.amount_paid mirrors the ledger sum for fast list rendering; the invoice
+// stays UNPAID (visible + chased) until the ledger covers the total.
+let _paymentsReady = false;
+async function ensurePaymentsTable() {
+  if (_paymentsReady) return;
+  try {
+    await query(`CREATE TABLE IF NOT EXISTS sale_payments (
+      id          SERIAL PRIMARY KEY,
+      sale_id     INTEGER NOT NULL,
+      amount      NUMERIC(10,2) NOT NULL,
+      method      TEXT,
+      notes       TEXT,
+      paid_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+      recorded_by INTEGER
+    )`);
+    await query(`CREATE INDEX IF NOT EXISTS sale_payments_sale_idx ON sale_payments (sale_id)`);
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS amount_paid NUMERIC(10,2)`);
+    _paymentsReady = true;
+  } catch (e) { console.warn('[sales] payments migration warning:', e.message); }
+}
+
 async function ensurePaidColumn() {
   if (_paidColReady) return;
   try {
@@ -528,8 +551,14 @@ router.get('/:id', requireAdmin, async (req, res, next) => {
             COALESCE(p.title, r.item_title) AS item_title
        FROM returns r LEFT JOIN products p ON p.id = r.product_id
       WHERE r.sale_id = $1 ORDER BY r.created_at DESC`, [req.params.id]);
+  // Payments ledger — so the detail modal can show what's been paid and the balance.
+  let payments = [];
+  try {
+    await ensurePaymentsTable();
+    payments = (await query(`SELECT id, amount, method, notes, paid_at FROM sale_payments WHERE sale_id = $1 ORDER BY paid_at`, [req.params.id])).rows;
+  } catch (_) {}
   await audit(req, 'view_sale', 'sale', req.params.id);  // GDPR: log customer-data read
-  res.json({ sale: s.rows[0], items: items.rows, returns: returns.rows });
+  res.json({ sale: s.rows[0], items: items.rows, returns: returns.rows, payments });
 });
 
 // POST /api/sales — record a manual sale or estimate.
@@ -765,12 +794,70 @@ router.post('/', requireAdmin, async (req, res) => {
   res.status(201).json(result);
 });
 
+// POST /api/sales/:id/payments — record a PARTIAL payment against an invoice.
+// Body: { amount, method?, notes?, paidAt? }. The invoice stays UNPAID (visible,
+// chased, in the Unpaid tab) until the ledger covers the total — at which point
+// it flips to paid exactly like mark-paid. Never hides a part-paid invoice.
+router.post('/:id/payments', requireAdmin, async (req, res) => {
+  try {
+    await ensurePaidColumn();
+    await ensurePaymentsTable();
+    const amount = Math.round((parseFloat(req.body?.amount) || 0) * 100) / 100;
+    if (!(amount > 0)) return res.status(400).json({ error: 'amount_required', message: 'Enter the amount received.' });
+    const s = await query(`SELECT id, is_estimate, status, channel, total, payment_method FROM sales WHERE id = $1`, [req.params.id]);
+    const sale = s.rows[0];
+    if (!sale) return res.status(404).json({ error: 'not_found' });
+    if (sale.is_estimate) return res.status(400).json({ error: 'is_estimate', message: 'Estimates have no payments — convert to an invoice first.' });
+    const total = Math.round((parseFloat(sale.total) || 0) * 100) / 100;
+    const prior = await query(`SELECT COALESCE(SUM(amount),0)::numeric AS s FROM sale_payments WHERE sale_id = $1`, [sale.id]);
+    const already = Math.round((parseFloat(prior.rows[0].s) || 0) * 100) / 100;
+    if (total > 0 && already + amount > total + 0.01) {
+      return res.status(409).json({
+        error: 'overpayment',
+        message: `Only £${Math.max(0, total - already).toFixed(2)} is left to pay on this £${total.toFixed(2)} invoice (£${already.toFixed(2)} already received).`,
+      });
+    }
+    let paidAt = null;
+    if (req.body?.paidAt) { const d = new Date(req.body.paidAt); if (!isNaN(d)) paidAt = d; }
+    await query(
+      `INSERT INTO sale_payments (sale_id, amount, method, notes, paid_at, recorded_by)
+       VALUES ($1,$2,$3,$4, COALESCE($5, now()), $6)`,
+      [sale.id, amount, (req.body?.method || sale.payment_method || null), (req.body?.notes || '').slice(0, 300) || null, paidAt, req.user?.id || null]);
+    const paidNow = Math.round((already + amount) * 100) / 100;
+    const fully = total > 0 && paidNow >= total - 0.005;
+    const newStatus = fully && sale.status === 'pending' ? 'paid' : sale.status;
+    await query(
+      `UPDATE sales SET amount_paid = $2,
+              is_paid = CASE WHEN $3 THEN true ELSE is_paid END,
+              paid_at = CASE WHEN $3 THEN COALESCE(paid_at, now()) ELSE paid_at END,
+              status = $4
+        WHERE id = $1`,
+      [sale.id, paidNow, fully, newStatus]);
+    await audit(req, 'sale_partial_payment', 'sale', sale.id, { amount, paidNow, total, fully });
+    if (fully) {
+      // Same follow-through as mark-paid: forward to the Invoice Hub + email receipt.
+      const invoiceHub = require('../services/invoiceHub');
+      if (invoiceHub.isInScope(sale.channel)) {
+        setImmediate(() => invoiceHub.pushSale(sale.id).catch(e => console.warn('[invoiceHub] push failed:', e.message)));
+      }
+      if (sale.status === 'pending') {
+        const baseUrl = `${req.protocol}://${req.get('host')}`;
+        setImmediate(() => maybeAutoEmailSale(sale.id, baseUrl));
+      }
+    }
+    res.json({ ok: true, amountPaid: paidNow, total, balance: Math.max(0, +(total - paidNow).toFixed(2)), fullyPaid: fully });
+  } catch (e) {
+    res.status(500).json({ error: 'payment_failed', message: e.message });
+  }
+});
+
 // POST /api/sales/:id/mark-paid — record payment for an already-issued invoice
 // (#13). Stock was already decremented when the invoice was issued, so this only
 // flips the payment state — no inventory change.
 router.post('/:id/mark-paid', requireAdmin, async (req, res) => {
   await ensurePaidColumn();
-  const s = await query(`SELECT id, is_estimate, status, channel FROM sales WHERE id = $1`, [req.params.id]);
+  await ensurePaymentsTable();
+  const s = await query(`SELECT id, is_estimate, status, channel, total, payment_method FROM sales WHERE id = $1`, [req.params.id]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   if (s.rows[0].is_estimate) return res.status(400).json({ error: 'is_estimate', message: 'Use “Mark paid” on the estimate to convert it to an invoice.' });
   const newStatus = (s.rows[0].status === 'pending') ? 'paid' : s.rows[0].status;
@@ -781,6 +868,19 @@ router.post('/:id/mark-paid', requireAdmin, async (req, res) => {
   const upd = await query(
     `UPDATE sales SET is_paid = true, paid_at = COALESCE($3, now()), status = $2 WHERE id = $1 RETURNING *`,
     [req.params.id, newStatus, paidAt]);
+  // Keep the payments ledger consistent: record the remaining balance as the
+  // final payment (so "mark paid" after part-payments reads correctly).
+  try {
+    const prior = await query(`SELECT COALESCE(SUM(amount),0)::numeric AS s FROM sale_payments WHERE sale_id = $1`, [req.params.id]);
+    const already = parseFloat(prior.rows[0].s) || 0;
+    const total = parseFloat(s.rows[0].total) || 0;
+    const remaining = Math.round((total - already) * 100) / 100;
+    if (remaining > 0) {
+      await query(`INSERT INTO sale_payments (sale_id, amount, method, notes, paid_at, recorded_by) VALUES ($1,$2,$3,'Marked paid', COALESCE($4, now()), $5)`,
+        [req.params.id, remaining, s.rows[0].payment_method || null, paidAt, req.user?.id || null]);
+    }
+    await query(`UPDATE sales SET amount_paid = $2 WHERE id = $1`, [req.params.id, total]);
+  } catch (_) { /* ledger is best-effort */ }
   await audit(req, 'sale_mark_paid', 'sale', req.params.id, { paidAt: paidAt || 'now' });
   // A pending direct bank/cash invoice has now been paid → forward it to the
   // Invoice Hub (best-effort; idempotent on the Hub side).

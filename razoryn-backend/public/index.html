@@ -1452,6 +1452,10 @@ function adaptSale(s) {
     isPaid: s.is_paid !== false,
     paidAt: s.paid_at || null,
     unpaid: !s.is_estimate && s.status !== 'preorder' && s.is_paid === false && s.status !== 'refunded' && s.status !== 'cancelled',
+    // Partial payments: what's been received so far against an unpaid invoice
+    // (null = nothing recorded / legacy row). The invoice stays visible + unpaid
+    // until the balance is covered.
+    amountPaid: s.amount_paid != null ? parseFloat(s.amount_paid) : null,
     subtotal: parseFloat(s.subtotal || 0),
     vat: parseFloat(s.vat || 0),
     shipping: parseFloat(s.shipping || 0),
@@ -8312,10 +8316,13 @@ function renderSales() {
       // "long overdue" warning so they get chased.
       const unpaidDays = s.unpaid ? Math.floor((Date.now() - new Date(s.date).getTime()) / 86400000) : 0;
       const unpaidOverdue = s.unpaid && unpaidDays >= 30;
+      const partPaid = s.unpaid && s.amountPaid > 0;
       const unpaidBadge = s.unpaid
-        ? (unpaidOverdue
-            ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--red-light);color:var(--red);font-weight:700" title="Unpaid for ${unpaidDays} days — chase payment">🔴 Unpaid ${unpaidDays}d</span>`
-            : ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="Parts given, payment not received yet (${unpaidDays}d)">⏳ Unpaid</span>`)
+        ? (partPaid
+            ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--blue-light);color:var(--blue);font-weight:700" title="Part-paid — ${gbp(s.amountPaid)} received of ${gbp(s.amount)}; ${gbp(Math.max(0, s.amount - s.amountPaid))} still due (${unpaidDays}d)">💷 ${gbp(s.amountPaid)} / ${gbp(s.amount)}</span>`
+            : unpaidOverdue
+              ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--red-light);color:var(--red);font-weight:700" title="Unpaid for ${unpaidDays} days — chase payment">🔴 Unpaid ${unpaidDays}d</span>`
+              : ` <span class="pill amber" style="font-size:10px;margin-left:4px" title="Parts given, payment not received yet (${unpaidDays}d)">⏳ Unpaid</span>`)
         : '';
       const preorderBadge = s.isPreorder ? ` <span class="pill" style="font-size:10px;margin-left:4px;background:var(--amber-light);color:var(--amber)" title="Item not in stock yet — you'll be notified to ship when it arrives">📦 Pre-order</span>` : '';
       // Fitment + large-panel flags (auto-parts ops). Only meaningful on live orders.
@@ -8364,7 +8371,7 @@ function renderSales() {
           <button class="btn btn-ghost btn-sm" onclick="openMessageModal('${s.id}')" title="Message the customer (email / eBay / WhatsApp)">💬</button>
           <button class="btn btn-ghost btn-sm" onclick="openEditSale('${s.id}')" title="Edit customer / reg / VIN / notes">✏️</button>
           ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Mark payment received → decrements stock, generates paid invoice using locked payment method" style="color:var(--green)">✓ Mark paid</button>` : ''}
-          ${s.unpaid ? `<button class="btn btn-ghost btn-sm" onclick="markSalePaid('${s.id}')" title="Record that payment has now been received (stock already given)" style="color:var(--green)">✓ Mark paid</button>` : ''}
+          ${s.unpaid ? `<button class="btn btn-ghost btn-sm" onclick="recordPartialPayment('${s.id}')" title="Record a PART payment — e.g. customer paid £300 of £600; invoice stays open for the balance" style="color:var(--blue)">💷 Part-pay</button><button class="btn btn-ghost btn-sm" onclick="markSalePaid('${s.id}')" title="Record that payment has now been received in full (stock already given)" style="color:var(--green)">✓ Mark paid</button>` : ''}
           ${dispatchBtn}
           ${(['cash', 'bank', 'card'].includes(s.channel) && !s.isEstimate && !s.isPreorder && s.status !== 'refunded') ? `<button class="btn btn-ghost btn-sm" onclick="openReturnFromSale('${s.id}')" title="Book a return / refund — restocks the item and corrects the cash book so revenue isn't over-stated" style="color:var(--amber)">↩ Return</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="deleteSale('${s.id}', ${s.isEstimate})" title="Delete this ${s.isEstimate ? 'estimate' : 'invoice'} ${!s.isEstimate ? '(restores stock)' : ''}" style="color:var(--red)">🗑</button>
@@ -8520,6 +8527,54 @@ async function reconcileRefunds(btn) {
 // #13 — record payment for an issued-but-unpaid invoice (stock already given).
 // Lets you set the date payment was actually received so it lands in the right
 // VAT period (defaults to today if left blank).
+// Record a PART payment against an unpaid invoice (e.g. £300 received of £600).
+// The invoice stays open/unpaid for the balance; the ledger tracks every payment.
+// Recording the full balance flips it to paid automatically.
+async function recordPartialPayment(id, presetBalance) {
+  const sale = (State.sales || []).find(s => String(s.id) === String(id));
+  const total = sale ? sale.amount : null;
+  const already = sale && sale.amountPaid > 0 ? sale.amountPaid : 0;
+  const balance = total != null ? Math.max(0, +(total - already).toFixed(2)) : (presetBalance ?? null);
+  modal({
+    title: '💷 Record a payment',
+    body: `
+      ${total != null ? `<div style="background:var(--bg-soft);padding:10px 12px;border-radius:8px;margin-bottom:12px;font-size:13px">
+        Invoice <strong>${gbp(total)}</strong>${already > 0 ? ` · already received <strong>${gbp(already)}</strong>` : ''} · balance <strong style="color:var(--amber)">${gbp(balance)}</strong>
+      </div>` : ''}
+      <div class="field"><label>Amount received (£)</label><input type="number" id="pp-amount" min="0.01" step="0.01" value="${balance != null ? balance.toFixed(2) : ''}" autofocus></div>
+      <div class="field"><label>How it was paid</label>
+        <select id="pp-method"><option value="bank">Bank transfer</option><option value="cash">Cash</option><option value="card">Card</option></select></div>
+      <div class="field"><label>Date received</label><input type="date" id="pp-date" value="${new Date().toISOString().slice(0, 10)}"></div>
+      <div class="field"><label>Note (optional)</label><input id="pp-notes" placeholder="e.g. 'first half — rest before next order'"></div>
+      <div style="font-size:11px;color:var(--ink-soft)">The invoice stays open (and visibly unpaid) until the full balance is received — paying the full balance marks it paid automatically.</div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '💷 Record payment', primary: true, onClick: async () => {
+        const amount = parseFloat(el('pp-amount')?.value);
+        if (!(amount > 0)) { toast('Enter the amount received', 'warn'); return; }
+        try {
+          const r = await Api.post('/api/sales/' + id + '/payments', {
+            amount, method: el('pp-method')?.value || null,
+            paidAt: el('pp-date')?.value || null, notes: el('pp-notes')?.value || null,
+          });
+          toast(r.fullyPaid
+            ? `Payment recorded — invoice now FULLY PAID (${gbp(r.amountPaid)})`
+            : `Payment recorded — ${gbp(r.amountPaid)} of ${gbp(r.total)} received, ${gbp(r.balance)} still due`, 'success', 7000);
+          closeModal();
+          await Store.refresh('sales');
+          if (State.page === 'sales' && typeof renderSales === 'function') renderSales();
+        } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error', 8000); }
+      } },
+    ],
+  });
+  // Default the method to how this customer/invoice pays.
+  if (sale && el('pp-method')) {
+    const pm = sale.paymentMethod || (sale.apiChannel === 'direct_cash' ? 'cash' : 'bank');
+    if (['cash', 'bank', 'card'].includes(pm)) el('pp-method').value = pm;
+  }
+}
+
 async function markSalePaid(id) {
   const today = new Date().toISOString().slice(0, 10);
   const input = await promptInput({
@@ -8686,6 +8741,9 @@ async function openSaleDetail(id) {
   const s = data.sale;
   const items = data.items || [];
   const bookedReturns = data.returns || [];
+  const salePayments = data.payments || [];
+  const paidSoFar = salePayments.reduce((a, p) => a + (parseFloat(p.amount) || 0), 0);
+  const isUnpaidSale = !s.is_estimate && s.is_paid === false && !['refunded', 'cancelled', 'preorder'].includes(s.status);
   const fmt = (n) => '£' + parseFloat(n || 0).toFixed(2);
   // Source of truth for the refunded figure = the actual booked returns (never a
   // possibly-stale refunded_amount column). Use the larger of the two so a
@@ -8782,7 +8840,24 @@ async function openSaleDetail(id) {
           <div style="text-align:right;color:var(--amber)">Returned / refunded</div><div style="text-align:right;color:var(--amber)">−${fmt(isFullyRefunded ? s.total : effectiveRefunded)}</div>
           <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px">${s.is_paid === false ? 'Now to pay' : 'Net value'}</div>
           <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px;color:var(--green)">${fmt(isFullyRefunded ? 0 : (orderTotalNum - effectiveRefunded))}</div>` : ''}
+        ${isUnpaidSale ? `
+          <div style="text-align:right;color:var(--blue)">Paid so far</div><div style="text-align:right;color:var(--blue)">${fmt(paidSoFar)}</div>
+          <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px;color:var(--amber)">Balance due</div>
+          <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px;color:var(--amber)">${fmt(Math.max(0, orderTotalNum - paidSoFar))}</div>` : ''}
       </div>
+
+      ${salePayments.length ? `
+      <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600;margin-bottom:8px">Payments received (${salePayments.length})</div>
+        ${salePayments.map(p => `
+          <div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:12px">
+            <div style="flex:1">
+              <span style="font-weight:600">${fmt(p.amount)}</span>
+              ${p.method ? ` · ${escape(p.method)}` : ''}${p.notes ? ` · <span style="color:var(--ink-soft)">${escape(p.notes)}</span>` : ''}
+            </div>
+            <div style="color:var(--ink-soft);white-space:nowrap">${p.paid_at ? new Date(p.paid_at).toLocaleDateString('en-GB') : ''}</div>
+          </div>`).join('')}
+      </div>` : ''}
 
       ${bookedReturns.length ? `
       <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
@@ -8808,6 +8883,7 @@ async function openSaleDetail(id) {
     `,
     actions: [
       { label: 'Close', onClick: closeModal },
+      ...(isUnpaidSale ? [{ label: '💷 Record payment', onClick: () => { closeModal(); recordPartialPayment(id, Math.max(0, orderTotalNum - paidSoFar)); } }] : []),
       ...(!s.is_estimate ? [{ label: '↩ Log return', onClick: () => openReturnFromSale(id) }] : []),
       ...(!s.is_estimate && hasRefund ? [{ label: '↩ Undo returns / reopen', onClick: () => undoReturnsForSale(id) }] : []),
       { label: '✉ Email', onClick: () => { closeModal(); emailSingleInvoice(id); } },
@@ -9214,7 +9290,7 @@ async function printSelectedInvoices() {
 /* ---------- Manual order entry ---------- */
 function openManualSale() {
   if (!State.products.length) { toast('No products in inventory yet', 'warn'); return; }
-  _msPickedId = null; _msCustList = []; // reset saved-buyer state for a fresh sale
+  _msPickedId = null; _msCustList = []; _msCustPrices = null; // reset saved-buyer state for a fresh sale
   modal({
     title: 'New manual order / estimate',
     body: `
@@ -9283,6 +9359,9 @@ function openManualSale() {
     manualSaleRecalc();
   });
   el('ms-shipping').addEventListener('input', manualSaleRecalc);
+  // Typing a known customer name (without clicking a suggestion) still applies
+  // their profile on blur — payment method + their previous per-product prices.
+  el('ms-cust').addEventListener('change', () => msApplyCustomerProfile(el('ms-cust').value));
 }
 
 function manualSaleAddRow() {
@@ -9380,6 +9459,14 @@ function manualSaleToggleCustom(link) {
 
 function manualSalePrefillPrice(row) {
   if (!row.dataset.productId) return;
+  // A saved customer's OWN price (from their last invoice for this product) wins
+  // over the base cash/bank pricing — regulars often buy below the standard rates.
+  const custP = _msCustPrices && parseFloat(_msCustPrices[row.dataset.productId]);
+  if (custP > 0) {
+    row.querySelector('.ms-price').value = custP.toFixed(2);
+    manualSaleRecalc();
+    return;
+  }
   const payment = el('ms-payment')?.value || 'cash';
   const cfg = State.pricingConfig || {};
   const shopifyP = parseFloat(row.dataset.priceShopify || 0);
@@ -9436,7 +9523,33 @@ function manualSaleRecalc() {
 }
 
 // #14 — saved-buyer autocomplete for the manual-sale form.
-let _msCustTimer = null, _msCustList = [], _msPickedId = null;
+let _msCustTimer = null, _msCustList = [], _msPickedId = null, _msCustPrices = null;
+
+// Pull the customer's buying profile (usual payment method + their last price per
+// product) and apply it to the form: payment method auto-switches (which also
+// re-prefills line prices + fulfilment), and their per-product prices override
+// the base cash/bank suggestions on every current and future line.
+async function msApplyCustomerProfile(name) {
+  const n = (name || '').trim();
+  if (n.length < 2) { _msCustPrices = null; return; }
+  try {
+    const prof = await Api.get('/api/customers/profile?name=' + encodeURIComponent(n));
+    if ((el('ms-cust')?.value || '').trim() !== n) return;   // user typed on — stale reply
+    _msCustPrices = (prof.prices && Object.keys(prof.prices).length) ? prof.prices : null;
+    let switched = false;
+    if (prof.paymentMethod && el('ms-payment') && el('ms-payment').value !== prof.paymentMethod) {
+      el('ms-payment').value = prof.paymentMethod;
+      el('ms-payment').dispatchEvent(new Event('change'));   // re-prefills prices + fulfilment
+      switched = true;
+    } else if (_msCustPrices) {
+      document.querySelectorAll('#ms-items > [data-idx]').forEach(manualSalePrefillPrice);
+      manualSaleRecalc();
+    }
+    if (prof.orderCount > 0 && (switched || _msCustPrices)) {
+      toast(`${n} — ${prof.orderCount} previous order${prof.orderCount === 1 ? '' : 's'}${switched ? ' · usually pays by ' + prof.paymentMethod : ''}${_msCustPrices ? ' · using their previous prices' : ''}`, 'info', 6000);
+    }
+  } catch (_) { /* profile is a convenience — never block the sale */ }
+}
 function msCustomerSearch(q) {
   _msPickedId = null; // editing the name clears any prior pick
   clearTimeout(_msCustTimer);
@@ -9466,6 +9579,8 @@ function msPickCustomer(i) {
   if (el('ms-address') && c.address) el('ms-address').value = c.address;
   if (el('ms-save-customer')) el('ms-save-customer').checked = false; // already saved
   const box = el('ms-cust-suggest'); if (box) box.style.display = 'none';
+  // Apply their buying profile: usual payment method + their previous prices.
+  msApplyCustomerProfile(c.name);
 }
 
 async function submitManualSale() {
