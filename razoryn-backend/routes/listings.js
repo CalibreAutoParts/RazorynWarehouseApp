@@ -1920,6 +1920,12 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
     if (pool) result.stockPool = pool;
   } catch (e) { /* best-effort — never fail the create over pooling */ }
 
+  // Storefront "Part no" = the REAL part number (the SKU carries per-model
+  // suffixes and must never show there). Best-effort.
+  if (shopifyProduct?.id) {
+    try { await shopify.setPartNumberMetafield(shopifyProduct.id, partNumber); } catch (_) {}
+  }
+
   // Pre-listing: create a linked incoming_stock line (existing or new container)
   // so the arriving units are tracked and "receiving" them later flips this
   // product live. Best-effort — never fail the listing over the incoming link.
@@ -2376,9 +2382,11 @@ router.post('/push-warehouse-sku', requireAdmin, async (req, res) => {
     if (!link || !link.shopify_product_id) { r.errors.push('not_linked'); results.push(r); continue; }
     const spId = String(link.shopify_product_id);
 
-    // Resolve the warehouse product + its master SKU.
-    const prod = await query(`SELECT id, sku FROM products WHERE shopify_product_id = $1 LIMIT 1`, [spId]);
+    // Resolve the warehouse product + its master SKU (and the REAL part number —
+    // the storefront's "Part no" metafield must never show the SKU).
+    const prod = await query(`SELECT id, sku, part_number FROM products WHERE shopify_product_id = $1 LIMIT 1`, [spId]);
     const sku = prod.rows[0]?.sku ? String(prod.rows[0].sku).trim() : '';
+    const partNo = (prod.rows[0]?.part_number || '').trim();
     if (!sku) { r.errors.push('no_warehouse_product'); results.push(r); continue; }
     r.sku = sku;
 
@@ -2392,7 +2400,9 @@ router.post('/push-warehouse-sku', requireAdmin, async (req, res) => {
     if (shopify.isConfigured()) {
       try { await shopify.setVariantSku(spId, sku); r.shopify = 'ok'; }
       catch (e) { r.shopify = 'error'; r.errors.push('Shopify: ' + e.message); }
-      try { await shopify.setPartNumberMetafield(spId, sku); } catch (_) { /* non-critical */ }
+      // Part Number metafield = the REAL part number, never the SKU (the SKU has
+      // per-model suffixes like 9820422880CITROEN which aren't the part number).
+      try { await shopify.setPartNumberMetafield(spId, partNo || sku); } catch (_) { /* non-critical */ }
     } else { r.shopify = 'not_configured'; }
 
     try { await query(`UPDATE mirror_links SET last_synced_sku = $1 WHERE ebay_item_id = $2`, [sku, itemId]); } catch (_) {}
@@ -2403,6 +2413,41 @@ router.post('/push-warehouse-sku', requireAdmin, async (req, res) => {
   const okCount = results.filter(r => !r.errors.length).length;
   res.json({ ok: true, results, summary: { total: itemIds.length, ok: okCount, errors: itemIds.length - okCount } });
 });
+
+// ──────────────────────────────────────────────────────────────────────────
+// POST /api/listings/fix-part-number-metafields — background repair: stamp every
+// linked Shopify product's "Part Number" metafield with the WAREHOUSE part number.
+// The SKU-push tool used to write the SKU into that metafield, so storefronts
+// showed e.g. "Part no: 9820422880CITROEN" (a SKU) instead of 9820422880.
+// Runs in the background (Shopify rate-limit throttled); poll .../status.
+// ──────────────────────────────────────────────────────────────────────────
+let _pnFixStatus = { state: 'idle', total: 0, done: 0, updated: 0, skipped: 0, errors: 0, startedAt: null, finishedAt: null };
+router.post('/fix-part-number-metafields', requireAdmin, async (req, res) => {
+  if (_pnFixStatus.state === 'running') return res.json({ ok: true, alreadyRunning: true, status: _pnFixStatus });
+  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+  const { rows } = await query(
+    `SELECT id, shopify_product_id, part_number FROM products
+      WHERE shopify_product_id IS NOT NULL AND active = true ORDER BY id`);
+  _pnFixStatus = { state: 'running', total: rows.length, done: 0, updated: 0, skipped: 0, errors: 0, startedAt: Date.now(), finishedAt: null };
+  await audit(req, 'fix_part_number_metafields', null, null, { total: rows.length });
+  res.json({ ok: true, started: true, total: rows.length });
+  setImmediate(async () => {
+    for (const p of rows) {
+      try {
+        const pn = (p.part_number || '').trim();
+        if (!pn) { _pnFixStatus.skipped++; }
+        else {
+          const r = await shopify.setPartNumberMetafield(p.shopify_product_id, pn);
+          if (r.ok) _pnFixStatus.updated++; else _pnFixStatus.skipped++;
+        }
+      } catch (_) { _pnFixStatus.errors++; }
+      _pnFixStatus.done++;
+      await new Promise(r2 => setTimeout(r2, 350));   // Shopify rate-limit headroom
+    }
+    _pnFixStatus.state = 'done'; _pnFixStatus.finishedAt = Date.now();
+  });
+});
+router.get('/fix-part-number-metafields/status', requireAdmin, (req, res) => res.json(_pnFixStatus));
 
 // ──────────────────────────────────────────────────────────────────────────
 // GET /api/listings/shopify-duplicates — scan the whole Shopify catalogue and
