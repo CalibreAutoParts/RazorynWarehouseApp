@@ -44,14 +44,26 @@ async function ensureThumbnailSchema() {
   _migrated = true;
 }
 
+// People paste page addresses ("https://photos.example/sets") — the API lives
+// at the site root, so normalize any URL down to its origin.
+function normalizeAppUrl(raw) {
+  const val = String(raw || '').trim();
+  if (!val) return '';
+  try {
+    return new URL(/^https?:\/\//i.test(val) ? val : `https://${val}`).origin;
+  } catch (_) {
+    return val.replace(/\/+$/, '');
+  }
+}
+
 // Base URL of the Thumbnail Maker deployment (for importing studio photos
 // into listings). Same convention as the key: env wins, settings fallback.
 async function getThumbnailAppUrl() {
   await ensureThumbnailSchema();
-  const envUrl = (process.env.THUMBNAIL_APP_URL || '').trim();
-  if (envUrl) return envUrl.replace(/\/$/, '');
+  const envUrl = normalizeAppUrl(process.env.THUMBNAIL_APP_URL);
+  if (envUrl) return envUrl;
   const r = await query(`SELECT thumbnail_app_url FROM app_settings LIMIT 1`);
-  return (r.rows[0]?.thumbnail_app_url || '').trim().replace(/\/$/, '');
+  return normalizeAppUrl(r.rows[0]?.thumbnail_app_url);
 }
 
 // Call the thumbnail app's inbound integration API with the shared key.
@@ -117,10 +129,7 @@ router.post('/config', requireAuth, requireAdmin, async (req, res) => {
     await query(`UPDATE app_settings SET thumbnail_integration_key = $1`, [apiKey || null]);
   }
   if (req.body && 'appUrl' in req.body) {
-    const appUrl = String(req.body.appUrl || '').trim().replace(/\/$/, '');
-    if (appUrl && !/^https?:\/\//i.test(appUrl)) {
-      return res.status(400).json({ error: 'invalid_app_url' });
-    }
+    const appUrl = normalizeAppUrl(req.body.appUrl);
     await query(`UPDATE app_settings SET thumbnail_app_url = $1`, [appUrl || null]);
   }
   await audit(req, 'thumbnail.config', 'settings', null, { keySet: !!apiKey });
@@ -137,12 +146,18 @@ router.post('/config', requireAuth, requireAdmin, async (req, res) => {
 router.get('/studio/test', requireAuth, async (req, res) => {
   try {
     const r = await studioFetch('/health');
-    const body = await r.json().catch(() => ({}));
     if (r.status === 401) {
       return res.json({ ok: false, message: 'Studio reachable but the key was rejected — it must equal the studio\'s warehouse integration key.' });
     }
-    if (!r.ok) {
-      return res.json({ ok: false, message: `Studio responded HTTP ${r.status} — check the app URL points at the thumbnail app.` });
+    const isJson = (r.headers.get('content-type') || '').includes('application/json');
+    const body = isJson ? await r.json().catch(() => ({})) : {};
+    if (!r.ok || !isJson || !body.ok) {
+      return res.json({
+        ok: false,
+        message: !isJson
+          ? 'That URL serves a web page, not the studio API — use the app\'s base address (e.g. https://photos.yourbrand.co.uk, no page path).'
+          : `Studio responded HTTP ${r.status} — check the app URL points at the thumbnail app.`,
+      });
     }
     res.json({ ok: true, service: body.service || 'thumbnail' });
   } catch (e) {
@@ -162,11 +177,16 @@ router.get('/studio/match', requireAuth, async (req, res) => {
     if (partNumber) params.set('part_number', partNumber);
     if (q) params.set('q', q);
     const r = await studioFetch(`/photo-sets?${params.toString()}`);
-    if (!r.ok) {
-      const body = await r.json().catch(() => ({}));
-      return res.status(502).json({ error: 'studio_error', message: body.detail?.error || `HTTP ${r.status}` });
+    const isJson = (r.headers.get('content-type') || '').includes('application/json');
+    const body = isJson ? await r.json().catch(() => ({})) : {};
+    if (!r.ok || !isJson) {
+      return res.status(502).json({
+        error: 'studio_error',
+        message: !isJson
+          ? 'The studio URL serves a web page, not the API — check it in Settings → Thumbnail integration.'
+          : body.detail?.error || `HTTP ${r.status}`,
+      });
     }
-    const body = await r.json();
     res.json({ configured: true, photoSets: body.photo_sets || [] });
   } catch (e) {
     if (e.status === 400) return res.json({ configured: false, photoSets: [] });
