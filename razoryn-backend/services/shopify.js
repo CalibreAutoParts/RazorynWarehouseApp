@@ -339,7 +339,7 @@ async function createProduct({ title, sku, price, imageUrls = [], imageData = []
 
   const r = await shopifyRequest('post', '/products.json', { data: { product: productPayload } });
   const product = r.data.product;
-  await publishProductToAllChannels(product.id);
+  product.__publishResult = await publishProductToAllChannels(product.id);
   if (qty != null) await setInitialInventory(product, qty);
   if (metafields.length) product.__metafieldResults = await applyMetafields(product.id, metafields);
   return product;
@@ -512,11 +512,48 @@ async function setVariantWeight(shopifyProductId, grams) {
   return { ok: true, productId: String(shopifyProductId), grams: g };
 }
 
+// Make the package-dimension metafields REAL, PINNED definitions so they show as
+// named fields ("Package length (cm)" …) in every product page's Metafields
+// section — visible to staff and mappable by courier/shipping apps. Idempotent:
+// an already-existing definition (TAKEN) is fine. Runs once per process.
+let _pkgDefsEnsured = false;
+async function ensurePackageMetafieldDefinitions() {
+  if (_pkgDefsEnsured) return;
+  const defs = [
+    { name: 'Package length (cm)', key: 'package_length_cm' },
+    { name: 'Package width (cm)',  key: 'package_width_cm' },
+    { name: 'Package height (cm)', key: 'package_height_cm' },
+  ];
+  for (const d of defs) {
+    try {
+      const mutation = `mutation createDef($definition: MetafieldDefinitionInput!) {
+        metafieldDefinitionCreate(definition: $definition) {
+          createdDefinition { id }
+          userErrors { code field message }
+        }
+      }`;
+      const r = await shopifyRequest('post', '/graphql.json', {
+        data: { query: mutation, variables: { definition: {
+          name: d.name, namespace: 'custom', key: d.key,
+          type: 'number_decimal', ownerType: 'PRODUCT', pin: true,
+        } } },
+      });
+      const errs = r.data?.data?.metafieldDefinitionCreate?.userErrors || [];
+      if (errs.length && !errs.some(e => e.code === 'TAKEN')) {
+        console.warn('[shopify] package def', d.key, ':', errs.map(e => e.message).join('; '));
+      }
+    } catch (e) { console.warn('[shopify] package def create failed:', d.key, e.message); }
+  }
+  _pkgDefsEnsured = true;
+  cachedMetafieldDefs = null;   // refresh so the new definitions are picked up
+}
+
 // Store the parcel DIMENSIONS as product metafields (Shopify has no native
 // per-product dimensions field — package sizes are store-level settings — so
 // metafields are the standard place; shipping apps and the theme can read them).
 async function setPackageDimensionMetafields(shopifyProductId, { lengthCm, widthCm, heightCm } = {}) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
+  await ensurePackageMetafieldDefinitions();
   const mfs = [];
   const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) && n > 0 ? String(n) : null; };
   const L = num(lengthCm), W = num(widthCm), H = num(heightCm);
@@ -659,7 +696,7 @@ async function publishProductToAllChannels(productId) {
     const pubs = await getPublications();
     if (!pubs.length) {
       console.warn('[shopify] no publications found — token likely missing read_publications scope');
-      return;
+      return { ok: false, published: 0, hint: 'No sales channels visible — the Shopify custom app token needs read_publications + write_publications scopes (Apps → your app → Configuration → Admin API scopes), then Save + reinstall.' };
     }
     const productGid = `gid://shopify/Product/${productId}`;
     const mutation = `mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
@@ -676,12 +713,19 @@ async function publishProductToAllChannels(productId) {
     const userErrors = r.data.data?.publishablePublish?.userErrors || [];
     if (userErrors.length) {
       console.warn('[shopify] publish userErrors for product', productId, ':', JSON.stringify(userErrors));
+      const msg = userErrors.map(e => e.message).join('; ');
+      // Access-denied → the write_publications scope is missing.
+      const hint = /access/i.test(msg) ? 'write_publications scope missing on the Shopify custom app token.' : msg;
+      return { ok: false, published: 0, total: pubs.length, hint };
     }
     if (r.data.errors) {
       console.warn('[shopify] publish GraphQL errors for product', productId, ':', JSON.stringify(r.data.errors));
+      return { ok: false, published: 0, total: pubs.length, hint: JSON.stringify(r.data.errors).slice(0, 200) };
     }
+    return { ok: true, published: pubs.length, total: pubs.length, channels: pubs.map(p => p.name) };
   } catch (e) {
     console.warn('[shopify] publish to channels failed:', e.response?.data || e.message);
+    return { ok: false, published: 0, hint: e.message };
   }
 }
 
