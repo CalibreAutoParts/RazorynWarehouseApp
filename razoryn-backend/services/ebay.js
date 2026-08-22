@@ -845,11 +845,12 @@ function buildItemSpecificsXml(specifics) {
   return lists ? `<ItemSpecifics>${lists}</ItemSpecifics>` : '';
 }
 
-async function reviseItem(itemId, { sku, title, price, description, itemSpecifics, pictureUrls } = {}, storeArg) {
+async function reviseItem(itemId, { sku, title, price, description, itemSpecifics, pictureUrls, packageDetails } = {}, storeArg) {
   if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
   if (!itemId) throw new Error('missing_item_id');
   if (sku == null && title == null && price == null && description == null
-      && !(itemSpecifics && itemSpecifics.length) && !(pictureUrls && pictureUrls.length)) {
+      && !(itemSpecifics && itemSpecifics.length) && !(pictureUrls && pictureUrls.length)
+      && !packageDetails) {
     return { skipped: true };
   }
 
@@ -866,6 +867,24 @@ async function reviseItem(itemId, { sku, title, price, description, itemSpecific
   if (itemSpecifics && itemSpecifics.length) fields.push(buildItemSpecificsXml(itemSpecifics));
   if (pictureUrls && pictureUrls.length) {
     fields.push(`<PictureDetails>${pictureUrls.filter(Boolean).slice(0, 24).map(u => `<PictureURL>${escapeXml(u)}</PictureURL>`).join('')}</PictureDetails>`);
+  }
+  // Parcel size + weight (metric) — same block as addItem, so editing a product's
+  // package in the warehouse can update the LIVE listing's postage details.
+  if (packageDetails) {
+    const L = parseFloat(packageDetails.lengthCm), W = parseFloat(packageDetails.widthCm), H = parseFloat(packageDetails.heightCm);
+    const g = parseInt(packageDetails.weightG);
+    const dimTags = [];
+    if (Number.isFinite(L) && L > 0) dimTags.push(`<PackageLength unit="centimeters">${L.toFixed(1)}</PackageLength>`);
+    if (Number.isFinite(W) && W > 0) dimTags.push(`<PackageWidth unit="centimeters">${W.toFixed(1)}</PackageWidth>`);
+    if (Number.isFinite(H) && H > 0) dimTags.push(`<PackageDepth unit="centimeters">${H.toFixed(1)}</PackageDepth>`);
+    let weightTags = '';
+    if (Number.isFinite(g) && g > 0) {
+      const kg = Math.floor(g / 1000), gm = g % 1000;
+      weightTags = `<WeightMajor unit="kg">${kg}</WeightMajor><WeightMinor unit="gm">${gm}</WeightMinor>`;
+    }
+    if (dimTags.length || weightTags) {
+      fields.push(`<ShippingPackageDetails>${dimTags.join('')}${weightTags}</ShippingPackageDetails>`);
+    }
   }
   const body = `<Item>${fields.join('')}</Item>`;
 

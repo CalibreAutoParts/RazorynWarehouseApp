@@ -4884,7 +4884,7 @@ function openProductModal(id) {
           <div><input type="number" step="0.1" min="0" id="m-pkg-l" value="${p.pkgLengthCm ?? ''}" placeholder="L cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Length</div></div>
           <div><input type="number" step="0.1" min="0" id="m-pkg-w" value="${p.pkgWidthCm ?? ''}" placeholder="W cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Width</div></div>
           <div><input type="number" step="0.1" min="0" id="m-pkg-h" value="${p.pkgHeightCm ?? ''}" placeholder="H cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Height</div></div>
-          <div><input type="number" step="1" min="0" id="m-pkg-g" value="${p.pkgWeightG ?? ''}" placeholder="grams"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (g)</div></div>
+          <div><input type="number" step="0.1" min="0" id="m-pkg-g" value="${p.pkgWeightG != null ? +(p.pkgWeightG / 1000).toFixed(2) : ''}" placeholder="kg"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (kg)</div></div>
         </div>
       </div>
       ${id ? `<div class="field"><label>Shared stock pool <span style="font-weight:400;color:var(--ink-soft)">— link listings that sell the same physical part so they share one stock count.</span></label>
@@ -4910,7 +4910,7 @@ function openProductModal(id) {
           pkgLengthCm: el('m-pkg-l')?.value !== '' ? +el('m-pkg-l').value : null,
           pkgWidthCm: el('m-pkg-w')?.value !== '' ? +el('m-pkg-w').value : null,
           pkgHeightCm: el('m-pkg-h')?.value !== '' ? +el('m-pkg-h').value : null,
-          pkgWeightG: el('m-pkg-g')?.value !== '' ? +el('m-pkg-g').value : null,
+          pkgWeightG: el('m-pkg-g')?.value !== '' ? Math.round(parseFloat(el('m-pkg-g').value) * 1000) : null,   // UI is kg → stored as grams
         };
         try {
           let newProduct = null;
@@ -12750,7 +12750,7 @@ function clCoreHtml() {
         <div><input type="number" step="0.1" min="0" id="cl-pkg-l" placeholder="L cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Length</div></div>
         <div><input type="number" step="0.1" min="0" id="cl-pkg-w" placeholder="W cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Width</div></div>
         <div><input type="number" step="0.1" min="0" id="cl-pkg-h" placeholder="H cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Height</div></div>
-        <div><input type="number" step="1" min="0" id="cl-pkg-g" placeholder="grams"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (g)</div></div>
+        <div><input type="number" step="0.1" min="0" id="cl-pkg-g" placeholder="kg"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (kg)</div></div>
       </div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -12878,7 +12878,7 @@ async function submitUnifiedCreate(btn, overrides = {}) {
       pkgLengthCm: (el('cl-pkg-l')?.value || '') !== '' ? parseFloat(el('cl-pkg-l').value) : null,
       pkgWidthCm: (el('cl-pkg-w')?.value || '') !== '' ? parseFloat(el('cl-pkg-w').value) : null,
       pkgHeightCm: (el('cl-pkg-h')?.value || '') !== '' ? parseFloat(el('cl-pkg-h').value) : null,
-      pkgWeightG: (el('cl-pkg-g')?.value || '') !== '' ? parseInt(el('cl-pkg-g').value) : null,
+      pkgWeightG: (el('cl-pkg-g')?.value || '') !== '' ? Math.round(parseFloat(el('cl-pkg-g').value) * 1000) : null,   // UI is kg → stored as grams
       tags: (el('cl-tags')?.value || '').trim() || null,
       status: el('cl-status')?.value || 'draft',
       taxable: el('cl-taxable') ? el('cl-taxable').checked : true,
@@ -13016,7 +13016,8 @@ async function clCopyFromProduct(productId) {
       'cl-desc': sh.description || '',
       'cl-tags': sh.tags || '',
       'cl-cost': p.cost_price != null ? p.cost_price : '',
-      'cl-pkg-l': p.pkg_length_cm ?? '', 'cl-pkg-w': p.pkg_width_cm ?? '', 'cl-pkg-h': p.pkg_height_cm ?? '', 'cl-pkg-g': p.pkg_weight_g ?? '',
+      'cl-pkg-l': p.pkg_length_cm ?? '', 'cl-pkg-w': p.pkg_width_cm ?? '', 'cl-pkg-h': p.pkg_height_cm ?? '',
+      'cl-pkg-g': p.pkg_weight_g != null ? +(p.pkg_weight_g / 1000).toFixed(2) : '',   // field is kg; stored grams
       'cl-subpn': (detail.subPartNumbers || []).join('\n'),
       'ce-title': eb.title || sh.title || p.title || '',
       'ce-price': (eb.price != null ? eb.price : p.price_ebay) ?? '',
