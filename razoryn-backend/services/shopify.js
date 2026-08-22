@@ -480,8 +480,12 @@ async function setVariantPrice(shopifyProductId, price) {
   return { ok: true, productId: String(shopifyProductId), price: +p.toFixed(2) };
 }
 
-// Lightweight weight-only update — sets the first variant's weight (grams) so
-// Shopify + connected shipping apps can quote rates. No-op for 0/blank.
+// Lightweight weight-only update — sets the first variant's weight so Shopify +
+// connected shipping apps can quote rates. No-op for 0/blank.
+// NOTE: as of Shopify API 2024-04 the REST variant weight/grams fields were
+// REMOVED (writes are silently ignored) — weight now lives on the InventoryItem
+// measurement, set via GraphQL inventoryItemUpdate. We fetch the variant's
+// inventory_item_id via REST (still returned) and mutate via GraphQL.
 async function setVariantWeight(shopifyProductId, grams) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const g = parseInt(grams);
@@ -489,10 +493,40 @@ async function setVariantWeight(shopifyProductId, grams) {
   const ex = await shopifyRequest('get', `/products/${encodeURIComponent(shopifyProductId)}.json`);
   const variant = ex.data.product?.variants?.[0];
   if (!variant) throw new Error('no_variant_for_product');
-  await shopifyRequest('put', `/variants/${variant.id}.json`, {
-    data: { variant: { id: variant.id, grams: g, weight: +(g / 1000).toFixed(3), weight_unit: 'kg' } },
+  if (!variant.inventory_item_id) throw new Error('no_inventory_item_for_variant');
+  const mutation = `mutation setWeight($id: ID!, $weight: WeightInput!) {
+    inventoryItemUpdate(id: $id, input: { measurement: { weight: $weight } }) {
+      inventoryItem { id }
+      userErrors { field message }
+    }
+  }`;
+  const r = await shopifyRequest('post', '/graphql.json', {
+    data: {
+      query: mutation,
+      variables: { id: `gid://shopify/InventoryItem/${variant.inventory_item_id}`, weight: { value: +(g / 1000).toFixed(3), unit: 'KILOGRAMS' } },
+    },
   });
+  const errs = r.data?.data?.inventoryItemUpdate?.userErrors || [];
+  if (r.data?.errors?.length) throw new Error('Shopify weight update failed: ' + JSON.stringify(r.data.errors));
+  if (errs.length) throw new Error('Shopify weight update failed: ' + errs.map(e => e.message).join('; '));
   return { ok: true, productId: String(shopifyProductId), grams: g };
+}
+
+// Store the parcel DIMENSIONS as product metafields (Shopify has no native
+// per-product dimensions field — package sizes are store-level settings — so
+// metafields are the standard place; shipping apps and the theme can read them).
+async function setPackageDimensionMetafields(shopifyProductId, { lengthCm, widthCm, heightCm } = {}) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const mfs = [];
+  const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) && n > 0 ? String(n) : null; };
+  const L = num(lengthCm), W = num(widthCm), H = num(heightCm);
+  if (L) mfs.push({ namespace: 'custom', key: 'package_length_cm', type: 'number_decimal', value: L });
+  if (W) mfs.push({ namespace: 'custom', key: 'package_width_cm',  type: 'number_decimal', value: W });
+  if (H) mfs.push({ namespace: 'custom', key: 'package_height_cm', type: 'number_decimal', value: H });
+  if (!mfs.length) return { ok: false, skipped: 'no_dimensions' };
+  const results = await applyMetafields(shopifyProductId, mfs);
+  const failed = results.filter(x => !x.ok);
+  return failed.length ? { ok: false, error: failed.map(f => f.error).join('; ') } : { ok: true, count: mfs.length };
 }
 
 // List delivery (shipping) profiles. Returns [{id, name}].
@@ -1204,6 +1238,7 @@ module.exports = {
   deleteProduct,
   setVariantPrice,
   setVariantWeight,
+  setPackageDimensionMetafields,
   setVariantSku,
   setPartNumberMetafield,
   setProductImages,
