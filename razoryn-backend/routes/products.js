@@ -646,15 +646,41 @@ router.patch('/:id', requireAdmin, async (req, res) => {
     params
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
-  // If the parcel weight was set/changed and the product is on Shopify, push the
-  // weight so Shopify + connected shipping apps can quote rates (best-effort).
-  if (('pkgWeightG' in (req.body || {}) || 'pkg_weight_g' in (req.body || {})) && rows[0].shopify_product_id && rows[0].pkg_weight_g) {
-    try {
-      const shopify = require('../services/shopify');
-      if (shopify.isConfigured() && typeof shopify.setVariantWeight === 'function') {
-        await shopify.setVariantWeight(rows[0].shopify_product_id, rows[0].pkg_weight_g);
-      }
-    } catch (e) { console.warn('[products] shopify weight push failed:', e.message); }
+  // If any parcel size/weight field was in this update, push the package to BOTH
+  // channels (best-effort): Shopify gets the variant weight (its shipping apps
+  // quote from it); every linked eBay listing gets ShippingPackageDetails via
+  // ReviseItem so calculated postage uses the real box.
+  const pkgTouched = ['pkgWeightG', 'pkg_weight_g', 'pkgLengthCm', 'pkg_length_cm',
+    'pkgWidthCm', 'pkg_width_cm', 'pkgHeightCm', 'pkg_height_cm']
+    .some(k => k in (req.body || {}));
+  if (pkgTouched) {
+    if (rows[0].shopify_product_id && rows[0].pkg_weight_g) {
+      try {
+        const shopify = require('../services/shopify');
+        if (shopify.isConfigured() && typeof shopify.setVariantWeight === 'function') {
+          await shopify.setVariantWeight(rows[0].shopify_product_id, rows[0].pkg_weight_g);
+        }
+      } catch (e) { console.warn('[products] shopify weight push failed:', e.message); }
+    }
+    if (rows[0].shopify_product_id && (rows[0].pkg_length_cm || rows[0].pkg_width_cm || rows[0].pkg_height_cm || rows[0].pkg_weight_g)) {
+      try {
+        const ebay = require('../services/ebay');
+        if (ebay.isConfigured()) {
+          const links = await query(
+            `SELECT ebay_item_id, store_code FROM mirror_links
+              WHERE shopify_product_id::text = $1 AND ebay_item_id IS NOT NULL`,
+            [String(rows[0].shopify_product_id)]);
+          const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
+          const pkg = { lengthCm: rows[0].pkg_length_cm, widthCm: rows[0].pkg_width_cm, heightCm: rows[0].pkg_height_cm, weightG: rows[0].pkg_weight_g };
+          for (const link of links.rows) {
+            const store = stores.find(s => s.code === link.store_code) || (link.store_code ? null : (stores.find(s => s.primary) || stores[0]));
+            if (!store) continue;   // disabled/old account — skip quietly
+            try { await ebay.reviseItem(link.ebay_item_id, { packageDetails: pkg }, store.code); }
+            catch (e) { console.warn('[products] ebay package push failed:', link.ebay_item_id, e.message); }
+          }
+        }
+      } catch (e) { console.warn('[products] ebay package push failed:', e.message); }
+    }
   }
   // Audit without the huge base64 blobs
   const auditBody = { ...req.body };
