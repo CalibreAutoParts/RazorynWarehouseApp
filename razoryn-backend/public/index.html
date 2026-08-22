@@ -4916,7 +4916,17 @@ function openProductModal(id) {
           let newProduct = null;
           let pushResult = null;
           if (id) {
-            await Api.patch('/api/products/' + id, payload);
+            const patchRes = await Api.patch('/api/products/' + id, payload);
+            // Parcel size/weight push results — tell the user if a channel failed
+            // instead of silently looking like it worked.
+            const pp = patchRes && patchRes.packagePush;
+            if (pp) {
+              const errs = [];
+              if (pp.shopifyWeight && pp.shopifyWeight !== 'ok') errs.push('Shopify weight: ' + pp.shopifyWeight);
+              if (pp.shopifyDims && pp.shopifyDims !== 'ok') errs.push('Shopify dims: ' + pp.shopifyDims);
+              (pp.ebay || []).forEach(e2 => { if (e2.error) errs.push('eBay ' + e2.itemId + ': ' + e2.error); });
+              if (errs.length) toast('⚠ Parcel push issues: ' + errs.join(' · '), 'warn', 10000);
+            }
             const newQty = +el('m-qty').value;
             if (newQty !== (p.qtyOnHand ?? p.qtyShopify)) {
               // set-quantity sets the absolute value AND pushes to Shopify + eBay

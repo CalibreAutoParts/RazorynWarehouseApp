@@ -845,7 +845,7 @@ function buildItemSpecificsXml(specifics) {
   return lists ? `<ItemSpecifics>${lists}</ItemSpecifics>` : '';
 }
 
-async function reviseItem(itemId, { sku, title, price, description, itemSpecifics, pictureUrls, packageDetails } = {}, storeArg) {
+async function reviseItem(itemId, { sku, title, price, description, itemSpecifics, pictureUrls, packageDetails, call } = {}, storeArg) {
   if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
   if (!itemId) throw new Error('missing_item_id');
   if (sku == null && title == null && price == null && description == null
@@ -888,12 +888,28 @@ async function reviseItem(itemId, { sku, title, price, description, itemSpecific
   }
   const body = `<Item>${fields.join('')}</Item>`;
 
-  const xml = await tradingCall('ReviseItem', body, storeArg);
+  // ReviseFixedPriceItem is the correct revise call for fixed-price listings and
+  // applies shipping/package edits more reliably than legacy ReviseItem (which
+  // can silently ignore ShippingPackageDetails changes on listings that already
+  // have one). Callers can force it via opts.call.
+  const callName = call || 'ReviseItem';
+  const xml = await tradingCall(callName, body, storeArg);
   if (xml.includes('<Ack>Failure</Ack>')) {
     const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
-    throw new Error('eBay ReviseItem error: ' + decodeEntities(err));
+    throw new Error(`eBay ${callName} error: ` + decodeEntities(err));
   }
-  return { ok: true, itemId, storeCode: resolveStore(storeArg)?.code };
+  // Surface WARNING-level messages (eBay accepts the call but may ignore a field
+  // and only say so in a warning) — callers can log them instead of flying blind.
+  const warnings = [];
+  if (/<SeverityCode>Warning<\/SeverityCode>/.test(xml)) {
+    for (const e of extractAll(xml, 'Errors')) {
+      if (/<SeverityCode>Warning<\/SeverityCode>/.test(e)) {
+        const msg = extractOne(e, 'LongMessage') || extractOne(e, 'ShortMessage');
+        if (msg) warnings.push(decodeEntities(msg));
+      }
+    }
+  }
+  return { ok: true, itemId, storeCode: resolveStore(storeArg)?.code, warnings: warnings.length ? warnings : undefined };
 }
 
 // endItem — end (delete) a live fixed-price listing via EndFixedPriceItem. Used to
