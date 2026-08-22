@@ -18195,6 +18195,15 @@ function renderSettings() {
             </div>
             <div id="pn-fix-result" style="font-size:12px;color:var(--ink-soft);margin-top:10px"></div>
           </div>
+
+          <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">Sales channels</div>
+            <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">New listings publish to every Shopify sales channel automatically (Online Store, Shop, POS, Google &amp; YouTube, TikTok…). Run this once to publish all EXISTING products to every channel too.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-primary" onclick="publishAllChannels(this)">📢 Publish all products to all channels</button>
+            </div>
+            <div id="pub-all-result" style="font-size:12px;color:var(--ink-soft);margin-top:10px"></div>
+          </div>
         </div>
       </div>
 
@@ -19293,6 +19302,33 @@ async function fixPartNumbers(btn) {
         if (out) out.textContent = s.state === 'running'
           ? `Working… ${s.done}/${s.total} (${s.updated} updated, ${s.skipped} skipped${s.errors ? ', ' + s.errors + ' errors' : ''})`
           : `Done ✓ — ${s.updated} updated, ${s.skipped} skipped${s.errors ? ', ' + s.errors + ' errors' : ''} of ${s.total}. Product pages now show the real part number.`;
+        if (s.state !== 'running') { clearInterval(poll); if (btn) btn.disabled = false; }
+      } catch (_) { clearInterval(poll); if (btn) btn.disabled = false; }
+    }, 2500);
+  } catch (e) {
+    toast('Failed to start: ' + (e.data?.message || e.message), 'error');
+    if (btn) btn.disabled = false;
+  }
+}
+
+// One-click: publish every linked Shopify product to ALL sales channels.
+// Background job with live progress; surfaces the missing-scope hint if the
+// token can't see/write publications.
+async function publishAllChannels(btn) {
+  const out = el('pub-all-result');
+  try {
+    const r = await Api.post('/api/listings/publish-all-channels', {});
+    if (r.alreadyRunning) toast('Already running — watching progress.', 'info');
+    else toast(`Publishing ${r.total} product(s) to all sales channels…`, 'success');
+    if (btn) btn.disabled = true;
+    const poll = setInterval(async () => {
+      try {
+        const s = await Api.get('/api/listings/publish-all-channels/status');
+        const chan = s.channels ? ` · channels: ${s.channels.join(', ')}` : '';
+        const hint = s.hint ? ` · ⚠ ${s.hint}` : '';
+        if (out) out.textContent = s.state === 'running'
+          ? `Working… ${s.done}/${s.total} (${s.ok} published${s.errors ? ', ' + s.errors + ' errors' : ''})${hint}`
+          : `Done ✓ — ${s.ok} of ${s.total} published${s.errors ? ', ' + s.errors + ' errors' : ''}${chan}${hint}`;
         if (s.state !== 'running') { clearInterval(poll); if (btn) btn.disabled = false; }
       } catch (_) { clearInterval(poll); if (btn) btn.disabled = false; }
     }, 2500);

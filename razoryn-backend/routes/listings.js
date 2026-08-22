@@ -1870,6 +1870,9 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
     result.shopifySkipped = 'not_configured';
   }
 
+  // Sales-channel publication outcome (all channels; hint = missing scope etc.)
+  if (shopifyProduct?.__publishResult) result.salesChannels = shopifyProduct.__publishResult;
+
   // Warehouse product = master. Store the Shopify ids so stock/price sync works.
   const v = shopifyProduct?.variants?.[0];
   // The Shopify create response already carries the hosted image URLs — capture
@@ -2448,6 +2451,37 @@ router.post('/fix-part-number-metafields', requireAdmin, async (req, res) => {
   });
 });
 router.get('/fix-part-number-metafields/status', requireAdmin, (req, res) => res.json(_pnFixStatus));
+
+// ──────────────────────────────────────────────────────────────────────────
+// POST /api/listings/publish-all-channels — background: publish EVERY linked
+// Shopify product to ALL sales channels (Online Store, Shop, POS, Google &
+// YouTube, TikTok, …). New listings publish automatically at create; this is the
+// one-click catch-up for products created before, or while a scope was missing.
+// Poll .../status. Surfaces the scope hint if channels aren't visible.
+// ──────────────────────────────────────────────────────────────────────────
+let _pubAllStatus = { state: 'idle', total: 0, done: 0, ok: 0, errors: 0, hint: null, channels: null, startedAt: null, finishedAt: null };
+router.post('/publish-all-channels', requireAdmin, async (req, res) => {
+  if (_pubAllStatus.state === 'running') return res.json({ ok: true, alreadyRunning: true, status: _pubAllStatus });
+  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured' });
+  const { rows } = await query(
+    `SELECT id, shopify_product_id FROM products WHERE shopify_product_id IS NOT NULL AND active = true ORDER BY id`);
+  _pubAllStatus = { state: 'running', total: rows.length, done: 0, ok: 0, errors: 0, hint: null, channels: null, startedAt: Date.now(), finishedAt: null };
+  await audit(req, 'publish_all_channels', null, null, { total: rows.length });
+  res.json({ ok: true, started: true, total: rows.length });
+  setImmediate(async () => {
+    for (const p of rows) {
+      try {
+        const r = await shopify.publishProductToAllChannels(p.shopify_product_id);
+        if (r && r.ok) { _pubAllStatus.ok++; if (!_pubAllStatus.channels && r.channels) _pubAllStatus.channels = r.channels; }
+        else { _pubAllStatus.errors++; if (!_pubAllStatus.hint && r && r.hint) _pubAllStatus.hint = r.hint; }
+      } catch (_) { _pubAllStatus.errors++; }
+      _pubAllStatus.done++;
+      await new Promise(r2 => setTimeout(r2, 300));   // Shopify rate-limit headroom
+    }
+    _pubAllStatus.state = 'done'; _pubAllStatus.finishedAt = Date.now();
+  });
+});
+router.get('/publish-all-channels/status', requireAdmin, (req, res) => res.json(_pubAllStatus));
 
 // ──────────────────────────────────────────────────────────────────────────
 // GET /api/listings/shopify-duplicates — scan the whole Shopify catalogue and
