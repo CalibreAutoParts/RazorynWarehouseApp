@@ -653,6 +653,16 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   const pkgTouched = ['pkgWeightG', 'pkg_weight_g', 'pkgLengthCm', 'pkg_length_cm',
     'pkgWidthCm', 'pkg_width_cm', 'pkgHeightCm', 'pkg_height_cm']
     .some(k => k in (req.body || {}));
+  // Brand (= Make) changed → push to Shopify's Vendor field so the storefront's
+  // make/model filtering stays in step with warehouse edits. Best-effort.
+  if (('brand' in (req.body || {})) && rows[0].shopify_product_id && rows[0].brand) {
+    try {
+      const shopify = require('../services/shopify');
+      if (shopify.isConfigured() && typeof shopify.setProductVendor === 'function') {
+        await shopify.setProductVendor(rows[0].shopify_product_id, rows[0].brand);
+      }
+    } catch (e) { console.warn('[products] shopify vendor push failed:', e.message); }
+  }
   let packagePush = null;
   if (pkgTouched) {
     packagePush = { shopifyWeight: null, shopifyDims: null, ebay: [] };

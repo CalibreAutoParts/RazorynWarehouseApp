@@ -480,6 +480,19 @@ async function setVariantPrice(shopifyProductId, price) {
   return { ok: true, productId: String(shopifyProductId), price: +p.toFixed(2) };
 }
 
+// Set the product's Vendor (= the Make/Brand shown in Shopify's vendor filters).
+// The warehouse Brand field is the source of truth; pushing it keeps Shopify's
+// make/model filtering in step with warehouse edits.
+async function setProductVendor(shopifyProductId, vendor) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const v = String(vendor || '').trim();
+  if (!v) return { ok: false, skipped: 'no_vendor' };
+  await shopifyRequest('put', `/products/${encodeURIComponent(shopifyProductId)}.json`, {
+    data: { product: { id: parseInt(shopifyProductId), vendor: v } },
+  });
+  return { ok: true, vendor: v };
+}
+
 // Lightweight weight-only update — sets the first variant's weight so Shopify +
 // connected shipping apps can quote rates. No-op for 0/blank.
 // NOTE: as of Shopify API 2024-04 the REST variant weight/grams fields were
@@ -1283,6 +1296,7 @@ module.exports = {
   setVariantPrice,
   setVariantWeight,
   setPackageDimensionMetafields,
+  setProductVendor,
   setVariantSku,
   setPartNumberMetafield,
   setProductImages,

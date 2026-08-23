@@ -33,8 +33,9 @@ const DEFAULT_PERMS = {
 
 // GET /api/staff
 router.get('/', async (req, res) => {
+  try { await require('../lib/digest').ensureColumns(); } catch (_) {}
   const { rows } = await query(`
-    SELECT id, username, email, name, role, permissions, active, last_login_at, created_at
+    SELECT id, username, email, name, role, permissions, active, last_login_at, created_at, notify_prefs
     FROM users ORDER BY active DESC, name
   `);
   res.json({ users: rows });
@@ -60,6 +61,12 @@ router.post('/', async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING id, name, username, email, role, permissions, active`,
       [b.name, b.username, b.email || null, passwordHash, pinHash, b.role, JSON.stringify(perms)]
     );
+    if (b.notifyPrefs !== undefined) {
+      try {
+        await require('../lib/digest').ensureColumns();
+        await query(`UPDATE users SET notify_prefs = $2::jsonb WHERE id = $1`, [rows[0].id, JSON.stringify(b.notifyPrefs || {})]);
+      } catch (_) {}
+    }
     await audit(req, 'create_user', 'user', rows[0].id, { role: b.role });
     res.status(201).json({ user: rows[0] });
   } catch (e) {
@@ -75,6 +82,13 @@ router.patch('/:id', async (req, res) => {
   if (b.name)         { params.push(b.name); sets.push(`name = $${params.length}`); }
   if (b.username)     { params.push(b.username); sets.push(`username = $${params.length}`); }
   if (b.email)        { params.push(b.email); sets.push(`email = $${params.length}`); }
+  // Email-notification prefs — MERGED into the stored jsonb so the digest's
+  // last-sent stamps survive a settings save.
+  if (b.notifyPrefs !== undefined) {
+    try { await require('../lib/digest').ensureColumns(); } catch (_) {}
+    params.push(JSON.stringify(b.notifyPrefs || {}));
+    sets.push(`notify_prefs = COALESCE(notify_prefs, '{}'::jsonb) || $${params.length}::jsonb`);
+  }
   if (b.role)         { params.push(b.role); sets.push(`role = $${params.length}`); }
   if (b.active !== undefined) { params.push(b.active); sets.push(`active = $${params.length}`); }
   if (b.permissions)  { params.push(JSON.stringify(b.permissions)); sets.push(`permissions = $${params.length}::jsonb`); }
