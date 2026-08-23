@@ -90,7 +90,10 @@ router.get('/products', requireAdmin, async (req, res) => {
     // Margin if we drop the eBay price by the standard "send offer" discount.
     const moe = (cost != null && pe) ? marginAtOffer({ price: pe, costPrice: cost, channel: 'ebay', ...fargs }) : { net: null, marginPct: null, offerPrice: null };
     // Cash sale: eBay price − cash discount %, sold direct (no marketplace fee).
-    const cashPrice = pe != null ? +(pe * (1 - cashDiscPct / 100)).toFixed(2) : null;
+    // Above £20, cash prices round DOWN to the nearest £5 (e.g. £71.99 → £70) —
+    // clean cash handovers, no coins.
+    const cashRaw = pe != null ? pe * (1 - cashDiscPct / 100) : null;
+    const cashPrice = cashRaw != null ? (cashRaw > 20 ? Math.floor(cashRaw / 5) * 5 : +cashRaw.toFixed(2)) : null;
     const mc = (cost != null && cashPrice) ? marginAtPrice({ price: cashPrice, costPrice: cost, channel: 'direct', ...fargs }) : { net: null, marginPct: null };
     // Trade account: retail (eBay) price − trade discount %, sold direct.
     const tradePrice = (pe != null && S.tradeDiscountPct > 0) ? +(pe * (1 - S.tradeDiscountPct / 100)).toFixed(2) : null;

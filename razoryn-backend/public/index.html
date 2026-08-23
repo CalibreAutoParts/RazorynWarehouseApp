@@ -2193,7 +2193,7 @@ function enterApp() {
   // Only fire the alert when a product *crosses* from healthy → low, not every
   // time we re-paint the list with the same products in the low bucket.
   let lastLowStockIds = new Set(
-    (State.products || []).filter(p => (p.qtyOnHand ?? p.qty_on_hand ?? 0) <= (p.lowThresh ?? p.low_stock_threshold ?? 3)).map(p => p.id)
+    (State.products || []).filter(p => !p.hidden && (p.qtyOnHand ?? p.qty_on_hand ?? 0) <= (p.lowThresh ?? p.low_stock_threshold ?? 3)).map(p => p.id)
   );
   window._rznRefreshTimer = setInterval(async () => {
     if (!State.user || document.hidden) return;
@@ -2243,7 +2243,7 @@ function enterApp() {
       // its threshold. Fires once per crossing; if it stays low we don't re-alarm.
       if (Array.isArray(State.products)) {
         const currentLow = new Set(
-          State.products.filter(p => (p.qtyOnHand ?? p.qty_on_hand ?? 0) <= (p.lowThresh ?? p.low_stock_threshold ?? 3)).map(p => p.id)
+          State.products.filter(p => !p.hidden && (p.qtyOnHand ?? p.qty_on_hand ?? 0) <= (p.lowThresh ?? p.low_stock_threshold ?? 3)).map(p => p.id)
         );
         const newlyLow = [...currentLow].filter(id => !lastLowStockIds.has(id));
         if (newlyLow.length && lastLowStockIds.size > 0) {
@@ -3794,7 +3794,8 @@ function renderDashboard() {
   const products = Array.isArray(State.products) ? State.products : [];
   const sales = Array.isArray(State.sales) ? State.sales : [];
   const returns = Array.isArray(State.returns) ? State.returns : [];
-  const lowStock = products.filter(p => totalQty(p) <= (p.lowThresh ?? 3));
+  // Hidden (parked) listings are out of the stock workflow — never alarm on them.
+  const lowStock = products.filter(p => !p.hidden && totalQty(p) <= (p.lowThresh ?? 3));
   // Revenue counts only PAID, non-estimate, non-preorder sales — an issued-but-
   // unpaid invoice (parts given, payment not yet received) is NOT counted until
   // marked paid, and a pre-order is NOT counted until the stock arrives & ships.
@@ -9485,6 +9486,8 @@ function manualSalePrefillPrice(row) {
   let suggested = shopifyP;
   if (payment === 'cash' && cfg.cashDiscountPct != null) {
     suggested = +(ebayBasis * (1 - cfg.cashDiscountPct / 100)).toFixed(2);
+    // Cash prices above £20 round DOWN to the nearest £5 (clean handovers).
+    if (suggested > 20) suggested = Math.floor(suggested / 5) * 5;
   } else if (payment === 'bank' && cfg.bankTransferPct != null) {
     suggested = +(ebayBasis * (1 - cfg.bankTransferPct / 100)).toFixed(2);
   } else if (payment === 'card') {
@@ -14581,7 +14584,7 @@ async function ctOpenEditor(productId) {
       </div>
       <div style="font-size:11px;color:var(--ink-soft);margin:2px 0 6px">This is the <strong>goods</strong> unit cost. Container freight &amp; duty are now entered on the container (Incoming → open a container) and split across its items by value to give the true landed cost.</div>
       <div class="field"><label>Note</label><input id="ct-note" placeholder="optional"></div>
-      <div id="ct-floors-preview" style="font-size:12px;margin:4px 0 8px"></div>${ctRecoBox(p)}
+      <div id="ct-floors-preview" style="font-size:12px;margin:4px 0 8px"></div><div id="ct-reco-wrap">${ctRecoBox(p)}</div>
       <div id="ct-history" style="border-top:1px solid var(--line);padding-top:10px"><div style="font-size:12px;color:var(--ink-soft)">Loading history…</div></div>`,
     actions: [
       { label: 'Cancel', onClick: closeModal },
@@ -14639,6 +14642,18 @@ function ctRecoBox(p) {
       <input id="ct-testprice" type="number" step="0.01" min="0" value="${testDefault}" style="width:110px" placeholder="price">
       ${p.floorEbay != null ? `<button type="button" class="btn btn-ghost btn-sm" onclick="el('ct-testprice').value='${p.floorEbay}';ctRenderBreakdown('${p.floorEbay}',CT.items.find(x=>x.id===${p.id}))" title="Fill with the recommended price">use recommended</button>` : ''}
     </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:8px;font-size:11px;background:var(--white);border:1px solid var(--line);border-radius:6px;padding:6px 10px">
+      <label style="display:flex;align-items:center;gap:5px">Seller level
+        <select id="ct-tier" onchange="ctRenderBreakdown(el('ct-testprice').value, CT.items.find(x=>x.id===${p.id}))" style="padding:2px 4px;font-size:11px">
+          <option value="above" selected>Above Standard</option>
+          <option value="top">Top Rated (−10% FVF)</option>
+          <option value="below">Below Standard (+6% FVF)</option>
+        </select>
+      </label>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="ct-x-hr" checked onchange="ctRenderBreakdown(el('ct-testprice').value, CT.items.find(x=>x.id===${p.id}))"> return-rate penalty</label>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="ct-x-ad" checked onchange="ctRenderBreakdown(el('ct-testprice').value, CT.items.find(x=>x.id===${p.id}))"> ad rate</label>
+      <span style="color:var(--ink-soft)">— what-if view only, nothing is saved</span>
+    </div>
     <div id="ct-breakdown" style="display:grid;gap:2px"></div>
     <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <button type="button" class="btn btn-primary btn-sm" onclick="ctApplyPrice(${p.id})" title="Set this as the eBay price and push it live — Shopify is derived from your eBay→Shopify link % and pushed too">💷 Apply to eBay + Shopify</button>
@@ -14686,10 +14701,12 @@ async function ctSaveBand(productId, band) {
     await Api.patch('/api/products/' + productId, payload);
     await loadCosts();
     await refreshCostFloors();
-    // Re-render the recommendation + breakdown with the updated postage.
+    // Re-render the recommendation + breakdown with the updated postage — REPLACE
+    // the wrapper's content (replacing only ct-floors-preview's outerHTML left the
+    // old pricing blocks in place, stacking a duplicate copy per change).
     const p = (CT.items || []).find(x => x.id === productId);
-    const box = el('ct-floors-preview');
-    if (box && p) { box.outerHTML = `<div id="ct-floors-preview" style="font-size:12px;margin:4px 0 8px"></div>${ctRecoBox(p)}`; ctWireTestPrice(p); }
+    const wrapEl = el('ct-reco-wrap');
+    if (wrapEl && p) { wrapEl.innerHTML = ctRecoBox(p); ctWireTestPrice(p); }
     toast('Shipping updated', 'success');
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
@@ -14701,8 +14718,8 @@ async function ctSavePostageInPrice(productId, checked) {
     await loadCosts();
     await refreshCostFloors();
     const p = (CT.items || []).find(x => x.id === productId);
-    const box = el('ct-floors-preview');
-    if (box && p) { box.outerHTML = `<div id="ct-floors-preview" style="font-size:12px;margin:4px 0 8px"></div>${ctRecoBox(p)}`; ctWireTestPrice(p); }
+    const wrapEl = el('ct-reco-wrap');
+    if (wrapEl && p) { wrapEl.innerHTML = ctRecoBox(p); ctWireTestPrice(p); }
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
@@ -14717,7 +14734,7 @@ function ctPostageFor(p) {
 // Full £ breakdown of an eBay sale at a given price — so you see exactly what each
 // fee costs (and how much a high-return penalty is hurting). Pure client maths from
 // CT.settings, so the "test a price" box updates instantly.
-function ctComputeBreakdown(price, p, channel = 'ebay') {
+function ctComputeBreakdown(price, p, channel = 'ebay', opts = {}) {
   const s = CT.settings || {};
   const B = parseFloat(price) || 0;
   const goods = p.costPrice != null ? parseFloat(p.costPrice) : 0;
@@ -14744,14 +14761,29 @@ function ctComputeBreakdown(price, p, channel = 'ebay') {
   // Channel-specific marketplace fees.
   let feeBase = 0, feeVat = 0;
   if (channel === 'ebay') {
-    const fvf = B * (s.ebayFvfPct || 0) / 100, reg = B * (s.ebayRegulatoryPct || 0) / 100;
-    const hr = B * (s.ebayHighReturnPct || 0) / 100, ad = B * (s.adRatePct || 0) / 100, per = s.ebayPerOrderFee || 0;
-    feeBase = fvf + reg + hr + ad + per;
+    // What-if view options (never persisted): seller level adjusts the final value
+    // fee (Top Rated = −10% FVF discount; Below Standard = +6 percentage points),
+    // and individual cost lines can be hidden to see profit without them.
+    const tier = opts.tier || 'above';
+    const inclHr = opts.includeHr !== false;
+    const inclAd = opts.includeAd !== false;
+    let fvf = B * (s.ebayFvfPct || 0) / 100;
+    let fvfLabel = `eBay final value fee (${s.ebayFvfPct ?? 9.5}%)`;
+    if (tier === 'top') { fvf = fvf * 0.9; fvfLabel = `eBay final value fee (${s.ebayFvfPct ?? 9.5}% − 10% Top Rated)`; }
+    const belowSurcharge = tier === 'below' ? B * 0.06 : 0;
+    const reg = B * (s.ebayRegulatoryPct || 0) / 100;
+    const hr = inclHr ? B * (s.ebayHighReturnPct || 0) / 100 : 0;
+    const ad = inclAd ? B * (s.adRatePct || 0) / 100 : 0;
+    const per = s.ebayPerOrderFee || 0;
+    feeBase = fvf + belowSurcharge + reg + hr + ad + per;
     feeVat = s.feesVatOnEbay ? feeBase * ((s.feesVatPct || 20) / 100) : 0;
-    rows.push([`eBay final value fee (${s.ebayFvfPct ?? 9.5}%)`, fvf]);
+    rows.push([fvfLabel, fvf]);
+    if (belowSurcharge > 0) rows.push(['Below-standard surcharge (+6%)', belowSurcharge, true]);
     rows.push([`Regulatory operating fee (${s.ebayRegulatoryPct ?? 0.35}%)`, reg]);
-    if ((s.ebayHighReturnPct || 0) > 0) rows.push([`High return-rate penalty (${s.ebayHighReturnPct}%)`, hr, true]);
-    if ((s.adRatePct || 0) > 0) rows.push([`Ad rate (${s.adRatePct}%)`, ad]);
+    if ((s.ebayHighReturnPct || 0) > 0 && inclHr) rows.push([`High return-rate penalty (${s.ebayHighReturnPct}%)`, hr, true]);
+    if ((s.ebayHighReturnPct || 0) > 0 && !inclHr) rows.push(['High return-rate penalty (hidden in this view)', 0, false, true]);
+    if ((s.adRatePct || 0) > 0 && inclAd) rows.push([`Ad rate (${s.adRatePct}%)`, ad]);
+    if ((s.adRatePct || 0) > 0 && !inclAd) rows.push(['Ad rate (hidden in this view)', 0, false, true]);
     rows.push(['Per-order fee', per]);
     if (feeVat > 0) rows.push([`VAT on eBay fees (${s.feesVatPct ?? 20}%)`, feeVat]);
   } else if (channel === 'shopify') {
@@ -14773,7 +14805,13 @@ function ctComputeBreakdown(price, p, channel = 'ebay') {
 function ctRenderBreakdown(price, p, channel) {
   const wrap = el('ct-breakdown'); if (!wrap) return;
   const ch = channel || el('ct-testchannel')?.value || 'ebay';
-  const b = ctComputeBreakdown(price, p, ch);
+  // Read the what-if view controls (seller level + hidden cost lines) if present.
+  const opts = {
+    tier: el('ct-tier')?.value || 'above',
+    includeHr: el('ct-x-hr') ? el('ct-x-hr').checked : true,
+    includeAd: el('ct-x-ad') ? el('ct-x-ad').checked : true,
+  };
+  const b = ctComputeBreakdown(price, p, ch, opts);
   const col = b.marginPct < 0 ? 'var(--red)' : b.marginPct < 10 ? 'var(--amber)' : 'var(--green)';
   wrap.innerHTML = `
     <div style="display:flex;justify-content:space-between;font-weight:700;margin-bottom:4px"><span>Sale price</span><span>${ctMoney(b.price)}</span></div>

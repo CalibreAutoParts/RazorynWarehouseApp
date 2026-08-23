@@ -262,6 +262,31 @@ router.post('/:id/photos', requirePermission('returns'), upload.single('photo'),
     `INSERT INTO return_photos (return_id, photo_path, caption) VALUES ($1,$2,$3) RETURNING *`,
     [req.params.id, relPath, req.body.caption || null]
   );
+  // First photo on a return = the warehouse has physically CHECKED it. Tell the
+  // admins it's ready to process (in-app notification + device push). Only on the
+  // first photo so a 5-photo upload doesn't ping five times. Best-effort.
+  try {
+    const cnt = await query(`SELECT COUNT(*)::int AS n FROM return_photos WHERE return_id = $1`, [req.params.id]);
+    if (cnt.rows[0].n === 1) {
+      const rr = await query(
+        `SELECT r.id, r.item_title, r.reason, p.title AS product_title, u.name AS by_name
+           FROM returns r LEFT JOIN products p ON p.id = r.product_id
+           LEFT JOIN users u ON u.id = $2 WHERE r.id = $1`, [req.params.id, req.user?.id || null]);
+      const ret = rr.rows[0] || {};
+      const itemName = (ret.product_title || ret.item_title || 'Return #' + req.params.id).slice(0, 60);
+      await query(
+        `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+         VALUES ('return_checked', $1, $2, 'info', 'return', $3)`,
+        [`Return checked: ${itemName}`,
+         `${ret.by_name ? ret.by_name + ' has' : 'Warehouse has'} inspected the return (photos${req.body.caption ? ' + notes' : ''} added)${ret.reason ? ' · ' + ret.reason : ''}. Ready to process.`,
+         req.params.id]);
+      require('../services/push').sendToAll({
+        title: 'Return checked — ready to process',
+        body: itemName + (ret.by_name ? ' · checked by ' + ret.by_name : ''),
+        url: '/', tag: 'return-checked-' + req.params.id, category: 'return',
+      }).catch(() => {});
+    }
+  } catch (e) { console.warn('[returns] checked-notify failed:', e.message); }
   res.status(201).json({ photo: rows[0], url: '/uploads/' + relPath });
 });
 
@@ -326,6 +351,22 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
   // it onto the sale so revenue/dispatch stay correct. Best-effort.
   if (result.sale_id && (b.status !== undefined || b.refundAmount !== undefined)) {
     try { await reconcileSaleRefund(result.sale_id); } catch (e) { console.warn('[returns] reconcile:', e.message); }
+  }
+  // Staff marked the return RECEIVED (item back + checked) → tell the admins it's
+  // ready to process (in-app + push). Best-effort.
+  if (b.status === 'received') {
+    try {
+      const itemName = (result.item_title || 'Return #' + result.id).slice(0, 60);
+      await query(
+        `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+         VALUES ('return_checked', $1, $2, 'info', 'return', $3)`,
+        [`Return received & checked: ${itemName}`,
+         `Marked received${b.notes ? ' · ' + String(b.notes).slice(0, 120) : ''}. Ready to process.`, result.id]);
+      require('../services/push').sendToAll({
+        title: 'Return received — ready to process', body: itemName,
+        url: '/', tag: 'return-checked-' + result.id, category: 'return',
+      }).catch(() => {});
+    } catch (e) { console.warn('[returns] received-notify failed:', e.message); }
   }
   res.json({ return: result });
 });
