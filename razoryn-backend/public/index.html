@@ -1521,6 +1521,7 @@ function adaptUser(u) {
     name: u.name,
     username: u.username,
     email: u.email,
+    notifyPrefs: u.notify_prefs || {},
     role: u.role,
     perms: u.permissions || {},          // legacy
     permissions: u.permissions || {},
@@ -3290,7 +3291,17 @@ function stPopulateFilters() {
   const makeSel = el('st-make'), locSel = el('st-location');
   if (makeSel) {
     const cur = makeSel.value;
-    const makes = [...new Set(products.map(p => p.brand).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    // Dedupe case/spacing variants ("MG" vs "mg", "null", trailing spaces) — one
+    // entry per make, first-seen casing wins. The list comes from the warehouse
+    // Brand field (originally Shopify's Vendor at import).
+    const seen = new Map();
+    for (const p of products) {
+      const raw = String(p.brand || '').trim();
+      if (!raw || raw.toLowerCase() === 'null') continue;
+      const k = raw.toLowerCase();
+      if (!seen.has(k)) seen.set(k, raw);
+    }
+    const makes = [...seen.values()].sort((a, b) => a.localeCompare(b));
     makeSel.innerHTML = '<option value="">All makes</option>' +
       makes.map(m => `<option value="${escapeAttr(m)}"${m === cur ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
   }
@@ -3329,7 +3340,7 @@ function stFiltered() {
     // Hidden/parked listings are excluded from stock-checks.
     if (p.hidden) return false;
     if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model, ...(p.partNumbers||[]).map(x => x.code))) return false;
-    if (make && p.brand !== make) return false;
+    if (make && String(p.brand || "").trim().toLowerCase() !== make.trim().toLowerCase()) return false;
     if (loc === '__none__') { if (p.location) return false; }
     else if (loc && p.location !== loc) return false;
     const isChecked = checked.has(String(p.id));
@@ -3795,7 +3806,9 @@ function renderDashboard() {
   const sales = Array.isArray(State.sales) ? State.sales : [];
   const returns = Array.isArray(State.returns) ? State.returns : [];
   // Hidden (parked) listings are out of the stock workflow — never alarm on them.
-  const lowStock = products.filter(p => !p.hidden && totalQty(p) <= (p.lowThresh ?? 3));
+  // Ordered most-urgent first: lowest quantity, then alphabetical.
+  const lowStock = products.filter(p => !p.hidden && totalQty(p) <= (p.lowThresh ?? 3))
+    .sort((a, b) => (totalQty(a) - totalQty(b)) || String(a.title || '').localeCompare(String(b.title || '')));
   // Revenue counts only PAID, non-estimate, non-preorder sales — an issued-but-
   // unpaid invoice (parts given, payment not yet received) is NOT counted until
   // marked paid, and a pre-order is NOT counted until the stock arrives & ships.
@@ -4511,7 +4524,7 @@ function renderInventory() {
 
       <div class="toolbar">
         <input type="search" class="search-input" id="inv-search" placeholder="Search by name, SKU, part #...">
-        <select class="filter-select" id="inv-brand"><option value="">All brands</option>${[...new Set(State.products.map(p=>p.brand))].map(b=>`<option>${b}</option>`).join('')}</select>
+        <select class="filter-select" id="inv-brand"><option value="">All brands</option>${(() => { const s2 = new Map(); for (const p2 of State.products) { const r2 = String(p2.brand || '').trim(); if (!r2 || r2.toLowerCase() === 'null') continue; const k2 = r2.toLowerCase(); if (!s2.has(k2)) s2.set(k2, r2); } return [...s2.values()].sort((a2, b2) => a2.localeCompare(b2)).map(b2 => `<option value="${escapeAttr(b2)}">${escapeHtml(b2)}</option>`).join(''); })()}</select>
         <select class="filter-select" id="inv-stock">
           <option value="">All stock levels</option>
           <option value="low">Low stock</option>
@@ -4621,7 +4634,7 @@ function renderInventory() {
       if (h === 'active' && p.hidden) return false;
       if (h === 'hidden' && !p.hidden) return false;
       if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model, ...(p.partNumbers||[]).map(x => x.code))) return false;
-      if (b && p.brand !== b) return false;
+      if (b && String(p.brand || "").trim().toLowerCase() !== b.trim().toLowerCase()) return false;
       const tq = totalQty(p);
       if (s === 'low' && tq > p.lowThresh) return false;
       if (s === 'ok' && tq <= p.lowThresh) return false;
@@ -7028,6 +7041,19 @@ async function reclassifyOrder(saleId, method) {
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
+// Order was cancelled/refunded on the channel but our record didn't update (e.g.
+// too old for the auto-sync window) — remove it from the worklist by marking the
+// sale cancelled. Drops out of dispatch AND revenue.
+async function removeCancelledOrder(saleId) {
+  if (!confirm('Remove this order from the dispatch list?\n\nUse this ONLY when it was cancelled or fully refunded on eBay/Shopify — the order is marked CANCELLED here (leaves dispatch and no longer counts as revenue).')) return;
+  try {
+    await Api.post(`/api/dispatch/${saleId}/remove-cancelled`, {});
+    toast('Removed — order marked cancelled', 'success');
+    await loadDispatch();
+    Store.refresh('sales').catch(() => {});
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
 // Email a collection customer that their order is ready to pick up.
 async function notifyReady(saleId, btn) {
   if (btn) btn.disabled = true;
@@ -7340,9 +7366,10 @@ function paintDispatchApp() {
     const action = isCollect
       ? `<button class="btn btn-primary" onclick="event.stopPropagation();openCollectModal('${s.id}')">✓ Collected</button>`
       : `<button class="btn btn-primary" onclick="event.stopPropagation();openDispatchModal('${s.id}')">📦 Shipped</button>`;
-    const moveLink = isCollect
+    const moveLink = (isCollect
       ? `<a href="#" onclick="event.stopPropagation();reclassifyOrder('${s.id}','ship');return false" style="font-size:11px;color:var(--ink-soft)">↪ Move to shipping</a>`
-      : `<a href="#" onclick="event.stopPropagation();reclassifyOrder('${s.id}','collect');return false" style="font-size:11px;color:var(--ink-soft)">↪ It's a collection</a>`;
+      : `<a href="#" onclick="event.stopPropagation();reclassifyOrder('${s.id}','collect');return false" style="font-size:11px;color:var(--ink-soft)">↪ It's a collection</a>`)
+      + ` · <a href="#" onclick="event.stopPropagation();removeCancelledOrder('${s.id}');return false" style="font-size:11px;color:var(--red)">✕ cancelled</a>`;
     return `<div class="disp-card" onclick="openSaleDetail('${s.id}')">
       <div class="disp-main">
         <div class="disp-ref copyable">${escapeHtml(ref)}</div>
@@ -7383,7 +7410,7 @@ function renderDispatchRow(s, kind) {
           <button class="btn btn-ghost btn-sm" onclick="openSaleDetail('${s.id}')" title="Preview what's in this order">🧾</button>
           <button class="btn btn-ghost btn-sm" onclick="pushDropfleet('${s.id}',this)" title="${s.dropfleet_pushed_at ? 'Re-send this order to DropFleet (updates the pending order)' : "Send this order to DropFleet's Integrated Orders for booking"}">🚚 ${s.dropfleet_pushed_at ? 'Re-send' : 'DropFleet'}</button>
           <button class="btn btn-primary btn-sm" onclick="openDispatchModal('${s.id}')">📦 Mark dispatched</button>
-          <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','collect');return false" style="color:var(--ink-soft)">↪ It's a collection</a></div>
+          <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','collect');return false" style="color:var(--ink-soft)">↪ It's a collection</a> · <a href="#" onclick="removeCancelledOrder('${s.id}');return false" style="color:var(--red)" title="Cancelled/refunded on the channel — remove from this list (marks the order cancelled)">✕ cancelled</a></div>
         </td>
       </tr>
     `;
@@ -7407,7 +7434,7 @@ function renderDispatchRow(s, kind) {
           <button class="btn btn-ghost btn-sm" onclick="printCollectionLabel('${s.id}')" title="Print 6×4 collection label(s) — customer, item, piece count + QR. No address.">🏷 Label</button>
           <button class="btn btn-primary btn-sm" onclick="openCollectModal('${s.id}')">✓ Mark collected</button>
           ${isDirect && s.customer_email ? `<button class="btn btn-ghost btn-sm" onclick="notifyReady('${s.id}',this)" title="Email the customer that their order is ready to collect">📧 Notify ready</button>` : ''}
-          <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','ship');return false" style="color:var(--ink-soft)">↪ It's a delivery</a></div>
+          <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','ship');return false" style="color:var(--ink-soft)">↪ It's a delivery</a> · <a href="#" onclick="removeCancelledOrder('${s.id}');return false" style="color:var(--red)" title="Cancelled/refunded on the channel — remove from this list (marks the order cancelled)">✕ cancelled</a></div>
         </td>
       </tr>
     `;
@@ -11964,7 +11991,17 @@ function openStaffModal(id) {
       <div class="field"><label>Username</label><input id="s-username" value="${u.username||''}" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. warehouse1"></div>
       <div class="field"><label>Email (optional)</label><input id="s-email" value="${u.email||''}"></div>
       <div class="field"><label>Role</label><select id="s-role"><option value="warehouse" ${u.role==='warehouse'?'selected':''}>Warehouse</option><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option></select></div>
-      <div class="field"><label>Password</label><input id="s-pwd" type="password" autocomplete="new-password" placeholder="${id ? 'Leave blank to keep current' : 'Set a password (min 8 chars)'}"></div>`,
+      <div class="field"><label>Password</label><input id="s-pwd" type="password" autocomplete="new-password" placeholder="${id ? 'Leave blank to keep current' : 'Set a password (min 8 chars)'}"></div>
+      <div class="field" style="background:var(--bg-soft);border-radius:8px;padding:10px 12px">
+        <label>📧 Emails to this user <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— uses the email above</span></label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:6px;cursor:pointer"><input type="checkbox" id="s-notif-email" ${u.notifyPrefs?.emailNotifications ? 'checked' : ''}> Email app notifications (hourly batch — orders, returns, low stock…)</label>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px">Email reports:
+          <select id="s-report-freq" style="padding:4px 8px;font-size:13px">
+            ${['none','daily','weekly','monthly','quarterly'].map(f => `<option value="${f}" ${(u.notifyPrefs?.reportFreq || 'none') === f ? 'selected' : ''}>${f === 'none' ? 'Off' : f.charAt(0).toUpperCase() + f.slice(1)}</option>`).join('')}
+          </select>
+        </div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Reports go out ~7am UK — weekly on Mondays, monthly on the 1st, quarterly on 1 Jan/Apr/Jul/Oct. Sales, dispatch, returns, unpaid and low-stock summary.</div>
+      </div>`,
     actions: [
       { label: id?'Save':'Add', primary: true, onClick: async () => {
         const username = el('s-username').value.trim();
@@ -11976,6 +12013,10 @@ function openStaffModal(id) {
           username,
           email: el('s-email').value || null,
           role: el('s-role').value,
+          notifyPrefs: {
+            emailNotifications: !!el('s-notif-email')?.checked,
+            reportFreq: el('s-report-freq')?.value || 'none',
+          },
         };
         if (pwd) payload.password = pwd;
         try {
@@ -14748,6 +14789,9 @@ function ctRecoBox(p) {
           <option value="below">Below Standard (+6% FVF)</option>
         </select>
       </label>
+      <label style="display:flex;align-items:center;gap:4px">FVF %
+        <input id="ct-x-fvf" type="number" step="0.1" min="0" max="30" value="${CT.settings?.ebayFvfPct ?? 15}" oninput="ctRenderBreakdown(el('ct-testprice').value, CT.items.find(x=>x.id===${p.id}))" style="width:56px;padding:2px 4px;font-size:11px" title="This category's eBay final value fee % — categories differ; adjust to match the item's category">
+      </label>
       <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="ct-x-hr" checked onchange="ctRenderBreakdown(el('ct-testprice').value, CT.items.find(x=>x.id===${p.id}))"> return-rate penalty</label>
       <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="ct-x-ad" checked onchange="ctRenderBreakdown(el('ct-testprice').value, CT.items.find(x=>x.id===${p.id}))"> ad rate</label>
       <span style="color:var(--ink-soft)">— what-if view only, nothing is saved</span>
@@ -14865,9 +14909,11 @@ function ctComputeBreakdown(price, p, channel = 'ebay', opts = {}) {
     const tier = opts.tier || 'above';
     const inclHr = opts.includeHr !== false;
     const inclAd = opts.includeAd !== false;
-    let fvf = B * (s.ebayFvfPct || 0) / 100;
-    let fvfLabel = `eBay final value fee (${s.ebayFvfPct ?? 9.5}%)`;
-    if (tier === 'top') { fvf = fvf * 0.9; fvfLabel = `eBay final value fee (${s.ebayFvfPct ?? 9.5}% − 10% Top Rated)`; }
+    // Per-category FVF override (categories carry different final value fees).
+    const fvfPct = (opts.fvfPct != null && Number.isFinite(opts.fvfPct)) ? opts.fvfPct : (s.ebayFvfPct || 0);
+    let fvf = B * fvfPct / 100;
+    let fvfLabel = `eBay final value fee (${fvfPct}%)`;
+    if (tier === 'top') { fvf = fvf * 0.9; fvfLabel = `eBay final value fee (${fvfPct}% − 10% Top Rated)`; }
     const belowSurcharge = tier === 'below' ? B * 0.06 : 0;
     const reg = B * (s.ebayRegulatoryPct || 0) / 100;
     const hr = inclHr ? B * (s.ebayHighReturnPct || 0) / 100 : 0;
@@ -14908,6 +14954,7 @@ function ctRenderBreakdown(price, p, channel) {
     tier: el('ct-tier')?.value || 'above',
     includeHr: el('ct-x-hr') ? el('ct-x-hr').checked : true,
     includeAd: el('ct-x-ad') ? el('ct-x-ad').checked : true,
+    fvfPct: el('ct-x-fvf') && el('ct-x-fvf').value !== '' ? parseFloat(el('ct-x-fvf').value) : null,
   };
   const b = ctComputeBreakdown(price, p, ch, opts);
   const col = b.marginPct < 0 ? 'var(--red)' : b.marginPct < 10 ? 'var(--amber)' : 'var(--green)';

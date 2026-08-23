@@ -475,6 +475,22 @@ router.get('/:saleId/label-data', requirePermission('dispatch'), async (req, res
   }
 });
 
+// POST /api/dispatch/:saleId/remove-cancelled — take an order OFF the worklist
+// because it was cancelled/refunded on the channel but our record didn't update
+// (e.g. the refund predates the sync window). Marks the sale cancelled locally —
+// it drops out of dispatch AND revenue. Confirmed by staff, audited.
+router.post('/:saleId/remove-cancelled', requirePermission('dispatch'), async (req, res) => {
+  try {
+    if (!/^\d+$/.test(req.params.saleId)) return res.status(400).json({ error: 'bad_id' });
+    const s = await query(`SELECT id, status, dispatched_at, collected_at FROM sales WHERE id = $1 AND is_estimate = false`, [req.params.saleId]);
+    if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
+    if (s.rows[0].dispatched_at || s.rows[0].collected_at) return res.status(400).json({ error: 'already_done', message: 'Already dispatched/collected — nothing to remove.' });
+    await query(`UPDATE sales SET status = 'cancelled' WHERE id = $1`, [req.params.saleId]);
+    await audit(req, 'dispatch_remove_cancelled', 'sale', req.params.saleId, { was: s.rows[0].status });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'remove_failed', message: e.message }); }
+});
+
 router.post('/:saleId/set-fulfillment', requirePermission('dispatch'), async (req, res) => {   // any signed-in staff (operational)
   await ensureDispatchColumns();
   const method = req.body?.method === 'collect' ? 'collect' : req.body?.method === 'ship' ? 'ship' : null;
@@ -982,9 +998,10 @@ router.post('/sync-ebay', requireAdmin, async (req, res) => {
   try {
     const days = Math.min(90, Math.max(1, parseInt(req.body?.days) || 14));
     const result = await syncEbayDispatchCore({ days });
-    // Also drop cancelled/refunded eBay orders off the worklist.
+    // Also drop cancelled/refunded eBay orders off the worklist. The manual sync
+    // looks back further (60d min) so stale cancellations clear too.
     let cancelled = { cleared: 0 };
-    try { cancelled = await syncEbayCancellationsCore({ days }); } catch (e) { console.warn('[dispatch] cancel-sync:', e.message); }
+    try { cancelled = await syncEbayCancellationsCore({ days: Math.min(90, Math.max(days, 60)) }); } catch (e) { console.warn('[dispatch] cancel-sync:', e.message); }
     if (result.dispatched || cancelled.cleared) await audit(req, 'ebay_dispatch_sync', null, null, { ...result, cancelled });
     res.json({ ok: true, ...result, cancelledCleared: cancelled.cleared || 0 });
   } catch (e) {

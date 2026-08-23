@@ -532,6 +532,17 @@ if (fitmentStaticCron && cron.validate(fitmentStaticCron)) {
   console.log('[boot] eBay fitment-message sweep scheduled: dynamic (07:00–13:00 UK every 10–15 min, faster toward noon; otherwise every 2h)');
 }
 
+// Email digests + scheduled reports — hourly tick: batches new notifications to
+// opted-in staff and sends daily/weekly/monthly/quarterly reports at ~07:00 UK
+// (configured per user in Staff & Access). No-op without RESEND_API_KEY.
+cron.schedule('10 * * * *', async () => {
+  try {
+    const r = await require('./lib/digest').runDigestTick();
+    if (r && (r.sentNotif || r.sentReports)) console.log(`[cron digest] ${r.sentNotif} notification email(s), ${r.sentReports} report(s)`);
+  } catch (e) { console.warn('[cron digest] failed:', e.message); }
+});
+console.log('[boot] email digest/report tick scheduled: hourly');
+
 // Back-in-stock sweep — email customers waiting on a product once its stock
 // returns (qty_on_hand > 0). Every 20 min by default (BACK_IN_STOCK_CRON).
 const bisCronExpr = (process.env.BACK_IN_STOCK_CRON || '*/20 * * * *').trim();
