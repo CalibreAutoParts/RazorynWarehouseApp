@@ -2123,7 +2123,8 @@ function repaintCurrent() {
     if (document.getElementById('modal-overlay')?.classList.contains('open')) return;
     const fns = {
       dashboard: typeof renderDashboard === 'function' ? renderDashboard : null,
-      inventory: typeof renderInventory === 'function' ? renderInventory : null,
+      // List-only repaint — preserves toolbar/scroll (never the full page).
+      inventory: typeof repaintInventoryList === 'function' ? repaintInventoryList : null,
       returns:   typeof renderReturns === 'function' ? renderReturns : null,
       schedule:  typeof renderSchedule === 'function' ? renderSchedule : null,
     };
@@ -2257,33 +2258,32 @@ function enterApp() {
       // Dispatch auto-refreshes (the app has no manual sync/refresh button) so the
       // worklist stays live as orders come in and get shipped/collected.
       if (State.page === 'dispatch' && typeof loadDispatch === 'function') { try { await loadDispatch(); } catch (_) {} }
-      // Repaint the current page so changes are visible
-      const repaintMap = {
-        dashboard: typeof renderDashboard === 'function' ? renderDashboard : null,
-        inventory: typeof renderInventory === 'function' ? renderInventory : null,
-        sales: null,   // handled above via salesReload (respects the active filter)
-        returns: typeof renderReturns === 'function' ? renderReturns : null,
-        schedule: typeof renderSchedule === 'function' ? renderSchedule : null,
-      };
-      // Don't blow away a text box the user is actively typing in — repainting
-      // replaces #content and would wipe their input/focus mid-keystroke. The
-      // refreshed data stays in State and paints on the next idle tick.
+      // Background repaint — must NEVER feel like a page refresh. Rules:
+      //  • Skip entirely while a modal is open, or while the user is typing /
+      //    has a dropdown focused inside #content.
+      //  • Inventory refreshes via the LIST-ONLY painter (toolbar, filters, open
+      //    dropdowns and scroll are preserved) — never the full page render.
+      //  • Full-render pages (dashboard/returns/schedule) only repaint while the
+      //    user is at the top of the page (scroll < 150px) — otherwise the fresh
+      //    data just waits in State for their next action.
+      const modalOpen = document.getElementById('modal-overlay')?.classList.contains('open');
       const a = document.activeElement;
       const typing = a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && document.getElementById('content')?.contains(a);
-      // On the Inventory page the repaint rebuilds #content and resets the search
-      // box, filters AND scroll position — so if the user has an active
-      // search/filter or has scrolled down, DON'T repaint out from under them
-      // (this was the "scrolling resets my search/filters" annoyance). The fresh
-      // data is already in State and shows on their next action / navigation.
-      let disruptive = false;
-      if (State.page === 'inventory') {
-        const hasFilter = (el('inv-search')?.value || '').trim() !== ''
-          || (el('inv-brand')?.value || '') !== ''
-          || (el('inv-stock')?.value || '') !== ''
-          || (el('inv-hidden')?.value || '') !== '';
-        disruptive = hasFilter || window.scrollY > 150;
+      if (!modalOpen && !typing) {
+        if (State.page === 'inventory') {
+          if (typeof repaintInventoryList === 'function') repaintInventoryList();
+        } else {
+          const contentEl = document.getElementById('content');
+          const scrolled = (contentEl?.scrollTop || 0) > 150 || window.scrollY > 150;
+          const repaintMap = {
+            dashboard: typeof renderDashboard === 'function' ? renderDashboard : null,
+            sales: null,   // handled above via salesReload (respects the active filter)
+            returns: typeof renderReturns === 'function' ? renderReturns : null,
+            schedule: typeof renderSchedule === 'function' ? renderSchedule : null,
+          };
+          if (repaintMap[State.page] && !scrolled) repaintMap[State.page]();
+        }
       }
-      if (repaintMap[State.page] && !typing && !disruptive) repaintMap[State.page]();
       refreshNavCounts();
     } catch (e) {
       // silent — surfacing every poll failure would be noisy
@@ -4690,11 +4690,27 @@ function renderInventory() {
   if (sentinel) State._invObserver.observe(sentinel);
 
   paint();
+  // Expose the list-only painter so background refreshes and row actions can
+  // update the TABLE without rebuilding the whole page (which resets scroll,
+  // search, filters and closes open dropdowns).
+  window._invPaint = paint;
   // Debounce the text search — filtering the whole catalogue (can be 10k+ rows)
   // on every keystroke made typing stutter. Selects stay immediate via 'change'.
   let _invPaintT;
   el('inv-search').addEventListener('input', () => { clearTimeout(_invPaintT); _invPaintT = setTimeout(paint, 160); });
   ['inv-brand','inv-stock','inv-hidden'].forEach(id => { const e = el(id); if (e) e.addEventListener('change', paint); });
+}
+
+// Soft inventory repaint: refresh the LIST ONLY, preserving the toolbar (search,
+// filters, open dropdowns) and scroll position. Falls back to a full render only
+// when the page isn't mounted. Use this after data changes — never the full
+// renderInventory() from a background path.
+function repaintInventoryList() {
+  if (State.page !== 'inventory') return;
+  if (typeof window._invPaint === 'function' && el('inv-tbody')) {
+    try { window._invPaint(); return; } catch (_) {}
+  }
+  renderInventory();
 }
 
 // Diagnose why a SKU that appears in Listing Mirror doesn't show in inventory.
@@ -4721,7 +4737,7 @@ async function diagnoseSku(sku) {
         toast('Product reactivated — it will now show in search', 'success');
         closeModal();
         await Store.refresh('products');
-        renderInventory();
+        repaintInventoryList();
       } catch (e) { toast('Reactivate failed: ' + (e.data?.message || e.message), 'error'); }
     }};
   } else if (r.fixAvailable === 'reimport_or_orphan') {
@@ -4824,7 +4840,7 @@ async function bulkDeleteSelected() {
     if (r.errors?.length) console.warn('Bulk delete errors:', r.errors);
     State.invSelected.clear();
     await Store.refresh('products');
-    renderInventory();
+    repaintInventoryList();
   } catch (e) {
     toast('Bulk delete failed: ' + (e.data?.message || e.message), 'error');
   }
@@ -4843,7 +4859,7 @@ async function toggleHideProduct(id, hide) {
   try {
     await Api.post(`/api/products/${id}/${hide ? 'hide' : 'unhide'}`, hide ? { reason } : {});
     await Store.refresh('products');
-    if (State.page === 'inventory') renderInventory();
+    if (State.page === 'inventory') repaintInventoryList();
     toast(hide ? '🙈 Listing hidden — excluded from stock-checks & channel pushes' : '👁 Listing unhidden — back to normal', 'success', 4000);
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
@@ -4868,7 +4884,7 @@ async function deleteProduct(id, title) {
     const url = `/api/products/${id}?hard=true${removeFromShopify ? '&shopify=true' : ''}`;
     await Api.delete(url);
     await Store.refresh('products');
-    renderInventory();
+    repaintInventoryList();
     toast(removeFromShopify ? 'Deleted from warehouse and Shopify' : 'Removed from warehouse', 'success');
   } catch (e) {
     toast('Delete failed: ' + (e.data?.message || e.message), 'error');
@@ -4990,7 +5006,7 @@ function openProductModal(id) {
           } else {
             toast('Saved', 'success');
           }
-          renderInventory();
+          repaintInventoryList();
           refreshNavCounts();
           if (!id && newProduct?.id) {
             const fresh = State.products.find(x => x.id === newProduct.id) || newProduct;
@@ -12278,7 +12294,7 @@ async function pushPrelistingLive(productId) {
     Task.done(taskId, 'Live');
     toast(`✓ eBay listing live — ItemID ${r.itemId}`, 'success', 8000);
     await Store.refresh('products').catch(() => {});
-    if (typeof renderInventory === 'function') renderInventory();
+    if (State.page === 'inventory') repaintInventoryList();
   } catch (e) {
     Task.fail(taskId, 'Failed');
     toast('Publish failed: ' + (e.data?.message || e.message), 'error', 9000);
@@ -14476,7 +14492,7 @@ async function sgAddProductToPool(productId) {
     toast(msg, 'success'); closeModal();
     await Store.refresh('products').catch(() => {});
     if (State.page === 'sharedstock' && typeof loadSharedStock === 'function') loadSharedStock();
-    if (State.page === 'inventory' && typeof renderInventory === 'function') renderInventory();
+    if (State.page === 'inventory') repaintInventoryList();
   };
   modal({
     title: '🔗 Add to shared pool',
@@ -21172,7 +21188,7 @@ async function pullEbayStock() {
       toast(`✓ Checked ${r.checked} linked items · updated ${r.updated} · ${r.unchanged} already correct${r.errors?.length ? ` · ${r.errors.length} errors` : ''}`, r.errors?.length ? 'warn' : 'success', 8000);
     }
     await Store.refresh('products');
-    if (State.page === 'inventory') renderInventory();
+    if (State.page === 'inventory') repaintInventoryList();
     if (State.page === 'mirror') { await loadLinkStatus?.(); renderLinkStatus?.(); }
   } catch (e) {
     Task.fail(taskId, 'Failed');
