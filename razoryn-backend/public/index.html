@@ -4167,6 +4167,7 @@ function paintIncoming(items) {
       <td>${statusPill(i.status)}</td>
       <td style="white-space:nowrap">
         ${remaining > 0 ? `<button class="btn btn-primary btn-sm" onclick="openReceiveIncoming(${i.id})" title="Receive units — adds to stock & pushes to channels">📦 Receive</button>` : ''}
+        ${!linked ? `<button class="btn btn-outline btn-sm app-hide" onclick="incDraftListing(${i.id})" title="This item isn't listed yet — start its listing pre-filled from this line (SKU, title, part number, qty, cost). Save as draft or push live; the line links up automatically via the SKU.">📝 Draft listing</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="printIncomingLabels(${i.id})" title="Print labels for this item (to apply when the goods arrive)">🏷</button>
         <button class="btn btn-ghost btn-sm" onclick="openEditIncoming(${i.id})" title="Edit">✏️</button>
         <button class="btn btn-ghost btn-sm" onclick="deleteIncoming(${i.id})" title="Delete" style="color:var(--red)">🗑</button>
@@ -4329,7 +4330,8 @@ async function submitBulkIncoming(andNext) {
   try {
     const r = await Api.post('/api/incoming/bulk', payload);
     Task.done(taskId, 'Added');
-    toast(`Added ${r.created} line(s) · ${r.createdUnits} units` + (r.unmatched?.length ? ` · ${r.unmatched.length} skipped` : ''), 'success', 5000);
+    const newMsg = r.newItems?.length ? ` · ${r.newItems.length} NEW unlisted item(s) — use 📝 Draft listing on those lines` : '';
+    toast(`Added ${r.created} line(s) · ${r.createdUnits} units${newMsg}` + (r.unmatched?.length ? ` · ${r.unmatched.length} skipped (no qty/sku)` : ''), 'success', newMsg ? 9000 : 5000);
     if (andNext) {
       // Re-open with the shared container header pre-filled; supplier + lines clear.
       openAddIncoming(header);
@@ -4338,6 +4340,33 @@ async function submitBulkIncoming(andNext) {
     }
     loadIncoming();
   } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// Start a listing for an incoming line that has NO product yet (never listed):
+// jumps to Create-listing pre-filled with the line's SKU/title/part number, qty
+// and per-unit cost. Save as draft or push live — the incoming line links up via
+// the SKU once the product exists.
+function incDraftListing(id) {
+  const it = (State.incoming || []).find(x => x.id === id);
+  if (!it) return;
+  CL_REPEAT = {
+    fields: {
+      'cl-title': it.title || '',
+      'cl-partnumber': it.part_number || '',
+      'ce-title': it.title || '',
+      'ce-qty': Math.max(1, (it.qty_ordered || 1) - (it.qty_received || 0)),
+      'cl-cost': it.unit_cost_gbp != null ? (+it.unit_cost_gbp).toFixed(2) : '',
+      'cl-cost-cur': 'GBP',
+      'cl-cost-foreign': it.unit_cost_gbp != null ? (+it.unit_cost_gbp).toFixed(2) : '',
+    },
+    checks: {}, specs: {}, placements: [], metafields: [],
+    ebayCategoryId: '', clCategoryId: '', clCategoryName: '', images: [],
+  };
+  routeTo('createlisting');
+  if (State.page !== 'createlisting') { CL_REPEAT = null; return; }
+  // Suggest the incoming SKU (must stay unique — staff can adjust).
+  setTimeout(() => { const s = el('cl-sku'); if (s && !s.value && it.sku) s.value = it.sku; }, 150);
+  toast('Pre-filled from the incoming line — set the SKU/price, add photos, then create (or Save as draft).', 'info', 8000);
 }
 
 function openAddIncomingSingle() {
@@ -12754,10 +12783,19 @@ function clCoreHtml() {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Shopify price <span style="color:var(--ink-soft);font-weight:400">— auto eBay − ${pct}%</span></label>
         <input id="cl-shop" disabled style="background:var(--bg-soft)" placeholder="set the eBay price in the eBay panel →"></div>
-      <div class="field"><label>Cost price (£) <span style="color:var(--ink-soft);font-weight:400">— your landed cost</span></label>
-        <input id="cl-cost" type="number" step="0.01" min="0" placeholder="e.g. 42.00">
-        <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Used for margins in Costs &amp; margins. Optional.</div></div>
+      <div class="field"><label>Cost price <span style="color:var(--ink-soft);font-weight:400">— your landed cost</span></label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <select id="cl-cost-cur" onchange="clCostCurChanged()" style="width:86px;flex-shrink:0">
+            <option value="CNY">CNY ¥</option>
+            <option value="GBP">GBP £</option>
+          </select>
+          <input id="cl-cost-foreign" type="number" step="0.01" min="0" placeholder="e.g. 380" oninput="clCostRecalc()" style="flex:1">
+          <span id="cl-cost-gbp" style="font-weight:700;white-space:nowrap;color:var(--ink-soft)">= £—</span>
+        </div>
+        <input id="cl-cost" type="hidden">
+        <div id="cl-cost-rate-note" style="font-size:11px;color:var(--ink-soft);margin-top:3px">Enter what you paid — RMB converts to £ automatically at today's rate. Optional.</div></div>
     </div>
+    <div id="cl-est-profit" style="display:none;font-size:12px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:10px"></div>
     <div class="field"><label>📦 Parcel size &amp; weight <span style="color:var(--ink-soft);font-weight:400">— pushed to eBay + Shopify for shipping rates. Optional.</span></label>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">
         <div><input type="number" step="0.1" min="0" id="cl-pkg-l" placeholder="L cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Length</div></div>
@@ -12987,6 +13025,65 @@ function clPromptMultiFitment(attemptedSku, existing, btn) {
 // After a successful create, offer to make another listing from the same info
 // instead of bouncing straight back to the mirror. Keeps the form data so the
 // user can tweak a few fields (SKU, Left/Right, make/model) and submit again.
+// ── Create-listing cost: RMB→£ auto-conversion + live profit estimate ────────
+// Suppliers quote in RMB — enter the amount in CNY and it converts to GBP at
+// today's rate automatically (no manual exchange-rate step). The hidden cl-cost
+// carries the GBP figure the rest of the flow already uses. Once cost + eBay
+// price are set, a live estimated-profit panel shows the eBay + Shopify nets
+// using the same fee maths as Costs & margins.
+let _clFxRate = null;
+async function clFetchCostRate() {
+  try {
+    const cur = el('cl-cost-cur')?.value || 'CNY';
+    if (cur === 'GBP') { _clFxRate = 1; return; }
+    const r = await Api.get('/api/costs/fx?from=' + encodeURIComponent(cur) + '&to=GBP');
+    _clFxRate = parseFloat(r.rate) || null;
+    const note = el('cl-cost-rate-note');
+    if (note && _clFxRate) note.textContent = `Rate today: 1 ${cur} = £${_clFxRate.toFixed(5)} — converted automatically.`;
+  } catch (_) { _clFxRate = null; }
+}
+function clCostCurChanged() {
+  _clFxRate = null;
+  clFetchCostRate().then(clCostRecalc);
+}
+function clCostRecalc() {
+  const cur = el('cl-cost-cur')?.value || 'CNY';
+  const amt = parseFloat(el('cl-cost-foreign')?.value);
+  let gbp = null;
+  if (Number.isFinite(amt) && amt > 0) {
+    if (cur === 'GBP') gbp = amt;
+    else if (_clFxRate) gbp = amt * _clFxRate;
+    else { clFetchCostRate().then(() => clCostRecalc()); }
+  }
+  if (el('cl-cost')) el('cl-cost').value = gbp != null ? gbp.toFixed(2) : '';
+  if (el('cl-cost-gbp')) el('cl-cost-gbp').textContent = gbp != null ? '= £' + gbp.toFixed(2) : '= £—';
+  clRenderEstProfit();
+}
+async function clRenderEstProfit() {
+  const box = el('cl-est-profit'); if (!box) return;
+  const cost = parseFloat(el('cl-cost')?.value);
+  const price = parseFloat(el('ce-price')?.value);
+  if (!(cost > 0) || !(price > 0)) { box.style.display = 'none'; return; }
+  if (!CT.settings || !Object.keys(CT.settings).length) {
+    try { CT.settings = (await Api.get('/api/costs/settings')).settings || {}; }
+    catch (_) { box.style.display = 'none'; return; }
+  }
+  const pseudo = { costPrice: cost, postageInPrice: true, largePanel: false, shippingBand: null, shippingCost: null, landedKnown: false, landedCost: null };
+  const eb = ctComputeBreakdown(price, pseudo, 'ebay');
+  const sp = parseFloat(el('cl-shop')?.value) || +(price * 0.95).toFixed(2);
+  const sh = ctComputeBreakdown(sp, pseudo, 'shopify');
+  const line = (n, b2) => `<div style="display:flex;justify-content:space-between"><span>${n}</span><span style="font-weight:700;color:${b2.marginPct < 0 ? 'var(--red)' : b2.marginPct < 10 ? 'var(--amber)' : 'var(--green)'}">${ctMoney(b2.net)} net · ${ctPct(b2.marginPct)}</span></div>`;
+  box.style.display = '';
+  box.innerHTML = `
+    <div style="font-weight:700;margin-bottom:4px">Estimated profit at these prices <span style="font-weight:400;color:var(--ink-soft)">— incl. fees, VAT, standard postage; refine in Costs &amp; margins after listing</span></div>
+    ${line('eBay @ £' + price.toFixed(2), eb)}
+    ${line('Shopify @ £' + sp.toFixed(2), sh)}`;
+}
+// Live update the estimate when the eBay price is typed (fields render later).
+document.addEventListener('input', (e) => {
+  if (e.target && (e.target.id === 'ce-price' || e.target.id === 'cl-cost-foreign')) clRenderEstProfit();
+});
+
 // ── Copy an existing product as a template for a NEW listing ──
 function clCopyPickerOpen() {
   modal({
@@ -13029,6 +13126,7 @@ async function clCopyFromProduct(productId) {
       'cl-desc': sh.description || '',
       'cl-tags': sh.tags || '',
       'cl-cost': p.cost_price != null ? p.cost_price : '',
+      'cl-cost-cur': 'GBP', 'cl-cost-foreign': p.cost_price != null ? p.cost_price : '',
       'cl-pkg-l': p.pkg_length_cm ?? '', 'cl-pkg-w': p.pkg_width_cm ?? '', 'cl-pkg-h': p.pkg_height_cm ?? '',
       'cl-pkg-g': p.pkg_weight_g != null ? +(p.pkg_weight_g / 1000).toFixed(2) : '',   // field is kg; stored grams
       'cl-subpn': (detail.subPartNumbers || []).join('\n'),

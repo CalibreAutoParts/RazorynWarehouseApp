@@ -331,7 +331,7 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
     for (const p of (await query(`SELECT id, sku, title, part_number FROM products WHERE id = ANY($1)`, [extraIds])).rows) byId.set(p.id, p);
   }
 
-  const created = [], unmatched = [];
+  const created = [], unmatched = [], newItems = [];
   for (const l of lines) {
     const qty = parseInt(l.qty);
     if (!Number.isInteger(qty) || qty <= 0) { unmatched.push({ ...l, reason: 'bad qty' }); continue; }
@@ -339,7 +339,15 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
       || (l.sku && bySku.get(String(l.sku).trim().toLowerCase()))
       || (l.partNumber && byPart.get(String(l.partNumber).trim().toLowerCase()))
       || null;
-    if (!prod) { unmatched.push({ ...l, reason: 'no matching product' }); continue; }
+    // NEW/unlisted stock: no matching product is NOT a reason to reject the line —
+    // record it product-less (typed sku/title/part number kept) so the container is
+    // complete; a listing can be drafted from the Incoming page and the line links
+    // up via SKU when the product is created.
+    if (!prod && !(l.sku || l.partNumber || l.title)) { unmatched.push({ ...l, reason: 'no sku/title' }); continue; }
+    if (!prod) {
+      prod = { id: null, sku: (l.sku || '').trim() || null, title: (l.title || '').trim() || null, part_number: (l.partNumber || '').trim() || null };
+      newItems.push({ sku: prod.sku, title: prod.title });
+    }
     // Per-line cost capture (foreign → GBP). Container-level freight/duty are
     // captured on each line (not apportioned in v1).
     const lineCurrency = String(l.currency || b.currency || 'CNY').toUpperCase();
@@ -359,7 +367,7 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
   await audit(req, 'incoming_bulk_add', 'incoming', null, { created: created.length, unmatched: unmatched.length, container: b.containerRef });
   if (b.supplier) { try { await require('./suppliers').ensureSupplierByName(b.supplier); } catch (_) {} }
   if (b.containerRef) await reapportionContainer(b.containerRef).catch(() => {});
-  res.json({ ok: true, created: created.length, createdUnits: created.reduce((a, c) => a + c.qty, 0), unmatched });
+  res.json({ ok: true, created: created.length, createdUnits: created.reduce((a, c) => a + c.qty, 0), unmatched, newItems });
 });
 
 // POST /api/incoming/receive-container  { containerRef, push }
