@@ -82,6 +82,22 @@ async function ensureProductLocationColumns() {
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_prelist_status TEXT`);
     await query(`CREATE INDEX IF NOT EXISTS products_prelisted_idx ON products (is_prelisted) WHERE is_prelisted = true`);
     await query(`CREATE INDEX IF NOT EXISTS products_ebay_sched_idx ON products (ebay_scheduled_at) WHERE ebay_prelist_status = 'scheduled'`);
+    // Packaging cost accuracy: was the box/packaging included with the item's
+    // purchase cost (true / null = yes, the default) or bought separately
+    // (false)? When bought separately, packaging_cost is the per-item £ spent
+    // on it — added on top of the goods cost in the margin maths.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS packaging_included BOOLEAN`);
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS packaging_cost NUMERIC(10,2)`);
+    // Extra product photos (beyond the single item/location slots) — used by the
+    // damaged-item quick capture so handheld photos ride along with the product
+    // and can be reused as listing images as-is.
+    await query(`CREATE TABLE IF NOT EXISTS product_photos (
+      id         SERIAL PRIMARY KEY,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      data_url   TEXT NOT NULL,
+      position   INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
     _prodLocMigrated = true;
   } catch (e) { console.warn('[products] location-columns migration warning:', e.message); }
 }
@@ -602,13 +618,98 @@ router.post('/', requireAdmin, async (req, res) => {
   }
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// Damaged-item quick capture. Creates a product with an AUTO-GENERATED SKU
+// (DMG-YYMMDD-##) so nobody has to invent a code on the warehouse floor, and
+// attaches the photos taken on the handheld. The photos live in product_photos
+// and can be pulled straight into a listing as-is — no background editing.
+// Warehouse permission (not admin): staff capture on the device; pricing and
+// listing happen later on the computer.
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/damaged', requirePermission('inventory'), async (req, res) => {
+  try {
+    await ensureProductLocationColumns();
+    const b = req.body || {};
+    if (!b.title || !String(b.title).trim()) return res.status(400).json({ error: 'title_required' });
+    const photos = (Array.isArray(b.photos) ? b.photos : []).filter(u => typeof u === 'string' && u.startsWith('data:image/')).slice(0, 8);
+    for (const ph of photos) {
+      if (ph.length > 7_000_000) return res.status(413).json({ error: 'photo_too_large', message: 'One of the photos is too large — retake it (the app normally downscales automatically).' });
+    }
+    // Next free DMG-YYMMDD-## for today. Race-safe via retry on the unique SKU.
+    const d = new Date();
+    const ymd = String(d.getFullYear()).slice(2) + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+    const prefix = `DMG-${ymd}-`;
+    let product = null;
+    for (let attempt = 0; attempt < 5 && !product; attempt++) {
+      const cnt = await query(`SELECT COUNT(*) AS n FROM products WHERE sku LIKE $1`, [prefix + '%']);
+      const sku = prefix + String(parseInt(cnt.rows[0].n) + 1 + attempt).padStart(2, '0');
+      try {
+        const r = await query(
+          `INSERT INTO products (sku, title, brand, model, part_number, barcode, qty_on_hand,
+                                 low_stock_threshold, price_ebay, location_note, item_photo_data_url)
+           VALUES ($1,$2,$3,$4,$5,$1,$6,0,$7,$8,$9) RETURNING *`,
+          [sku, String(b.title).trim(), b.brand || null, b.model || null, b.partNumber || null,
+           Math.max(1, parseInt(b.qty) || 1),
+           (b.price != null && b.price !== '') ? parseFloat(b.price) : null,
+           (b.notes || '').trim() ? 'DAMAGED — ' + String(b.notes).trim() : 'DAMAGED',
+           photos[0] || null]);
+        product = r.rows[0];
+      } catch (e) { if (e.code !== '23505') throw e; /* sku taken → retry with next number */ }
+    }
+    if (!product) return res.status(409).json({ error: 'sku_clash', message: 'Could not allocate a DMG SKU — try again.' });
+    for (let i = 0; i < photos.length; i++) {
+      await query(`INSERT INTO product_photos (product_id, data_url, position) VALUES ($1,$2,$3)`, [product.id, photos[i], i]);
+    }
+    await audit(req, 'create_damaged_product', 'product', product.id, { sku: product.sku, photos: photos.length });
+    res.status(201).json({ product, photoCount: photos.length });
+  } catch (e) { res.status(500).json({ error: 'create_failed', message: e.message }); }
+});
+
+// GET /api/products/:id/photos — the extra photo set (damaged captures etc.).
+router.get('/:id/photos', requirePermission('inventory'), async (req, res) => {
+  try {
+    await ensureProductLocationColumns();
+    const { rows } = await query(`SELECT id, data_url, position FROM product_photos WHERE product_id = $1 ORDER BY position, id`, [req.params.id]);
+    res.json({ photos: rows });
+  } catch (e) { res.status(500).json({ error: 'load_failed', message: e.message }); }
+});
+
+// POST /api/products/:id/photos — add more photos to an existing item.
+router.post('/:id/photos', requirePermission('inventory'), async (req, res) => {
+  try {
+    await ensureProductLocationColumns();
+    const photos = (Array.isArray(req.body?.photos) ? req.body.photos : []).filter(u => typeof u === 'string' && u.startsWith('data:image/')).slice(0, 8);
+    if (!photos.length) return res.status(400).json({ error: 'no_photos' });
+    for (const ph of photos) {
+      if (ph.length > 7_000_000) return res.status(413).json({ error: 'photo_too_large' });
+    }
+    const base = await query(`SELECT COALESCE(MAX(position), -1) AS p FROM product_photos WHERE product_id = $1`, [req.params.id]);
+    let pos = parseInt(base.rows[0].p) + 1;
+    for (const ph of photos) {
+      await query(`INSERT INTO product_photos (product_id, data_url, position) VALUES ($1,$2,$3)`, [req.params.id, ph, pos++]);
+    }
+    // First photo doubles as the item thumbnail if the product has none yet.
+    await query(`UPDATE products SET item_photo_data_url = COALESCE(item_photo_data_url, $2), updated_at = now() WHERE id = $1`, [req.params.id, photos[0]]);
+    res.json({ ok: true, added: photos.length });
+  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+});
+
+// DELETE /api/products/:id/photos/:photoId
+router.delete('/:id/photos/:photoId', requirePermission('inventory'), async (req, res) => {
+  try {
+    await query(`DELETE FROM product_photos WHERE id = $1 AND product_id = $2`, [req.params.photoId, req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'delete_failed', message: e.message }); }
+});
+
 // PATCH /api/products/:id  — update fields (admin)
 router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
                    'low_stock_threshold', 'price_shopify', 'price_ebay', 'cost_price',
                    'location_id', 'active', 'location_note', 'location_photo_data_url',
                    'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked', 'shipping_band', 'shipping_cost', 'postage_in_price',
-                   'pkg_length_cm', 'pkg_width_cm', 'pkg_height_cm', 'pkg_weight_g'];
+                   'pkg_length_cm', 'pkg_width_cm', 'pkg_height_cm', 'pkg_weight_g',
+                   'packaging_included', 'packaging_cost'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
@@ -618,7 +719,8 @@ router.patch('/:id', requireAdmin, async (req, res) => {
                 locationPhotoDataUrl2: 'location_photo_data_url_2',
                 primaryPhoto: 'primary_photo', largePanel: 'large_panel', priceLocked: 'price_locked',
                 shippingBand: 'shipping_band', shippingCost: 'shipping_cost', postageInPrice: 'postage_in_price',
-                pkgLengthCm: 'pkg_length_cm', pkgWidthCm: 'pkg_width_cm', pkgHeightCm: 'pkg_height_cm', pkgWeightG: 'pkg_weight_g' };
+                pkgLengthCm: 'pkg_length_cm', pkgWidthCm: 'pkg_width_cm', pkgHeightCm: 'pkg_height_cm', pkgWeightG: 'pkg_weight_g',
+                packagingIncluded: 'packaging_included', packagingCost: 'packaging_cost' };
   const sets = [], params = [];
   // Always ensure the per-product location/photo columns (incl. updated_at)
   // exist before we touch them — cheap (cached after first run).
