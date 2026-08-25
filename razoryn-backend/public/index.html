@@ -4207,7 +4207,7 @@ function incomingModalBody(it) {
       <div class="field"><label>Quantity ordered</label><input id="inc-qty" type="number" min="1" step="1" value="${escapeAttr(it.qty_ordered || '')}"></div>
       <div class="field"><label>Expected date</label><input id="inc-expected" type="date" value="${escapeAttr(it.expected_date ? String(it.expected_date).slice(0,10) : '')}"></div>
       <div class="field"><label>Container / order ref</label><input id="inc-container" value="${escapeAttr(it.container_ref || '')}" placeholder="e.g. CONT-2026-04"></div>
-      <div class="field"><label>Supplier</label><input id="inc-supplier" list="dl-suppliers" value="${escapeAttr(it.supplier || '')}">${supplierDatalist('dl-suppliers')}</div>
+      <div class="field"><label>Supplier</label>${supplierComboHtml('inc-supplier', it.supplier || '', 'Pick a supplier or type a new one')}</div>
     </div>
     <div class="field"><label>Status</label>
       <select id="inc-status">${Object.entries(INCOMING_STATUS).filter(([k]) => k !== 'cancelled').map(([k, v]) => `<option value="${k}" ${(it.status || 'on_order') === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
@@ -4228,7 +4228,7 @@ function openAddIncoming(prefill) {
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Add a whole container at once. Each line links to a product in your inventory — no need to retype SKUs. Adding goods from several suppliers? Use <strong>Save &amp; add another supplier</strong> to keep the container details and just change the supplier + lines.</div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 0.7fr;gap:10px;margin-bottom:6px">
         <div class="field"><label>Container number / name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— unique, e.g. MSKU1234567</span></label><input id="incb-container" placeholder="Container no. (trackable) or a name" value="${escapeAttr(prefill.containerRef||'')}"></div>
-        <div class="field"><label>Supplier</label><input id="incb-supplier" list="dl-suppliers" placeholder="This supplier's name">${supplierDatalist('dl-suppliers')}</div>
+        <div class="field"><label>Supplier</label>${supplierComboHtml('incb-supplier', prefill.supplier || '', "This supplier's name")}</div>
         <div class="field"><label>Rough ETA <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(sea freight, approx.)</span></label><input id="incb-expected" type="date" value="${escapeAttr(prefill.expectedDate||'')}"></div>
         <div class="field"><label>Cost currency</label><select id="incb-currency">${curOpts}</select></div>
       </div>
@@ -4347,6 +4347,7 @@ async function submitBulkIncoming(andNext) {
     Task.done(taskId, 'Added');
     const newMsg = r.newItems?.length ? ` · ${r.newItems.length} NEW unlisted item(s) — use 📝 Draft listing on those lines` : '';
     toast(`Added ${r.created} line(s) · ${r.createdUnits} units${newMsg}` + (r.unmatched?.length ? ` · ${r.unmatched.length} skipped (no qty/sku)` : ''), 'success', newMsg ? 9000 : 5000);
+    State._suppliersLoaded = false;   // a new supplier name may have been typed — refresh dropdowns
     if (andNext) {
       // Re-open with the shared container header pre-filled; supplier + lines clear.
       openAddIncoming(header);
@@ -13004,7 +13005,7 @@ function clCoreHtml() {
         <div style="font-weight:600;font-size:12px;margin:8px 0 4px">Link to incoming stock</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
           <div class="field"><label>Container ref / name</label><input id="cl-inc-container" list="cl-inc-containers" placeholder="existing or new container"><datalist id="cl-inc-containers"></datalist></div>
-          <div class="field"><label>Supplier</label><input id="cl-inc-supplier" list="dl-suppliers"></div>${supplierDatalist('dl-suppliers')}
+          <div class="field"><label>Supplier</label>${supplierComboHtml('cl-inc-supplier', '', 'Pick a supplier or type a new one')}</div>
           <div class="field"><label>Qty on the way</label><input id="cl-inc-qty" type="number" min="0" placeholder="e.g. 50"></div>
           <div class="field"><label>Unit cost</label><div style="display:flex;gap:6px"><input id="cl-inc-cost" type="number" min="0" step="0.01" style="flex:1" placeholder="optional"><select id="cl-inc-currency" style="width:80px">${['CNY','GBP','USD','EUR'].map(c=>`<option value="${c}">${c}</option>`).join('')}</select></div></div>
         </div>
@@ -14726,6 +14727,54 @@ function supplierDatalist(id) {
   return `<datalist id="${id || 'dl-suppliers'}">${(State.suppliers || []).map(s => `<option value="${escapeAttr(s.name)}">`).join('')}</datalist>`;
 }
 
+// ── Supplier combo-box ──────────────────────────────────────────────────────
+// A proper dropdown for supplier fields (native <datalist> is unreliable in the
+// Android WebView the handheld runs). Focus shows every saved supplier; typing
+// filters the list; tapping picks one; and if what's typed isn't saved yet the
+// last row offers "➕ New supplier" — picking it (or just leaving the text) adds
+// it on save, exactly like before. The input keeps its id, so every existing
+// `el(id).value` read works unchanged.
+function supplierComboHtml(id, value, placeholder) {
+  return `<div style="position:relative">
+    <input id="${id}" value="${escapeAttr(value || '')}" placeholder="${escapeAttr(placeholder || 'Pick a supplier or type a new one')}" autocomplete="off" style="width:100%"
+      oninput="supCmbFilter('${id}')" onfocus="supCmbFilter('${id}')" onblur="setTimeout(() => supCmbHide('${id}'), 200)">
+    <div id="${id}-dd" style="display:none;position:absolute;top:calc(100% + 2px);left:0;right:0;z-index:60;background:var(--white);border:1px solid var(--line);border-radius:8px;max-height:190px;overflow-y:auto;box-shadow:0 8px 20px rgba(0,0,0,.15)"></div>
+  </div>`;
+}
+function supCmbEnsureCss() {
+  if (document.getElementById('sup-cmb-css')) return;
+  const st = document.createElement('style'); st.id = 'sup-cmb-css';
+  st.textContent = '.sup-cmb-opt{padding:9px 12px;cursor:pointer;font-size:13px}.sup-cmb-opt:hover,.sup-cmb-opt:active{background:var(--bg-soft)}';
+  document.head.appendChild(st);
+}
+function supCmbFilter(id) {
+  supCmbEnsureCss();
+  const inp = el(id), dd = el(id + '-dd');
+  if (!inp || !dd) return;
+  const render = () => {
+    const cur = el(id), box = el(id + '-dd');
+    if (!cur || !box) return;   // modal closed while suppliers were loading
+    const q = (cur.value || '').trim();
+    const names = (State.suppliers || []).map(s => s.name);
+    const hits = q ? names.filter(n => n.toLowerCase().includes(q.toLowerCase())) : names;
+    const exact = q && names.some(n => n.toLowerCase() === q.toLowerCase());
+    let html = hits.slice(0, 50).map(n =>
+      `<div class="sup-cmb-opt" data-v="${escapeAttr(n)}" onmousedown="event.preventDefault();supCmbPick('${id}', this.dataset.v)">🏭 ${escapeHtml(n)}</div>`).join('');
+    if (q && !exact) {
+      html += `<div class="sup-cmb-opt" data-v="${escapeAttr(q)}" onmousedown="event.preventDefault();supCmbPick('${id}', this.dataset.v)" style="color:var(--brand-primary);font-weight:600;${hits.length ? 'border-top:1px solid var(--line)' : ''}">➕ New supplier: &ldquo;${escapeHtml(q)}&rdquo;</div>`;
+    }
+    if (!html) html = '<div style="padding:9px 12px;font-size:12px;color:var(--ink-soft)">No saved suppliers yet — type a name to add the first one.</div>';
+    box.innerHTML = html;
+    box.style.display = '';
+  };
+  if (!State._suppliersLoaded) loadSuppliersOnce().then(render); else render();
+}
+function supCmbPick(id, name) {
+  const inp = el(id); if (inp) inp.value = name;
+  supCmbHide(id);
+}
+function supCmbHide(id) { const dd = el(id + '-dd'); if (dd) dd.style.display = 'none'; }
+
 // ════════════════════════════════════════════════════════════════════════════
 // Supplier SKUs · shipping toolkit · handheld quick tools
 // ════════════════════════════════════════════════════════════════════════════
@@ -14793,7 +14842,7 @@ async function renderProductSuppliers(productId) {
         <button onclick="psDeleteLink(${l.id},${productId})" title="Unlink" style="border:none;background:none;cursor:pointer;color:var(--red);font-weight:700">✕</button>` : ''}
       </div>`).join('')}</div>` : '<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">No suppliers linked yet.</div>'}
     ${admin ? `<div style="display:grid;grid-template-columns:1.2fr 1fr .7fr .55fr .55fr auto;gap:6px;align-items:center">
-      <input id="ps-name" list="dl-suppliers" placeholder="Supplier">${supplierDatalist('dl-suppliers')}
+      ${supplierComboHtml('ps-name', '', 'Supplier')}
       <input id="ps-sku" placeholder="Their SKU / part code" style="font-family:ui-monospace,monospace">
       <input id="ps-cost" type="number" step="0.01" min="0" placeholder="Cost">
       <select id="ps-cur"><option>GBP</option><option>CNY</option><option>USD</option><option>EUR</option></select>
@@ -15151,7 +15200,7 @@ function qcPick(id) {
       <div class="field"><label>Currency</label><select id="qc-cur"><option>CNY</option><option>GBP</option><option>USD</option><option>EUR</option></select></div>
       <div class="field"><label>Basis</label><select id="qc-basis" title="FOB = to the ship, freight on top · EXW = ex-works, freight + haulage on top"><option value="">—</option><option>FOB</option><option>EXW</option></select></div>
     </div>
-    <div class="field"><label>Supplier <span style="font-weight:400;color:var(--ink-soft)">— optional, links the purchase</span></label><input id="qc-supplier" list="dl-suppliers" placeholder="who we bought it from">${supplierDatalist('dl-suppliers')}</div>
+    <div class="field"><label>Supplier <span style="font-weight:400;color:var(--ink-soft)">— optional, links the purchase</span></label>${supplierComboHtml('qc-supplier', '', 'who we bought it from')}</div>
     <div class="field"><label>Their SKU <span style="font-weight:400;color:var(--ink-soft)">— optional supplier part code</span></label><input id="qc-supsku" style="font-family:ui-monospace,monospace" placeholder="supplier's code for this part"></div>
     <div class="field"><label>Per-item postage (£) <span style="font-weight:400;color:var(--ink-soft)">— what it costs US to ship one</span></label><input id="qc-post" type="number" step="0.01" min="0" inputmode="decimal" value="${p.shippingCost ?? ''}" placeholder="leave blank to keep the shipping band"></div>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
@@ -15190,6 +15239,7 @@ async function qcSave() {
     }
     Task.done(taskId);
     Store.refresh('products');
+    if (supplier) State._suppliersLoaded = false;   // refresh the supplier dropdowns
     toast('Saved' + (gbpCost != null && canSeeMoney() ? ` — cost £${(+gbpCost).toFixed(2)}` : ''), 'success');
     QC.productId = null;
     const f = el('qc-form'); if (f) { f.style.display = 'none'; f.innerHTML = ''; }
@@ -15513,7 +15563,7 @@ async function ctOpenEditor(productId) {
     title: 'Cost — ' + (p.title || ('#' + productId)),
     body: `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="field"><label>Supplier <span style="color:var(--ink-soft);font-weight:400">— pick a saved one or type a new</span></label><input id="ct-supplier" list="dl-suppliers" value="${escapeAttr(p.lastSupplier || '')}" placeholder="e.g. Guangzhou XYZ">${supplierDatalist('dl-suppliers')}</div>
+        <div class="field"><label>Supplier <span style="color:var(--ink-soft);font-weight:400">— pick a saved one or type a new</span></label>${supplierComboHtml('ct-supplier', p.lastSupplier || '', 'e.g. Guangzhou XYZ')}</div>
         <div class="field"><label>Purchase date</label><input id="ct-date" type="date" value="${ctToday()}"></div>
         <div class="field"><label>Currency</label>
           <select id="ct-cur"><option value="CNY"${(p.lastCurrency || 'CNY') === 'CNY' ? ' selected' : ''}>CNY (RMB)</option><option value="GBP"${p.lastCurrency === 'GBP' ? ' selected' : ''}>GBP</option><option value="USD"${p.lastCurrency === 'USD' ? ' selected' : ''}>USD</option><option value="EUR"${p.lastCurrency === 'EUR' ? ' selected' : ''}>EUR</option></select></div>
@@ -15830,6 +15880,7 @@ async function ctSaveCost(productId) {
   try {
     const r = await Api.post('/api/costs/products/' + productId + '/cost', payload);
     toast('Cost saved — £' + Number(r.costPrice).toFixed(2) + ' landed', 'success');
+    State._suppliersLoaded = false;   // a new supplier name may have been added — refresh the dropdowns
     closeModal();
     await loadCosts();
     await refreshCostFloors();
