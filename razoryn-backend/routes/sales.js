@@ -42,6 +42,13 @@ async function ensurePaidColumn() {
   try {
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_paid BOOLEAN NOT NULL DEFAULT true`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ`);
+    // International/export orders: goods exported from the UK are ZERO-RATED for
+    // UK VAT (business AND consumer buyers alike) provided export evidence is
+    // kept. We record the destination + the buyer's VAT number (useful for their
+    // import/customs paperwork, not required for the UK zero-rating itself).
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_export BOOLEAN NOT NULL DEFAULT false`);
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS export_country TEXT`);
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS customer_vat_number TEXT`);
     // Explicit ship-vs-collect choice per order. NULL = legacy rows; the worklist
     // falls back to "cash = collect, everything else = ship" for those.
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS fulfillment_method TEXT`);
@@ -653,7 +660,11 @@ router.post('/', requireAdmin, async (req, res) => {
     // Delivery is taxable income too, so VAT is taken on the gross subtotal PLUS
     // shipping (both are VAT-inclusive). Total is unchanged.
     const isCashSale = paymentMethod === 'cash';
-    const vatChargeable = !isCashSale && vatRegistered;
+    // Export orders (goods leaving the UK): ZERO-RATED for UK VAT — applies to
+    // business and consumer buyers alike, any destination country, provided
+    // export evidence is kept (VAT Act 1994 s.30(6), 3-month evidence window).
+    const isExport = !!b.isExport;
+    const vatChargeable = !isCashSale && vatRegistered && !isExport;
     const shipping = parseFloat(b.shipping || 0);
     const grossForVat = subtotal + shipping;
     const vat = vatChargeable
@@ -714,15 +725,18 @@ router.post('/', requireAdmin, async (req, res) => {
                           subtotal, vat, shipping, total, status, invoice_number,
                           notes, recorded_by, payment_method, payment_reference,
                           is_estimate, order_number, vehicle_reg, vin_number, shipping_address,
-                          customer_id, is_paid, paid_at, fulfillment_method, needs_fitment, large_panel)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING *`,
+                          customer_id, is_paid, paid_at, fulfillment_method, needs_fitment, large_panel,
+                          is_export, export_country, customer_vat_number)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28) RETURNING *`,
       [b.channel, b.customerName || null, b.customerPhone || null, b.customerEmail || null,
        subtotal, vat, shipping, total,
        isEstimate ? 'pending' : (isPreorder ? 'preorder' : (isPaid ? 'paid' : 'pending')),
        invoiceNumber, b.notes || null, req.user.id,
        paymentMethod, paymentReference,
        isEstimate, b.orderNumber || null, b.vehicleReg || null, b.vinNumber || null, b.shippingAddress || null,
-       customerId, isPaid, (!isEstimate && isPaid) ? new Date() : null, fulfillmentMethod, needsFitment, largePanel]
+       customerId, isPaid, (!isEstimate && isPaid) ? new Date() : null, fulfillmentMethod, needsFitment, largePanel,
+       isExport, isExport ? (String(b.exportCountry || '').slice(0, 60) || null) : null,
+       isExport ? (String(b.customerVatNumber || '').slice(0, 40) || null) : null]
     );
 
     for (const it of itemsResolved) {
@@ -1690,10 +1704,22 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
       ` : `
         <div class="row"><span>Subtotal</span><span>${fmt(sale.subtotal)}</span></div>
         ${shippingGross > 0 ? `<div class="row"><span>Shipping</span><span>${fmt(sale.shipping)}</span></div>` : ''}
+        ${sale.is_export ? `<div class="row"><span>VAT (0% — zero-rated export)</span><span>${fmt(0)}</span></div>` : ''}
       `}
       <div class="grand"><span>TOTAL${showVatBreakdown ? ' (incl. VAT)' : ''}</span><span>${fmt(sale.total)}</span></div>
     </div>
   </div>
+
+  ${sale.is_export ? `
+  <div class="pay" style="border:1px solid #ccc;border-radius:6px;padding:10px 14px;margin-top:12px">
+    <div style="font-weight:700;letter-spacing:.04em;margin-bottom:4px">EXPORT — ZERO-RATED FOR UK VAT</div>
+    <div style="font-size:11px;line-height:1.5">
+      Goods exported from the United Kingdom. UK VAT charged at 0% under the VAT Act 1994 s.30(6).
+      ${sale.export_country ? `Destination: <strong>${escapeHtml(sale.export_country)}</strong>. ` : ''}
+      ${sale.customer_vat_number ? `Customer VAT/tax no: <strong>${escapeHtml(sale.customer_vat_number)}</strong>. ` : ''}
+      The buyer is responsible for import VAT, duties and clearance charges in the destination country (Incoterms DAP unless agreed otherwise).
+    </div>
+  </div>` : ''}
 
   ${(sale.payment_method === 'bank' && company.bank_account_name) ? `
   <div class="pay">
