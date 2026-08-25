@@ -138,6 +138,10 @@ async function ensureLinksTable() {
       UNIQUE (product_id, supplier_id)
     )`);
     await query(`CREATE INDEX IF NOT EXISTS product_suppliers_sku_idx ON product_suppliers (LOWER(supplier_sku))`);
+    // Price basis (incoterm) for the supplier's price: FOB = they get it onto the
+    // ship (freight on top); EXW = ex-works, collected from their factory (freight
+    // + local haulage on top). Makes supplier prices comparable at a glance.
+    await query(`ALTER TABLE product_suppliers ADD COLUMN IF NOT EXISTS price_basis TEXT`);
     // Reorder history — a record of every repurchase list exported/placed, so
     // "what did we last order from X and when" has an answer.
     await query(`CREATE TABLE IF NOT EXISTS supplier_reorders (
@@ -178,18 +182,20 @@ router.post('/links', requireAdmin, async (req, res) => {
     if (!supplierId) return res.status(400).json({ error: 'supplier_required', message: 'Enter a supplier name.' });
     const cost = (b.unitCost === '' || b.unitCost == null) ? null : parseFloat(b.unitCost);
     const { rows } = await query(`
-      INSERT INTO product_suppliers (product_id, supplier_id, supplier_sku, unit_cost, currency, preferred, in_stock, notes, last_purchased_at, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+      INSERT INTO product_suppliers (product_id, supplier_id, supplier_sku, unit_cost, currency, preferred, in_stock, notes, last_purchased_at, price_basis, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
       ON CONFLICT (product_id, supplier_id) DO UPDATE SET
         supplier_sku = EXCLUDED.supplier_sku, unit_cost = EXCLUDED.unit_cost,
         currency = EXCLUDED.currency, preferred = EXCLUDED.preferred,
         in_stock = EXCLUDED.in_stock, notes = EXCLUDED.notes,
         last_purchased_at = COALESCE(EXCLUDED.last_purchased_at, product_suppliers.last_purchased_at),
+        price_basis = COALESCE(EXCLUDED.price_basis, product_suppliers.price_basis),
         updated_at = now()
       RETURNING *`,
       [productId, supplierId, (b.supplierSku || '').trim() || null, Number.isFinite(cost) ? cost : null,
        (b.currency || 'GBP').toUpperCase(), !!b.preferred, b.inStock !== false,
-       (b.notes || '').trim() || null, b.lastPurchasedAt || null]);
+       (b.notes || '').trim() || null, b.lastPurchasedAt || null,
+       String(b.priceBasis || '').trim().toUpperCase().slice(0, 12) || null]);
     // Only one preferred supplier per product — flipping one on flips the rest off.
     if (b.preferred) {
       await query(`UPDATE product_suppliers SET preferred = false WHERE product_id = $1 AND id <> $2`, [productId, rows[0].id]);
@@ -205,7 +211,8 @@ router.patch('/links/:id', requireAdmin, async (req, res) => {
     await ensureLinksTable();
     const b = req.body || {};
     const map = { supplierSku: 'supplier_sku', unitCost: 'unit_cost', currency: 'currency',
-                  preferred: 'preferred', inStock: 'in_stock', notes: 'notes', lastPurchasedAt: 'last_purchased_at' };
+                  preferred: 'preferred', inStock: 'in_stock', notes: 'notes', lastPurchasedAt: 'last_purchased_at',
+                  priceBasis: 'price_basis' };
     const sets = [], params = [];
     for (const [k, col] of Object.entries(map)) {
       if (b[k] === undefined) continue;
