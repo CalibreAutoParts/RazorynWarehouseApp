@@ -1392,6 +1392,8 @@ function adaptProduct(p) {
     pkgWidthCm: p.pkg_width_cm != null ? parseFloat(p.pkg_width_cm) : null,
     pkgHeightCm: p.pkg_height_cm != null ? parseFloat(p.pkg_height_cm) : null,
     pkgWeightG: p.pkg_weight_g != null ? parseInt(p.pkg_weight_g) : null,
+    packagingIncluded: p.packaging_included == null ? null : !!p.packaging_included,
+    packagingCost: p.packaging_cost != null ? parseFloat(p.packaging_cost) : null,
   };
 }
 function adaptSale(s) {
@@ -4518,6 +4520,9 @@ function renderInventory() {
         <div class="actions">
           <button class="btn btn-outline app-hide" onclick="routeTo('labels')" title="Generate thermal barcode labels">🏷 Labels</button>
           <button class="btn btn-outline app-hide" onclick="syncNow()">↻ Sync</button>
+          <button class="btn btn-outline" onclick="openSupplierHub()" title="Supplier SKUs, reorders + Excel export, and 'who did we buy this from' lookups. Internal only — never pushed to eBay/Shopify.">🏭 Suppliers</button>
+          <button class="btn btn-outline" onclick="openDamagedCapture()" title="Log a damaged item: the SKU is auto-generated (DMG-…), photos come straight off the camera, and it can be listed as-is later.">🔨 Damaged item</button>
+          <button class="btn btn-outline admin-only" onclick="openQuickCost()" title="Fast on-the-move cost entry: scan/search an item, punch in the cost (£ or ¥) and its per-item postage.">💷 Quick costs</button>
           <button class="btn btn-primary admin-only" onclick="openProductModal()">+ Add product</button>
         </div>
       </div>
@@ -4939,11 +4944,22 @@ function openProductModal(id) {
       <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="m-lp" ${p.largePanel?'checked':''}><span></span></label> Large panel (needs special courier — flags any order containing it)</label></div>
       <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="m-plock" ${p.priceLocked?'checked':''}><span></span></label> Lock price (keep manual — automated price tools won't overwrite this product)</label></div>
       <div class="field"><label>📦 Parcel size &amp; weight <span style="font-weight:400;color:var(--ink-soft)">— pushed to eBay + Shopify so shipping platforms can quote UK &amp; international rates. Leave blank if the box size isn't fixed yet.</span></label>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+          <select id="m-pkg-preset" onchange="applyCartonPreset(this.value)" style="flex:1;min-width:160px"><option value="">— Carton preset (set sizes) —</option></select>
+          <button class="btn btn-ghost btn-sm admin-only" type="button" onclick="openShippingQuote({l:el('m-pkg-l').value,w:el('m-pkg-w').value,h:el('m-pkg-h').value,kg:el('m-pkg-g').value})" title="Rough shipping quote from these dimensions — compares your couriers' rate cards, cheapest first.">💷 Quote shipping</button>
+        </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">
           <div><input type="number" step="0.1" min="0" id="m-pkg-l" value="${p.pkgLengthCm ?? ''}" placeholder="L cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Length</div></div>
           <div><input type="number" step="0.1" min="0" id="m-pkg-w" value="${p.pkgWidthCm ?? ''}" placeholder="W cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Width</div></div>
           <div><input type="number" step="0.1" min="0" id="m-pkg-h" value="${p.pkgHeightCm ?? ''}" placeholder="H cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Height</div></div>
           <div><input type="number" step="0.1" min="0" id="m-pkg-g" value="${p.pkgWeightG != null ? +(p.pkgWeightG / 1000).toFixed(2) : ''}" placeholder="kg"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (kg)</div></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><label class="switch"><input type="checkbox" id="m-pkg-inc" ${p.packagingIncluded !== false ? 'checked' : ''} onchange="el('m-pkg-cost-wrap').style.display=this.checked?'none':''"><span></span></label> Packaging came with the purchase cost</label>
+          <span id="m-pkg-cost-wrap" style="display:${p.packagingIncluded === false ? '' : 'none'};align-items:center;gap:6px">
+            <input type="number" step="0.01" min="0" id="m-pkg-cost" value="${p.packagingCost ?? ''}" placeholder="£ per item" style="width:110px">
+            <span style="font-size:11px;color:var(--ink-soft)">bought separately — £/item, feeds the cost maths</span>
+          </span>
         </div>
       </div>
       ${id ? `<div class="field"><label>Shared stock pool <span style="font-weight:400;color:var(--ink-soft)">— link listings that sell the same physical part so they share one stock count.</span></label>
@@ -4955,6 +4971,7 @@ function openProductModal(id) {
         </div>
       </div>` : ''}
       ${id ? `<div class="field"><label>Sub part numbers <span style="font-weight:400;color:var(--ink-soft)">— alternate factory / country codes. All are searchable and resolve to the SKU above (the printed master code).</span></label><div id="m-subpn">Loading…</div></div>` : `<div class="field" style="font-size:11px;color:var(--ink-soft)">Save the product first, then re-open it to add alternate (sub) part numbers.</div>`}
+      ${id ? `<div class="field"><label>🏭 Supplier SKUs <span style="font-weight:400;color:var(--ink-soft)">— who sells this part, their part code and price. Internal only — never shown on eBay/Shopify. ★ = preferred; the others are fallbacks when they're out of stock.</span></label><div id="m-suppliers">Loading…</div></div>` : ''}
       ${id ? `<div class="field"><label>Shopify shop categories (collections)</label><div id="m-collections" style="font-size:12px;color:var(--ink-soft)">Loading…</div></div>` : ''}
     `,
     actions: [
@@ -4971,6 +4988,15 @@ function openProductModal(id) {
           pkgHeightCm: el('m-pkg-h')?.value !== '' ? +el('m-pkg-h').value : null,
           pkgWeightG: el('m-pkg-g')?.value !== '' ? Math.round(parseFloat(el('m-pkg-g').value) * 1000) : null,   // UI is kg → stored as grams
         };
+        // Packaging-cost flag: only send once it means something — an untouched
+        // "included" default on a product that never had it set stays NULL, so
+        // existing margin maths keep their behaviour until someone decides.
+        const pkgInc = el('m-pkg-inc')?.checked;
+        const pkgCostVal = (el('m-pkg-cost')?.value ?? '') !== '' ? +el('m-pkg-cost').value : null;
+        if (p.packagingIncluded != null || pkgInc === false || pkgCostVal != null) {
+          payload.packagingIncluded = !!pkgInc;
+          payload.packagingCost = pkgCostVal;
+        }
         try {
           let newProduct = null;
           let pushResult = null;
@@ -5022,6 +5048,8 @@ function openProductModal(id) {
   });
   if (id) loadProductCollections(id);
   if (id) renderSubPartNumbers(id);
+  if (id) renderProductSuppliers(id);
+  populateCartonPresets('m-pkg-preset');
 }
 
 // ── Sub part numbers (alternate factory/country codes) inside the product modal.
@@ -6649,6 +6677,7 @@ function renderReturns() {
           <button class="btn btn-primary" onclick="openReturnModal()">+ Log return</button>
         </div>
       </div>
+      <div id="ret-dropoff"></div>
       <div id="ret-stats" class="grid-4" style="margin-bottom:14px"></div>
       <div class="seg" style="margin-bottom:14px">
         <button class="active" data-rfilter="open">Open</button>
@@ -6662,6 +6691,7 @@ function renderReturns() {
   `;
   document.querySelectorAll('[data-rfilter]').forEach(b => b.addEventListener('click', () => filterReturns(b.dataset.rfilter)));
   filterReturns('open');
+  paintReturnsDropoff();
 }
 
 function paintReturnStats() {
@@ -7008,6 +7038,7 @@ function renderDispatch() {
               <option value="90">90 days</option>
             </select>
           </label>
+          <button class="btn btn-outline btn-sm" onclick="openScanTracking()" title="Scan a parcel's tracking barcode, pick the order it belongs to — dispatched + tracking pushed in one go.">📡 Scan tracking</button>
           <button class="btn btn-outline btn-sm" onclick="syncDispatchFromEbay(this)" title="Check eBay for orders already marked dispatched there (tracking uploaded) and clear them from this worklist. Runs automatically every 30 min.">⟳ Sync from eBay</button>
           <button class="btn btn-outline btn-sm" onclick="loadDispatch();loadShipments()" title="Refresh">↻ Refresh</button>
         </div>
@@ -7334,6 +7365,7 @@ function renderDispatchApp() {
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head"><div><h1>Dispatch</h1><div class="desc">Take out and package for shipping, or get ready for collection.</div></div></div>
+      <button class="btn btn-outline" style="width:100%;margin-bottom:10px;padding:12px" onclick="openScanTracking()">📡 Scan tracking barcode → attach to order</button>
       <div id="disp-tabs" style="display:flex;gap:8px;margin-bottom:14px">
         <button class="disp-tab" data-tab="ship" onclick="setDispatchAppTab('ship')">📦 To package &amp; ship <span class="disp-count" id="disp-count-ship">0</span></button>
         <button class="disp-tab" data-tab="collect" onclick="setDispatchAppTab('collect')">🤝 For collection <span class="disp-count" id="disp-count-collect">0</span></button>
@@ -14694,6 +14726,678 @@ function supplierDatalist(id) {
   return `<datalist id="${id || 'dl-suppliers'}">${(State.suppliers || []).map(s => `<option value="${escapeAttr(s.name)}">`).join('')}</datalist>`;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Supplier SKUs · shipping toolkit · handheld quick tools
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Shipping config (carton presets, courier rates, returns drop-off) ───────
+function loadShippingCfgOnce(force) {
+  if (State.shippingCfg && !force) return Promise.resolve(State.shippingCfg);
+  return Api.get('/api/shipping/config').then(r => { State.shippingCfg = r; return r; }).catch(() => (State.shippingCfg = { cartons: [], returnsDropoff: '' }));
+}
+function populateCartonPresets(selectId) {
+  loadShippingCfgOnce().then(cfg => {
+    const sel = el(selectId); if (!sel) return;
+    const cartons = cfg.cartons || [];
+    sel.innerHTML = '<option value="">— Carton preset (set sizes) —</option>' + cartons.map((c, i) =>
+      `<option value="${i}">${escapeHtml(c.name)} — ${[c.lengthCm, c.widthCm, c.heightCm].map(v => v ?? '?').join('×')}cm${c.weightKg != null ? ', ' + c.weightKg + 'kg' : ''}</option>`).join('');
+    if (!cartons.length) sel.innerHTML = '<option value="">No carton presets yet — add them in Settings</option>';
+  });
+}
+function applyCartonPreset(idx) {
+  if (idx === '' || idx == null) return;
+  const c = (State.shippingCfg?.cartons || [])[+idx]; if (!c) return;
+  const set = (id, v) => { const n = el(id); if (n && v != null) n.value = v; };
+  set('m-pkg-l', c.lengthCm); set('m-pkg-w', c.widthCm); set('m-pkg-h', c.heightCm);
+  if (c.weightKg != null) set('m-pkg-g', c.weightKg);
+  toast('Preset applied: ' + c.name, 'success', 1800);
+}
+
+// Money display that respects the staff money mask; supplier costs can be in
+// CNY/USD too, so it's not always £.
+function psMoney(v, cur) {
+  if (v == null || v === '') return '—';
+  if (!canSeeMoney()) return '•••';
+  const n = parseFloat(v);
+  const sym = { GBP: '£', CNY: '¥', USD: '$', EUR: '€' }[(cur || 'GBP').toUpperCase()] || ((cur || '') + ' ');
+  return sym + n.toFixed(2);
+}
+
+function downloadTextFile(name, text, mime) {
+  try {
+    const blob = new Blob([text], { type: mime || 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click();
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 500);
+  } catch (e) { toast('Download failed: ' + e.message, 'error'); }
+}
+
+// ── Product modal: supplier links editor ────────────────────────────────────
+async function renderProductSuppliers(productId) {
+  const wrap = el('m-suppliers'); if (!wrap) return;
+  loadSuppliersOnce();
+  let links = [];
+  try { links = (await Api.get('/api/suppliers/links/' + productId)).links || []; }
+  catch (e) { wrap.innerHTML = `<div style="font-size:12px;color:var(--red)">Failed to load: ${escapeHtml(e.message)}</div>`; return; }
+  const admin = State.user?.role === 'admin';
+  wrap.innerHTML = `
+    ${links.length ? `<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px">${links.map(l => `
+      <div style="display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:12px;${l.in_stock ? '' : 'opacity:.55'}">
+        <button title="${l.preferred ? 'Preferred supplier' : 'Make preferred'}" ${admin ? `onclick="psPatchLink(${l.id},${productId},{preferred:true})"` : 'disabled'} style="border:none;background:none;cursor:${admin ? 'pointer' : 'default'};font-size:15px;padding:0">${l.preferred ? '★' : '☆'}</button>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600">${escapeHtml(l.supplier_name)}${l.lead_time_days ? ` <span style="font-weight:400;color:var(--ink-soft)">· ${l.lead_time_days}d lead</span>` : ''}${l.in_stock ? '' : ' <span class="pill red" style="font-size:9px">out of stock</span>'}</div>
+          <div style="color:var(--ink-soft)">${l.supplier_sku ? `Their SKU: <span class="copyable" data-copy="${escapeAttr(l.supplier_sku)}" style="font-family:ui-monospace,monospace">${escapeHtml(l.supplier_sku)}</span>` : 'No supplier SKU'} · ${psMoney(l.unit_cost, l.currency)}${l.last_purchased_at ? ' · last bought ' + fmtDate(l.last_purchased_at) : ''}${l.notes ? ' · ' + escapeHtml(l.notes) : ''}</div>
+        </div>
+        ${admin ? `<button class="btn btn-ghost btn-sm" onclick="psPatchLink(${l.id},${productId},{inStock:${l.in_stock ? 'false' : 'true'}})" title="Toggle whether this supplier currently has it">${l.in_stock ? '📦 In stock' : '🚫 Out'}</button>
+        <button onclick="psDeleteLink(${l.id},${productId})" title="Unlink" style="border:none;background:none;cursor:pointer;color:var(--red);font-weight:700">✕</button>` : ''}
+      </div>`).join('')}</div>` : '<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">No suppliers linked yet.</div>'}
+    ${admin ? `<div style="display:grid;grid-template-columns:1.2fr 1fr .7fr .6fr auto;gap:6px;align-items:center">
+      <input id="ps-name" list="dl-suppliers" placeholder="Supplier">${supplierDatalist('dl-suppliers')}
+      <input id="ps-sku" placeholder="Their SKU / part code" style="font-family:ui-monospace,monospace">
+      <input id="ps-cost" type="number" step="0.01" min="0" placeholder="Cost">
+      <select id="ps-cur"><option>GBP</option><option>CNY</option><option>USD</option><option>EUR</option></select>
+      <button class="btn btn-outline btn-sm" onclick="psSaveLink(${productId})">+ Link</button>
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-soft);margin-top:4px;cursor:pointer"><input type="checkbox" id="ps-pref"> Preferred supplier (order from them first)</label>` : ''}`;
+}
+async function psSaveLink(productId) {
+  const name = (el('ps-name')?.value || '').trim();
+  if (!name) { toast('Enter a supplier name', 'warn'); return; }
+  try {
+    await Api.post('/api/suppliers/links', {
+      productId, supplierName: name,
+      supplierSku: (el('ps-sku')?.value || '').trim(),
+      unitCost: el('ps-cost')?.value || null,
+      currency: el('ps-cur')?.value || 'GBP',
+      preferred: !!el('ps-pref')?.checked,
+    });
+    State._suppliersLoaded = false; loadSuppliersOnce();   // new supplier name → refresh datalists
+    await renderProductSuppliers(productId);
+    toast('Supplier linked', 'success', 2000);
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function psPatchLink(linkId, productId, patch) {
+  try { await Api.patch('/api/suppliers/links/' + linkId, patch); await renderProductSuppliers(productId); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function psDeleteLink(linkId, productId) {
+  try { await Api.delete('/api/suppliers/links/' + linkId); await renderProductSuppliers(productId); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// ── Supplier hub: reorders + Excel export + "who did we buy this from" ──────
+const SH = { tab: 'reorder', supplierId: null, items: [], qty: {}, picked: new Set() };
+function openSupplierHub(tab) {
+  loadSuppliersOnce().then(() => {
+    SH.tab = tab || 'reorder'; SH.items = []; SH.qty = {}; SH.picked = new Set();
+    modal({
+      title: '🏭 Suppliers',
+      body: `
+        <div class="seg" style="margin-bottom:12px">
+          <button id="sh-tab-reorder" class="${SH.tab === 'reorder' ? 'active' : ''}" onclick="shSetTab('reorder')">🛒 Reorder</button>
+          <button id="sh-tab-find" class="${SH.tab === 'find' ? 'active' : ''}" onclick="shSetTab('find')">🔎 Find supplier</button>
+        </div>
+        <div id="sh-body"></div>`,
+      actions: [{ label: 'Close', onClick: closeModal }],
+    });
+    shSetTab(SH.tab);
+  });
+}
+function shSetTab(t) {
+  SH.tab = t;
+  const a = el('sh-tab-reorder'), b = el('sh-tab-find');
+  if (a) a.classList.toggle('active', t === 'reorder');
+  if (b) b.classList.toggle('active', t === 'find');
+  const box = el('sh-body'); if (!box) return;
+  if (t === 'find') {
+    box.innerHTML = `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Search by the supplier's part code, our SKU / part number, a product name or a supplier name — shows who each item was bought from.</div>
+      <input id="sh-find-q" type="search" placeholder="Scan or type a code…" style="width:100%;margin-bottom:10px" onkeydown="if(event.key==='Enter'){event.preventDefault();shFind()}">
+      <div style="margin-bottom:10px"><button class="btn btn-primary btn-sm" onclick="shFind()">Search</button></div>
+      <div id="sh-find-out"></div>`;
+    setTimeout(() => el('sh-find-q')?.focus(), 100);
+    return;
+  }
+  const admin = State.user?.role === 'admin';
+  box.innerHTML = `
+    <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Pick a supplier, tick what to repurchase and set quantities, then export the list for Excel${admin ? ' (recording it stamps the "last bought" date)' : ''}. Low-stock lines float to the top with a suggested quantity.</div>
+    <select id="sh-supplier" style="width:100%;margin-bottom:10px" onchange="shLoadCatalogue()">
+      <option value="">— Choose a supplier —</option>
+      ${(State.suppliers || []).map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}
+    </select>
+    <div id="sh-cat"></div>`;
+}
+async function shLoadCatalogue() {
+  SH.supplierId = el('sh-supplier')?.value || null;
+  const box = el('sh-cat'); if (!box) return;
+  if (!SH.supplierId) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="empty"><div class="t">Loading…</div></div>';
+  try { SH.items = (await Api.get(`/api/suppliers/${SH.supplierId}/catalogue`)).items || []; }
+  catch (e) { box.innerHTML = `<div style="color:var(--red);font-size:12px">${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  SH.qty = {}; SH.picked = new Set();
+  for (const it of SH.items) {
+    const low = it.qty_on_hand <= (it.low_stock_threshold ?? 3);
+    // Suggested reorder: back up to twice the low-stock threshold.
+    SH.qty[it.link_id] = low ? Math.max(1, (it.low_stock_threshold ?? 3) * 2 - it.qty_on_hand) : 1;
+    if (low) SH.picked.add(it.link_id);
+  }
+  shRenderCatalogue();
+}
+function shRenderCatalogue() {
+  const box = el('sh-cat'); if (!box) return;
+  if (!SH.items.length) { box.innerHTML = '<div class="empty"><div class="t">Nothing linked to this supplier yet</div><div style="font-size:12px;color:var(--ink-soft)">Link products from the product modal → 🏭 Supplier SKUs.</div></div>'; return; }
+  const admin = State.user?.role === 'admin';
+  box.innerHTML = `
+    <div style="max-height:45vh;overflow-y:auto;border:1px solid var(--line);border-radius:8px">
+      <table style="width:100%;font-size:12px;border-collapse:collapse">
+        <thead><tr style="text-align:left;position:sticky;top:0;background:var(--white)"><th style="padding:6px"></th><th style="padding:6px">Item</th><th style="padding:6px">Their SKU</th><th style="padding:6px;text-align:right">Stock</th><th style="padding:6px;text-align:right">Cost</th><th style="padding:6px;text-align:right">Qty</th></tr></thead>
+        <tbody>${SH.items.map(it => {
+          const low = it.qty_on_hand <= (it.low_stock_threshold ?? 3);
+          return `<tr style="border-top:1px solid var(--line)">
+            <td style="padding:6px"><input type="checkbox" ${SH.picked.has(it.link_id) ? 'checked' : ''} onchange="if(this.checked)SH.picked.add(${it.link_id});else SH.picked.delete(${it.link_id})"></td>
+            <td style="padding:6px"><div style="font-weight:600">${escapeHtml(it.title)}</div><div style="color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')}${it.part_number ? ' · ' + escapeHtml(it.part_number) : ''}</div></td>
+            <td style="padding:6px;font-family:ui-monospace,monospace">${escapeHtml(it.supplier_sku || '—')}</td>
+            <td style="padding:6px;text-align:right">${low ? `<span class="pill red" style="font-size:10px">${it.qty_on_hand}</span>` : it.qty_on_hand}</td>
+            <td style="padding:6px;text-align:right">${psMoney(it.unit_cost, it.currency)}</td>
+            <td style="padding:6px;text-align:right"><input type="number" min="0" value="${SH.qty[it.link_id] ?? 1}" style="width:64px" onchange="SH.qty[${it.link_id}]=parseInt(this.value)||0"></td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+      <button class="btn btn-outline btn-sm" onclick="shExport(false)">⬇ Export CSV for Excel</button>
+      ${admin ? `<button class="btn btn-primary btn-sm" onclick="shExport(true)">✔ Record reorder + export</button>` : ''}
+    </div>
+    <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">The CSV opens straight in Excel — supplier SKU first so it's paste-ready for their order form.</div>`;
+}
+function shSelectedLines() {
+  return SH.items.filter(it => SH.picked.has(it.link_id) && (SH.qty[it.link_id] || 0) > 0)
+    .map(it => ({ linkId: it.link_id, productId: it.product_id, qty: SH.qty[it.link_id], supplierSku: it.supplier_sku, sku: it.sku, partNumber: it.part_number, title: it.title, unitCost: it.unit_cost, currency: it.currency }));
+}
+async function shExport(record) {
+  const lines = shSelectedLines();
+  if (!lines.length) { toast('Tick at least one item with a quantity', 'warn'); return; }
+  const supplierName = (State.suppliers || []).find(s => String(s.id) === String(SH.supplierId))?.name || 'supplier';
+  const esc = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const showMoney = canSeeMoney();
+  const rows = [['Supplier SKU', 'Our SKU', 'Part number', 'Item', 'Qty to order'].concat(showMoney ? ['Unit cost', 'Currency', 'Line total'] : [])];
+  for (const l of lines) {
+    rows.push([l.supplierSku || '', l.sku || '', l.partNumber || '', l.title, l.qty]
+      .concat(showMoney ? [l.unitCost ?? '', l.currency || '', l.unitCost != null ? (l.unitCost * l.qty).toFixed(2) : ''] : []));
+  }
+  const csv = rows.map(r => r.map(esc).join(',')).join('\r\n');
+  const stamp = new Date().toISOString().slice(0, 10);
+  downloadTextFile(`reorder-${supplierName.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${stamp}.csv`, csv, 'text/csv;charset=utf-8');
+  if (record) {
+    try {
+      await Api.post(`/api/suppliers/${SH.supplierId}/reorder`, { lines: lines.map(l => ({ linkId: l.linkId, productId: l.productId, qty: l.qty })) });
+      toast('Reorder recorded — "last bought" stamped on ' + lines.length + ' item' + (lines.length > 1 ? 's' : ''), 'success');
+    } catch (e) { toast('Export done, but recording failed: ' + (e.data?.message || e.message), 'warn'); }
+  } else {
+    toast('CSV exported (' + lines.length + ' lines)', 'success', 2500);
+  }
+}
+async function shFind() {
+  const q = (el('sh-find-q')?.value || '').trim();
+  const out = el('sh-find-out'); if (!out) return;
+  if (!q) { out.innerHTML = ''; return; }
+  out.innerHTML = '<div class="empty"><div class="t">Searching…</div></div>';
+  let results = [];
+  try { results = (await Api.get('/api/suppliers/find?q=' + encodeURIComponent(q))).results || []; }
+  catch (e) { out.innerHTML = `<div style="color:var(--red);font-size:12px">${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  if (!results.length) { out.innerHTML = '<div class="empty"><div class="t">No supplier links match</div><div style="font-size:12px;color:var(--ink-soft)">Link suppliers to products from the product modal first.</div></div>'; return; }
+  out.innerHTML = results.map(r => `
+    <div style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-bottom:6px;font-size:12px">
+      <div style="font-weight:600">${escapeHtml(r.title)} <span style="font-weight:400;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(r.sku || '')}</span></div>
+      <div style="margin-top:2px">🏭 <strong>${escapeHtml(r.supplier_name)}</strong>${r.preferred ? ' ★' : ''} · Their SKU: <span class="copyable" data-copy="${escapeAttr(r.supplier_sku || '')}" style="font-family:ui-monospace,monospace">${escapeHtml(r.supplier_sku || '—')}</span> · ${psMoney(r.unit_cost, r.currency)}${r.last_purchased_at ? ' · last bought ' + fmtDate(r.last_purchased_at) : ''}</div>
+      ${r.contact ? `<div style="color:var(--ink-soft);margin-top:2px">📞 ${escapeHtml(r.contact)}</div>` : ''}
+    </div>`).join('');
+}
+
+// ── Shipping quote calculator ───────────────────────────────────────────────
+function openShippingQuote(prefill) {
+  const pf = prefill || {};
+  modal({
+    title: '💷 Shipping quote',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Rough quote from parcel size + weight. Chargeable weight is the greater of the real weight and the volumetric weight; couriers are compared off your saved rate cards, cheapest first. Manage rates in Settings → Shipping &amp; cartons.</div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <select id="sq-preset" style="flex:1" onchange="sqApplyPreset(this.value)"><option value="">— Carton preset —</option></select>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:10px">
+        <div><input type="number" step="0.1" min="0" id="sq-l" value="${escapeAttr(pf.l ?? '')}" placeholder="L cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Length</div></div>
+        <div><input type="number" step="0.1" min="0" id="sq-w" value="${escapeAttr(pf.w ?? '')}" placeholder="W cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Width</div></div>
+        <div><input type="number" step="0.1" min="0" id="sq-h" value="${escapeAttr(pf.h ?? '')}" placeholder="H cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Height</div></div>
+        <div><input type="number" step="0.01" min="0" id="sq-kg" value="${escapeAttr(pf.kg ?? '')}" placeholder="kg"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (kg)</div></div>
+      </div>
+      <button class="btn btn-primary" onclick="sqRun()">Get quotes</button>
+      <div id="sq-out" style="margin-top:12px"></div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
+  populateCartonPresets('sq-preset');
+}
+function sqApplyPreset(idx) {
+  if (idx === '' || idx == null) return;
+  const c = (State.shippingCfg?.cartons || [])[+idx]; if (!c) return;
+  const set = (id, v) => { const n = el(id); if (n && v != null) n.value = v; };
+  set('sq-l', c.lengthCm); set('sq-w', c.widthCm); set('sq-h', c.heightCm); set('sq-kg', c.weightKg);
+}
+async function sqRun() {
+  const out = el('sq-out'); if (!out) return;
+  out.innerHTML = '<div class="empty"><div class="t">Calculating…</div></div>';
+  let r;
+  try {
+    r = await Api.post('/api/shipping/quote', {
+      lengthCm: el('sq-l').value, widthCm: el('sq-w').value, heightCm: el('sq-h').value, weightKg: el('sq-kg').value,
+    });
+  } catch (e) { out.innerHTML = `<div style="color:var(--red);font-size:12px">${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  if (r.noRates || !(r.quotes || []).length) {
+    out.innerHTML = '<div class="empty"><div class="t">No courier rate cards saved yet</div><div style="font-size:12px;color:var(--ink-soft)">Add your couriers\' rates in Settings → 📦 Shipping &amp; cartons (you can paste a rate sheet as CSV).</div></div>';
+    return;
+  }
+  const best = r.quotes.find(q => q.price != null);
+  out.innerHTML = r.quotes.map(q => `
+    <div style="display:flex;align-items:center;gap:10px;border:1px solid ${q === best ? 'var(--green, #16a34a)' : 'var(--line)'};border-radius:8px;padding:9px 12px;margin-bottom:6px;font-size:13px;${q.price == null ? 'opacity:.55' : ''}">
+      <div style="flex:1"><strong>${escapeHtml(q.courier)}</strong>${q === best ? ' <span class="pill green" style="font-size:10px">CHEAPEST</span>' : ''}
+        <div style="font-size:11px;color:var(--ink-soft)">${q.price != null ? `band ${escapeHtml(q.band || '')} · chargeable ${q.chargeableKg}kg${q.volumetricKg != null ? ` (volumetric ${q.volumetricKg}kg)` : ''}` : escapeHtml(q.unavailable || 'unavailable')}${q.notes ? ' · ' + escapeHtml(q.notes) : ''}</div>
+      </div>
+      <div style="font-weight:700;font-size:15px">${q.price != null ? '£' + q.price.toFixed(2) : '—'}</div>
+    </div>`).join('') + '<div style="font-size:11px;color:var(--ink-soft)">Rough guide only — fuel surcharges / remote-area fees may apply on top.</div>';
+}
+
+// ── Damaged-item quick capture (auto DMG-… SKU + photos) ────────────────────
+const DMG = { photos: [] };
+function openDamagedCapture() {
+  DMG.photos = [];
+  modal({
+    title: '🔨 Damaged item',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Log a damaged part in seconds — the SKU is generated for you (<span style="font-family:ui-monospace,monospace">DMG-date-##</span>), photos come straight off the camera and stay linked to the item, and it can be listed later exactly as shot (no background editing needed).</div>
+      <div class="field"><label>What is it? *</label><input id="dmg-title" placeholder="e.g. MG3 front bumper — cracked lower lip"></div>
+      <div class="grid-2" style="grid-template-columns:1fr 1fr">
+        <div class="field"><label>Make</label><input id="dmg-brand" placeholder="e.g. MG"></div>
+        <div class="field"><label>Model</label><input id="dmg-model" placeholder="e.g. MG3"></div>
+        <div class="field"><label>Part number</label><input id="dmg-pn" placeholder="optional"></div>
+        <div class="field"><label>Qty</label><input id="dmg-qty" type="number" min="1" value="1"></div>
+      </div>
+      <div class="field"><label>Damage notes</label><textarea id="dmg-notes" rows="2" placeholder="What's wrong with it — scratch, crack, broken tab…"></textarea></div>
+      <div class="field admin-only"><label>Price (£, optional)</label><input id="dmg-price" type="number" step="0.01" min="0" placeholder="leave blank to price later"></div>
+      <div class="field"><label>📸 Photos</label>
+        <input type="file" id="dmg-file" accept="image/*" capture="environment" multiple style="display:none" onchange="dmgAddPhotos(this)">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-outline" type="button" onclick="el('dmg-file').click()">📷 Take / add photos</button>
+          <span id="dmg-count" style="font-size:12px;color:var(--ink-soft)">No photos yet</span>
+        </div>
+        <div id="dmg-thumbs" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
+      </div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '🔨 Save damaged item', primary: true, onClick: dmgSubmit },
+    ],
+  });
+}
+async function dmgAddPhotos(input) {
+  const files = Array.from(input.files || []); input.value = '';
+  for (const f of files) {
+    if (DMG.photos.length >= 8) { toast('Max 8 photos', 'warn'); break; }
+    try { DMG.photos.push(await readAsDataUrl(await downscaleImage(f, { maxDim: 1600 }))); }
+    catch (e) { toast('Photo failed: ' + e.message, 'error'); }
+  }
+  dmgPaintThumbs();
+}
+function dmgPaintThumbs() {
+  const c = el('dmg-count'); if (c) c.textContent = DMG.photos.length ? DMG.photos.length + ' photo' + (DMG.photos.length > 1 ? 's' : '') : 'No photos yet';
+  const t = el('dmg-thumbs'); if (!t) return;
+  t.innerHTML = DMG.photos.map((d, i) => `
+    <div style="position:relative"><img src="${d}" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">
+    <button onclick="DMG.photos.splice(${i},1);dmgPaintThumbs()" style="position:absolute;top:-6px;right:-6px;border:none;background:var(--red);color:#fff;border-radius:50%;width:18px;height:18px;line-height:1;cursor:pointer;font-size:11px">✕</button></div>`).join('');
+}
+async function dmgSubmit() {
+  const title = (el('dmg-title')?.value || '').trim();
+  if (!title) { toast('Describe the item first', 'warn'); return; }
+  const taskId = Task.start('Saving damaged item');
+  try {
+    const r = await Api.post('/api/products/damaged', {
+      title, brand: (el('dmg-brand')?.value || '').trim(), model: (el('dmg-model')?.value || '').trim(),
+      partNumber: (el('dmg-pn')?.value || '').trim(), qty: el('dmg-qty')?.value || 1,
+      notes: (el('dmg-notes')?.value || '').trim(), price: el('dmg-price')?.value || null,
+      photos: DMG.photos,
+    });
+    Task.done(taskId);
+    const prod = r.product;
+    await Store.refresh('products');
+    closeModal();
+    modal({
+      title: '✅ Damaged item saved',
+      body: `
+        <div style="text-align:center;padding:8px 0">
+          <div style="font-size:12px;color:var(--ink-soft)">Auto-generated SKU (tap to copy)</div>
+          <div class="copyable" data-copy="${escapeAttr(prod.sku)}" style="font-family:ui-monospace,monospace;font-size:26px;font-weight:700;margin:6px 0;cursor:pointer">${escapeHtml(prod.sku)}</div>
+          <div style="font-size:13px">${escapeHtml(prod.title)}</div>
+          <div style="font-size:12px;color:var(--ink-soft);margin-top:4px">${r.photoCount || 0} photo${r.photoCount === 1 ? '' : 's'} linked — they'll be used as the listing photos as-is.</div>
+        </div>`,
+      actions: [
+        { label: '📝 List it now', primary: true, className: 'app-hide', onClick: () => dmgListNow(prod.id, prod.title, prod.part_number, prod.sku, el('dmg-qty')?.value) },
+        { label: '🏷 Print label', onClick: () => { closeModal(); const fresh = State.products.find(x => x.id === prod.id); if (fresh && typeof promptPrintLabels === 'function') promptPrintLabels(fresh, 'new_product'); } },
+        { label: 'Done', onClick: closeModal },
+      ],
+    });
+    repaintInventoryList();
+  } catch (e) { Task.fail(taskId); toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function dmgListNow(productId, title, partNumber, sku, qty) {
+  let photos = [];
+  try { photos = ((await Api.get(`/api/products/${productId}/photos`)).photos || []).map(p => p.data_url); } catch (_) {}
+  closeModal();
+  CL_REPEAT = {
+    fields: {
+      'cl-title': title || '', 'cl-partnumber': partNumber || '',
+      'ce-title': title || '', 'ce-qty': Math.max(1, parseInt(qty) || 1),
+    },
+    checks: {}, specs: {}, placements: [], metafields: [],
+    ebayCategoryId: '', clCategoryId: '', clCategoryName: '', images: photos,
+  };
+  routeTo('createlisting');
+  if (State.page !== 'createlisting') { CL_REPEAT = null; toast('Listing creation is desktop-only — the item + photos are saved, list it from the computer.', 'info', 6000); return; }
+  setTimeout(() => { const s = el('cl-sku'); if (s && !s.value && sku) s.value = sku; }, 150);
+  toast('Pre-filled from the damaged item — photos carried over as-is. Set the price and condition, then create.', 'info', 8000);
+}
+
+// ── Quick cost entry (admin, built for the handheld) ────────────────────────
+const QC = { productId: null };
+function openQuickCost() {
+  QC.productId = null;
+  loadSuppliersOnce();
+  modal({
+    title: '💷 Quick costs',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Scan or search an item, punch in what it cost (¥ converts automatically) and its per-item postage. Repeats so you can walk the racks.</div>
+      <input id="qc-q" type="search" placeholder="Scan barcode or type SKU / name…" style="width:100%;margin-bottom:8px" oninput="qcSearch(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();qcSearch(this.value,true)}">
+      <div id="qc-matches" style="margin-bottom:8px"></div>
+      <div id="qc-form" style="display:none"></div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
+  setTimeout(() => el('qc-q')?.focus(), 100);
+}
+function qcSearch(q, autopick) {
+  const box = el('qc-matches'); if (!box) return;
+  q = (q || '').trim().toLowerCase();
+  if (q.length < 2) { box.innerHTML = ''; return; }
+  const hits = (State.products || []).filter(p =>
+    (p.sku || '').toLowerCase().includes(q) || (p.barcode || '').toLowerCase().includes(q) ||
+    (p.title || '').toLowerCase().includes(q) || (p.partNumber || '').toLowerCase().includes(q)).slice(0, 8);
+  if (autopick && hits.length === 1) { qcPick(hits[0].id); return; }
+  box.innerHTML = hits.map(p => `
+    <div onclick="qcPick('${p.id}')" style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:4px;cursor:pointer;font-size:12px">
+      <strong>${escapeHtml(p.title)}</strong><div style="color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')} · stock ${p.qtyOnHand ?? '?'}</div>
+    </div>`).join('') || '<div style="font-size:12px;color:var(--ink-soft)">No matches.</div>';
+}
+function qcPick(id) {
+  const p = (State.products || []).find(x => String(x.id) === String(id)); if (!p) return;
+  QC.productId = p.id;
+  el('qc-matches').innerHTML = '';
+  const q = el('qc-q'); if (q) q.value = '';
+  const f = el('qc-form'); if (!f) return;
+  f.style.display = '';
+  f.innerHTML = `
+    <div style="background:var(--bg-soft);border-radius:8px;padding:10px;margin-bottom:10px;font-size:13px">
+      <strong>${escapeHtml(p.title)}</strong><div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escapeHtml(p.sku || '')}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr .6fr;gap:8px">
+      <div class="field"><label>Item cost</label><input id="qc-cost" type="number" step="0.01" min="0" inputmode="decimal" placeholder="what we paid per unit"></div>
+      <div class="field"><label>Currency</label><select id="qc-cur"><option>CNY</option><option>GBP</option><option>USD</option><option>EUR</option></select></div>
+    </div>
+    <div class="field"><label>Supplier <span style="font-weight:400;color:var(--ink-soft)">— optional, links the purchase</span></label><input id="qc-supplier" list="dl-suppliers" placeholder="who we bought it from">${supplierDatalist('dl-suppliers')}</div>
+    <div class="field"><label>Their SKU <span style="font-weight:400;color:var(--ink-soft)">— optional supplier part code</span></label><input id="qc-supsku" style="font-family:ui-monospace,monospace" placeholder="supplier's code for this part"></div>
+    <div class="field"><label>Per-item postage (£) <span style="font-weight:400;color:var(--ink-soft)">— what it costs US to ship one</span></label><input id="qc-post" type="number" step="0.01" min="0" inputmode="decimal" value="${p.shippingCost ?? ''}" placeholder="leave blank to keep the shipping band"></div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><label class="switch"><input type="checkbox" id="qc-pkg-inc" ${p.packagingIncluded !== false ? 'checked' : ''} onchange="el('qc-pkg-cost-wrap').style.display=this.checked?'none':''"><span></span></label> Packaging came with the purchase</label>
+      <span id="qc-pkg-cost-wrap" style="display:${p.packagingIncluded === false ? '' : 'none'}"><input id="qc-pkg-cost" type="number" step="0.01" min="0" value="${p.packagingCost ?? ''}" placeholder="£ packaging/item" style="width:130px"></span>
+    </div>
+    <button class="btn btn-primary" onclick="qcSave()">💾 Save & next item</button>`;
+  setTimeout(() => el('qc-cost')?.focus(), 100);
+}
+async function qcSave() {
+  if (!QC.productId) return;
+  const cost = el('qc-cost')?.value;
+  const cur = el('qc-cur')?.value || 'CNY';
+  const post = el('qc-post')?.value;
+  const supplier = (el('qc-supplier')?.value || '').trim();
+  const supSku = (el('qc-supsku')?.value || '').trim();
+  const pkgInc = !!el('qc-pkg-inc')?.checked;
+  const pkgCost = el('qc-pkg-cost')?.value;
+  if (!cost && !post && !supSku && pkgInc) { toast('Nothing to save', 'warn'); return; }
+  const taskId = Task.start('Saving costs');
+  try {
+    let gbpCost = null;
+    if (cost) {
+      const body = { currency: cur, supplier: supplier || undefined };
+      if (cur === 'GBP') body.unitCostGbp = parseFloat(cost); else body.unitCostForeign = parseFloat(cost);
+      const r = await Api.post(`/api/costs/products/${QC.productId}/cost`, body);
+      gbpCost = r.costPrice;
+    }
+    const patch = {};
+    if (post !== '' && post != null) { patch.shippingCost = parseFloat(post); patch.shippingBand = 'custom'; }
+    if (!pkgInc || (pkgCost !== '' && pkgCost != null)) { patch.packagingIncluded = pkgInc; patch.packagingCost = pkgCost !== '' && pkgCost != null ? parseFloat(pkgCost) : null; }
+    if (Object.keys(patch).length) await Api.patch('/api/products/' + QC.productId, patch);
+    if (supplier && (supSku || cost)) {
+      try { await Api.post('/api/suppliers/links', { productId: QC.productId, supplierName: supplier, supplierSku: supSku, unitCost: cost || null, currency: cur, lastPurchasedAt: new Date().toISOString() }); } catch (_) {}
+    }
+    Task.done(taskId);
+    Store.refresh('products');
+    toast('Saved' + (gbpCost != null && canSeeMoney() ? ` — cost £${(+gbpCost).toFixed(2)}` : ''), 'success');
+    QC.productId = null;
+    const f = el('qc-form'); if (f) { f.style.display = 'none'; f.innerHTML = ''; }
+    const q = el('qc-q'); if (q) { q.value = ''; q.focus(); }
+  } catch (e) { Task.fail(taskId); toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// ── Scan-to-tracking: scan a label, attach it to an undispatched order ──────
+const STK = { code: '', saleId: null };
+function guessCarrier(code) {
+  const c = String(code || '').trim().toUpperCase();
+  if (/^[A-Z]{2}\d{9}GB$/.test(c) || /^JD\d{16,}$/.test(c) || /^P[A-Z]\d{7,}$/.test(c)) return 'Royal Mail';
+  if (/^1Z[A-Z0-9]{16}$/.test(c)) return 'UPS';
+  if (/^H0[A-Z0-9]{14,}$/.test(c) || /^C00HHA/.test(c)) return 'Evri';
+  if (/^(JJD|JVGL|GM)\d{8,}/.test(c) || /^\d{10}$/.test(c)) return 'DHL';
+  if (/^15\d{12,14}$/.test(c)) return 'DPD';
+  if (/^\d{12}$/.test(c) || /^\d{15}$/.test(c) || /^\d{20,22}$/.test(c)) return 'FedEx';
+  return '';
+}
+function openScanTracking() {
+  STK.code = ''; STK.saleId = null;
+  modal({
+    title: '📡 Scan tracking → order',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Scan the tracking barcode on the parcel label (or type it), then tap the order it belongs to. The order is marked dispatched and the tracking is pushed to eBay/Shopify so the customer gets the shipped notification.</div>
+      <div id="stk-step1">
+        <input id="stk-code" placeholder="Scan tracking number…" style="width:100%;font-family:ui-monospace,monospace;font-size:15px" onkeydown="if(event.key==='Enter'){event.preventDefault();stCodeEntered()}">
+        <div style="margin-top:8px"><button class="btn btn-primary" onclick="stCodeEntered()">Next →</button></div>
+      </div>
+      <div id="stk-step2" style="display:none">
+        <div style="background:var(--bg-soft);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:13px">Tracking: <strong id="stk-code-show" style="font-family:ui-monospace,monospace"></strong> <a href="#" onclick="stReset();return false" style="font-size:11px">change</a></div>
+        <input id="stk-filter" type="search" placeholder="Filter orders…" style="width:100%;margin-bottom:8px" oninput="stRenderOrders(this.value)">
+        <div id="stk-orders" style="max-height:40vh;overflow-y:auto"></div>
+      </div>
+      <div id="stk-step3" style="display:none"></div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
+  setTimeout(() => el('stk-code')?.focus(), 150);
+  // Make sure the outstanding list is fresh enough to pick from.
+  if (!State.dispatch?.toShip) {
+    Api.get('/api/dispatch/outstanding').then(r => { State.dispatch = { ...(State.dispatch || {}), ...r }; }).catch(() => {});
+  }
+}
+function stReset() {
+  STK.code = ''; STK.saleId = null;
+  el('stk-step1').style.display = ''; el('stk-step2').style.display = 'none'; el('stk-step3').style.display = 'none';
+  const c = el('stk-code'); if (c) { c.value = ''; c.focus(); }
+}
+function stCodeEntered() {
+  const code = (el('stk-code')?.value || '').trim();
+  if (code.length < 5) { toast('Scan or type the tracking number first', 'warn'); return; }
+  STK.code = code;
+  el('stk-step1').style.display = 'none';
+  el('stk-step2').style.display = '';
+  const show = el('stk-code-show'); if (show) show.textContent = code;
+  stRenderOrders('');
+}
+function stRenderOrders(q) {
+  const box = el('stk-orders'); if (!box) return;
+  q = (q || '').toLowerCase().trim();
+  // Undispatched ship orders only — collections don't get tracking.
+  let list = (State.dispatch?.toShip || []);
+  if (q) list = list.filter(s => [s.customer_name, s.invoice_number, s.payment_reference, s.external_order_id, s.first_item_title].some(v => (v || '').toLowerCase().includes(q)));
+  if (!list.length) { box.innerHTML = '<div class="empty"><div class="t">No undispatched orders to attach to</div><div style="font-size:12px;color:var(--ink-soft)">Everything on the package &amp; ship list has been dispatched.</div></div>'; return; }
+  box.innerHTML = list.map(s => {
+    const ref = s.invoice_number || s.payment_reference || s.external_order_id || '#' + s.id;
+    const itemLabel = s.first_item_title ? (s.item_count > 1 ? `${escapeHtml(s.first_item_title)} +${s.item_count - 1}` : escapeHtml(s.first_item_title)) : '(no items)';
+    return `<div onclick="stPickOrder('${s.id}')" style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-bottom:6px;cursor:pointer">
+      <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escapeHtml(ref)}</div>
+      <div style="font-weight:600;font-size:13px">${itemLabel}</div>
+      <div style="font-size:12px;color:var(--ink-soft)">${escapeHtml(s.customer_name || '—')} · ${channelPill(s.channel)}</div>
+    </div>`;
+  }).join('');
+}
+function stPickOrder(saleId) {
+  const s = (State.dispatch?.toShip || []).find(x => String(x.id) === String(saleId));
+  if (!s) return;
+  STK.saleId = saleId;
+  el('stk-step2').style.display = 'none';
+  const box = el('stk-step3'); box.style.display = '';
+  const carriers = State.dispatch?.carriers || ['Royal Mail', 'Evri', 'DPD', 'DHL', 'UPS', 'FedEx'];
+  const guessed = guessCarrier(STK.code);
+  const ref = s.invoice_number || s.payment_reference || s.external_order_id || '#' + s.id;
+  const isExternal = (s.channel || '').match(/^(shopify|ebay_)/);
+  box.innerHTML = `
+    <div style="background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:13px">
+      <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escapeHtml(ref)}</div>
+      <div style="font-weight:600">${escapeHtml(s.first_item_title || '')}</div>
+      <div style="font-size:12px;color:var(--ink-soft)">${escapeHtml(s.customer_name || '—')}</div>
+      <div style="margin-top:6px">📡 <strong style="font-family:ui-monospace,monospace">${escapeHtml(STK.code)}</strong></div>
+    </div>
+    <div class="field"><label>Carrier ${guessed ? `<span style="font-weight:400;color:var(--ink-soft)">— guessed from the number</span>` : ''}</label>
+      <select id="stk-carrier">${carriers.map(c => `<option value="${escapeAttr(c)}" ${c === guessed ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}</select>
+    </div>
+    ${isExternal ? `<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:12px"><input type="checkbox" id="stk-push" checked> Push tracking to ${s.channel.startsWith('ebay') ? 'eBay' : 'Shopify'} (customer gets the shipped email)</label>` : ''}
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-outline" onclick="el('stk-step3').style.display='none';el('stk-step2').style.display=''">← Back</button>
+      <button class="btn btn-primary" style="flex:1" onclick="stConfirm()">📦 Mark dispatched</button>
+    </div>`;
+}
+async function stConfirm() {
+  if (!STK.saleId || !STK.code) return;
+  const taskId = Task.start('Dispatching');
+  try {
+    await Api.post(`/api/dispatch/${STK.saleId}/mark-dispatched`, {
+      carrier: el('stk-carrier')?.value || guessCarrier(STK.code) || 'Royal Mail',
+      trackingNumber: STK.code,
+      pushToChannel: el('stk-push') ? !!el('stk-push').checked : false,
+      notes: 'Tracking scanned on device',
+    });
+    Task.done(taskId);
+    toast('✅ Dispatched — tracking attached', 'success');
+    // Ready for the next parcel straight away.
+    if (typeof loadDispatch === 'function') loadDispatch();
+    stReset();
+  } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// ── Returns drop-off banner ─────────────────────────────────────────────────
+async function paintReturnsDropoff() {
+  const box = el('ret-dropoff'); if (!box) return;
+  const cfg = await loadShippingCfgOnce();
+  if (!cfg?.returnsDropoff) { box.innerHTML = ''; return; }
+  box.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;background:color-mix(in srgb, var(--brand-primary) 10%, transparent);border:1px solid var(--brand-primary);border-radius:10px;padding:10px 14px;margin-bottom:14px">
+      <div style="font-size:22px">📍</div>
+      <div><div style="font-weight:700;font-size:13px">Returns drop-off area</div>
+      <div style="font-size:13px">${escapeHtml(cfg.returnsDropoff)}</div></div>
+    </div>`;
+}
+
+// ── Settings: shipping & cartons admin card ─────────────────────────────────
+let _shipEdit = null;
+async function loadShippingSettingsUI() {
+  const box = el('shipset-body'); if (!box) return;
+  let cfg;
+  try { cfg = await Api.get('/api/shipping/config'); }
+  catch (e) { box.innerHTML = `<div style="color:var(--red);font-size:12px">${escapeHtml(e.message)}</div>`; return; }
+  _shipEdit = {
+    cartons: (cfg.cartons || []).map(c => ({ ...c })),
+    couriers: (cfg.couriers || []).map(c => ({ ...c, bands: (c.bands || []).map(b => ({ ...b })) })),
+    returnsDropoff: cfg.returnsDropoff || '',
+  };
+  shipSetRender();
+}
+function shipSetRender() {
+  const box = el('shipset-body'); if (!box || !_shipEdit) return;
+  box.innerHTML = `
+    <div style="font-weight:600;font-size:14px;margin-bottom:4px">📦 Carton presets</div>
+    <p style="color:var(--ink-soft);font-size:12px;margin-bottom:8px">Standard box sizes for pre-packaged parcels — pickable in two taps on the product form and the quote calculator.</p>
+    <div id="shipset-cartons">${_shipEdit.cartons.map((c, i) => `
+      <div style="display:grid;grid-template-columns:1.4fr .6fr .6fr .6fr .6fr auto;gap:6px;margin-bottom:6px">
+        <input value="${escapeAttr(c.name || '')}" placeholder="Name (e.g. Bumper box)" onchange="_shipEdit.cartons[${i}].name=this.value">
+        <input type="number" step="0.1" value="${c.lengthCm ?? ''}" placeholder="L cm" onchange="_shipEdit.cartons[${i}].lengthCm=this.value">
+        <input type="number" step="0.1" value="${c.widthCm ?? ''}" placeholder="W cm" onchange="_shipEdit.cartons[${i}].widthCm=this.value">
+        <input type="number" step="0.1" value="${c.heightCm ?? ''}" placeholder="H cm" onchange="_shipEdit.cartons[${i}].heightCm=this.value">
+        <input type="number" step="0.01" value="${c.weightKg ?? ''}" placeholder="kg" onchange="_shipEdit.cartons[${i}].weightKg=this.value">
+        <button class="btn btn-ghost btn-sm" onclick="_shipEdit.cartons.splice(${i},1);shipSetRender()" style="color:var(--red)">✕</button>
+      </div>`).join('')}</div>
+    <button class="btn btn-outline btn-sm" onclick="_shipEdit.cartons.push({name:''});shipSetRender()">+ Add carton</button>
+
+    <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px">
+      <div style="font-weight:600;font-size:14px;margin-bottom:4px">🚚 Courier rate cards</div>
+      <p style="color:var(--ink-soft);font-size:12px;margin-bottom:8px">One card per courier. Bands are one per line: <code>max kg, price £</code> (optionally <code>, band name</code>) — you can paste a whole rate sheet straight from Excel. Volumetric weight = L×W×H ÷ divisor (5000 is the usual).</p>
+      <div id="shipset-couriers">${_shipEdit.couriers.map((c, i) => `
+        <div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px">
+          <div style="display:grid;grid-template-columns:1.4fr .7fr .7fr auto;gap:6px;margin-bottom:6px">
+            <input value="${escapeAttr(c.name || '')}" placeholder="Courier name" onchange="_shipEdit.couriers[${i}].name=this.value">
+            <input type="number" value="${c.volumetricDivisor ?? 5000}" placeholder="Divisor (5000)" title="Volumetric divisor" onchange="_shipEdit.couriers[${i}].volumetricDivisor=this.value">
+            <input type="number" value="${c.maxLongestCm ?? ''}" placeholder="Max length cm" title="Longest-side limit (optional)" onchange="_shipEdit.couriers[${i}].maxLongestCm=this.value">
+            <button class="btn btn-ghost btn-sm" onclick="_shipEdit.couriers.splice(${i},1);shipSetRender()" style="color:var(--red)">✕</button>
+          </div>
+          <textarea rows="3" placeholder="2, 3.20, Small parcel&#10;10, 6.50&#10;30, 14.99, Heavy" style="width:100%;font-family:ui-monospace,monospace;font-size:12px" onchange="shipSetParseBands(${i}, this.value)">${escapeHtml((c.bands || []).map(b => [b.maxKg, b.price, b.name].filter(v => v !== '' && v != null).join(', ')).join('\n'))}</textarea>
+          <input value="${escapeAttr(c.notes || '')}" placeholder="Notes (e.g. next-day, no NI)" style="width:100%;margin-top:6px" onchange="_shipEdit.couriers[${i}].notes=this.value">
+        </div>`).join('')}</div>
+      <button class="btn btn-outline btn-sm" onclick="_shipEdit.couriers.push({name:'',volumetricDivisor:5000,bands:[]});shipSetRender()">+ Add courier</button>
+    </div>
+
+    <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px">
+      <div style="font-weight:600;font-size:14px;margin-bottom:4px">📍 Returns drop-off area</div>
+      <p style="color:var(--ink-soft);font-size:12px;margin-bottom:8px">Shown as a banner at the top of the Returns page (computer + handheld) so everyone knows exactly where returned parcels go.</p>
+      <input id="shipset-dropoff" value="${escapeAttr(_shipEdit.returnsDropoff)}" placeholder="e.g. Blue trolley bay next to goods-in, Aisle A" style="width:100%">
+    </div>
+
+    <div style="display:flex;gap:8px;margin-top:14px;align-items:center">
+      <button class="btn btn-primary" onclick="saveShippingConfig(this)">Save shipping settings</button>
+      <button class="btn btn-outline btn-sm" onclick="openShippingQuote()">💷 Try the quote calculator</button>
+    </div>`;
+}
+function shipSetParseBands(i, text) {
+  const bands = [];
+  for (const line of String(text || '').split(/\n+/)) {
+    const parts = line.split(/[,\t;]+/).map(s => s.trim()).filter(Boolean);
+    if (parts.length < 2) continue;
+    const maxKg = parseFloat(parts[0]), price = parseFloat(String(parts[1]).replace(/[£$]/g, ''));
+    if (!Number.isFinite(maxKg) || !Number.isFinite(price)) continue;
+    bands.push({ maxKg, price, name: parts[2] || '' });
+  }
+  _shipEdit.couriers[i].bands = bands;
+}
+async function saveShippingConfig(btn) {
+  if (!_shipEdit) return;
+  _shipEdit.returnsDropoff = el('shipset-dropoff')?.value ?? _shipEdit.returnsDropoff;
+  if (btn) btn.disabled = true;
+  try {
+    await Api.post('/api/shipping/config', _shipEdit);
+    State.shippingCfg = null;   // bust the cache so pages repaint fresh
+    toast('Shipping settings saved', 'success');
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
+}
+
 async function loadCosts() {
   loadSuppliersOnce();
   let data;
@@ -19083,6 +19787,11 @@ function renderSettings() {
         </div>
       </div>
 
+      <div class="card admin-only" style="margin-bottom:16px">
+        <div class="card-head"><h3>📦 Shipping, cartons &amp; returns area</h3></div>
+        <div class="card-body"><div id="shipset-body"><div class="empty"><div class="t">Loading…</div></div></div></div>
+      </div>
+
       <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>Knowledge base visibility</h3></div>
         <div class="card-body">
@@ -19104,6 +19813,7 @@ function renderSettings() {
   loadDropfleetConfig();
   loadThumbnailConfig();
   loadFitmentConfig();
+  if (State.user?.role === 'admin') loadShippingSettingsUI();
 }
 
 // ── eBay fitment-confirmation messages ──
@@ -22037,7 +22747,7 @@ function modal({ title, body, actions=[] }) {
   el('modal-foot').innerHTML = '';
   actions.forEach(a => {
     const b = document.createElement('button');
-    b.className = 'btn ' + (a.primary ? 'btn-primary' : 'btn-outline');
+    b.className = 'btn ' + (a.primary ? 'btn-primary' : 'btn-outline') + (a.className ? ' ' + a.className : '');
     b.textContent = a.label;
     b.onclick = a.onClick;
     el('modal-foot').appendChild(b);

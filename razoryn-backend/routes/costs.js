@@ -60,6 +60,7 @@ router.get('/products', requireAdmin, async (req, res) => {
   const { rows } = await query(`
     SELECT p.id, p.sku, p.title, p.brand, p.model, p.qty_on_hand, p.large_panel, p.shipping_band, p.shipping_cost,
            p.landed_cost, p.postage_in_price, p.stock_group_id, p.part_number,
+           p.packaging_included, p.packaging_cost,
            p.cost_price, p.price_ebay, p.price_shopify, p.image_url,
            lc.supplier AS last_supplier, lc.purchase_date AS last_purchase_date,
            lc.currency AS last_currency, lc.unit_cost_foreign AS last_unit_cost_foreign
@@ -80,7 +81,16 @@ router.get('/products', requireAdmin, async (req, res) => {
     const shippingCost = r.shipping_cost != null ? parseFloat(r.shipping_cost) : null;
     const landedCost = r.landed_cost != null ? parseFloat(r.landed_cost) : null;
     const postageInPrice = (r.postage_in_price == null) ? !isLarge : !!r.postage_in_price;
-    const fargs = { isLarge, band, shippingCost, landedCost, postageInPrice, settings: S };
+    // Per-item packaging accuracy. The global settings add a flat packaging £
+    // to every item; the per-product flag refines that:
+    //   packaging_included = true  → the box came WITH the purchase, so its cost
+    //                                is already inside cost_price → charge £0.
+    //   packaging_included = false → bought separately → use the per-item £
+    //                                (falling back to the global figure).
+    //   NULL                       → not recorded yet → keep the old behaviour.
+    const SI = r.packaging_included == null ? S
+      : { ...S, packagingCost: r.packaging_included ? 0 : (r.packaging_cost != null ? parseFloat(r.packaging_cost) : S.packagingCost) };
+    const fargs = { isLarge, band, shippingCost, landedCost, postageInPrice, settings: SI };
     const fe = cost != null ? computeFloor({ costPrice: cost, channel: 'ebay', ...fargs }) : null;
     const fs = cost != null ? computeFloor({ costPrice: cost, channel: 'shopify', ...fargs }) : null;
     const pe = r.price_ebay != null ? parseFloat(r.price_ebay) : null;
@@ -105,6 +115,7 @@ router.get('/products', requireAdmin, async (req, res) => {
       stockGroupId: r.stock_group_id || null, partNumber: r.part_number || null,
       qtyOnHand: r.qty_on_hand, largePanel: isLarge, shippingBand: band, shippingCost, imageUrl: r.image_url,
       landedCost, landedKnown: landedCost != null, postageInPrice,
+      packagingIncluded: r.packaging_included, packagingCost: r.packaging_cost != null ? parseFloat(r.packaging_cost) : null,
       effectiveCost: effCost != null ? +effCost.toFixed(2) : null,
       costPrice: cost, priceEbay: pe, priceShopify: ps,
       lastSupplier: r.last_supplier, lastPurchaseDate: r.last_purchase_date,
