@@ -14787,16 +14787,17 @@ async function renderProductSuppliers(productId) {
         <button title="${l.preferred ? 'Preferred supplier' : 'Make preferred'}" ${admin ? `onclick="psPatchLink(${l.id},${productId},{preferred:true})"` : 'disabled'} style="border:none;background:none;cursor:${admin ? 'pointer' : 'default'};font-size:15px;padding:0">${l.preferred ? '★' : '☆'}</button>
         <div style="flex:1;min-width:0">
           <div style="font-weight:600">${escapeHtml(l.supplier_name)}${l.lead_time_days ? ` <span style="font-weight:400;color:var(--ink-soft)">· ${l.lead_time_days}d lead</span>` : ''}${l.in_stock ? '' : ' <span class="pill red" style="font-size:9px">out of stock</span>'}</div>
-          <div style="color:var(--ink-soft)">${l.supplier_sku ? `Their SKU: <span class="copyable" data-copy="${escapeAttr(l.supplier_sku)}" style="font-family:ui-monospace,monospace">${escapeHtml(l.supplier_sku)}</span>` : 'No supplier SKU'} · ${psMoney(l.unit_cost, l.currency)}${l.last_purchased_at ? ' · last bought ' + fmtDate(l.last_purchased_at) : ''}${l.notes ? ' · ' + escapeHtml(l.notes) : ''}</div>
+          <div style="color:var(--ink-soft)">${l.supplier_sku ? `Their SKU: <span class="copyable" data-copy="${escapeAttr(l.supplier_sku)}" style="font-family:ui-monospace,monospace">${escapeHtml(l.supplier_sku)}</span>` : 'No supplier SKU'} · ${psMoney(l.unit_cost, l.currency)}${l.price_basis ? ` <span class="pill" style="font-size:9px;background:var(--bg-soft)" title="${l.price_basis === 'EXW' ? 'Ex-works — freight AND collection haulage on top of this price' : l.price_basis === 'FOB' ? 'Free on board — they get it to the ship, sea freight on top' : ''}">${escapeHtml(l.price_basis)}</span>` : ''}${l.last_purchased_at ? ' · last bought ' + fmtDate(l.last_purchased_at) : ''}${l.notes ? ' · ' + escapeHtml(l.notes) : ''}</div>
         </div>
         ${admin ? `<button class="btn btn-ghost btn-sm" onclick="psPatchLink(${l.id},${productId},{inStock:${l.in_stock ? 'false' : 'true'}})" title="Toggle whether this supplier currently has it">${l.in_stock ? '📦 In stock' : '🚫 Out'}</button>
         <button onclick="psDeleteLink(${l.id},${productId})" title="Unlink" style="border:none;background:none;cursor:pointer;color:var(--red);font-weight:700">✕</button>` : ''}
       </div>`).join('')}</div>` : '<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">No suppliers linked yet.</div>'}
-    ${admin ? `<div style="display:grid;grid-template-columns:1.2fr 1fr .7fr .6fr auto;gap:6px;align-items:center">
+    ${admin ? `<div style="display:grid;grid-template-columns:1.2fr 1fr .7fr .55fr .55fr auto;gap:6px;align-items:center">
       <input id="ps-name" list="dl-suppliers" placeholder="Supplier">${supplierDatalist('dl-suppliers')}
       <input id="ps-sku" placeholder="Their SKU / part code" style="font-family:ui-monospace,monospace">
       <input id="ps-cost" type="number" step="0.01" min="0" placeholder="Cost">
       <select id="ps-cur"><option>GBP</option><option>CNY</option><option>USD</option><option>EUR</option></select>
+      <select id="ps-basis" title="Price basis: FOB = to the ship (freight on top); EXW = ex-works (freight + haulage on top)"><option value="">basis…</option><option>FOB</option><option>EXW</option></select>
       <button class="btn btn-outline btn-sm" onclick="psSaveLink(${productId})">+ Link</button>
     </div>
     <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-soft);margin-top:4px;cursor:pointer"><input type="checkbox" id="ps-pref"> Preferred supplier (order from them first)</label>` : ''}`;
@@ -14810,6 +14811,7 @@ async function psSaveLink(productId) {
       supplierSku: (el('ps-sku')?.value || '').trim(),
       unitCost: el('ps-cost')?.value || null,
       currency: el('ps-cur')?.value || 'GBP',
+      priceBasis: el('ps-basis')?.value || null,
       preferred: !!el('ps-pref')?.checked,
     });
     State._suppliersLoaded = false; loadSuppliersOnce();   // new supplier name → refresh datalists
@@ -14899,7 +14901,7 @@ function shRenderCatalogue() {
             <td style="padding:6px"><div style="font-weight:600">${escapeHtml(it.title)}</div><div style="color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(it.sku || '')}${it.part_number ? ' · ' + escapeHtml(it.part_number) : ''}</div></td>
             <td style="padding:6px;font-family:ui-monospace,monospace">${escapeHtml(it.supplier_sku || '—')}</td>
             <td style="padding:6px;text-align:right">${low ? `<span class="pill red" style="font-size:10px">${it.qty_on_hand}</span>` : it.qty_on_hand}</td>
-            <td style="padding:6px;text-align:right">${psMoney(it.unit_cost, it.currency)}</td>
+            <td style="padding:6px;text-align:right">${psMoney(it.unit_cost, it.currency)}${it.price_basis ? ` <span class="pill" style="font-size:9px;background:var(--bg-soft)">${escapeHtml(it.price_basis)}</span>` : ''}</td>
             <td style="padding:6px;text-align:right"><input type="number" min="0" value="${SH.qty[it.link_id] ?? 1}" style="width:64px" onchange="SH.qty[${it.link_id}]=parseInt(this.value)||0"></td>
           </tr>`;
         }).join('')}</tbody>
@@ -14913,7 +14915,7 @@ function shRenderCatalogue() {
 }
 function shSelectedLines() {
   return SH.items.filter(it => SH.picked.has(it.link_id) && (SH.qty[it.link_id] || 0) > 0)
-    .map(it => ({ linkId: it.link_id, productId: it.product_id, qty: SH.qty[it.link_id], supplierSku: it.supplier_sku, sku: it.sku, partNumber: it.part_number, title: it.title, unitCost: it.unit_cost, currency: it.currency }));
+    .map(it => ({ linkId: it.link_id, productId: it.product_id, qty: SH.qty[it.link_id], supplierSku: it.supplier_sku, sku: it.sku, partNumber: it.part_number, title: it.title, unitCost: it.unit_cost, currency: it.currency, priceBasis: it.price_basis || '' }));
 }
 async function shExport(record) {
   const lines = shSelectedLines();
@@ -14921,10 +14923,10 @@ async function shExport(record) {
   const supplierName = (State.suppliers || []).find(s => String(s.id) === String(SH.supplierId))?.name || 'supplier';
   const esc = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
   const showMoney = canSeeMoney();
-  const rows = [['Supplier SKU', 'Our SKU', 'Part number', 'Item', 'Qty to order'].concat(showMoney ? ['Unit cost', 'Currency', 'Line total'] : [])];
+  const rows = [['Supplier SKU', 'Our SKU', 'Part number', 'Item', 'Qty to order'].concat(showMoney ? ['Unit cost', 'Currency', 'Price basis', 'Line total'] : [])];
   for (const l of lines) {
     rows.push([l.supplierSku || '', l.sku || '', l.partNumber || '', l.title, l.qty]
-      .concat(showMoney ? [l.unitCost ?? '', l.currency || '', l.unitCost != null ? (l.unitCost * l.qty).toFixed(2) : ''] : []));
+      .concat(showMoney ? [l.unitCost ?? '', l.currency || '', l.priceBasis || '', l.unitCost != null ? (l.unitCost * l.qty).toFixed(2) : ''] : []));
   }
   const csv = rows.map(r => r.map(esc).join(',')).join('\r\n');
   const stamp = new Date().toISOString().slice(0, 10);
@@ -14950,7 +14952,7 @@ async function shFind() {
   out.innerHTML = results.map(r => `
     <div style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-bottom:6px;font-size:12px">
       <div style="font-weight:600">${escapeHtml(r.title)} <span style="font-weight:400;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(r.sku || '')}</span></div>
-      <div style="margin-top:2px">🏭 <strong>${escapeHtml(r.supplier_name)}</strong>${r.preferred ? ' ★' : ''} · Their SKU: <span class="copyable" data-copy="${escapeAttr(r.supplier_sku || '')}" style="font-family:ui-monospace,monospace">${escapeHtml(r.supplier_sku || '—')}</span> · ${psMoney(r.unit_cost, r.currency)}${r.last_purchased_at ? ' · last bought ' + fmtDate(r.last_purchased_at) : ''}</div>
+      <div style="margin-top:2px">🏭 <strong>${escapeHtml(r.supplier_name)}</strong>${r.preferred ? ' ★' : ''} · Their SKU: <span class="copyable" data-copy="${escapeAttr(r.supplier_sku || '')}" style="font-family:ui-monospace,monospace">${escapeHtml(r.supplier_sku || '—')}</span> · ${psMoney(r.unit_cost, r.currency)}${r.price_basis ? ` <span class="pill" style="font-size:9px;background:var(--bg-soft)">${escapeHtml(r.price_basis)}</span>` : ''}${r.last_purchased_at ? ' · last bought ' + fmtDate(r.last_purchased_at) : ''}</div>
       ${r.contact ? `<div style="color:var(--ink-soft);margin-top:2px">📞 ${escapeHtml(r.contact)}</div>` : ''}
     </div>`).join('');
 }
@@ -15144,9 +15146,10 @@ function qcPick(id) {
     <div style="background:var(--bg-soft);border-radius:8px;padding:10px;margin-bottom:10px;font-size:13px">
       <strong>${escapeHtml(p.title)}</strong><div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escapeHtml(p.sku || '')}</div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr .6fr;gap:8px">
+    <div style="display:grid;grid-template-columns:1fr .55fr .55fr;gap:8px">
       <div class="field"><label>Item cost</label><input id="qc-cost" type="number" step="0.01" min="0" inputmode="decimal" placeholder="what we paid per unit"></div>
       <div class="field"><label>Currency</label><select id="qc-cur"><option>CNY</option><option>GBP</option><option>USD</option><option>EUR</option></select></div>
+      <div class="field"><label>Basis</label><select id="qc-basis" title="FOB = to the ship, freight on top · EXW = ex-works, freight + haulage on top"><option value="">—</option><option>FOB</option><option>EXW</option></select></div>
     </div>
     <div class="field"><label>Supplier <span style="font-weight:400;color:var(--ink-soft)">— optional, links the purchase</span></label><input id="qc-supplier" list="dl-suppliers" placeholder="who we bought it from">${supplierDatalist('dl-suppliers')}</div>
     <div class="field"><label>Their SKU <span style="font-weight:400;color:var(--ink-soft)">— optional supplier part code</span></label><input id="qc-supsku" style="font-family:ui-monospace,monospace" placeholder="supplier's code for this part"></div>
@@ -15171,8 +15174,9 @@ async function qcSave() {
   const taskId = Task.start('Saving costs');
   try {
     let gbpCost = null;
+    const basis = el('qc-basis')?.value || null;
     if (cost) {
-      const body = { currency: cur, supplier: supplier || undefined };
+      const body = { currency: cur, supplier: supplier || undefined, priceBasis: basis };
       if (cur === 'GBP') body.unitCostGbp = parseFloat(cost); else body.unitCostForeign = parseFloat(cost);
       const r = await Api.post(`/api/costs/products/${QC.productId}/cost`, body);
       gbpCost = r.costPrice;
@@ -15182,7 +15186,7 @@ async function qcSave() {
     if (!pkgInc || (pkgCost !== '' && pkgCost != null)) { patch.packagingIncluded = pkgInc; patch.packagingCost = pkgCost !== '' && pkgCost != null ? parseFloat(pkgCost) : null; }
     if (Object.keys(patch).length) await Api.patch('/api/products/' + QC.productId, patch);
     if (supplier && (supSku || cost)) {
-      try { await Api.post('/api/suppliers/links', { productId: QC.productId, supplierName: supplier, supplierSku: supSku, unitCost: cost || null, currency: cur, lastPurchasedAt: new Date().toISOString() }); } catch (_) {}
+      try { await Api.post('/api/suppliers/links', { productId: QC.productId, supplierName: supplier, supplierSku: supSku, unitCost: cost || null, currency: cur, priceBasis: basis, lastPurchasedAt: new Date().toISOString() }); } catch (_) {}
     }
     Task.done(taskId);
     Store.refresh('products');
@@ -15513,6 +15517,12 @@ async function ctOpenEditor(productId) {
         <div class="field"><label>Purchase date</label><input id="ct-date" type="date" value="${ctToday()}"></div>
         <div class="field"><label>Currency</label>
           <select id="ct-cur"><option value="CNY"${(p.lastCurrency || 'CNY') === 'CNY' ? ' selected' : ''}>CNY (RMB)</option><option value="GBP"${p.lastCurrency === 'GBP' ? ' selected' : ''}>GBP</option><option value="USD"${p.lastCurrency === 'USD' ? ' selected' : ''}>USD</option><option value="EUR"${p.lastCurrency === 'EUR' ? ' selected' : ''}>EUR</option></select></div>
+        <div class="field"><label>Price basis <span style="color:var(--ink-soft);font-weight:400">— what the quote includes</span></label>
+          <select id="ct-basis">
+            <option value=""${!p.lastPriceBasis ? ' selected' : ''}>— not set —</option>
+            <option value="FOB"${p.lastPriceBasis === 'FOB' ? ' selected' : ''}>FOB — to the ship, freight on top</option>
+            <option value="EXW"${p.lastPriceBasis === 'EXW' ? ' selected' : ''}>EXW — ex-works, freight + haulage on top</option>
+          </select></div>
         <div class="field"><label>Unit cost (foreign)</label><input id="ct-foreign" type="number" step="0.01" min="0" value="${p.lastUnitCostForeign != null ? p.lastUnitCostForeign : ''}" placeholder="e.g. 80"></div>
         <div class="field"><label>FX rate → GBP <span style="color:var(--ink-soft);font-weight:400">auto</span></label>
           <div style="display:flex;gap:6px"><input id="ct-rate" type="number" step="0.00001" min="0" placeholder="auto" style="flex:1"><button type="button" class="btn btn-outline btn-sm" onclick="ctFetchRate()">↻</button></div></div>
@@ -15815,6 +15825,7 @@ async function ctSaveCost(productId) {
     fxRate: rate || null,
     qty: el('ct-qty')?.value || null,
     note: el('ct-note')?.value || null,
+    priceBasis: el('ct-basis')?.value || null,
   };
   try {
     const r = await Api.post('/api/costs/products/' + productId + '/cost', payload);
@@ -15849,7 +15860,7 @@ async function ctLoadHistory(productId) {
     <svg width="${W}" height="${H}" style="display:block;margin-bottom:8px"><polyline points="${pts}" fill="none" stroke="var(--brand-primary)" stroke-width="1.5"/></svg>
     <div style="max-height:140px;overflow:auto;font-size:11px">
       ${h.slice().reverse().map(x => `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line-2)">
-        <span>${new Date(x.purchaseDate).toLocaleDateString('en-GB')}${x.supplier ? ' · ' + escapeHtml(x.supplier) : ''}</span>
+        <span>${new Date(x.purchaseDate).toLocaleDateString('en-GB')}${x.supplier ? ' · ' + escapeHtml(x.supplier) : ''}${x.priceBasis ? ` · <span class="pill" style="font-size:9px;background:var(--bg-soft)">${escapeHtml(x.priceBasis)}</span>` : ''}</span>
         <span>${x.unitCostForeign != null ? x.unitCostForeign + ' ' + escapeHtml(x.currency || '') + ' → ' : ''}<strong>£${Number(x.unitCostGbp).toFixed(2)}</strong>${x.trendPct != null ? ` <span style="color:${x.trendPct > 0 ? 'var(--red)' : 'var(--green)'}">${x.trendPct > 0 ? '+' : ''}${x.trendPct}%</span>` : ''}</span>
       </div>`).join('')}
     </div>`;

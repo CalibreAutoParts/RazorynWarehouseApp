@@ -35,6 +35,10 @@ async function ensureCostSchema() {
     )`);
     await query(`CREATE INDEX IF NOT EXISTS pch_product_idx ON product_cost_history (product_id, purchase_date DESC)`);
     await query(`CREATE INDEX IF NOT EXISTS pch_supplier_idx ON product_cost_history (supplier)`);
+    // Price basis (incoterm) for the quoted cost: FOB (supplier delivers to the
+    // ship, freight on top) vs EXW (ex-works — collection from their factory,
+    // freight AND local haulage on top). Free text-ish but the UI offers the two.
+    await query(`ALTER TABLE product_cost_history ADD COLUMN IF NOT EXISTS price_basis TEXT`);
     await fx.ensureFxTable();
     _ready = true;
   } catch (e) { console.warn('[costs] schema migration warning:', e.message); }
@@ -63,10 +67,11 @@ router.get('/products', requireAdmin, async (req, res) => {
            p.packaging_included, p.packaging_cost,
            p.cost_price, p.price_ebay, p.price_shopify, p.image_url,
            lc.supplier AS last_supplier, lc.purchase_date AS last_purchase_date,
-           lc.currency AS last_currency, lc.unit_cost_foreign AS last_unit_cost_foreign
+           lc.currency AS last_currency, lc.unit_cost_foreign AS last_unit_cost_foreign,
+           lc.price_basis AS last_price_basis
     FROM products p
     LEFT JOIN LATERAL (
-      SELECT supplier, purchase_date, currency, unit_cost_foreign
+      SELECT supplier, purchase_date, currency, unit_cost_foreign, price_basis
       FROM product_cost_history h WHERE h.product_id = p.id
       ORDER BY purchase_date DESC, id DESC LIMIT 1
     ) lc ON true
@@ -120,6 +125,7 @@ router.get('/products', requireAdmin, async (req, res) => {
       costPrice: cost, priceEbay: pe, priceShopify: ps,
       lastSupplier: r.last_supplier, lastPurchaseDate: r.last_purchase_date,
       lastCurrency: r.last_currency, lastUnitCostForeign: r.last_unit_cost_foreign != null ? parseFloat(r.last_unit_cost_foreign) : null,
+      lastPriceBasis: r.last_price_basis || null,
       // floor = recommended price (breakeven + target margin); breakeven = lowest safe price.
       floorEbay: fe ? fe.floor : null, floorShopify: fs ? fs.floor : null,
       breakevenEbay: fe ? fe.breakeven : null, breakevenShopify: fs ? fs.breakeven : null,
@@ -189,6 +195,7 @@ router.get('/products/:id/history', requireAdmin, async (req, res) => {
       unitCostForeign: r.unit_cost_foreign != null ? parseFloat(r.unit_cost_foreign) : null,
       fxRate: r.fx_rate != null ? parseFloat(r.fx_rate) : null, unitCostGbp: gbp,
       qty: r.qty, note: r.note, createdAt: r.created_at, trendPct,
+      priceBasis: r.price_basis || null,
     };
   });
   res.json({ history });
@@ -216,12 +223,13 @@ router.post('/products/:id/cost', requireAdmin, async (req, res) => {
   }
   const history = await withTx(async (c) => {
     const ins = await c.query(
-      `INSERT INTO product_cost_history (product_id, supplier, purchase_date, currency, unit_cost_foreign, fx_rate, unit_cost_gbp, qty, freight_total, duty, note, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      `INSERT INTO product_cost_history (product_id, supplier, purchase_date, currency, unit_cost_foreign, fx_rate, unit_cost_gbp, qty, freight_total, duty, note, created_by, price_basis)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
       [id, b.supplier || null, purchaseDate, currency, foreign, fxRate, gbp,
        b.qty != null ? (parseInt(b.qty) || null) : null,
        b.freightTotal != null && b.freightTotal !== '' ? parseFloat(b.freightTotal) : null,
-       b.duty != null && b.duty !== '' ? parseFloat(b.duty) : null, b.note || null, req.user.id]);
+       b.duty != null && b.duty !== '' ? parseFloat(b.duty) : null, b.note || null, req.user.id,
+       String(b.priceBasis || '').trim().toUpperCase().slice(0, 12) || null]);
     // A manually-entered cost is the GOODS cost → clear any stale actual landed_cost
     // so freight/duty is estimated via the global uplift % until a container costs it.
     await c.query(`UPDATE products SET cost_price = $1, landed_cost = NULL, updated_at = now() WHERE id = $2`, [gbp, id]);
