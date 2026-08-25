@@ -15222,13 +15222,14 @@ async function qcSave() {
   if (!cost && !post && !supSku && pkgInc) { toast('Nothing to save', 'warn'); return; }
   const taskId = Task.start('Saving costs');
   try {
-    let gbpCost = null;
+    let gbpCost = null, sharedN = 0;
     const basis = el('qc-basis')?.value || null;
     if (cost) {
       const body = { currency: cur, supplier: supplier || undefined, priceBasis: basis };
       if (cur === 'GBP') body.unitCostGbp = parseFloat(cost); else body.unitCostForeign = parseFloat(cost);
       const r = await Api.post(`/api/costs/products/${QC.productId}/cost`, body);
       gbpCost = r.costPrice;
+      sharedN = (r.sharedWith || []).length;
     }
     const patch = {};
     if (post !== '' && post != null) { patch.shippingCost = parseFloat(post); patch.shippingBand = 'custom'; }
@@ -15240,7 +15241,8 @@ async function qcSave() {
     Task.done(taskId);
     Store.refresh('products');
     if (supplier) State._suppliersLoaded = false;   // refresh the supplier dropdowns
-    toast('Saved' + (gbpCost != null && canSeeMoney() ? ` — cost £${(+gbpCost).toFixed(2)}` : ''), 'success');
+    toast('Saved' + (gbpCost != null && canSeeMoney() ? ` — cost £${(+gbpCost).toFixed(2)}` : '')
+      + (sharedN ? ` · shared with ${sharedN} listing${sharedN > 1 ? 's' : ''} of the same part` : ''), 'success');
     QC.productId = null;
     const f = el('qc-form'); if (f) { f.style.display = 'none'; f.innerHTML = ''; }
     const q = el('qc-q'); if (q) { q.value = ''; q.focus(); }
@@ -15506,7 +15508,7 @@ function ctRow(p) {
         <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(p.title || '')}${p.shared ? ` <span class="pill" style="font-size:9px;background:var(--brand-primary-light,#e8edff);color:var(--brand-primary);font-weight:700" title="Shared stock — ${p.memberCount} listings share this pool: ${escapeAttr((p.sharedSkus||[]).join(', '))}">🔗 shared ×${p.memberCount}</span>` : ''}</div>
         <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(p.partNumber || p.sku || '')}${p.shared && p.fitsModels && p.fitsModels.length > 1 ? ` · fits ${p.fitsModels.length} models` : ''}${p.lastSupplier ? ' · ' + escapeHtml(p.lastSupplier) : ''} ${flag(p.overstock, '📦 ' + p.qtyOnHand, 'var(--amber)')}</div>
       </div>
-      <div style="width:88px;text-align:right"><div style="font-size:10px;color:var(--ink-soft)">Cost ${p.costPrice == null ? '' : (p.landedKnown ? '(landed)' : '(est.)')}</div><div style="font-weight:700;font-size:13px">${p.costPrice == null ? '<span style="color:var(--amber)">add</span>' : ctMoney(p.effectiveCost != null ? p.effectiveCost : p.costPrice)}</div>${(p.qtyOnHand != null) ? `<div style="font-size:10px;color:var(--ink-soft)">${p.qtyOnHand} in stock</div>` : ''}</div>
+      <div style="width:88px;text-align:right"><div style="font-size:10px;color:var(--ink-soft)">Cost ${p.costPrice == null ? '' : (p.landedKnown ? '(landed)' : '(est.)')}</div><div style="font-weight:700;font-size:13px">${p.costPrice == null ? '<span style="color:var(--amber)">add</span>' : ctMoney(p.effectiveCost != null ? p.effectiveCost : p.costPrice)}</div>${p.costShared ? `<div style="font-size:9px;color:var(--ink-soft)" title="No cost of its own — borrowed from ${escapeAttr(p.costSharedFrom || 'a listing of the same part')} (shared pool / same part number)">🔗 shared${p.costSharedFrom ? ' · ' + escapeHtml(p.costSharedFrom) : ''}</div>` : ''}${(p.qtyOnHand != null) ? `<div style="font-size:10px;color:var(--ink-soft)">${p.qtyOnHand} in stock</div>` : ''}</div>
       <div style="width:150px;text-align:right">
         <div style="font-size:10px;color:var(--ink-soft)">eBay rec / price</div>
         <div style="font-size:12px"><span title="Recommended price" style="font-weight:600">${ctMoney(p.floorEbay)}</span> <span style="color:var(--ink-soft)">/</span> <span style="${p.belowFloorEbay ? 'color:var(--red);font-weight:700' : ''}">${ctMoney(p.priceEbay)}</span></div>
@@ -15879,7 +15881,8 @@ async function ctSaveCost(productId) {
   };
   try {
     const r = await Api.post('/api/costs/products/' + productId + '/cost', payload);
-    toast('Cost saved — £' + Number(r.costPrice).toFixed(2) + ' landed', 'success');
+    toast('Cost saved — £' + Number(r.costPrice).toFixed(2) + ' landed'
+      + ((r.sharedWith || []).length ? ` · shared with ${r.sharedWith.length} listing${r.sharedWith.length > 1 ? 's' : ''} of the same part` : ''), 'success', (r.sharedWith || []).length ? 6000 : undefined);
     State._suppliersLoaded = false;   // a new supplier name may have been added — refresh the dropdowns
     closeModal();
     await loadCosts();

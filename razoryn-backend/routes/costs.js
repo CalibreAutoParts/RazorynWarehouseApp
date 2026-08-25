@@ -45,6 +45,47 @@ async function ensureCostSchema() {
 }
 ensureCostSchema();
 
+// ──────────────────────────────────────────────────────────────────────────
+// Shared costs across same-part listings. Products in the same shared stock
+// pool — or with the same part number (normalised: case/dash/space-blind) —
+// are the SAME physical part, so a cost set on one applies to all of them.
+// Called after any cost write (manual entry, quick costs, container receive);
+// each sibling gets the cost_price update AND its own history row (marked as
+// shared) so its trend line stays truthful. Best-effort — never throws.
+// ──────────────────────────────────────────────────────────────────────────
+async function shareCostWithSiblings(productId, o = {}) {
+  try {
+    if (o.gbp == null) return [];
+    const sibs = await query(`
+      SELECT p2.id, p2.sku FROM products p
+      JOIN products p2 ON p2.id <> p.id AND p2.active = true
+        AND (
+          (p.stock_group_id IS NOT NULL AND p2.stock_group_id = p.stock_group_id)
+          OR (p.part_number IS NOT NULL AND p.part_number <> ''
+              AND p2.part_number IS NOT NULL AND p2.part_number <> ''
+              AND UPPER(REGEXP_REPLACE(p2.part_number, '[^A-Za-z0-9]', '', 'g'))
+                = UPPER(REGEXP_REPLACE(p.part_number,  '[^A-Za-z0-9]', '', 'g')))
+        )
+      WHERE p.id = $1`, [productId]);
+    const shared = [];
+    for (const s of sibs.rows) {
+      try {
+        await query(`UPDATE products SET cost_price = $1, landed_cost = $2, updated_at = now() WHERE id = $3`,
+          [o.gbp, o.landed != null ? o.landed : null, s.id]);
+        await query(
+          `INSERT INTO product_cost_history (product_id, supplier, purchase_date, currency, unit_cost_foreign, fx_rate, unit_cost_gbp, qty, note, created_by, price_basis)
+           VALUES ($1,$2,COALESCE($3::date, CURRENT_DATE),$4,$5,$6,$7,$8,$9,$10,$11)`,
+          [s.id, o.supplier || null, o.purchaseDate || null, o.currency || 'GBP',
+           o.foreign != null ? o.foreign : null, o.fxRate != null ? o.fxRate : null, o.gbp, o.qty || null,
+           'Shared cost — same part as ' + (o.sourceSku || ('#' + productId)), o.userId || null,
+           o.priceBasis || null]);
+        shared.push(s.sku);
+      } catch (e) { console.warn('[costs] share-to-sibling warning:', e.message); }
+    }
+    return shared;
+  } catch (e) { console.warn('[costs] share-cost warning:', e.message); return []; }
+}
+
 async function settingsRow() {
   return (await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {};
 }
@@ -68,23 +109,46 @@ router.get('/products', requireAdmin, async (req, res) => {
            p.cost_price, p.price_ebay, p.price_shopify, p.image_url,
            lc.supplier AS last_supplier, lc.purchase_date AS last_purchase_date,
            lc.currency AS last_currency, lc.unit_cost_foreign AS last_unit_cost_foreign,
-           lc.price_basis AS last_price_basis
+           lc.price_basis AS last_price_basis,
+           shc.shared_cost, shc.shared_landed, shc.shared_from_sku
     FROM products p
     LEFT JOIN LATERAL (
       SELECT supplier, purchase_date, currency, unit_cost_foreign, price_basis
       FROM product_cost_history h WHERE h.product_id = p.id
       ORDER BY purchase_date DESC, id DESC LIMIT 1
     ) lc ON true
+    LEFT JOIN LATERAL (
+      -- Same-part cost inheritance: when this listing has no cost of its own but
+      -- a pooled sibling (or one sharing its part number) does, borrow that cost
+      -- so margins/floors show for every listing of the part. New cost writes
+      -- also propagate for real; this covers costs recorded before pooling.
+      SELECT p2.cost_price AS shared_cost, p2.landed_cost AS shared_landed, p2.sku AS shared_from_sku
+      FROM products p2
+      WHERE p.cost_price IS NULL AND p2.id <> p.id AND p2.active = true AND p2.cost_price IS NOT NULL
+        AND (
+          (p.stock_group_id IS NOT NULL AND p2.stock_group_id = p.stock_group_id)
+          OR (p.part_number IS NOT NULL AND p.part_number <> ''
+              AND p2.part_number IS NOT NULL AND p2.part_number <> ''
+              AND UPPER(REGEXP_REPLACE(p2.part_number, '[^A-Za-z0-9]', '', 'g'))
+                = UPPER(REGEXP_REPLACE(p.part_number,  '[^A-Za-z0-9]', '', 'g')))
+        )
+      ORDER BY p2.updated_at DESC NULLS LAST, p2.id LIMIT 1
+    ) shc ON true
     WHERE ${where.join(' AND ')}
     ORDER BY p.title
     LIMIT 2000`, params);
 
   const items = rows.map(r => {
-    const cost = r.cost_price != null ? parseFloat(r.cost_price) : null;
+    // Own cost first; else borrow a same-part sibling's (shared pool / same
+    // part number) so every listing of the part shows real margins.
+    const ownCost = r.cost_price != null ? parseFloat(r.cost_price) : null;
+    const costShared = ownCost == null && r.shared_cost != null;
+    const cost = ownCost != null ? ownCost : (costShared ? parseFloat(r.shared_cost) : null);
     const isLarge = !!r.large_panel;
     const band = r.shipping_band || null;
     const shippingCost = r.shipping_cost != null ? parseFloat(r.shipping_cost) : null;
-    const landedCost = r.landed_cost != null ? parseFloat(r.landed_cost) : null;
+    const landedCost = r.landed_cost != null ? parseFloat(r.landed_cost)
+      : (costShared && r.shared_landed != null ? parseFloat(r.shared_landed) : null);
     const postageInPrice = (r.postage_in_price == null) ? !isLarge : !!r.postage_in_price;
     // Per-item packaging accuracy. The global settings add a flat packaging £
     // to every item; the per-product flag refines that:
@@ -120,6 +184,7 @@ router.get('/products', requireAdmin, async (req, res) => {
       stockGroupId: r.stock_group_id || null, partNumber: r.part_number || null,
       qtyOnHand: r.qty_on_hand, largePanel: isLarge, shippingBand: band, shippingCost, imageUrl: r.image_url,
       landedCost, landedKnown: landedCost != null, postageInPrice,
+      costShared, costSharedFrom: costShared ? r.shared_from_sku : null,
       packagingIncluded: r.packaging_included, packagingCost: r.packaging_cost != null ? parseFloat(r.packaging_cost) : null,
       effectiveCost: effCost != null ? +effCost.toFixed(2) : null,
       costPrice: cost, priceEbay: pe, priceShopify: ps,
@@ -205,7 +270,7 @@ router.get('/products/:id/history', requireAdmin, async (req, res) => {
 router.post('/products/:id/cost', requireAdmin, async (req, res) => {
   await ensureCostSchema();
   const id = parseInt(req.params.id);
-  const pr = await query(`SELECT id, large_panel, shipping_band, shipping_cost, postage_in_price FROM products WHERE id = $1`, [id]);
+  const pr = await query(`SELECT id, sku, large_panel, shipping_band, shipping_cost, postage_in_price FROM products WHERE id = $1`, [id]);
   if (!pr.rows[0]) return res.status(404).json({ error: 'not_found' });
   const b = req.body || {};
   const currency = String(b.currency || 'CNY').toUpperCase();
@@ -236,6 +301,14 @@ router.post('/products/:id/cost', requireAdmin, async (req, res) => {
     return ins.rows[0];
   });
   await audit(req, 'cost_set', 'product', id, { gbp, currency, foreign, fxRate });
+  // Same physical part listed more than once (shared pool / same part number)
+  // → push this cost to every sibling so their margins stay truthful too.
+  const sharedWith = await shareCostWithSiblings(id, {
+    gbp, currency, foreign, fxRate, purchaseDate, supplier: b.supplier || null,
+    qty: b.qty != null ? (parseInt(b.qty) || null) : null,
+    priceBasis: String(b.priceBasis || '').trim().toUpperCase().slice(0, 12) || null,
+    userId: req.user.id, sourceSku: pr.rows[0].sku,
+  });
   if (b.supplier) { try { await require('./suppliers').ensureSupplierByName(b.supplier, { currency }); } catch (_) {} }
   const S = resolveCostSettings(await settingsRow());
   const isLarge = !!pr.rows[0].large_panel;
@@ -244,7 +317,7 @@ router.post('/products/:id/cost', requireAdmin, async (req, res) => {
   const postageInPrice = (pr.rows[0].postage_in_price == null) ? !isLarge : !!pr.rows[0].postage_in_price;
   // A manual cost just cleared landed_cost, so freight/duty is estimated via uplift.
   res.json({
-    ok: true, costPrice: gbp, history,
+    ok: true, costPrice: gbp, history, sharedWith,
     floors: {
       ebay: computeFloor({ costPrice: gbp, isLarge, band, shippingCost, postageInPrice, channel: 'ebay', settings: S }),
       shopify: computeFloor({ costPrice: gbp, isLarge, band, shippingCost, postageInPrice, channel: 'shopify', settings: S }),
@@ -401,4 +474,5 @@ router.get('/floors', requireAdmin, async (req, res) => {
   res.json({ floors, targetMarginPct: S.targetMarginPct });
 });
 
+router.shareCostWithSiblings = shareCostWithSiblings;
 module.exports = router;
