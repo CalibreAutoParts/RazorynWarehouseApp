@@ -44,6 +44,16 @@ async function recordReceivedCost(row, qtyReceived, userId) {
     // figure rather than the global uplift estimate).
     await query(`UPDATE products SET cost_price = $1, landed_cost = $2, updated_at = now() WHERE id = $3`,
       [landed, (row.landed_unit_cost_gbp != null ? landed : null), row.product_id]);
+    // Same physical part listed more than once (shared pool / same part number)
+    // → push this cost to every sibling listing too.
+    try {
+      await require('./costs').shareCostWithSiblings(row.product_id, {
+        gbp: landed, landed: (row.landed_unit_cost_gbp != null ? landed : null),
+        currency: row.currency || 'CNY', foreign: row.unit_cost_foreign, fxRate: row.fx_rate,
+        purchaseDate: row.received_at || row.expected_date || null,
+        supplier: row.supplier || null, qty: qtyReceived, userId, sourceSku: row.sku || null,
+      });
+    } catch (e) { console.warn('[incoming] cost share warning:', e.message); }
     return true;
   } catch (e) { console.warn('[incoming] cost record warning:', e.message); return false; }
 }
