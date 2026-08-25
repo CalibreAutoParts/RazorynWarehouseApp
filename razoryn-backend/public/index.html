@@ -9604,6 +9604,12 @@ function manualSalePrefillPrice(row) {
   } else if (payment === 'card') {
     suggested = shopifyP;
   }
+  // International export: warehouse prices are VAT-inclusive, and exports sell
+  // ex-VAT — so the prefill strips the UK VAT portion automatically (standard
+  // practice; bump the price manually if you want to keep the sticker price).
+  if (suggested > 0 && el('ms-export')?.checked && cfg.vatRegistered) {
+    suggested = +(suggested / (1 + (cfg.vatRate || 20) / 100)).toFixed(2);
+  }
   if (suggested > 0) row.querySelector('.ms-price').value = suggested;
   manualSaleRecalc();
 }
@@ -9670,6 +9676,10 @@ function msExportChanged() {
   }
   const warn = el('ms-export-collect-warn');
   if (warn) warn.style.display = (on && el('ms-fulfil')?.value === 'collect') ? 'block' : 'none';
+  // Re-prefill every line so prices flip to ex-VAT (export on) or back to the
+  // normal VAT-inclusive prices (export off). Customer-specific remembered
+  // prices are left alone — those are explicitly agreed amounts.
+  document.querySelectorAll('#ms-items > [data-idx]').forEach(manualSalePrefillPrice);
   manualSaleRecalc();
 }
 
