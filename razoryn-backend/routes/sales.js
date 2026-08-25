@@ -49,6 +49,9 @@ async function ensurePaidColumn() {
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_export BOOLEAN NOT NULL DEFAULT false`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS export_country TEXT`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS customer_vat_number TEXT`);
+    // Proof-of-export tracking: HMRC requires evidence within 3 months of an
+    // export to keep the zero-rating — this stamps when it was filed.
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS export_evidence_at TIMESTAMPTZ`);
     // Explicit ship-vs-collect choice per order. NULL = legacy rows; the worklist
     // falls back to "cash = collect, everything else = ship" for those.
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS fulfillment_method TEXT`);
@@ -806,6 +809,22 @@ router.post('/', requireAdmin, async (req, res) => {
   // Optional: auto-forward the order to DropFleet (no-op unless enabled + auto-push on).
   setImmediate(() => require('../services/dropfleet').autoPushSale(result.sale.id).catch(() => {}));
   res.status(201).json(result);
+});
+
+// POST /api/sales/:id/export-evidence — tick/untick "proof of export filed" on an
+// international order. HMRC requires the evidence within 3 months to keep the
+// zero-rating, so this is the tracking stamp.
+router.post('/:id/export-evidence', requireAdmin, async (req, res) => {
+  try {
+    await ensurePaidColumn();
+    const received = !!req.body?.received;
+    const r = await query(
+      `UPDATE sales SET export_evidence_at = CASE WHEN $2 THEN now() ELSE NULL END
+        WHERE id = $1 AND is_export = true RETURNING id, export_evidence_at`, [req.params.id, received]);
+    if (!r.rows[0]) return res.status(404).json({ error: 'not_export_order' });
+    await audit(req, 'export_evidence', 'sale', req.params.id, { received });
+    res.json({ ok: true, exportEvidenceAt: r.rows[0].export_evidence_at });
+  } catch (e) { res.status(500).json({ error: 'evidence_failed', message: e.message }); }
 });
 
 // POST /api/sales/:id/payments — record a PARTIAL payment against an invoice.

@@ -8929,6 +8929,16 @@ async function openSaleDetail(id) {
           <div style="text-align:right;font-weight:700;font-size:15px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px;color:var(--amber)">${fmt(Math.max(0, orderTotalNum - paidSoFar))}</div>` : ''}
       </div>
 
+      ${s.is_export ? `
+      <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600;margin-bottom:8px">🌍 Export order — zero-rated UK VAT</div>
+        <div style="font-size:12px;color:var(--ink-soft)">${s.export_country ? `Destination: <strong style="color:var(--ink)">${escape(s.export_country)}</strong>` : 'Destination not recorded'}${s.customer_vat_number ? ` · Customer VAT no: <span style="font-family:ui-monospace,monospace">${escape(s.customer_vat_number)}</span>` : ''}</div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:8px;cursor:pointer">
+          <input type="checkbox" ${s.export_evidence_at ? 'checked' : ''} onchange="toggleExportEvidence('${s.id}', this.checked)">
+          Proof of export received &amp; filed ${s.export_evidence_at ? `<span style="font-size:11px;color:var(--green)">(${new Date(s.export_evidence_at).toLocaleDateString('en-GB')})</span>` : '<span style="font-size:11px;color:var(--amber)">— needed within 3 months to keep the zero-rating</span>'}
+        </label>
+      </div>` : ''}
+
       ${salePayments.length ? `
       <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
         <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft);font-weight:600;margin-bottom:8px">Payments received (${salePayments.length})</div>
@@ -8986,6 +8996,14 @@ async function undoReturnsForSale(id) {
     await Store.refresh('sales'); await Store.refresh('products').catch(() => {}); await Store.refresh('returns').catch(() => {});
     if (State.page === 'sales' && typeof renderSales === 'function') renderSales();
   } catch (e) { toast('Undo failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// Tick/untick "proof of export filed" on an international order (HMRC 3-month rule).
+async function toggleExportEvidence(saleId, received) {
+  try {
+    await Api.post('/api/sales/' + saleId + '/export-evidence', { received });
+    toast(received ? 'Export evidence marked as filed ✓' : 'Export evidence cleared', 'success');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 // Remove ONE booked return from the order detail: reverses its restock + refund,
@@ -9410,7 +9428,11 @@ function openManualSale() {
               <div class="field" style="margin:0"><label>Customer VAT / tax no. <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(optional)</span></label><input id="ms-export-vat" placeholder="e.g. IE1234567X"></div>
             </div>
             <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">
-              Exports are <strong>zero-rated for UK VAT</strong> — business AND personal buyers, any country — as long as the goods leave the UK and you keep <strong>proof of export</strong> (courier docs) within 3 months. The VAT number isn't needed for the zero-rating; it goes on the invoice for the buyer's own customs/import. The buyer pays their country's import VAT/duty.
+              Exports are <strong>zero-rated for UK VAT</strong> — business AND personal buyers, any country — as long as the goods leave the UK and you keep <strong>proof of export</strong> (courier docs) within 3 months. The VAT number isn't needed for the zero-rating; it goes on the invoice for the buyer's own customs/import. The buyer pays their country's import VAT/duty. Payment method is locked to <strong>bank transfer</strong>.
+            </div>
+            <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <button type="button" class="btn btn-outline btn-sm" onclick="msStripVatFromPrices()" title="Prices you type are charged AS-IS with 0% VAT. If you want to sell at your normal price MINUS the UK VAT portion, this divides every line price by 1.2.">➗ Remove UK VAT from prices (÷1.2)</button>
+              <span style="font-size:11px;color:var(--ink-soft)">optional — the price you type is what they pay</span>
             </div>
             <div id="ms-export-collect-warn" style="display:none;font-size:11px;color:var(--amber);margin-top:6px">
               ⚠ Collection + export: if the customer collects in the UK you must still get evidence the goods LEFT the UK within 3 months — otherwise charge normal UK VAT. Only keep this ticked if you'll hold that evidence.
@@ -9629,13 +9651,40 @@ function manualSaleRecalc() {
 }
 
 // Export toggle: reveal destination/VAT fields, re-run VAT maths, and warn when
-// combined with Collection (indirect-export evidence rule).
+// combined with Collection (indirect-export evidence rule). International buyers
+// pay by BANK TRANSFER — cash makes no sense abroad — so the payment method is
+// forced to bank and locked while the export box is ticked.
 function msExportChanged() {
   const on = !!el('ms-export')?.checked;
   const fields = el('ms-export-fields'); if (fields) fields.style.display = on ? 'block' : 'none';
+  const pay = el('ms-payment');
+  if (pay) {
+    if (on) {
+      if (pay.value !== 'bank') { pay.value = 'bank'; pay.dispatchEvent(new Event('change')); }
+      pay.disabled = true;
+      pay.title = 'International orders are paid by bank transfer';
+    } else {
+      pay.disabled = false;
+      pay.title = '';
+    }
+  }
   const warn = el('ms-export-collect-warn');
   if (warn) warn.style.display = (on && el('ms-fulfil')?.value === 'collect') ? 'block' : 'none';
   manualSaleRecalc();
+}
+
+// Optional helper: strip the UK VAT portion out of the entered line prices
+// (÷1.2 at 20%) — for when your normal gross price should be sold ex-VAT abroad.
+function msStripVatFromPrices() {
+  const cfg = State.pricingConfig || {};
+  const rate = 1 + ((cfg.vatRate || 20) / 100);
+  let changed = 0;
+  document.querySelectorAll('#ms-items .ms-price').forEach(inp => {
+    const v = parseFloat(inp.value);
+    if (Number.isFinite(v) && v > 0) { inp.value = (v / rate).toFixed(2); changed++; }
+  });
+  if (changed) { manualSaleRecalc(); toast(`Removed UK VAT from ${changed} price(s) (÷${rate.toFixed(2)})`, 'success'); }
+  else toast('No line prices to adjust yet', 'warn');
 }
 
 // #14 — saved-buyer autocomplete for the manual-sale form.
