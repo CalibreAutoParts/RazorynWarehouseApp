@@ -159,15 +159,32 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
       doc.text(fromLines, colL, fy, { width: colW });
       const fromBottom = doc.y;
 
-      // Billed-to
+      // Billed-to. For eBay/Shopify orders the shipping address's first line IS
+      // the buyer's real name (customer_name may be a username), so the name
+      // comes off the address. For direct/manual sales the typed address is
+      // usually JUST the address, so headline the business/customer name and
+      // keep every address line.
       const addrLines = (sale.shipping_address || '').split('\n').map((l) => l.trim())
         .filter((l) => l && !/^ebay[a-z0-9]{4,}$/i.test(l) && !/^(GB|UK|GBR|United Kingdom)$/i.test(l));
-      const billedToName = (addrLines[0]) || sale.customer_name || 'Customer';
+      const isMarketplace = /^(ebay|shopify)/.test(sale.channel || '');
+      let billedToName, billedAttn = null, billedAddr = addrLines;
+      if (isMarketplace) {
+        billedToName = addrLines[0] || sale.customer_name || 'Customer';
+        billedAddr = addrLines.slice(1);
+      } else {
+        const business = (sale.customer_business_name || '').trim();
+        const person = (sale.customer_name || '').trim();
+        billedToName = business || person || addrLines[0] || 'Customer';
+        if (business && person && business.toLowerCase() !== person.toLowerCase()) billedAttn = 'Attn: ' + person;
+        const f = (addrLines[0] || '').toLowerCase();
+        if (f && (f === billedToName.toLowerCase() || (person && f === person.toLowerCase()))) billedAddr = addrLines.slice(1);
+      }
       labelText(colR, fromTop, mode === 'proforma' ? 'Billed to' : 'Billed / Delivered to');
       doc.font('Helvetica-Bold').fontSize(11).fillColor(ink).text(billedToName, colR, fromTop + 12, { width: colW });
       doc.font('Helvetica').fontSize(9).fillColor('#555');
       const toLines = [
-        ...addrLines.slice(1),
+        billedAttn,
+        ...billedAddr,
         sale.customer_phone, sale.customer_email,
       ].filter(Boolean).join('\n') || 'No address on file';
       doc.text(toLines, colR, fromTop + 12 + 14, { width: colW });

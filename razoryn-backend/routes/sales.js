@@ -1265,14 +1265,36 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     .filter(l => l && !/^ebay[a-z0-9]{4,}$/i.test(l) && !/^(GB|UK|GBR|United Kingdom)$/i.test(l));
   const cleanedAddress = cleanedAddressLines.join('\n');
 
+  // Who the invoice is addressed to:
+  //   • eBay/Shopify orders — the shipping address's FIRST line is the buyer's
+  //     real name (customer_name is often just the eBay username), so the name
+  //     comes off the address and the block shows the remaining lines.
+  //   • Direct/manual sales — the typed address is usually JUST the address
+  //     (no name line), so the headline is the customer's business name (when
+  //     known) or their name, with an "Attn:" line when we have both, and the
+  //     address block keeps EVERY line. Previously the first address line was
+  //     used as the name here too, which printed the street instead of the
+  //     customer.
   let billedToName = sale.customer_name || 'Walk-in customer';
-  if (cleanedAddress) {
-    const firstLine = cleanedAddressLines[0];
-    if (firstLine) billedToName = firstLine;
-  } else if (isEbay) {
-    billedToName = 'eBay customer';
-  } else if (isShopify) {
-    billedToName = 'Online customer';
+  let billedToAttn = null;
+  let billedAddrLines = cleanedAddressLines;
+  if (isEbay || isShopify) {
+    if (cleanedAddressLines[0]) {
+      billedToName = cleanedAddressLines[0];
+      billedAddrLines = cleanedAddressLines.slice(1);
+    } else {
+      billedToName = isEbay ? 'eBay customer' : 'Online customer';
+    }
+  } else {
+    const business = (sale.customer_business_name || '').trim();
+    const person = (sale.customer_name || '').trim();
+    billedToName = business || person || 'Walk-in customer';
+    if (business && person && business.toLowerCase() !== person.toLowerCase()) billedToAttn = 'Attn: ' + person;
+    // If the address's first line just repeats the name, don't print it twice.
+    const f = (cleanedAddressLines[0] || '').toLowerCase();
+    if (f && (f === billedToName.toLowerCase() || (person && f === person.toLowerCase()))) {
+      billedAddrLines = cleanedAddressLines.slice(1);
+    }
   }
 
   const isCashReceipt = mode === 'receipt' || sale.payment_method === 'cash';
@@ -1369,7 +1391,8 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   <div class="customer-block">
     <div class="label">For</div>
     <div class="name">${escapeHtml(billedToName)}</div>
-    ${cleanedAddress ? `<div class="addr">${escapeHtml(cleanedAddressLines.slice(1).join('\n'))}</div>` : ''}
+    ${billedToAttn ? `<div class="addr">${escapeHtml(billedToAttn)}</div>` : ''}
+    ${billedAddrLines.length ? `<div class="addr">${escapeHtml(billedAddrLines.join('\n'))}</div>` : ''}
     ${sale.customer_phone ? `<div class="addr">${escapeHtml(sale.customer_phone)}</div>` : ''}
     ${sale.customer_email ? `<div class="addr">${escapeHtml(sale.customer_email)}</div>` : ''}
   </div>
@@ -1661,8 +1684,9 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
       <div class="lbl">${isProforma ? 'Billed to' : 'Billed / Delivered to'}</div>
       <div class="name">${escapeHtml(billedToName)}</div>
       <div class="lines">
-        ${cleanedAddress
-          ? escapeHtml(cleanedAddressLines.slice(1).join('\n')).replace(/\n/g, '<br>') + '<br>'
+        ${billedToAttn ? escapeHtml(billedToAttn) + '<br>' : ''}
+        ${billedAddrLines.length
+          ? escapeHtml(billedAddrLines.join('\n')).replace(/\n/g, '<br>') + '<br>'
           : '<em style="color:#bbb">No address on file</em><br>'}
         ${sale.customer_phone ? escapeHtml(sale.customer_phone) + '<br>' : ''}
         ${sale.customer_email ? escapeHtml(sale.customer_email) : ''}
@@ -1826,6 +1850,23 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
 </body></html>`;
 }
 
+// Attach the customer's business name to a sale row (best-effort) so invoices
+// can headline the business. Linked customer first; else an exact name match.
+async function enrichSaleCustomer(sale) {
+  try {
+    if (!sale || sale.customer_business_name !== undefined) return sale;
+    let row = null;
+    if (sale.customer_id) {
+      row = (await query(`SELECT business_name FROM customers WHERE id = $1`, [sale.customer_id])).rows[0];
+    }
+    if (!row && (sale.customer_name || '').trim()) {
+      row = (await query(`SELECT business_name FROM customers WHERE LOWER(name) = LOWER($1) LIMIT 1`, [sale.customer_name.trim()])).rows[0];
+    }
+    sale.customer_business_name = row?.business_name || null;
+  } catch (_) { sale.customer_business_name = null; }
+  return sale;
+}
+
 // GET /api/sales/:id/invoice.html  — print-ready invoice (or estimate, proforma, or receipt)
 // Query: ?proforma=1 forces proforma layout even for paid invoices.
 // Pro-formas use the FULL invoice template (1:1 with a real invoice) but with
@@ -1834,7 +1875,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
 router.get('/:id/invoice.html', requireAdmin, async (req, res) => {
   const s = await query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
   if (!s.rows[0]) return res.status(404).send('Not found');
-  const sale = s.rows[0];
+  const sale = await enrichSaleCustomer(s.rows[0]);
   const items = (await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id])).rows;
   const company = await getCompanySettings();
   const forceProforma = req.query.proforma === '1' || req.query.proforma === 'true';
@@ -1886,6 +1927,7 @@ async function sendSaleDocumentEmail(saleId, { to, templateKey, includeMessage, 
   const sr = await query('SELECT * FROM sales WHERE id = $1', [saleId]);
   const sale = sr.rows[0];
   if (!sale) return { ok: false, error: 'sale_not_found' };
+  await enrichSaleCustomer(sale);
   const recipient = String(to || sale.customer_email || '').trim();
   if (!recipient) return { ok: false, error: 'no_email_address' };
 
