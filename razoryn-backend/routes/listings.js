@@ -1845,6 +1845,9 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
       shopifyProduct = await shopify.createProduct({
         title, sku, price: shopifyPrice, imageUrls, imageData, status, metafields, qty, tags,
         description: b.description || null, taxable, templateSuffix,
+        // Shopify "Product type" mirrors the eBay category leaf (e.g. "Grilles")
+        // so the storefront gets a category with zero extra typing.
+        productType: (b.productType || '').trim() || null,
         // Pre-orders are CAPPED to the incoming quantity (not unlimited): 'deny' so
         // Shopify won't oversell beyond the available count we push (= units on the
         // way). The available qty is set just after the incoming line is created.
@@ -1922,6 +1925,26 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
     const pool = await autoPoolByPartNumber(productId, partNumber);
     if (pool) result.stockPool = pool;
   } catch (e) { /* best-effort — never fail the create over pooling */ }
+
+  // The cost entered on the create form is a REAL cost record, not just a
+  // display: file it in the cost history (with the original currency when the
+  // form converted from RMB etc.) and share it with every same-part sibling
+  // (pool / same part number) so all their margins line up. Best-effort.
+  if (costPrice != null) {
+    try {
+      const costCur = String(b.costCurrency || 'GBP').toUpperCase();
+      const costForeign = (b.costForeign != null && b.costForeign !== '' && costCur !== 'GBP') ? parseFloat(b.costForeign) : null;
+      await query(
+        `INSERT INTO product_cost_history (product_id, purchase_date, currency, unit_cost_foreign, unit_cost_gbp, qty, note, created_by)
+         VALUES ($1, CURRENT_DATE, $2, $3, $4, $5, 'Set at listing creation', $6)`,
+        [productId, costCur, costForeign, costPrice, qty || null, req.user.id]);
+      const shared = await require('./costs').shareCostWithSiblings(productId, {
+        gbp: costPrice, currency: costCur, foreign: costForeign,
+        qty: qty || null, userId: req.user.id, sourceSku: sku,
+      });
+      if (shared.length) result.costSharedWith = shared;
+    } catch (e) { console.warn('[create-listing] cost record warning:', e.message); }
+  }
 
   // Storefront "Part no" = the REAL part number (the SKU carries per-model
   // suffixes and must never show there). Best-effort.
