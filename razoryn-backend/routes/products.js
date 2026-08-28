@@ -88,6 +88,9 @@ async function ensureProductLocationColumns() {
     // on it — added on top of the goods cost in the margin maths.
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS packaging_included BOOLEAN`);
     await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS packaging_cost NUMERIC(10,2)`);
+    // Fixed box: this item has a settled/standard carton, so its parcel size is
+    // final (vs. still being packed ad-hoc). Set from the handheld quick sheet.
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS fixed_box BOOLEAN`);
     // Extra product photos (beyond the single item/location slots) — used by the
     // damaged-item quick capture so handheld photos ride along with the product
     // and can be reused as listing images as-is.
@@ -702,6 +705,89 @@ router.delete('/:id/photos/:photoId', requirePermission('inventory'), async (req
   } catch (e) { res.status(500).json({ error: 'delete_failed', message: e.message }); }
 });
 
+// Push a product's parcel size/weight to BOTH channels (best-effort): Shopify
+// gets the variant weight (GraphQL — REST weight is dead on 2024-04+) plus dims
+// as metafields; every linked eBay listing gets ShippingPackageDetails via
+// ReviseFixedPriceItem (legacy ReviseItem can silently ignore a package change
+// on listings that already have package details). Shared by the admin PATCH and
+// the staff-permitted /:id/package endpoint.
+async function pushPackageToChannels(row) {
+  const packagePush = { shopifyWeight: null, shopifyDims: null, ebay: [] };
+  if (row.shopify_product_id) {
+    const shopify = require('../services/shopify');
+    if (shopify.isConfigured()) {
+      if (row.pkg_weight_g) {
+        try { const r = await shopify.setVariantWeight(row.shopify_product_id, row.pkg_weight_g); packagePush.shopifyWeight = r.ok ? 'ok' : (r.skipped || 'skipped'); }
+        catch (e) { packagePush.shopifyWeight = e.message; console.warn('[products] shopify weight push failed:', e.message); }
+      }
+      if (row.pkg_length_cm || row.pkg_width_cm || row.pkg_height_cm) {
+        try {
+          const r = await shopify.setPackageDimensionMetafields(row.shopify_product_id,
+            { lengthCm: row.pkg_length_cm, widthCm: row.pkg_width_cm, heightCm: row.pkg_height_cm });
+          packagePush.shopifyDims = r.ok ? 'ok' : (r.skipped || r.error || 'skipped');
+        } catch (e) { packagePush.shopifyDims = e.message; console.warn('[products] shopify dims push failed:', e.message); }
+      }
+    }
+  }
+  if (row.shopify_product_id && (row.pkg_length_cm || row.pkg_width_cm || row.pkg_height_cm || row.pkg_weight_g)) {
+    try {
+      const ebay = require('../services/ebay');
+      if (ebay.isConfigured()) {
+        const links = await query(
+          `SELECT ebay_item_id, store_code FROM mirror_links
+            WHERE shopify_product_id::text = $1 AND ebay_item_id IS NOT NULL`,
+          [String(row.shopify_product_id)]);
+        const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
+        const pkg = { lengthCm: row.pkg_length_cm, widthCm: row.pkg_width_cm, heightCm: row.pkg_height_cm, weightG: row.pkg_weight_g };
+        for (const link of links.rows) {
+          const store = stores.find(s => s.code === link.store_code) || (link.store_code ? null : (stores.find(s => s.primary) || stores[0]));
+          if (!store) continue;   // disabled/old account — skip quietly
+          try {
+            const r = await ebay.reviseItem(link.ebay_item_id, { packageDetails: pkg, call: 'ReviseFixedPriceItem' }, store.code);
+            if (r.warnings) console.warn('[products] ebay package warnings:', link.ebay_item_id, r.warnings.join(' | '));
+            packagePush.ebay.push({ itemId: link.ebay_item_id, ok: true, warnings: r.warnings });
+          } catch (e) {
+            console.warn('[products] ebay package push failed:', link.ebay_item_id, e.message);
+            packagePush.ebay.push({ itemId: link.ebay_item_id, error: e.message });
+          }
+        }
+      }
+    } catch (e) { console.warn('[products] ebay package push failed:', e.message); }
+  }
+  return packagePush;
+}
+
+// POST /api/products/:id/package — warehouse-staff-safe parcel update (the full
+// PATCH is admin-only). Built for the handheld's scan → quick-sheet flow: set
+// size/weight, mark whether the item has a fixed box, and record whether the
+// packaging came with the purchase (or what it costs separately). Pushes the
+// package to Shopify + eBay exactly like the admin edit does.
+router.post('/:id/package', requirePermission('inventory'), async (req, res) => {
+  try {
+    await ensureProductLocationColumns();
+    const b = req.body || {};
+    const sets = [], params = [];
+    const num = (v) => (v === '' || v == null) ? null : parseFloat(v);
+    const add = (col, v) => { params.push(v); sets.push(`${col} = $${params.length}`); };
+    if (b.pkgLengthCm !== undefined) add('pkg_length_cm', num(b.pkgLengthCm));
+    if (b.pkgWidthCm  !== undefined) add('pkg_width_cm',  num(b.pkgWidthCm));
+    if (b.pkgHeightCm !== undefined) add('pkg_height_cm', num(b.pkgHeightCm));
+    if (b.pkgWeightG  !== undefined) add('pkg_weight_g',  (b.pkgWeightG === '' || b.pkgWeightG == null) ? null : Math.round(parseFloat(b.pkgWeightG)));
+    if (b.fixedBox !== undefined) add('fixed_box', !!b.fixedBox);
+    if (b.packagingIncluded !== undefined) add('packaging_included', !!b.packagingIncluded);
+    if (b.packagingCost !== undefined) add('packaging_cost', num(b.packagingCost));
+    if (!sets.length) return res.status(400).json({ error: 'no_fields' });
+    params.push(req.params.id);
+    const { rows } = await query(
+      `UPDATE products SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length} RETURNING *`, params);
+    if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+    const pkgTouched = [b.pkgLengthCm, b.pkgWidthCm, b.pkgHeightCm, b.pkgWeightG].some(v => v !== undefined);
+    const packagePush = pkgTouched ? await pushPackageToChannels(rows[0]) : null;
+    await audit(req, 'update_product_package', 'product', rows[0].id, { fixedBox: b.fixedBox, packagingIncluded: b.packagingIncluded });
+    res.json({ product: rows[0], ...(packagePush ? { packagePush } : {}) });
+  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+});
+
 // PATCH /api/products/:id  — update fields (admin)
 router.patch('/:id', requireAdmin, async (req, res) => {
   const allowed = ['title', 'brand', 'model', 'part_number', 'position', 'barcode',
@@ -709,7 +795,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
                    'location_id', 'active', 'location_note', 'location_photo_data_url',
                    'item_photo_data_url', 'location_photo_data_url_2', 'primary_photo', 'large_panel', 'price_locked', 'shipping_band', 'shipping_cost', 'postage_in_price',
                    'pkg_length_cm', 'pkg_width_cm', 'pkg_height_cm', 'pkg_weight_g',
-                   'packaging_included', 'packaging_cost'];
+                   'packaging_included', 'packaging_cost', 'fixed_box'];
   // Map camelCase -> snake_case
   const map = { partNumber: 'part_number', lowStockThreshold: 'low_stock_threshold',
                 priceShopify: 'price_shopify', priceEbay: 'price_ebay',
@@ -720,7 +806,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
                 primaryPhoto: 'primary_photo', largePanel: 'large_panel', priceLocked: 'price_locked',
                 shippingBand: 'shipping_band', shippingCost: 'shipping_cost', postageInPrice: 'postage_in_price',
                 pkgLengthCm: 'pkg_length_cm', pkgWidthCm: 'pkg_width_cm', pkgHeightCm: 'pkg_height_cm', pkgWeightG: 'pkg_weight_g',
-                packagingIncluded: 'packaging_included', packagingCost: 'packaging_cost' };
+                packagingIncluded: 'packaging_included', packagingCost: 'packaging_cost', fixedBox: 'fixed_box' };
   const sets = [], params = [];
   // Always ensure the per-product location/photo columns (incl. updated_at)
   // exist before we touch them — cheap (cached after first run).
@@ -766,54 +852,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
     } catch (e) { console.warn('[products] shopify vendor push failed:', e.message); }
   }
   let packagePush = null;
-  if (pkgTouched) {
-    packagePush = { shopifyWeight: null, shopifyDims: null, ebay: [] };
-    if (rows[0].shopify_product_id) {
-      const shopify = require('../services/shopify');
-      if (shopify.isConfigured()) {
-        // Weight → InventoryItem measurement (GraphQL — REST weight is dead on 2024-04+).
-        if (rows[0].pkg_weight_g) {
-          try { const r = await shopify.setVariantWeight(rows[0].shopify_product_id, rows[0].pkg_weight_g); packagePush.shopifyWeight = r.ok ? 'ok' : (r.skipped || 'skipped'); }
-          catch (e) { packagePush.shopifyWeight = e.message; console.warn('[products] shopify weight push failed:', e.message); }
-        }
-        // Dimensions → product metafields (Shopify has no native per-product dims).
-        if (rows[0].pkg_length_cm || rows[0].pkg_width_cm || rows[0].pkg_height_cm) {
-          try {
-            const r = await shopify.setPackageDimensionMetafields(rows[0].shopify_product_id,
-              { lengthCm: rows[0].pkg_length_cm, widthCm: rows[0].pkg_width_cm, heightCm: rows[0].pkg_height_cm });
-            packagePush.shopifyDims = r.ok ? 'ok' : (r.skipped || r.error || 'skipped');
-          } catch (e) { packagePush.shopifyDims = e.message; console.warn('[products] shopify dims push failed:', e.message); }
-        }
-      }
-    }
-    if (rows[0].shopify_product_id && (rows[0].pkg_length_cm || rows[0].pkg_width_cm || rows[0].pkg_height_cm || rows[0].pkg_weight_g)) {
-      try {
-        const ebay = require('../services/ebay');
-        if (ebay.isConfigured()) {
-          const links = await query(
-            `SELECT ebay_item_id, store_code FROM mirror_links
-              WHERE shopify_product_id::text = $1 AND ebay_item_id IS NOT NULL`,
-            [String(rows[0].shopify_product_id)]);
-          const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
-          const pkg = { lengthCm: rows[0].pkg_length_cm, widthCm: rows[0].pkg_width_cm, heightCm: rows[0].pkg_height_cm, weightG: rows[0].pkg_weight_g };
-          for (const link of links.rows) {
-            const store = stores.find(s => s.code === link.store_code) || (link.store_code ? null : (stores.find(s => s.primary) || stores[0]));
-            if (!store) continue;   // disabled/old account — skip quietly
-            try {
-              // ReviseFixedPriceItem: legacy ReviseItem can silently ignore a
-              // package change on listings that ALREADY have package details.
-              const r = await ebay.reviseItem(link.ebay_item_id, { packageDetails: pkg, call: 'ReviseFixedPriceItem' }, store.code);
-              if (r.warnings) console.warn('[products] ebay package warnings:', link.ebay_item_id, r.warnings.join(' | '));
-              packagePush.ebay.push({ itemId: link.ebay_item_id, ok: true, warnings: r.warnings });
-            } catch (e) {
-              console.warn('[products] ebay package push failed:', link.ebay_item_id, e.message);
-              packagePush.ebay.push({ itemId: link.ebay_item_id, error: e.message });
-            }
-          }
-        }
-      } catch (e) { console.warn('[products] ebay package push failed:', e.message); }
-    }
-  }
+  if (pkgTouched) packagePush = await pushPackageToChannels(rows[0]);
   // Audit without the huge base64 blobs
   const auditBody = { ...req.body };
   for (const f of ['itemPhotoDataUrl', 'locationPhotoDataUrl', 'locationPhotoDataUrl2']) {

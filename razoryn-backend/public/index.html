@@ -841,6 +841,14 @@
   /* Desktop/admin-only controls (eBay pull, channel syncs, print, etc.) — hidden
      inside the app, which auto-refreshes and is a lean warehouse tool. */
   body.is-app .app-hide { display: none !important; }
+  /* Never allow sideways panning/overflow in the app — the page must stay
+     locked to the device width (only inner tables may scroll horizontally). */
+  body.is-app { overflow-x: hidden; touch-action: pan-y; }
+  body.is-app #content { overflow-x: hidden; max-width: 100vw; }
+  body.is-app #content .page { max-width: 100%; }
+  /* Two-column layouts stack on the handheld (create-listing panels included). */
+  body.is-app .grid-2 { grid-template-columns: 1fr !important; }
+  body.is-app .grid-4 { grid-template-columns: 1fr 1fr !important; }
   /* Toolbars: search gets a full-width row (no more cut-off), filters wrap below. */
   body.is-app .toolbar { flex-wrap: wrap; gap: 8px; }
   body.is-app .toolbar .search-input { flex: 1 1 100%; width: 100%; min-width: 0; font-size: 16px; }
@@ -1394,6 +1402,7 @@ function adaptProduct(p) {
     pkgWeightG: p.pkg_weight_g != null ? parseInt(p.pkg_weight_g) : null,
     packagingIncluded: p.packaging_included == null ? null : !!p.packaging_included,
     packagingCost: p.packaging_cost != null ? parseFloat(p.packaging_cost) : null,
+    fixedBox: p.fixed_box == null ? null : !!p.fixed_box,
   };
 }
 function adaptSale(s) {
@@ -2780,7 +2789,7 @@ function initKiosk() {
 // warehouse workflow: operational pages + Settings only (no marketing/admin
 // management), a bottom quick-bar for one-tap Scan/Inventory/Dispatch/Returns,
 // bigger touch targets, and global hardware-scanner capture.
-const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','locations','returns','dispatch','notifications','schedule','settings']);
+const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','locations','returns','dispatch','notifications','schedule','settings','createlisting']);
 // Pages surfaced in the bottom quick-bar (order = left→right). Home is leftmost.
 // Only shown if the user has permission for them. Scan lives inside Stock Check
 // now (hardware scanner is automatic), so there's no separate Scan tab.
@@ -2981,8 +2990,14 @@ function onHardwareScan(code) {
     // the trigger works exactly like the USB/keyboard box on those screens.
     if (State.page === 'stocktake' && typeof handleStScan === 'function') { handleStScan(code); return; }
     if (State.page === 'scan' && typeof handleScan === 'function') { handleScan(code); return; }
-    // Anywhere else: jump to Inventory filtered to the scanned code — the fastest
-    // "what/where is this part" lookup from a trigger-pull.
+    // A recognised barcode/SKU anywhere else → the product quick sheet: update
+    // stock, set the location + photo, size/weight, fixed box, packaging — all
+    // in one tap-friendly modal. Falls back to the inventory search otherwise.
+    const c = String(code).trim().toLowerCase();
+    const hits = (State.products || []).filter(p =>
+      (p.barcode || '').toLowerCase() === c || (p.sku || '').toLowerCase() === c ||
+      (p.partNumber || '').toLowerCase() === c || (p.partNumbers || []).some(pn => String(pn.code || pn).toLowerCase() === c));
+    if (hits.length === 1) { openProductQuickSheet(hits[0].id); return; }
     routeTo('inventory');
     setTimeout(() => {
       const box = el('inv-search'); if (box) { box.value = code; box.dispatchEvent(new Event('input', { bubbles: true })); }
@@ -3197,6 +3212,32 @@ function routeTo(page) {
     </div></div></div>`;
   }
   document.getElementById('content').scrollTo(0, 0);
+  // History entry per page, so the browser/phone back button moves BETWEEN
+  // pages (see the popstate handler below) instead of leaving the app.
+  if (!window._navFromHistory) {
+    try { if (!history.state || history.state.page !== page || history.state.modal) history.pushState({ page }, '', '#' + page); } catch (_) {}
+  } else {
+    try { history.replaceState({ page }, '', '#' + page); } catch (_) {}
+  }
+}
+
+// ── Back-button navigation (desktop, mobile browser AND the APK, where the
+// system back button pops WebView history). An open modal closes first; then
+// each back press walks the visited pages; only from the very first page does
+// back actually leave. No reloads — pages re-render in place.
+if (!window._histNavBound) {
+  window._histNavBound = true;
+  window.addEventListener('popstate', (e) => {
+    try {
+      const ov = document.getElementById('modal-overlay');
+      if (ov && ov.classList.contains('open')) { closeModal(); return; }
+      const pg = (e.state && e.state.page) || (location.hash || '').replace(/^#/, '');
+      if (!pg || pg === State.page) return;
+      if (typeof hasPerm === 'function' && !hasPerm(pg)) return;
+      window._navFromHistory = true;
+      try { routeTo(pg); } finally { window._navFromHistory = false; }
+    } catch (err) { console.warn('[nav] popstate failed:', err.message); }
+  });
 }
 
 /* ==================== MONTHLY STOCK-TAKE CHECKLIST ==================== */
@@ -4182,7 +4223,7 @@ function paintIncoming(items) {
       <td>${statusPill(i.status)}</td>
       <td style="white-space:nowrap">
         ${remaining > 0 ? `<button class="btn btn-primary btn-sm" onclick="openReceiveIncoming(${i.id})" title="Receive units — adds to stock & pushes to channels">📦 Receive</button>` : ''}
-        ${!linked ? `<button class="btn btn-outline btn-sm app-hide" onclick="incDraftListing(${i.id})" title="This item isn't listed yet — start its listing pre-filled from this line (SKU, title, part number, qty, cost). Save as draft or push live; the line links up automatically via the SKU.">📝 Draft listing</button>` : ''}
+        ${!linked ? `<button class="btn btn-outline btn-sm" onclick="incDraftListing(${i.id})" title="This item isn't listed yet — start its listing pre-filled from this line (SKU, title, part number, qty, cost). Save as draft or push live; the line links up automatically via the SKU.">📝 Draft listing</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="printIncomingLabels(${i.id})" title="Print labels for this item (to apply when the goods arrive)">🏷</button>
         <button class="btn btn-ghost btn-sm" onclick="openEditIncoming(${i.id})" title="Edit">✏️</button>
         <button class="btn btn-ghost btn-sm" onclick="deleteIncoming(${i.id})" title="Delete" style="color:var(--red)">🗑</button>
@@ -4586,7 +4627,7 @@ function renderInventory() {
         <td><input type="checkbox" class="inv-row-check" data-act="check" data-pid="${p.id}" ${State.invSelected.has(p.id)?'checked':''}></td>
         <td>
           ${p.imageUrl
-            ? `<img src="${p.imageUrl}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:6px;background:var(--line-2)">`
+            ? `<img src="${p.imageUrl}" alt="" loading="lazy" decoding="async" style="width:48px;height:48px;object-fit:cover;border-radius:6px;background:var(--line-2)">`
             : `<div style="width:48px;height:48px;border-radius:6px;background:var(--line-2);display:flex;align-items:center;justify-content:center;color:var(--ink-soft)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>`
           }
         </td>
@@ -4968,7 +5009,7 @@ function openProductModal(id) {
         ${p.stockGroupId
           ? `<span class="pill" style="background:var(--bg-soft);font-family:ui-monospace,monospace">${escapeHtml(p.stockGroupCode || ('pool #' + p.stockGroupId))}</span><button class="btn btn-ghost btn-sm app-hide" onclick="closeModal();routeTo('sharedstock')">Manage pools →</button>`
           : `<button class="btn btn-outline btn-sm" onclick="sgAddProductToPool(${p.id})">🔗 Add to shared pool…</button>`}
-        <button class="btn btn-outline btn-sm admin-only app-hide" onclick="clCopyFromProduct(${p.id})" title="Start a NEW listing pre-filled from this one — photos, part number, category, item specifics and price carry over; just set a new SKU and change the make/model. Keeping the same part number auto-joins the shared pool.">📋 Copy as new listing…</button>
+        <button class="btn btn-outline btn-sm admin-only" onclick="clCopyFromProduct(${p.id})" title="Start a NEW listing pre-filled from this one — photos, part number, category, item specifics and price carry over; just set a new SKU and change the make/model. Keeping the same part number auto-joins the shared pool.">📋 Copy as new listing…</button>
         </div>
       </div>` : ''}
       ${id ? `<div class="field"><label>Sub part numbers <span style="font-weight:400;color:var(--ink-soft)">— alternate factory / country codes. All are searchable and resolve to the SKU above (the printed master code).</span></label><div id="m-subpn">Loading…</div></div>` : `<div class="field" style="font-size:11px;color:var(--ink-soft)">Save the product first, then re-open it to add alternate (sub) part numbers.</div>`}
@@ -12954,7 +12995,7 @@ function clCoreHtml() {
       <input id="cl-partnumber" style="font-family:ui-monospace,monospace" placeholder="e.g. 602001929AA" autocomplete="off">
       <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">🔗 Listings that fit multiple models should share <strong>the same part number</strong> — they'll be auto-linked into one shared stock pool (a sale on any one reduces them all).</div></div>
     <div class="field"><label>Photos</label>
-      <input type="file" id="cl-photo-file" accept="image/*" multiple onchange="clAddPhotos(this)" style="font-size:12px">
+      <input type="file" id="cl-photo-file" accept="image/*" multiple capture="environment" onchange="clAddPhotos(this)" style="font-size:12px">
       <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">${editing
         ? 'Remove a watermarked photo (×), add clean ones, and drag the main one first (◀ ▶). Saving replaces the photos on <strong>both Shopify &amp; eBay</strong>.'
         : 'Uploaded to Shopify; the same photos are reused on the eBay listing.'}</div>
@@ -12991,7 +13032,7 @@ function clCoreHtml() {
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Tags (comma-separated)</label><input id="cl-tags" placeholder="MO18, grille"></div>
-      <div class="field"><label>Shopify status</label><select id="cl-status">${editing ? '<option value="">— Keep current —</option>' : ''}<option value="draft">Draft</option><option value="active">Active</option></select></div>
+      <div class="field"><label>Shopify status</label><select id="cl-status">${editing ? '<option value="">— Keep current —</option>' : ''}<option value="active">Active</option><option value="draft">Draft</option></select></div>
     </div>
     ${editing ? '' : `
     <div class="field" style="border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--bg-soft)">
@@ -13116,7 +13157,11 @@ async function submitUnifiedCreate(btn, overrides = {}) {
       pkgHeightCm: (el('cl-pkg-h')?.value || '') !== '' ? parseFloat(el('cl-pkg-h').value) : null,
       pkgWeightG: (el('cl-pkg-g')?.value || '') !== '' ? Math.round(parseFloat(el('cl-pkg-g').value) * 1000) : null,   // UI is kg → stored as grams
       tags: (el('cl-tags')?.value || '').trim() || null,
-      status: el('cl-status')?.value || 'draft',
+      status: el('cl-status')?.value || 'active',
+      // Shopify Product type mirrors the eBay category leaf automatically.
+      productType: (el('ce-cat-path')?.textContent || '').split(' › ').pop().trim() || CL.categoryName || null,
+      costCurrency: el('cl-cost-cur')?.value || 'GBP',
+      costForeign: (el('cl-cost-foreign')?.value || '') !== '' ? parseFloat(el('cl-cost-foreign').value) : null,
       taxable: el('cl-taxable') ? el('cl-taxable').checked : true,
       templateSuffix: el('cl-template')?.value || null,
       shippingProfileId: el('cl-shipprofile')?.value || null,
@@ -13141,6 +13186,14 @@ async function submitUnifiedCreate(btn, overrides = {}) {
     return;
   }
   if (created.stockPool) toast(`🔗 Linked into a shared stock pool — ${created.stockPool.memberCount} listings now share part № ${escapeHtml(created.partNumber || partNumber || sku)} (qty ${created.stockPool.qty})`, 'success', 8000);
+  // Surface any Shopify metafields that were rejected instead of silently dropping them.
+  if ((created.metafieldIssues || []).length) {
+    toast('⚠ Some Shopify metafields failed: ' + created.metafieldIssues.map(m => m.key + ' (' + m.error + ')').join(' · '), 'warn', 10000);
+  }
+  // The listing is saved — typing in the form must no longer arm the
+  // "unsaved changes" guard (that's what caused the leave-page popup + the
+  // feeling of a full refresh after creating).
+  Editing.dirty = false;
   await Store.refresh('products').catch(() => {});
   // Publishing a draft: the listing is now a real product, so remove the draft.
   if (CL.draftId) { try { await Api.delete('/api/listings/drafts/' + CL.draftId); } catch (_) {} CL.draftId = null; }
@@ -13244,25 +13297,50 @@ function clCostRecalc() {
   if (el('cl-cost-gbp')) el('cl-cost-gbp').textContent = gbp != null ? '= £' + gbp.toFixed(2) : '= £—';
   clRenderEstProfit();
 }
+// Recommended selling price from a cost: solve (numerically) for the price
+// whose margin hits the target %, using the SAME fee maths as the live
+// estimate — so the recommendation and the estimate always agree.
+function clRecommendPrice(cost, channel, targetPct) {
+  const pseudo = { costPrice: cost, postageInPrice: true, largePanel: false, shippingBand: null, shippingCost: null, landedKnown: false, landedCost: null };
+  let lo = cost, hi = Math.max(cost * 6, cost + 400);
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    const m = ctComputeBreakdown(mid, pseudo, channel);
+    if ((m.marginPct ?? -100) < targetPct) lo = mid; else hi = mid;
+  }
+  return Math.ceil(hi * 100) / 100;
+}
 async function clRenderEstProfit() {
   const box = el('cl-est-profit'); if (!box) return;
   const cost = parseFloat(el('cl-cost')?.value);
   const price = parseFloat(el('ce-price')?.value);
-  if (!(cost > 0) || !(price > 0)) { box.style.display = 'none'; return; }
+  if (!(cost > 0)) { box.style.display = 'none'; return; }
   if (!CT.settings || !Object.keys(CT.settings).length) {
     try { CT.settings = (await Api.get('/api/costs/settings')).settings || {}; }
     catch (_) { box.style.display = 'none'; return; }
   }
-  const pseudo = { costPrice: cost, postageInPrice: true, largePanel: false, shippingBand: null, shippingCost: null, landedKnown: false, landedCost: null };
-  const eb = ctComputeBreakdown(price, pseudo, 'ebay');
-  const sp = parseFloat(el('cl-shop')?.value) || +(price * 0.95).toFixed(2);
-  const sh = ctComputeBreakdown(sp, pseudo, 'shopify');
-  const line = (n, b2) => `<div style="display:flex;justify-content:space-between"><span>${n}</span><span style="font-weight:700;color:${b2.marginPct < 0 ? 'var(--red)' : b2.marginPct < 10 ? 'var(--amber)' : 'var(--green)'}">${ctMoney(b2.net)} net · ${ctPct(b2.marginPct)}</span></div>`;
+  const target = parseFloat(CT.settings.targetMarginPct) || 25;
+  const recoEbay = clRecommendPrice(cost, 'ebay', target);
   box.style.display = '';
-  box.innerHTML = `
-    <div style="font-weight:700;margin-bottom:4px">Estimated profit at these prices <span style="font-weight:400;color:var(--ink-soft)">— incl. fees, VAT, standard postage; refine in Costs &amp; margins after listing</span></div>
-    ${line('eBay @ £' + price.toFixed(2), eb)}
-    ${line('Shopify @ £' + sp.toFixed(2), sh)}`;
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+      <span><strong>Recommended eBay price: £${recoEbay.toFixed(2)}</strong> <span style="color:var(--ink-soft)">(hits the ${target}% target margin from £${cost.toFixed(2)} cost)</span></span>
+      <button type="button" class="btn btn-outline btn-sm" onclick="if(el('ce-price')){el('ce-price').value='${recoEbay.toFixed(2)}';el('ce-price').dispatchEvent(new Event('input',{bubbles:true}))}">Use £${recoEbay.toFixed(2)}</button>
+    </div>`;
+  if (price > 0) {
+    const pseudo = { costPrice: cost, postageInPrice: true, largePanel: false, shippingBand: null, shippingCost: null, landedKnown: false, landedCost: null };
+    const eb = ctComputeBreakdown(price, pseudo, 'ebay');
+    const sp = parseFloat(el('cl-shop')?.value) || +(price * 0.95).toFixed(2);
+    const sh = ctComputeBreakdown(sp, pseudo, 'shopify');
+    const line = (n, b2) => `<div style="display:flex;justify-content:space-between"><span>${n}</span><span style="font-weight:700;color:${b2.marginPct < 0 ? 'var(--red)' : b2.marginPct < 10 ? 'var(--amber)' : 'var(--green)'}">${ctMoney(b2.net)} net · ${ctPct(b2.marginPct)}</span></div>`;
+    html += `
+      <div style="font-weight:700;margin-bottom:4px">Estimated profit at these prices <span style="font-weight:400;color:var(--ink-soft)">— incl. fees, VAT, standard postage. Change the price above to play with profitability; refine per-item postage in Costs &amp; margins after listing.</span></div>
+      ${line('eBay @ £' + price.toFixed(2), eb)}
+      ${line('Shopify @ £' + sp.toFixed(2), sh)}`;
+  } else {
+    html += `<div style="color:var(--ink-soft)">Type a price (or hit Use) to see the live profit at that price.</div>`;
+  }
+  box.innerHTML = html;
 }
 // Live update the estimate when the eBay price is typed (fields render later).
 document.addEventListener('input', (e) => {
@@ -13348,8 +13426,12 @@ function clOfferRepeat(r) {
     body: `<p style="margin:0 0 8px">Listed everywhere${r && r.itemId ? ` — eBay ItemID <strong>${escapeHtml(String(r.itemId))}</strong>` : ''}.</p>
       <p style="margin:0;color:var(--ink-soft);font-size:13px">Create another listing using the same info? The form stays filled — just enter a <strong>new unique SKU</strong> and tweak anything else (e.g. make/model for a different fitment). Keep the <strong>same part number</strong> and they'll share one stock pool automatically.</p>`,
     actions: [
-      { label: 'Done', onClick: () => { closeModal(); routeTo('mirror'); } },
-      { label: '🔁 Repeat listing', primary: true, onClick: async () => { closeModal(); CL_REPEAT = snap; await renderCreateListing(); } },
+      { label: '✅ Finished', onClick: () => { Editing.dirty = false; closeModal(); routeTo('mirror'); } },
+      { label: '🔁 Repeat listing', primary: true, onClick: async () => {
+        Editing.dirty = false; closeModal(); CL_REPEAT = snap; await renderCreateListing();
+        // Bulk sessions: clear the SKU so the next one can't collide by accident.
+        setTimeout(() => { const s = el('cl-sku'); if (s) { s.value = ''; s.focus(); } }, 200);
+      } },
     ],
   });
 }
@@ -15129,7 +15211,7 @@ async function dmgSubmit() {
           <div style="font-size:12px;color:var(--ink-soft);margin-top:4px">${r.photoCount || 0} photo${r.photoCount === 1 ? '' : 's'} linked — they'll be used as the listing photos as-is.</div>
         </div>`,
       actions: [
-        { label: '📝 List it now', primary: true, className: 'app-hide', onClick: () => dmgListNow(prod.id, prod.title, prod.part_number, prod.sku, el('dmg-qty')?.value) },
+        { label: '📝 List it now', primary: true, onClick: () => dmgListNow(prod.id, prod.title, prod.part_number, prod.sku, el('dmg-qty')?.value) },
         { label: '🏷 Print label', onClick: () => { closeModal(); const fresh = State.products.find(x => x.id === prod.id); if (fresh && typeof promptPrintLabels === 'function') promptPrintLabels(fresh, 'new_product'); } },
         { label: 'Done', onClick: closeModal },
       ],
@@ -15150,7 +15232,7 @@ async function dmgListNow(productId, title, partNumber, sku, qty) {
     ebayCategoryId: '', clCategoryId: '', clCategoryName: '', images: photos,
   };
   routeTo('createlisting');
-  if (State.page !== 'createlisting') { CL_REPEAT = null; toast('Listing creation is desktop-only — the item + photos are saved, list it from the computer.', 'info', 6000); return; }
+  if (State.page !== 'createlisting') { CL_REPEAT = null; toast('No access to the listing creator on this login — the item + photos are saved, list it from an admin login.', 'info', 6000); return; }
   setTimeout(() => { const s = el('cl-sku'); if (s && !s.value && sku) s.value = sku; }, 150);
   toast('Pre-filled from the damaged item — photos carried over as-is. Set the price and condition, then create.', 'info', 8000);
 }
@@ -15357,6 +15439,133 @@ async function stConfirm() {
     // Ready for the next parcel straight away.
     if (typeof loadDispatch === 'function') loadDispatch();
     stReset();
+  } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// ── Product quick sheet — what a barcode scan opens on the handheld ─────────
+// One modal with everything staff do at the shelf: stock count, location +
+// photo, parcel size/weight (with carton presets), fixed-box flag and the
+// packaging-cost toggle. Each section saves on its own button so a half-done
+// sheet never blocks the bits that were finished.
+function openProductQuickSheet(id) {
+  const p = (State.products || []).find(x => String(x.id) === String(id));
+  if (!p) { toast('Product not found', 'error'); return; }
+  modal({
+    title: '📦 ' + (p.title || p.sku || 'Product'),
+    body: `
+      <div style="display:flex;gap:10px;align-items:center;background:var(--bg-soft);border-radius:10px;padding:10px 12px;margin-bottom:12px">
+        ${p.imageUrl || p.itemPhoto ? `<img src="${escapeAttr(p.imageUrl || p.itemPhoto)}" loading="lazy" style="width:52px;height:52px;object-fit:cover;border-radius:8px">` : ''}
+        <div style="flex:1;min-width:0">
+          <div class="copyable" data-copy="${escapeAttr(p.sku || '')}" style="font-family:ui-monospace,monospace;font-size:13px;font-weight:700">${escapeHtml(p.sku || '')}</div>
+          <div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(p.partNumber || '')}${p.location ? ' · 📍 ' + escapeHtml(p.location) : ''}</div>
+        </div>
+        <button class="btn btn-ghost btn-sm admin-only" onclick="closeModal();openProductModal('${p.id}')" title="Full edit">✏️</button>
+      </div>
+
+      <div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px">
+        <div style="font-weight:700;font-size:12px;margin-bottom:6px">Stock quantity</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-outline" style="width:52px;font-size:18px" onclick="var q=el('qs-qty');q.value=Math.max(0,(parseInt(q.value)||0)-1)">−</button>
+          <input id="qs-qty" type="number" min="0" inputmode="numeric" value="${p.qtyOnHand ?? 0}" style="flex:1;text-align:center;font-size:18px;font-weight:700">
+          <button class="btn btn-outline" style="width:52px;font-size:18px" onclick="var q=el('qs-qty');q.value=(parseInt(q.value)||0)+1">+</button>
+          <button class="btn btn-primary" onclick="qsSaveQty('${p.id}')">💾</button>
+        </div>
+        <div style="font-size:10px;color:var(--ink-soft);margin-top:4px">Saving pushes the new quantity to Shopify + eBay.</div>
+      </div>
+
+      <div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px">
+        <div style="font-weight:700;font-size:12px;margin-bottom:6px">📍 Location</div>
+        <input id="qs-loc" value="${escapeAttr(p.locationNote || '')}" placeholder="e.g. Aisle B, Rack 3, top shelf" style="width:100%;margin-bottom:6px">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="file" id="qs-loc-photo" accept="image/*" capture="environment" style="display:none" onchange="qsLocPhotoPicked(this)">
+          <button class="btn btn-outline btn-sm" type="button" onclick="el('qs-loc-photo').click()">📷 Photo of the spot</button>
+          <span id="qs-loc-photo-note" style="font-size:11px;color:var(--ink-soft)">${p.locationPhoto ? 'Has a photo — retake to replace' : 'No photo yet'}</span>
+          <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="qsSaveLocation('${p.id}')">💾 Save location</button>
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px">
+        <div style="font-weight:700;font-size:12px;margin-bottom:6px">📦 Parcel &amp; packaging</div>
+        <select id="qs-preset" style="width:100%;margin-bottom:6px" onchange="qsApplyPreset(this.value)"><option value="">— Carton preset —</option></select>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:8px">
+          <div><input type="number" step="0.1" min="0" id="qs-l" value="${p.pkgLengthCm ?? ''}" placeholder="L"><div style="font-size:9px;color:var(--ink-soft);text-align:center">L cm</div></div>
+          <div><input type="number" step="0.1" min="0" id="qs-w" value="${p.pkgWidthCm ?? ''}" placeholder="W"><div style="font-size:9px;color:var(--ink-soft);text-align:center">W cm</div></div>
+          <div><input type="number" step="0.1" min="0" id="qs-h" value="${p.pkgHeightCm ?? ''}" placeholder="H"><div style="font-size:9px;color:var(--ink-soft);text-align:center">H cm</div></div>
+          <div><input type="number" step="0.01" min="0" id="qs-kg" value="${p.pkgWeightG != null ? +(p.pkgWeightG / 1000).toFixed(2) : ''}" placeholder="kg"><div style="font-size:9px;color:var(--ink-soft);text-align:center">kg</div></div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:6px"><label class="switch"><input type="checkbox" id="qs-fixed" ${p.fixedBox ? 'checked' : ''}><span></span></label> Has a fixed box (settled carton size)</label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:6px"><label class="switch"><input type="checkbox" id="qs-prepack" ${p.packagingIncluded !== false ? 'checked' : ''} onchange="el('qs-pack-cost-wrap').style.display=this.checked?'none':''"><span></span></label> Comes pre-packaged (packaging in the purchase cost)</label>
+        <div id="qs-pack-cost-wrap" style="display:${p.packagingIncluded === false ? '' : 'none'};margin-bottom:6px">
+          <input id="qs-pack-cost" type="number" step="0.01" min="0" inputmode="decimal" value="${p.packagingCost ?? ''}" placeholder="£ packaging per item" style="width:100%">
+          <div style="font-size:10px;color:var(--ink-soft);margin-top:2px">Bought separately — this £ goes into the item's cost maths.</div>
+        </div>
+        <button class="btn btn-primary" style="width:100%" onclick="qsSavePackage('${p.id}')">💾 Save parcel &amp; packaging</button>
+      </div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
+  populateCartonPresets('qs-preset');
+}
+function qsApplyPreset(idx) {
+  if (idx === '' || idx == null) return;
+  const c = (State.shippingCfg?.cartons || [])[+idx]; if (!c) return;
+  const set = (id2, v) => { const n = el(id2); if (n && v != null) n.value = v; };
+  set('qs-l', c.lengthCm); set('qs-w', c.widthCm); set('qs-h', c.heightCm); set('qs-kg', c.weightKg);
+  const f = el('qs-fixed'); if (f) f.checked = true;   // picked a standard carton → it has a fixed box
+}
+async function qsSaveQty(id) {
+  const qty = parseInt(el('qs-qty')?.value);
+  if (!Number.isInteger(qty) || qty < 0) { toast('Enter a quantity', 'warn'); return; }
+  const taskId = Task.start('Updating stock');
+  try {
+    const r = await Api.post(`/api/products/${id}/set-quantity`, { quantity: qty, notes: 'Quick sheet (scan)' });
+    Task.done(taskId);
+    toast(r.channelPush ? summarizeChannelPush(r.channelPush) : 'Stock updated', 'success', 5000);
+    Store.refresh('products').catch(() => {});
+  } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+let _qsLocPhoto = null;
+async function qsLocPhotoPicked(input) {
+  const f = input.files && input.files[0]; input.value = '';
+  if (!f) return;
+  try {
+    _qsLocPhoto = await readAsDataUrl(await downscaleImage(f, { maxDim: 1400 }));
+    const n = el('qs-loc-photo-note'); if (n) n.textContent = '✓ Photo ready — hit Save location';
+  } catch (e) { toast('Photo failed: ' + e.message, 'error'); }
+}
+async function qsSaveLocation(id) {
+  const body = { locationNote: (el('qs-loc')?.value || '').trim() };
+  if (_qsLocPhoto) body.locationPhotoDataUrl = _qsLocPhoto;
+  const taskId = Task.start('Saving location');
+  try {
+    await Api.patch(`/api/products/${id}/location`, body);
+    Task.done(taskId);
+    _qsLocPhoto = null;
+    toast('Location saved', 'success');
+    Store.refresh('products').catch(() => {});
+  } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function qsSavePackage(id) {
+  const v = (x) => { const n = el(x); return n && n.value !== '' ? n.value : null; };
+  const prepack = !!el('qs-prepack')?.checked;
+  const taskId = Task.start('Saving parcel');
+  try {
+    const r = await Api.post(`/api/products/${id}/package`, {
+      pkgLengthCm: v('qs-l'), pkgWidthCm: v('qs-w'), pkgHeightCm: v('qs-h'),
+      pkgWeightG: v('qs-kg') != null ? Math.round(parseFloat(v('qs-kg')) * 1000) : null,
+      fixedBox: !!el('qs-fixed')?.checked,
+      packagingIncluded: prepack,
+      packagingCost: prepack ? null : v('qs-pack-cost'),
+    });
+    Task.done(taskId);
+    const pp = r.packagePush;
+    const errs = [];
+    if (pp) {
+      if (pp.shopifyWeight && pp.shopifyWeight !== 'ok') errs.push('Shopify weight: ' + pp.shopifyWeight);
+      if (pp.shopifyDims && pp.shopifyDims !== 'ok') errs.push('Shopify dims: ' + pp.shopifyDims);
+      (pp.ebay || []).forEach(e2 => { if (e2.error) errs.push('eBay ' + e2.itemId + ': ' + e2.error); });
+    }
+    toast(errs.length ? '⚠ Saved, but: ' + errs.join(' · ') : 'Parcel & packaging saved' + (pp ? ' — pushed to channels' : ''), errs.length ? 'warn' : 'success', 6000);
+    Store.refresh('products').catch(() => {});
   } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
@@ -16743,6 +16952,27 @@ function ceCategoryPick(id, path) {
   if (el('ce-cat-suggest')) el('ce-cat-suggest').innerHTML = '';
   if (el('ce-cat-search')) el('ce-cat-search').value = path ? path.split(' › ').pop() : id;
   ceLoadSpecifics(id);
+  // Auto-fill the Shopify category from the eBay one (same name) so it never
+  // needs picking twice. Only when the user hasn't chosen one themselves.
+  const leaf = path ? path.split(' › ').pop().trim() : '';
+  if (leaf) clAutoMatchShopCat(leaf);
+}
+// Match a name against Shopify's taxonomy and auto-select the best hit for the
+// Shopify category (skipped once one is already picked). Best-effort + silent.
+async function clAutoMatchShopCat(name) {
+  if (CL.categoryId || !name) return;
+  try {
+    const r = await Api.get('/api/listings/shopify-categories?q=' + encodeURIComponent(name));
+    const cats = r.categories || [];
+    if (!cats.length) return;
+    // Prefer an exact leaf-name match; else the first (best-ranked) result.
+    const exact = cats.find(c => (c.name || '').split(/[>›]/).pop().trim().toLowerCase() === name.toLowerCase());
+    const pick = exact || cats[0];
+    if (CL.categoryId) return;   // user picked one while we were searching
+    CL.categoryId = pick.id; CL.categoryName = pick.name;
+    const cur = el('cl-cat-current');
+    if (cur) cur.innerHTML = '✓ ' + escapeHtml(pick.name) + ' <span style="color:var(--ink-soft);font-weight:400">(auto-matched from the eBay category — search above to change)</span>';
+  } catch (_) {}
 }
 let _ceSpecTimer = null;
 function ceCategoryManual(v) {
@@ -22818,6 +23048,9 @@ function modal({ title, body, actions=[] }) {
     el('modal-foot').appendChild(b);
   });
   el('modal-overlay').classList.add('open');
+  // One history entry per open modal, so the phone/browser back button closes
+  // the modal (see the popstate handler) instead of leaving the page.
+  try { if (!(history.state && history.state.modal)) history.pushState({ page: State.page, modal: true }, '', location.hash || ('#' + (State.page || 'dashboard'))); } catch (_) {}
   // Label any tables in the modal so they stack cleanly on mobile.
   try { if (typeof labelizeTables === 'function') labelizeTables(el('modal-body')); } catch (_) {}
 }

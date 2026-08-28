@@ -305,7 +305,7 @@ function normaliseImageUrls(imageUrls = []) {
   return [...new Set((imageUrls || []).map(maxResImageUrl).filter(Boolean))];
 }
 
-async function createProduct({ title, sku, price, imageUrls = [], imageData = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null, description = null, taxable = true, inventoryPolicy = null }) {
+async function createProduct({ title, sku, price, imageUrls = [], imageData = [], status = 'draft', metafields = [], qty = null, tags = null, templateSuffix = null, description = null, taxable = true, inventoryPolicy = null, productType = null }) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const imgs = normaliseImageUrls(imageUrls);
   // imageData = base64 data URLs (uploaded files). Strip the data: prefix —
@@ -334,6 +334,7 @@ async function createProduct({ title, sku, price, imageUrls = [], imageData = []
       .map((img, i) => ({ ...img, position: i + 1 })),
   };
   if (description != null) productPayload.body_html = description;
+  if (productType) productPayload.product_type = String(productType).slice(0, 255); // e.g. eBay category leaf ("Grilles")
   if (tags) productPayload.tags = tags; // comma-separated string
   if (templateSuffix) productPayload.template_suffix = templateSuffix; // e.g. "large-parts"
 
