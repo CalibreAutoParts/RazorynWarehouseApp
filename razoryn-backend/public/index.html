@@ -13306,8 +13306,17 @@ async function clImportStudioPhotos(setId, btn) {
     CL.images.push(...urls);
     CL.imagesDirty = true;
     clRenderPhotos();
-    // Part numbers captured at photo time flow into the listing too: fill the
-    // main part number if empty, merge alternates into "sub part numbers".
+    // Everything captured at photo time flows into the listing: the title
+    // fills the eBay title if empty (Shopify mirrors it when blank), the
+    // main part number fills if empty, alternates merge into sub part numbers.
+    let titleAdded = false;
+    const titleEl = el('ce-title');
+    if (r.title && titleEl && !titleEl.value.trim()) {
+      titleEl.value = String(r.title).slice(0, 80);
+      titleEl.dispatchEvent(new Event('input', { bubbles: true }));
+      if (el('ce-title-count')) el('ce-title-count').textContent = titleEl.value.length + '/80';
+      titleAdded = true;
+    }
     let pnsAdded = 0;
     const pnEl = el('cl-partnumber');
     if (r.part_number && pnEl && !pnEl.value.trim()) { pnEl.value = r.part_number; pnsAdded++; }
@@ -13322,7 +13331,7 @@ async function clImportStudioPhotos(setId, btn) {
       }
       subEl.value = existing.join('\n');
     }
-    if (btn) btn.textContent = `✓ ${urls.length} photo${urls.length === 1 ? '' : 's'}${pnsAdded ? ` + ${pnsAdded} part №` : ''}`;
+    if (btn) btn.textContent = `✓ ${urls.length} photo${urls.length === 1 ? '' : 's'}${titleAdded ? ' + title' : ''}${pnsAdded ? ` + ${pnsAdded} part №` : ''}`;
   } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = 'Import'; }
     alert('Import failed: ' + (e.message || 'error'));
