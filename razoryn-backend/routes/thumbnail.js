@@ -244,7 +244,8 @@ router.get('/products', async (req, res) => {
 
   let rows = [];
   const COLS = ['id', 'sku', 'title', 'brand', 'model', 'part_number', 'position',
-    'barcode', 'image_url', 'shopify_product_id', 'stock_group_id', 'qty_on_hand', 'active'];
+    'barcode', 'image_url', 'shopify_product_id', 'stock_group_id', 'qty_on_hand', 'active',
+    'price_shopify', 'price_ebay'];
   const cols = COLS.join(', ');
   const colsP = COLS.map(c => `p.${c}`).join(', ');
   if (sku) {
@@ -295,6 +296,9 @@ router.get('/products', async (req, res) => {
       shopify_product_id: p.shopify_product_id,
       qty_on_hand: p.qty_on_hand,
       active: p.active,
+      // Selling prices — the thumbnail app prints the Shopify price on ads.
+      price_shopify: p.price_shopify != null ? Number(p.price_shopify) : null,
+      price_ebay: p.price_ebay != null ? Number(p.price_ebay) : null,
       partNumbers: alts,
       stockGroupSiblings: siblings,
     });
