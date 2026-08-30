@@ -941,6 +941,7 @@ router.get('/vinsearch', async (req, res) => {
       email: showLogin ? (v.email || '') : null,
       password: showLogin ? (v.password || '') : null,
       showToStaff: v.showToStaff !== false,
+      autoLogin: !!v.autoLogin,
       configured: !!(v.email || v.password),
       isAdmin,
     });
@@ -957,6 +958,7 @@ router.post('/vinsearch', requireAdmin, async (req, res) => {
     if (b.email !== undefined) v.email = String(b.email || '').trim().slice(0, 200);
     if (b.password !== undefined) v.password = String(b.password || '').slice(0, 200);
     if (b.showToStaff !== undefined) v.showToStaff = !!b.showToStaff;
+    if (b.autoLogin !== undefined) v.autoLogin = !!b.autoLogin;
     await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`,
       [JSON.stringify({ ...cur, vinsearch: v })]);
     await audit(req, 'vinsearch_config', null, null, { showToStaff: v.showToStaff });
