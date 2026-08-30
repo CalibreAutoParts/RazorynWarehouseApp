@@ -3455,13 +3455,42 @@ function stSortList(list, sort) {
   }
   return list;
 }
+// ── Shared-pool dedupe ──────────────────────────────────────────────────────
+// Pool members are ONE physical part listed several times (different SKU per
+// fitment) sharing one stock count. Anywhere the app deals with physical stock
+// (stock check, labels, low-stock) they collapse to a single representative:
+// the pool "master" (the member whose barcode is its own SKU — the printed
+// code), else the oldest member.
+function poolMaster(p) {
+  if (!p?.stockGroupId) return p;
+  const members = (State.products || []).filter(x => x.stockGroupId === p.stockGroupId);
+  if (!members.length) return p;
+  return members.find(x => (x.barcode || '') === x.sku) || members.slice().sort((a, z) => a.id - z.id)[0];
+}
+function dedupeSharedPools(list) {
+  const seen = new Set(); const out = [];
+  for (const p of (list || [])) {
+    const key = p.stockGroupId ? 'g' + p.stockGroupId : 'p' + p.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p.stockGroupId ? poolMaster(p) : p);
+  }
+  return out;
+}
+// Counted state that understands pools: counting ANY member counts the part.
+function stPoolChecked(p) {
+  const checked = State._stChecked || new Set();
+  if (checked.has(String(p.id))) return true;
+  if (p.stockGroupId) return (State.products || []).some(x => x.stockGroupId === p.stockGroupId && checked.has(String(x.id)));
+  return false;
+}
+
 function stFiltered() {
   const q = (el('st-search')?.value || '');
   const filter = el('st-filter')?.value || 'remaining';
   const make = el('st-make')?.value || '';
   const loc = el('st-location')?.value || '';
-  const checked = State._stChecked || new Set();
-  return (State.products || []).filter(p => {
+  const base = (State.products || []).filter(p => {
     // Pre-listed items aren't physically here yet — exclude from the count.
     if (p.isPrelisted) return false;
     // Hidden/parked listings are excluded from stock-checks.
@@ -3470,16 +3499,22 @@ function stFiltered() {
     if (make && String(p.brand || "").trim().toLowerCase() !== make.trim().toLowerCase()) return false;
     if (loc === '__none__') { if (p.location) return false; }
     else if (loc && p.location !== loc) return false;
-    const isChecked = checked.has(String(p.id));
+    return true;
+  });
+  // ONE row per physical part: pooled listings collapse to the pool master,
+  // and a pool counts as counted when ANY member was counted.
+  return dedupeSharedPools(base).filter(p => {
+    const isChecked = stPoolChecked(p);
     if (filter === 'remaining' && isChecked) return false;
     if (filter === 'counted' && !isChecked) return false;
     return true;
   });
 }
 function stProgress() {
-  const countable = (State.products || []).filter(p => !p.isPrelisted && !p.hidden);
+  // Physical parts, not listings: pools count once in the denominator.
+  const countable = dedupeSharedPools((State.products || []).filter(p => !p.isPrelisted && !p.hidden));
   const total = countable.length;
-  const done = countable.filter(p => State._stChecked.has(String(p.id))).length;
+  const done = countable.filter(p => stPoolChecked(p)).length;
   const pct = total ? Math.round(done / total * 100) : 0;
   // Cadence context: when the next full check is due.
   let due = '';
@@ -3604,7 +3639,7 @@ function stPrintForm() {
   w.document.close();
 }
 function stRowHtml(p) {
-  const checked = State._stChecked.has(String(p.id));
+  const checked = stPoolChecked(p);   // counting any pool member counts the part
   return `
     <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line-2);${checked ? 'opacity:.55' : ''}">
       <button data-act="count" data-pid="${p.id}" title="${checked ? 'Counted' : 'Mark counted'}" style="width:34px;height:34px;border-radius:8px;flex-shrink:0;border:2px solid ${checked ? 'var(--green)' : 'var(--line)'};background:${checked ? 'var(--green)' : 'transparent'};color:#fff;font-size:16px;font-weight:700;cursor:pointer">${checked ? '✓' : ''}</button>
@@ -3613,9 +3648,13 @@ function stRowHtml(p) {
         : `<div style="width:42px;height:42px;border-radius:6px;background:var(--line-2);flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--ink-soft)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>`}
       <div style="flex:1;min-width:0">
         ${p.stockGroupCode
-          ? `<div style="font-weight:700;font-size:14px;font-family:ui-monospace,monospace">PN ${escapeHtml(p.stockGroupCode)}</div>
-             <div style="color:var(--ink-soft);font-size:11px;margin-top:1px">🔗 Shared stock — count this part number once</div>
-             <div style="color:var(--ink-soft);font-size:11px">${escapeHtml(p.sku)} · ${escapeHtml(p.location || 'No location')}</div>`
+          ? (() => {
+              const members = (State.products || []).filter(x => x.stockGroupId === p.stockGroupId);
+              const fits = [...new Set(members.map(x => [x.brand, x.model].filter(Boolean).join(' ').trim()).filter(Boolean))];
+              return `<div style="font-weight:700;font-size:14px;font-family:ui-monospace,monospace">PN ${escapeHtml(p.stockGroupCode)}</div>
+             <div style="color:var(--ink-soft);font-size:11px;margin-top:1px">🔗 Shared part — one count covers all ${members.length} listings${fits.length > 1 ? ' · fits ' + escapeHtml(fits.slice(0, 4).join(', ')) + (fits.length > 4 ? ` +${fits.length - 4}` : '') : ''}</div>
+             <div style="color:var(--ink-soft);font-size:11px">${escapeHtml(p.sku)} · ${escapeHtml(p.location || 'No location')}</div>`;
+            })()
           : `<div style="font-weight:600;font-size:13px">${escapeHtml(p.title)}</div>
              <div style="color:var(--ink-soft);font-size:12px">${escapeHtml(p.sku)} · ${escapeHtml(p.location || 'No location')}</div>`}
       </div>
@@ -6177,17 +6216,22 @@ function renderLabels() {
     const q = el('lab-search').value.trim().toLowerCase();
     const wrap = el('lab-suggest');
     if (!q || q.length < 2) { wrap.innerHTML = ''; return; }
-    const matches = (State.products || []).filter(p =>
+    // Shared-pool members are ONE physical part — collapse them so the pool
+    // appears once (its label lists every fitment anyway).
+    const matches = dedupeSharedPools((State.products || []).filter(p =>
       matchesKeywords(q, p.sku, p.title, p.partNumber, p.barcode, ...(p.partNumbers||[]).map(a => a.code))
-    ).slice(0, 12);
+    )).slice(0, 12);
     wrap.innerHTML = matches.length
       ? `<div style="position:absolute;top:4px;left:0;right:0;background:var(--white);border:1px solid var(--line);border-radius:6px;max-height:280px;overflow-y:auto;z-index:20;box-shadow:var(--shadow)">
-        ${matches.map(p => `
+        ${matches.map(p => {
+          const members = p.stockGroupId ? (State.products || []).filter(x => x.stockGroupId === p.stockGroupId) : [];
+          const fits = [...new Set(members.map(x => [x.brand, x.model].filter(Boolean).join(' ').trim()).filter(Boolean))];
+          return `
           <div onclick="labelsAdd(${p.id})" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line)">
-            <div style="font-size:12px;font-weight:500">${escapeHtml(p.title)}</div>
-            <div style="font-size:10px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku)} · ${totalQty(p)} in stock</div>
-          </div>
-        `).join('')}
+            <div style="font-size:12px;font-weight:500">${escapeHtml(p.title)}${members.length > 1 ? ` <span class="pill" style="font-size:9px;background:var(--bg-soft)">🔗 shared × ${members.length}</span>` : ''}</div>
+            <div style="font-size:10px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku)} · ${totalQty(p)} in stock${fits.length > 1 ? ' · fits ' + escapeHtml(fits.join(', ')) : ''}</div>
+          </div>`;
+        }).join('')}
       </div>`
       : '<div style="position:absolute;top:4px;left:0;right:0;background:var(--white);border:1px solid var(--line);border-radius:6px;padding:10px;font-size:12px;color:var(--ink-soft);z-index:20">No matches</div>';
   });
@@ -6199,10 +6243,13 @@ function renderLabels() {
 }
 
 function labelsAdd(productId) {
-  const p = State.products.find(x => x.id == productId);
+  let p = State.products.find(x => x.id == productId);
   if (!p) return;
+  p = poolMaster(p);   // shared pool → always label the pool master (one physical part, one label)
   State.labels = State.labels || [];
-  const existing = State.labels.find(l => l.productId === p.id);
+  // Any member of the same pool already queued counts as this label.
+  const existing = State.labels.find(l => l.productId === p.id
+    || (p.stockGroupId && (State.products.find(x => x.id === l.productId)?.stockGroupId === p.stockGroupId)));
   if (existing) { existing.qty++; }
   else { State.labels.push({ productId: p.id, sku: p.sku, title: p.title, barcode: p.barcode || p.sku, partNumber: p.partNumber || p.sku, qty: 1 }); }
   el('lab-search').value = '';
@@ -6301,13 +6348,15 @@ function promptPrintLabels(product, reason, qtyHint) {
       { label: '🏷 Print labels', primary: true, onClick: () => {
         const qty = +el('ppl-qty').value || 1;
         const size = el('ppl-size').value;
-        // Queue the product and route to Labels
+        // Queue the product and route to Labels. A shared-pool member labels as
+        // the pool MASTER — one physical part, one shelf label (all fitments on it).
+        const lp = (typeof poolMaster === 'function' ? poolMaster(product) : product) || product;
         State.labels = State.labels || [];
-        const existing = State.labels.find(l => l.productId === product.id);
+        const existing = State.labels.find(l => l.productId === lp.id);
         if (existing) existing.qty += qty;
         else State.labels.push({
-          productId: product.id, sku: product.sku, title: product.title,
-          barcode: product.barcode || product.sku, partNumber: product.partNumber || product.sku, qty,
+          productId: lp.id, sku: lp.sku, title: lp.title,
+          barcode: lp.barcode || lp.sku, partNumber: lp.partNumber || lp.sku, qty,
         });
         closeModal();
         routeTo('labels');
