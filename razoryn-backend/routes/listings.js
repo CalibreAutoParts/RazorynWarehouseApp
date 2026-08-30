@@ -1897,8 +1897,9 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
     INSERT INTO products (sku, title, barcode, part_number, qty_on_hand, price_ebay, price_shopify, image_url,
                           shopify_product_id, shopify_variant_id, shopify_inventory_id, active,
                           is_prelisted, preorder_active, preorder_eta, ebay_scheduled_at, ebay_prelist_payload, ebay_prelist_status,
-                          cost_price, pkg_length_cm, pkg_width_cm, pkg_height_cm, pkg_weight_g)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING id`,
+                          cost_price, pkg_length_cm, pkg_width_cm, pkg_height_cm, pkg_weight_g,
+                          packaging_included, packaging_cost)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING id`,
     [sku, title, barcode, partNumber, qty, ebayPrice, shopifyPrice, imgSrcs[0] || null,
      shopifyProduct ? String(shopifyProduct.id) : null,
      v?.id ? String(v.id) : null,
@@ -1909,7 +1910,9 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
      ebayScheduledAt,
      ebayPrelistPayload ? JSON.stringify(ebayPrelistPayload) : null,
      ebayPrelistPayload ? 'scheduled' : null,
-     costPrice, pkgL, pkgW, pkgH, pkgG]);
+     costPrice, pkgL, pkgW, pkgH, pkgG,
+     b.packagingIncluded === undefined ? null : !!b.packagingIncluded,
+     (b.packagingCost != null && b.packagingCost !== '') ? parseFloat(b.packagingCost) : null]);
   const productId = ins.rows[0].id;
 
   // Store the alternate / sub part numbers against the new product (searchable).

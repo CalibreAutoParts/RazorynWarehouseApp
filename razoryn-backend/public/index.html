@@ -1493,6 +1493,8 @@ function adaptReturn(r) {
     reason: r.reason,
     resolution: r.resolution,
     refundAmount: parseFloat(r.refund_amount || 0),
+    refundMethod: r.refund_method || null,
+    closedLocally: !!r.closed_locally,
     status: r.status,
     notes: r.notes,
     photoCount: r.photo_count || 0,
@@ -6885,6 +6887,17 @@ async function openReturnDetail(id) {
         </select>
         <div id="rd-resolution-hint" style="font-size:11px;color:var(--ink-soft);margin-top:6px;line-height:1.5"></div>
       </div>
+
+      ${r.status !== 'closed' ? `
+      <div style="border-top:1px solid var(--line);padding-top:12px;margin-bottom:6px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600;margin-bottom:6px">Close this return</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-outline btn-sm" onclick="closeReturnAs(${r.id}, 'cash')">💷 Closed — refunded CASH</button>
+          <button class="btn btn-outline btn-sm" onclick="closeReturnAs(${r.id}, 'bank')">🏦 Closed — refunded BANK</button>
+          <button class="btn btn-outline btn-sm" onclick="closeReturnAs(${r.id}, 'none')">✖ Closed — no refund</button>
+        </div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Closes it here right away — even for an eBay case that hasn't updated on eBay yet (the sync won't reopen it; if eBay closes it later the states just line up).</div>
+      </div>` : `${r.refundMethod ? `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:6px">Closed${r.closedLocally ? ' on the warehouse app' : ''} — refund via <strong>${escapeHtml(r.refundMethod === 'none' ? 'no refund' : r.refundMethod)}</strong></div>` : ''}`}
     `,
     actions: [
       { label: 'Close', onClick: closeModal },
@@ -6895,6 +6908,30 @@ async function openReturnDetail(id) {
   });
   // Initialise the resolution hint after the modal renders
   setTimeout(updateResolutionHint, 0);
+}
+
+// Close a return from the warehouse app, recording how the money went back.
+// Works for direct (cash/bank) sales AND for eBay cases that haven't flipped
+// to closed on eBay yet — closed_locally stops the 15-min sync reopening it.
+async function closeReturnAs(id, method) {
+  const label = method === 'cash' ? 'refunded by CASH' : method === 'bank' ? 'refunded by BANK transfer' : 'no refund';
+  if (!confirm(`Close this return (${label})?`)) return;
+  try {
+    await Api.patch('/api/returns/' + id, {
+      status: 'closed',
+      refundMethod: method,
+      notes: el('rd-notes')?.value ?? undefined,
+      resolution: el('rd-resolution')?.value || undefined,
+    });
+    toast('Return closed — ' + label, 'success');
+    closeModal();
+    await Store.refresh('returns');
+    if (State.page === 'returns') {
+      const active = document.querySelector('[data-rfilter].active')?.dataset.rfilter || 'open';
+      filterReturns(active);
+    }
+    refreshNavCounts();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 async function saveReturnDetail(id) {
@@ -12777,7 +12814,7 @@ async function renderCreateListing() {
       </div>
     </div>`;
   try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (_) {}
-  CL.categoryId = ''; CL.categoryName = ''; CL._catResults = []; CL.images = [];
+  CL.categoryId = ''; CL.categoryName = ''; CL.categoryAuto = false; CL._catResults = []; CL.images = [];
   CL.editProductId = null; CL.imagesReadonly = false;   // create mode (not edit)
   CL.draftId = null;   // set when resuming a saved draft
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
@@ -12823,7 +12860,7 @@ async function renderEditListing() {
       </div>
     </div>`;
   try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (_) {}
-  CL.categoryId = ''; CL.categoryName = ''; CL._catResults = []; CL.images = []; CL.imagesReadonly = false; CL.imagesDirty = false;
+  CL.categoryId = ''; CL.categoryName = ''; CL.categoryAuto = false; CL._catResults = []; CL.images = []; CL.imagesReadonly = false; CL.imagesDirty = false;
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
 
   let detail;
@@ -13029,6 +13066,13 @@ function clCoreHtml() {
         <div><input type="number" step="0.1" min="0" id="cl-pkg-h" placeholder="H cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Height</div></div>
         <div><input type="number" step="0.1" min="0" id="cl-pkg-g" placeholder="kg"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (kg)</div></div>
       </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><label class="switch"><input type="checkbox" id="cl-pack-inc" checked onchange="el('cl-pack-cost-wrap').style.display=this.checked?'none':''"><span></span></label> Comes pre-packaged (packaging in the purchase cost)</label>
+        <span id="cl-pack-cost-wrap" style="display:none;align-items:center;gap:6px">
+          <input type="number" step="0.01" min="0" id="cl-pack-cost" placeholder="£ packaging/item" style="width:130px">
+          <span style="font-size:11px;color:var(--ink-soft)">bought separately — goes into the cost maths</span>
+        </span>
+      </div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div class="field"><label>Tags (comma-separated)</label><input id="cl-tags" placeholder="MO18, grille"></div>
@@ -13162,6 +13206,8 @@ async function submitUnifiedCreate(btn, overrides = {}) {
       productType: (el('ce-cat-path')?.textContent || '').split(' › ').pop().trim() || CL.categoryName || null,
       costCurrency: el('cl-cost-cur')?.value || 'GBP',
       costForeign: (el('cl-cost-foreign')?.value || '') !== '' ? parseFloat(el('cl-cost-foreign').value) : null,
+      packagingIncluded: el('cl-pack-inc') ? !!el('cl-pack-inc').checked : undefined,
+      packagingCost: (el('cl-pack-cost')?.value || '') !== '' ? parseFloat(el('cl-pack-cost').value) : null,
       taxable: el('cl-taxable') ? el('cl-taxable').checked : true,
       templateSuffix: el('cl-template')?.value || null,
       shippingProfileId: el('cl-shipprofile')?.value || null,
@@ -13297,18 +13343,22 @@ function clCostRecalc() {
   if (el('cl-cost-gbp')) el('cl-cost-gbp').textContent = gbp != null ? '= £' + gbp.toFixed(2) : '= £—';
   clRenderEstProfit();
 }
-// Recommended selling price from a cost: solve (numerically) for the price
-// whose margin hits the target %, using the SAME fee maths as the live
-// estimate — so the recommendation and the estimate always agree.
+// Recommended selling price from a cost, matching the Costs & margins floor
+// maths exactly: find the BREAKEVEN price (net profit = 0) numerically with the
+// same fee model as the live estimate, then add the configured target on top
+// (floor = breakeven × (1 + target%) — the target is a markup over breakeven,
+// NOT a margin-of-price, which is why the old solver ran away to a huge number).
 function clRecommendPrice(cost, channel, targetPct) {
   const pseudo = { costPrice: cost, postageInPrice: true, largePanel: false, shippingBand: null, shippingCost: null, landedKnown: false, landedCost: null };
-  let lo = cost, hi = Math.max(cost * 6, cost + 400);
-  for (let i = 0; i < 40; i++) {
+  let lo = 0.01, hi = Math.max(cost * 3, 30);
+  for (let g = 0; g < 25 && ctComputeBreakdown(hi, pseudo, channel).net < 0; g++) hi *= 1.5;
+  if (ctComputeBreakdown(hi, pseudo, channel).net < 0) return null;   // fees ≥ 100% — infeasible
+  for (let i = 0; i < 50; i++) {
     const mid = (lo + hi) / 2;
-    const m = ctComputeBreakdown(mid, pseudo, channel);
-    if ((m.marginPct ?? -100) < targetPct) lo = mid; else hi = mid;
+    if (ctComputeBreakdown(mid, pseudo, channel).net < 0) lo = mid; else hi = mid;
   }
-  return Math.ceil(hi * 100) / 100;
+  const breakeven = hi;
+  return { breakeven: +breakeven.toFixed(2), reco: +(breakeven * (1 + (parseFloat(targetPct) || 0) / 100)).toFixed(2) };
 }
 async function clRenderEstProfit() {
   const box = el('cl-est-profit'); if (!box) return;
@@ -13320,13 +13370,16 @@ async function clRenderEstProfit() {
     catch (_) { box.style.display = 'none'; return; }
   }
   const target = parseFloat(CT.settings.targetMarginPct) || 25;
-  const recoEbay = clRecommendPrice(cost, 'ebay', target);
+  const rec = clRecommendPrice(cost, 'ebay', target);
   box.style.display = '';
-  let html = `
+  let html = '';
+  if (rec) {
+    html += `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
-      <span><strong>Recommended eBay price: £${recoEbay.toFixed(2)}</strong> <span style="color:var(--ink-soft)">(hits the ${target}% target margin from £${cost.toFixed(2)} cost)</span></span>
-      <button type="button" class="btn btn-outline btn-sm" onclick="if(el('ce-price')){el('ce-price').value='${recoEbay.toFixed(2)}';el('ce-price').dispatchEvent(new Event('input',{bubbles:true}))}">Use £${recoEbay.toFixed(2)}</button>
+      <span><strong>Recommended eBay price: £${rec.reco.toFixed(2)}</strong> <span style="color:var(--ink-soft)">— breakeven £${rec.breakeven.toFixed(2)} + your ${target}% target (same maths as Costs &amp; margins)</span></span>
+      <button type="button" class="btn btn-outline btn-sm" onclick="if(el('ce-price')){el('ce-price').value='${rec.reco.toFixed(2)}';el('ce-price').dispatchEvent(new Event('input',{bubbles:true}))}">Use £${rec.reco.toFixed(2)}</button>
     </div>`;
+  }
   if (price > 0) {
     const pseudo = { costPrice: cost, postageInPrice: true, largePanel: false, shippingBand: null, shippingCost: null, landedKnown: false, landedCost: null };
     const eb = ctComputeBreakdown(price, pseudo, 'ebay');
@@ -13427,6 +13480,11 @@ function clOfferRepeat(r) {
       <p style="margin:0;color:var(--ink-soft);font-size:13px">Create another listing using the same info? The form stays filled — just enter a <strong>new unique SKU</strong> and tweak anything else (e.g. make/model for a different fitment). Keep the <strong>same part number</strong> and they'll share one stock pool automatically.</p>`,
     actions: [
       { label: '✅ Finished', onClick: () => { Editing.dirty = false; closeModal(); routeTo('mirror'); } },
+      { label: '➕ New blank listing', onClick: async () => {
+        // Bulk sessions of DIFFERENT parts: stay right here with an empty form.
+        Editing.dirty = false; closeModal(); CL_REPEAT = null; await renderCreateListing();
+        setTimeout(() => el('cl-sku')?.focus(), 200);
+      } },
       { label: '🔁 Repeat listing', primary: true, onClick: async () => {
         Editing.dirty = false; closeModal(); CL_REPEAT = snap; await renderCreateListing();
         // Bulk sessions: clear the SKU so the next one can't collide by accident.
@@ -13740,7 +13798,7 @@ function clSearchCats(q) {
 }
 function clPickCat(i) {
   const c = CL._catResults[i]; if (!c) return;
-  CL.categoryId = c.id; CL.categoryName = c.name;
+  CL.categoryId = c.id; CL.categoryName = c.name; CL.categoryAuto = false;   // manual pick — stop auto-matching
   const cur = el('cl-cat-current'); if (cur) cur.innerHTML = '✓ ' + escapeHtml(c.name);
   const res = el('cl-cat-results'); if (res) res.style.display = 'none';
   const s = el('cl-cat-search'); if (s) s.value = '';
@@ -16967,9 +17025,12 @@ function ceCategoryPick(id, path) {
   if (leaf) clAutoMatchShopCat(leaf);
 }
 // Match a name against Shopify's taxonomy and auto-select the best hit for the
-// Shopify category (skipped once one is already picked). Best-effort + silent.
+// Shopify category. Re-runs every time the eBay category changes, as long as
+// the Shopify one is empty OR was itself auto-matched — a manual pick
+// (clPickCat) always wins and stops the auto updates. Best-effort + silent.
 async function clAutoMatchShopCat(name) {
-  if (CL.categoryId || !name) return;
+  if (!name) return;
+  if (CL.categoryId && !CL.categoryAuto) return;   // user chose one — leave it alone
   try {
     const r = await Api.get('/api/listings/shopify-categories?q=' + encodeURIComponent(name));
     const cats = r.categories || [];
@@ -16977,8 +17038,8 @@ async function clAutoMatchShopCat(name) {
     // Prefer an exact leaf-name match; else the first (best-ranked) result.
     const exact = cats.find(c => (c.name || '').split(/[>›]/).pop().trim().toLowerCase() === name.toLowerCase());
     const pick = exact || cats[0];
-    if (CL.categoryId) return;   // user picked one while we were searching
-    CL.categoryId = pick.id; CL.categoryName = pick.name;
+    if (CL.categoryId && !CL.categoryAuto) return;   // user picked one while we were searching
+    CL.categoryId = pick.id; CL.categoryName = pick.name; CL.categoryAuto = true;
     const cur = el('cl-cat-current');
     if (cur) cur.innerHTML = '✓ ' + escapeHtml(pick.name) + ' <span style="color:var(--ink-soft);font-weight:400">(auto-matched from the eBay category — search above to change)</span>';
   } catch (_) {}
