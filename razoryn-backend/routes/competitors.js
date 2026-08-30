@@ -42,6 +42,108 @@ router.get('/alerts', canRead, async (req, res) => {
   res.json({ alerts: rows });
 });
 
+// GET /api/competitors/compare?productId=&listingId=
+// Side-by-side of OUR stock vs every competitor's matched listing (part number
+// / title matches). Grouped per product with all competitors' offers ranked by
+// delivered price, plus a per-competitor threat ranking. Includes our cost
+// fields so the frontend can run the same margin maths as Costs & margins.
+router.get('/compare', canRead, async (req, res) => {
+  try {
+    const where = [`m.product_id IS NOT NULL`, `m.dismissed = false`, `l.available = true`, `p.active = true`];
+    const params = [];
+    if (req.query.listingId) {
+      // Resolve the listing → its product so the modal shows EVERY offer for that part.
+      const pr = await query(`SELECT product_id FROM competitor_match WHERE listing_id = $1`, [req.query.listingId]);
+      if (pr.rows[0]?.product_id) { params.push(pr.rows[0].product_id); where.push(`m.product_id = $${params.length}`); }
+      else return res.json({ items: [], competitors: [] });
+    } else if (req.query.productId) {
+      params.push(req.query.productId); where.push(`m.product_id = $${params.length}`);
+    }
+    const { rows } = await query(`
+      SELECT p.id AS product_id, p.sku, p.title AS our_title, p.part_number, p.image_url AS our_image,
+             p.price_ebay, p.price_shopify, p.qty_on_hand,
+             p.cost_price, p.landed_cost, p.large_panel, p.shipping_band, p.shipping_cost AS our_shipping_cost,
+             p.postage_in_price, p.packaging_included, p.packaging_cost,
+             l.id AS listing_id, l.title AS their_title, l.price AS their_price, l.currency,
+             l.shipping_cost AS their_shipping, l.shipping_free, l.shipping_type, l.url, l.image_url AS their_image,
+             l.last_seen_at,
+             m.match_type, m.confidence,
+             c.id AS competitor_id, c.name AS competitor_name, c.code AS competitor_code
+        FROM competitor_match m
+        JOIN competitor_listings l ON l.id = m.listing_id
+        JOIN competitors c         ON c.id = l.competitor_id
+        JOIN products p            ON p.id = m.product_id
+       WHERE ${where.join(' AND ')}
+       ORDER BY p.title, l.price NULLS LAST
+       LIMIT 3000`, params);
+
+    const byProduct = new Map();
+    for (const r of rows) {
+      const price = r.their_price != null ? parseFloat(r.their_price) : null;
+      const ship = r.shipping_free ? 0 : (r.their_shipping != null ? parseFloat(r.their_shipping) : null);
+      const delivered = price != null ? +(price + (ship || 0)).toFixed(2) : null;
+      if (!byProduct.has(r.product_id)) {
+        byProduct.set(r.product_id, {
+          productId: r.product_id, sku: r.sku, title: r.our_title, partNumber: r.part_number,
+          image: r.our_image, priceEbay: r.price_ebay != null ? parseFloat(r.price_ebay) : null,
+          priceShopify: r.price_shopify != null ? parseFloat(r.price_shopify) : null,
+          qtyOnHand: r.qty_on_hand,
+          costPrice: r.cost_price != null ? parseFloat(r.cost_price) : null,
+          landedCost: r.landed_cost != null ? parseFloat(r.landed_cost) : null,
+          largePanel: !!r.large_panel, shippingBand: r.shipping_band,
+          shippingCost: r.our_shipping_cost != null ? parseFloat(r.our_shipping_cost) : null,
+          postageInPrice: r.postage_in_price,
+          packagingIncluded: r.packaging_included, packagingCost: r.packaging_cost != null ? parseFloat(r.packaging_cost) : null,
+          offers: [],
+        });
+      }
+      byProduct.get(r.product_id).offers.push({
+        listingId: r.listing_id, competitorId: r.competitor_id, competitor: r.competitor_name, competitorCode: r.competitor_code,
+        title: r.their_title, url: r.url, image: r.their_image,
+        price, shipping: ship, shippingType: r.shipping_type, delivered,
+        matchType: r.match_type, confidence: r.confidence != null ? parseFloat(r.confidence) : null,
+        lastSeenAt: r.last_seen_at,
+      });
+    }
+
+    const items = [...byProduct.values()];
+    for (const it of items) {
+      it.offers.sort((a, z) => (a.delivered == null) - (z.delivered == null) || (a.delivered ?? 0) - (z.delivered ?? 0));
+      const cheapest = it.offers.find(o => o.delivered != null);
+      it.cheapestDelivered = cheapest ? cheapest.delivered : null;
+      it.delta = (it.priceEbay != null && it.cheapestDelivered != null) ? +(it.cheapestDelivered - it.priceEbay).toFixed(2) : null;
+    }
+    // Undercuts first (worst gap at the top), then the rest by title.
+    items.sort((a, z) => {
+      const au = a.delta != null && a.delta < 0, zu = z.delta != null && z.delta < 0;
+      if (au !== zu) return au ? -1 : 1;
+      if (au && zu) return a.delta - z.delta;
+      return String(a.title).localeCompare(String(z.title));
+    });
+
+    // Per-competitor threat ranking across the matched set.
+    const perComp = new Map();
+    for (const it of items) {
+      if (it.priceEbay == null) continue;
+      for (const o of it.offers) {
+        if (o.delivered == null) continue;
+        if (!perComp.has(o.competitorId)) perComp.set(o.competitorId, { competitorId: o.competitorId, competitor: o.competitor, matched: 0, cheaper: 0, gapPctSum: 0 });
+        const s = perComp.get(o.competitorId);
+        s.matched++;
+        if (o.delivered < it.priceEbay) s.cheaper++;
+        s.gapPctSum += ((o.delivered - it.priceEbay) / it.priceEbay) * 100;
+      }
+    }
+    const competitors = [...perComp.values()].map(s => ({
+      ...s, avgGapPct: s.matched ? +(s.gapPctSum / s.matched).toFixed(1) : null, gapPctSum: undefined,
+      cheaperPct: s.matched ? +((s.cheaper / s.matched) * 100).toFixed(0) : null,
+    })).sort((a, z) => (z.cheaperPct ?? -1) - (a.cheaperPct ?? -1) || (a.avgGapPct ?? 0) - (z.avgGapPct ?? 0));
+    competitors.forEach((c, i) => { c.rank = i + 1; });
+
+    res.json({ items, competitors });
+  } catch (e) { res.status(500).json({ error: 'compare_failed', message: e.message }); }
+});
+
 // GET /api/competitors/opportunities — parts/models they sell that we don't.
 router.get('/opportunities', canRead, async (req, res) => {
   const { rows } = await query(`

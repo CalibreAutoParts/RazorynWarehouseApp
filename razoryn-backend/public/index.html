@@ -22666,6 +22666,7 @@ function renderCompetitors() {
       </div>
       <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
         ${compTabBtn('manager', 'Competitors')}
+        ${compTabBtn('compare', '🆚 Compare')}
         ${compTabBtn('listings', 'Listings')}
         ${compTabBtn('market', 'Market & Ranking')}
         ${compTabBtn('opportunities', 'Opportunities')}
@@ -22686,6 +22687,7 @@ async function loadCompTab() {
   const tab = State.comp.tab;
   try {
     if (tab === 'manager') return loadCompManager();
+    if (tab === 'compare') return loadCompCompare();
     if (tab === 'listings') return loadCompListings();
     if (tab === 'market') return loadCompMarket();
     if (tab === 'opportunities') return loadCompOpportunities();
@@ -23009,17 +23011,130 @@ async function dismissOpportunity(matchId) {
 async function loadCompAlerts() {
   const { alerts } = await Api.get('/api/competitors/alerts');
   const sevCol = { warn: 'var(--amber, #d97706)', error: 'var(--red)', success: 'var(--green)', info: 'var(--ink-soft)' };
-  const rows = alerts.map(a => `<div style="padding:12px 14px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:flex-start">
+  const rows = alerts.map(a => `<div style="padding:12px 14px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:flex-start;${a.related_id ? 'cursor:pointer' : ''}" ${a.related_id ? `onclick="compOpenSideBySide(${a.related_id})" title="Side-by-side: us vs every competitor on this part"` : ''}>
     <span style="width:8px;height:8px;border-radius:50%;background:${sevCol[a.severity] || 'var(--ink-soft)'};margin-top:6px;flex:none"></span>
     <div style="flex:1">
       <div style="font-weight:600;font-size:13px">${escapeHtml(a.title)}</div>
       <div style="font-size:12px;color:var(--ink-soft)">${escapeHtml(a.body || '')}</div>
+      ${a.related_id ? '<div style="font-size:11px;color:var(--brand-primary);margin-top:2px">🆚 Click for the side-by-side</div>' : ''}
     </div>
     <div style="font-size:11px;color:var(--ink-soft);white-space:nowrap">${fmtDate(a.created_at)}</div>
   </div>`).join('');
   el('comp-body').innerHTML = `<div class="card"><div class="card-body" style="padding:0">
     ${rows || `<div style="padding:20px;text-align:center;color:var(--ink-soft)">No competitor alerts yet.</div>`}
   </div></div>`;
+}
+
+// ---- 🆚 Compare tab: our stock vs every competitor, ranked ----
+// Matched (shared) listings only — the parts BOTH of us sell, matched on part
+// number / alternates / title. Offers per part are ranked cheapest-delivered
+// first; competitors get an overall threat rank. Margin maths reuse the exact
+// Costs & margins model, so "if we price-matched" shows the real net.
+async function loadCompCompare() {
+  const body = el('comp-body');
+  body.innerHTML = '<div class="empty"><div class="t">Comparing…</div></div>';
+  if (!CT.settings || !Object.keys(CT.settings).length) {
+    try { CT.settings = (await Api.get('/api/costs/settings')).settings || {}; } catch (_) {}
+  }
+  let data;
+  try { data = await Api.get('/api/competitors/compare'); }
+  catch (e) { body.innerHTML = `<div class="card"><div class="card-body" style="padding:20px;color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div></div>`; return; }
+  State.comp.compare = data;
+  State.comp.compareFilter = State.comp.compareFilter || 'all';
+  compPaintCompare();
+}
+function compCompareSetFilter(f) { State.comp.compareFilter = f; compPaintCompare(); }
+function compMarginAt(it, price) {
+  if (!canSeeMoney() || it.costPrice == null || !(price > 0) || typeof ctComputeBreakdown !== 'function' || !CT.settings || !Object.keys(CT.settings).length) return null;
+  const pseudo = { costPrice: it.costPrice, landedCost: it.landedCost, landedKnown: it.landedCost != null,
+    largePanel: it.largePanel, shippingBand: it.shippingBand, shippingCost: it.shippingCost, postageInPrice: it.postageInPrice };
+  try { return ctComputeBreakdown(price, pseudo, 'ebay'); } catch (_) { return null; }
+}
+function compPaintCompare() {
+  const body = el('comp-body'); if (!body) return;
+  const data = State.comp.compare || { items: [], competitors: [] };
+  const f = State.comp.compareFilter || 'all';
+  const q = (State.comp.compareQ || '').toLowerCase();
+  let items = data.items || [];
+  if (f === 'undercut') items = items.filter(it => it.delta != null && it.delta < 0);
+  if (f === 'cheaper') items = items.filter(it => it.delta != null && it.delta >= 0);
+  if (q) items = items.filter(it => [it.title, it.sku, it.partNumber].some(v => (v || '').toLowerCase().includes(q)));
+  const ranks = {}; (data.competitors || []).forEach(c => { ranks[c.competitorId] = c.rank; });
+  const rankStrip = (data.competitors || []).length ? `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      ${data.competitors.map(c => `<div style="border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:12px">
+        <strong>#${c.rank} ${escapeHtml(c.competitor)}</strong>
+        <div style="color:var(--ink-soft)">cheaper on ${c.cheaper}/${c.matched} shared parts (${c.cheaperPct ?? 0}%) · avg ${c.avgGapPct > 0 ? '+' : ''}${c.avgGapPct ?? 0}% vs our price</div>
+      </div>`).join('')}
+    </div>` : '';
+  body.innerHTML = `
+    ${rankStrip}
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+      <div class="seg">
+        <button class="${f === 'all' ? 'active' : ''}" onclick="compCompareSetFilter('all')">All shared (${(data.items || []).length})</button>
+        <button class="${f === 'undercut' ? 'active' : ''}" onclick="compCompareSetFilter('undercut')">They're cheaper</button>
+        <button class="${f === 'cheaper' ? 'active' : ''}" onclick="compCompareSetFilter('cheaper')">We're cheaper</button>
+      </div>
+      <input type="search" placeholder="Filter by name / SKU / part #…" style="flex:1;min-width:180px" value="${escapeAttr(State.comp.compareQ || '')}" oninput="State.comp.compareQ=this.value;compPaintCompare()">
+    </div>
+    ${items.length ? items.map(it => compCompareRow(it, ranks)).join('') : '<div class="card"><div class="empty" style="padding:30px"><div class="t">No shared listings ' + (f !== 'all' || q ? 'match this filter' : 'yet — run a scan and matches appear here') + '</div></div></div>'}`;
+}
+function compCompareRow(it, ranks) {
+  const ourM = compMarginAt(it, it.priceEbay);
+  const cheapest = (it.offers || []).find(o => o.delivered != null);
+  const matchM = cheapest ? compMarginAt(it, cheapest.delivered) : null;
+  const deltaPill = it.delta == null ? ''
+    : it.delta < 0 ? `<span class="pill red" style="font-weight:700">they're £${Math.abs(it.delta).toFixed(2)} cheaper</span>`
+    : `<span class="pill green" style="font-weight:700">we're £${it.delta.toFixed(2)} cheaper</span>`;
+  return `<div class="card" style="margin-bottom:10px"><div class="card-body" style="padding:12px 14px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px" class="grid-2">
+      <div style="display:flex;gap:10px">
+        ${it.image ? `<img src="${escapeAttr(it.image)}" loading="lazy" style="width:54px;height:54px;object-fit:cover;border-radius:8px;flex:none">` : ''}
+        <div style="min-width:0">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);font-weight:700">Us</div>
+          <div style="font-weight:600;font-size:13px">${escapeHtml(it.title || '')}</div>
+          <div style="font-size:11px;color:var(--ink-soft)"><span class="copyable" style="font-family:ui-monospace,monospace">${escapeHtml(it.partNumber || it.sku || '')}</span> · ${it.qtyOnHand ?? '?'} in stock</div>
+          <div style="font-size:15px;font-weight:700;margin-top:3px">${gbp(it.priceEbay)} <span style="font-weight:400;font-size:11px;color:var(--ink-soft)">eBay</span></div>
+          ${ourM ? `<div style="font-size:11px;color:${ourM.marginPct < 0 ? 'var(--red)' : ourM.marginPct < 10 ? 'var(--amber)' : 'var(--green)'}">our margin: ${ctMoney(ourM.net)} net · ${ctPct(ourM.marginPct)}</div>` : ''}
+          <div style="margin-top:4px">${deltaPill}</div>
+          ${cheapest && matchM ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">if we matched £${cheapest.delivered.toFixed(2)} → <span style="color:${matchM.marginPct < 0 ? 'var(--red)' : matchM.marginPct < 10 ? 'var(--amber)' : 'var(--green)'};font-weight:600">${ctMoney(matchM.net)} net · ${ctPct(matchM.marginPct)}</span></div>` : ''}
+        </div>
+      </div>
+      <div>
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);font-weight:700;margin-bottom:4px">Them (${it.offers.length} offer${it.offers.length > 1 ? 's' : ''}, cheapest first)</div>
+        ${(it.offers || []).map(o => {
+          const worse = it.priceEbay != null && o.delivered != null && o.delivered < it.priceEbay;
+          return `<div style="display:flex;gap:8px;align-items:center;border:1px solid ${worse ? 'var(--red)' : 'var(--line)'};border-radius:8px;padding:6px 9px;margin-bottom:5px;font-size:12px">
+            <div style="flex:1;min-width:0">
+              <div><strong>#${ranks[o.competitorId] || '–'} ${escapeHtml(o.competitor)}</strong> <span class="pill" style="font-size:9px;background:var(--bg-soft)" title="match: ${escapeAttr(o.matchType || '')}">${o.matchType === 'exact_part_number' ? 'part № match' : o.matchType === 'part_number_in_title' ? 'part № in title' : 'title match'}</span></div>
+              <a href="${escapeAttr(o.url || '#')}" target="_blank" rel="noopener" style="font-size:11px;color:var(--ink-soft);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(o.title || '')}</a>
+            </div>
+            <div style="text-align:right;flex:none">
+              <div style="font-weight:700;${worse ? 'color:var(--red)' : ''}">${o.delivered != null ? '£' + o.delivered.toFixed(2) : '—'}</div>
+              <div style="font-size:10px;color:var(--ink-soft)">${o.price != null ? '£' + o.price.toFixed(2) : ''}${o.shipping ? ' + £' + o.shipping.toFixed(2) + ' P&P' : o.shippingType === 'free' || o.shipping === 0 ? ' free P&P' : ''}</div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+  </div></div>`;
+}
+// Side-by-side popup from an alert: every offer on that part vs ours.
+async function compOpenSideBySide(listingId) {
+  if (!CT.settings || !Object.keys(CT.settings).length) {
+    try { CT.settings = (await Api.get('/api/costs/settings')).settings || {}; } catch (_) {}
+  }
+  let data;
+  try { data = await Api.get('/api/competitors/compare?listingId=' + encodeURIComponent(listingId)); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); return; }
+  const it = (data.items || [])[0];
+  if (!it) { toast('No comparison available — the listing isn\'t matched to one of our products.', 'info', 5000); return; }
+  const ranks = {}; (data.competitors || []).forEach(c => { ranks[c.competitorId] = c.rank; });
+  modal({
+    title: '🆚 Side-by-side',
+    body: compCompareRow(it, ranks),
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
 }
 
 // ---- Price history (drill-down) ----
