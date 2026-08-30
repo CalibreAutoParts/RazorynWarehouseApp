@@ -11,6 +11,17 @@ const { reconcileSaleRefund } = require('../lib/refunds');
 const router = express.Router();
 router.use(requireAuth);
 
+// Self-healing: warehouse-side close support. closed_locally marks a return
+// closed from the warehouse app BEFORE eBay caught up — the eBay sync then must
+// not flip it back to open. refund_method records how the money went back
+// (cash / bank / none) for cases settled outside the marketplace.
+(async () => {
+  try {
+    await query(`ALTER TABLE returns ADD COLUMN IF NOT EXISTS closed_locally BOOLEAN`);
+    await query(`ALTER TABLE returns ADD COLUMN IF NOT EXISTS refund_method TEXT`);
+  } catch (e) { console.warn('[returns] migration warning:', e.message); }
+})();
+
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
 const RETURNS_DIR = path.join(UPLOAD_DIR, 'returns');
 fs.mkdirSync(RETURNS_DIR, { recursive: true });
@@ -297,10 +308,12 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
   for (const [k, v] of Object.entries({
     status: b.status, resolution: b.resolution,
     refund_amount: b.refundAmount, notes: b.notes,
+    refund_method: b.refundMethod,
   })) {
     if (v !== undefined) { params.push(v); sets.push(`${k} = $${params.length}`); }
   }
-  if (b.status === 'closed') sets.push('closed_at = now()');
+  if (b.status === 'closed') sets.push('closed_at = now()', 'closed_locally = true');
+  else if (b.status !== undefined) sets.push('closed_locally = false');
   if (!sets.length) return res.status(400).json({ error: 'no_updatable_fields' });
   params.push(req.params.id);
 
@@ -382,10 +395,12 @@ router.post('/resync-statuses', requirePermission('returns'), async (req, res) =
     'DELIVERED': 'received',
     'CLOSED': 'closed', 'RETURN_CLOSED': 'closed', 'CLOSED_REFUNDED': 'processed', 'CLOSED_DENIED': 'closed',
   };
-  const { rows } = await query(`SELECT id, external_state, status, sale_id FROM returns WHERE external_state IS NOT NULL`);
+  const { rows } = await query(`SELECT id, external_state, status, sale_id, closed_locally FROM returns WHERE external_state IS NOT NULL`);
   let updated = 0;
   for (const r of rows) {
     const correct = statusMap[r.external_state] || (String(r.external_state).includes('CLOSED') ? 'closed' : r.status);
+    // A warehouse-side close beats a stale eBay "open" — don't reopen it.
+    if (r.closed_locally && (correct === 'open' || correct === 'received')) continue;
     if (correct !== r.status) {
       await query(`UPDATE returns SET status = $1 WHERE id = $2`, [correct, r.id]);
       updated++;
@@ -695,7 +710,9 @@ async function syncEbayReturnsCore({ days = 90, performedByUserId = null } = {})
       const wasState = existing.rows[0].external_state;
       const isStateChange = wasState && wasState !== state;
       await query(
-        `UPDATE returns SET status = $1, external_state = $2, respond_by = $3,
+        `UPDATE returns SET status = CASE WHEN closed_locally IS TRUE AND $1::text IN ('open','received') THEN status ELSE $1::text END,
+                            closed_locally = CASE WHEN $1::text IN ('closed','processed') THEN false ELSE closed_locally END,
+                            external_state = $2, respond_by = $3,
                             refund_amount = COALESCE($4, refund_amount),
                             sale_id = COALESCE(sale_id, $5),
                             product_id = COALESCE(product_id, $6),
