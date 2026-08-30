@@ -59,6 +59,9 @@ router.post('/config', requireAdmin, async (req, res) => {
         name: String(c.name || '').trim().slice(0, 80),
         volumetricDivisor: parseInt(c.volumetricDivisor) > 0 ? parseInt(c.volumetricDivisor) : 5000,
         maxLongestCm: c.maxLongestCm != null && c.maxLongestCm !== '' ? parseFloat(c.maxLongestCm) : null,
+        // Fuel surcharge % applied on top of the band price — couriers publish
+        // this weekly/monthly; update it here and every quote stays live-accurate.
+        fuelSurchargePct: c.fuelSurchargePct != null && c.fuelSurchargePct !== '' ? +parseFloat(c.fuelSurchargePct).toFixed(2) : 0,
         notes: String(c.notes || '').trim().slice(0, 300),
         bands: (Array.isArray(c.bands) ? c.bands : []).slice(0, 60).map(bd => ({
           maxKg: parseFloat(bd.maxKg),
@@ -102,11 +105,15 @@ router.post('/quote', requireAdmin, async (req, res) => {
       if (c.maxLongestCm && longest && longest > c.maxLongestCm) reason = `over ${c.maxLongestCm}cm max length`;
       const band = (c.bands || []).find(bd => chargeableKg <= bd.maxKg);
       if (!reason && !band) reason = `over ${(c.bands || []).length ? Math.max(...c.bands.map(x => x.maxKg)) + 'kg max' : 'no bands set'}`;
+      const fuelPct = parseFloat(c.fuelSurchargePct) || 0;
+      const basePrice = (!reason && band) ? band.price : null;
       quotes.push({
         courier: c.name, notes: c.notes || '',
         volumetricKg: volKg != null ? +volKg.toFixed(2) : null,
         chargeableKg: +chargeableKg.toFixed(2),
-        price: (!reason && band) ? +band.price.toFixed(2) : null,
+        price: basePrice != null ? +(basePrice * (1 + fuelPct / 100)).toFixed(2) : null,
+        basePrice: basePrice != null ? +basePrice.toFixed(2) : null,
+        fuelPct,
         band: (!reason && band) ? (band.name || `≤${band.maxKg}kg`) : null,
         unavailable: reason,
       });
