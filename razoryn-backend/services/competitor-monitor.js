@@ -258,8 +258,14 @@ async function scanCompetitor(competitorId) {
       match = await computeMatch(listingRow);
       await upsertMatch(listingId, match);
     } else {
-      const haveMatch = await query(`SELECT 1 FROM competitor_match WHERE listing_id = $1`, [listingId]);
+      const haveMatch = await query(`SELECT product_id FROM competitor_match WHERE listing_id = $1`, [listingId]);
       if (!haveMatch.rows.length) { match = await computeMatch(listingRow); await upsertMatch(listingId, match); }
+      // Part numbers first: an unmatched listing that CARRIES a part number
+      // retries every scan — our catalogue grows constantly, so yesterday's
+      // "no match" can be today's exact part-number link.
+      else if (haveMatch.rows[0].product_id == null && parsed.partNumber) {
+        match = await computeMatch(listingRow); await upsertMatch(listingId, match);
+      }
     }
     if (match && match.is_opportunity) summary.opportunities++;
 
@@ -356,4 +362,25 @@ async function scanAll() {
   return result;
 }
 
-module.exports = { scanCompetitor, scanAll, computeMatch };
+// Re-run matching over a competitor's STORED listings (no re-fetch) — the fast
+// way to apply matcher upgrades or link up after the catalogue grows. Part
+// numbers first (the user's priority order), then everything else; the status
+// object is mutated live so an endpoint can report progress.
+async function rematchCompetitor(competitorId, status = {}) {
+  const { rows } = await query(
+    `SELECT id, title, parsed_make, parsed_model, parsed_part_type, parsed_part_number
+       FROM competitor_listings
+      WHERE competitor_id = $1 AND available = true
+      ORDER BY (parsed_part_number IS NOT NULL) DESC, id`,
+    [competitorId]);
+  status.total = rows.length; status.done = 0; status.matched = 0;
+  for (const l of rows) {
+    const m = await computeMatch(l);
+    await upsertMatch(l.id, m);
+    status.done++;
+    if (m.product_id) status.matched++;
+  }
+  return { total: rows.length, matched: status.matched };
+}
+
+module.exports = { scanCompetitor, scanAll, computeMatch, rematchCompetitor };
