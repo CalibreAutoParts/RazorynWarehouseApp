@@ -19,6 +19,7 @@ async function fetchListings(competitor) {
     marketplaceId: cfg.marketplaceId,
     limit: cfg.limit || 1000,
     conditionIds,
+    categoryIds: cfg.categoryIds,   // optional override; defaults to Vehicle Parts & Accessories
   });
   // getSellerActiveListings already returns the normalized shape; attach raw.
   return items.map(it => ({ ...it, raw: it }));

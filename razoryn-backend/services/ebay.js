@@ -160,7 +160,7 @@ async function browseSearch(url, marketplaceId) {
 //   { external_id, title, price, currency, url, image_url,
 //     condition, condition_id, seller_username,
 //     shipping_cost, shipping_type, shipping_free }
-async function getSellerActiveListings(sellerUsername, { limit = 1000, marketplaceId, conditionIds } = {}) {
+async function getSellerActiveListings(sellerUsername, { limit = 1000, marketplaceId, conditionIds, categoryIds } = {}) {
   if (!sellerUsername) throw new Error('seller username required');
   const token = await getAppToken();
   const mkt = marketplaceId || process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
@@ -178,9 +178,16 @@ async function getSellerActiveListings(sellerUsername, { limit = 1000, marketpla
     filterStr += `,conditionIds:{${ids}}`;
   }
 
+  // The Browse API requires a real q OR category_ids — the seller filter alone
+  // isn't a valid query, and the old wildcard q ('*') is rejected outright
+  // (that's what broke competitor scans). Scope to the marketplace's
+  // Vehicle Parts & Accessories tree by default; overridable per call.
+  const CAT_DEFAULTS = { EBAY_GB: '131090', EBAY_US: '6028', EBAY_DE: '131090', EBAY_AU: '131090' };
+  const cats = categoryIds || CAT_DEFAULTS[mkt] || '131090';
+
   while (offset < Math.min(limit, total) && pages < maxPages) {
     const url = `${BASE}/buy/browse/v1/item_summary/search`
-      + `?q=${encodeURIComponent('*')}`
+      + `?category_ids=${encodeURIComponent(String(cats))}`
       + `&filter=${encodeURIComponent(filterStr)}`
       + `&limit=${pageSize}&offset=${offset}`;
 

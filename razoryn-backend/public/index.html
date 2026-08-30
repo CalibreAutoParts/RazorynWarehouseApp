@@ -268,6 +268,7 @@
     color: var(--ink-2); font-weight: 500; width: 100%; text-align: left;
     cursor: pointer; margin-bottom: 2px; position: relative;
     transition: background .14s ease, color .14s ease;
+    text-decoration: none; box-sizing: border-box;   /* items are <a> links now (right-click → open in new tab) */
   }
   .nav-item:hover { background: var(--line-2); }
   .nav-item.active { background: var(--brand-primary-light); color: var(--brand-primary); font-weight: 600; }
@@ -2706,20 +2707,29 @@ function bindHeader() {
    ROUTER & PERMISSIONS
    ========================================================== */
 function bindNav() {
+  // The sidebar items are authored as <button>s, but buttons never get the
+  // browser's link affordances (right-click → "Open in new tab", middle-click,
+  // ctrl-click). Swap each for a real <a href="#page"> carrying the same
+  // classes/data/markup — the context menu then Just Works, and left-clicks
+  // still route in-page.
+  document.querySelectorAll('button.nav-item').forEach(btn => {
+    const a = document.createElement('a');
+    for (const attr of btn.attributes) { if (attr.name !== 'type') a.setAttribute(attr.name, attr.value); }
+    if (btn.dataset.page) a.setAttribute('href', location.pathname + '#' + btn.dataset.page);
+    a.innerHTML = btn.innerHTML;
+    btn.replaceWith(a);
+  });
   document.querySelectorAll('.nav-item').forEach(n => {
     n.addEventListener('click', (e) => {
-      // Ctrl/Cmd-click = open this section in a NEW browser tab (pages have
-      // #hash URLs now, so the new tab boots straight into it).
-      if ((e.ctrlKey || e.metaKey) && n.dataset.page) { window.open(location.pathname + '#' + n.dataset.page, '_blank'); return; }
+      // Modified clicks (ctrl/cmd/shift/middle) = the browser's own new-tab/
+      // window behaviour on the href — don't hijack them.
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) return;
+      e.preventDefault();
       // Action items (e.g. Create listing) open a flow instead of routing to a page.
       if (n.dataset.action === 'create-listing') { if (typeof openCreateListing === 'function') openCreateListing(); return; }
       // Direction-specific nav items deep-link into the Bulk Editor's source tab.
       if (n.dataset.source) MirrorState.sourceTab = n.dataset.source;
       routeTo(n.dataset.page);
-    });
-    // Middle-click = new browser tab too (buttons don't get the native link menu).
-    n.addEventListener('auxclick', (e) => {
-      if (e.button === 1 && n.dataset.page) { e.preventDefault(); window.open(location.pathname + '#' + n.dataset.page, '_blank'); }
     });
   });
 }
@@ -13451,8 +13461,8 @@ async function clRenderEstProfit() {
       <button type="button" class="btn btn-outline btn-sm" onclick="if(el('ce-price')){el('ce-price').value='${rec.reco.toFixed(2)}';el('ce-price').dispatchEvent(new Event('input',{bubbles:true}))}">Use £${rec.reco.toFixed(2)}</button>
     </div>`;
   }
+  const pseudo = { costPrice: cost, postageInPrice: true, largePanel: false, shippingBand: null, shippingCost: null, landedKnown: false, landedCost: null };
   if (price > 0) {
-    const pseudo = { costPrice: cost, postageInPrice: true, largePanel: false, shippingBand: null, shippingCost: null, landedKnown: false, landedCost: null };
     const eb = ctComputeBreakdown(price, pseudo, 'ebay');
     const sp = parseFloat(el('cl-shop')?.value) || +(price * 0.95).toFixed(2);
     const sh = ctComputeBreakdown(sp, pseudo, 'shopify');
@@ -13463,6 +13473,22 @@ async function clRenderEstProfit() {
       ${line('Shopify @ £' + sp.toFixed(2), sh)}`;
   } else {
     html += `<div style="color:var(--ink-soft)">Type a price (or hit Use) to see the live profit at that price.</div>`;
+  }
+  // Full line-by-line cost breakdown (fees, VAT, postage, packaging…) at the
+  // typed price — or at the recommended price until one is typed.
+  const bdPrice = price > 0 ? price : (rec ? rec.reco : null);
+  if (bdPrice) {
+    const bd = ctComputeBreakdown(bdPrice, pseudo, 'ebay');
+    html += `
+      <a href="#" onclick="var d=el('cl-bd');d.style.display=d.style.display==='none'?'':'none';this.textContent=d.style.display==='none'?'▸ Show the full cost breakdown':'▾ Hide the cost breakdown';return false" style="display:inline-block;margin-top:8px;font-size:12px">▸ Show the full cost breakdown</a>
+      <div id="cl-bd" style="display:none;margin-top:6px;border-top:1px solid var(--line);padding-top:6px">
+        <div style="display:flex;justify-content:space-between;font-weight:700;margin-bottom:3px"><span>eBay sale @ ${ctMoney(bd.price)}${price > 0 ? '' : ' (recommended)'}</span><span></span></div>
+        ${bd.rows.map(r => {
+          const muted = r[3];
+          return `<div style="display:flex;justify-content:space-between;color:${r[2] ? 'var(--red)' : 'var(--ink-soft)'}"><span>${muted ? '' : '− '}${r[0]}</span><span>${muted ? '<span style="opacity:.7">n/a</span>' : '−' + ctMoney(r[1])}</span></div>`;
+        }).join('')}
+        <div style="display:flex;justify-content:space-between;font-weight:700;border-top:1px solid var(--line);margin-top:4px;padding-top:4px;color:${bd.marginPct < 0 ? 'var(--red)' : bd.marginPct < 10 ? 'var(--amber)' : 'var(--green)'}"><span>= Net profit</span><span>${ctMoney(bd.net)} · ${ctPct(bd.marginPct)}</span></div>
+      </div>`;
   }
   box.innerHTML = html;
 }
@@ -15262,7 +15288,7 @@ async function sqRun() {
   out.innerHTML = r.quotes.map(q => `
     <div style="display:flex;align-items:center;gap:10px;border:1px solid ${q === best ? 'var(--green, #16a34a)' : 'var(--line)'};border-radius:8px;padding:9px 12px;margin-bottom:6px;font-size:13px;${q.price == null ? 'opacity:.55' : ''}">
       <div style="flex:1"><strong>${escapeHtml(q.courier)}</strong>${q === best ? ' <span class="pill green" style="font-size:10px">CHEAPEST</span>' : ''}
-        <div style="font-size:11px;color:var(--ink-soft)">${q.price != null ? `band ${escapeHtml(q.band || '')} · chargeable ${q.chargeableKg}kg${q.volumetricKg != null ? ` (volumetric ${q.volumetricKg}kg)` : ''}` : escapeHtml(q.unavailable || 'unavailable')}${q.notes ? ' · ' + escapeHtml(q.notes) : ''}</div>
+        <div style="font-size:11px;color:var(--ink-soft)">${q.price != null ? `band ${escapeHtml(q.band || '')} · chargeable ${q.chargeableKg}kg${q.volumetricKg != null ? ` (volumetric ${q.volumetricKg}kg)` : ''}${q.fuelPct ? ` · £${(q.basePrice ?? 0).toFixed(2)} + ${q.fuelPct}% fuel` : ''}` : escapeHtml(q.unavailable || 'unavailable')}${q.notes ? ' · ' + escapeHtml(q.notes) : ''}</div>
       </div>
       <div style="font-weight:700;font-size:15px">${q.price != null ? '£' + q.price.toFixed(2) : '—'}</div>
     </div>`).join('') + '<div style="font-size:11px;color:var(--ink-soft)">Rough guide only — fuel surcharges / remote-area fees may apply on top.</div>';
@@ -15800,14 +15826,19 @@ function shipSetRender() {
       <p style="color:var(--ink-soft);font-size:12px;margin-bottom:8px">One card per courier. Bands are one per line: <code>max kg, price £</code> (optionally <code>, band name</code>) — you can paste a whole rate sheet straight from Excel. Volumetric weight = L×W×H ÷ divisor (5000 is the usual).</p>
       <div id="shipset-couriers">${_shipEdit.couriers.map((c, i) => `
         <div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px">
-          <div style="display:grid;grid-template-columns:1.4fr .7fr .7fr auto;gap:6px;margin-bottom:6px">
+          <div style="display:grid;grid-template-columns:1.4fr .6fr .6fr .6fr auto;gap:6px;margin-bottom:6px">
             <input value="${escapeAttr(c.name || '')}" placeholder="Courier name" onchange="_shipEdit.couriers[${i}].name=this.value">
             <input type="number" value="${c.volumetricDivisor ?? 5000}" placeholder="Divisor (5000)" title="Volumetric divisor" onchange="_shipEdit.couriers[${i}].volumetricDivisor=this.value">
             <input type="number" value="${c.maxLongestCm ?? ''}" placeholder="Max length cm" title="Longest-side limit (optional)" onchange="_shipEdit.couriers[${i}].maxLongestCm=this.value">
+            <input type="number" step="0.1" value="${c.fuelSurchargePct ?? ''}" placeholder="Fuel %" title="Fuel surcharge % — added on top of every band price. Couriers publish this weekly/monthly; keep it current and quotes stay live." onchange="_shipEdit.couriers[${i}].fuelSurchargePct=this.value">
             <button class="btn btn-ghost btn-sm" onclick="_shipEdit.couriers.splice(${i},1);shipSetRender()" style="color:var(--red)">✕</button>
           </div>
-          <textarea rows="3" placeholder="2, 3.20, Small parcel&#10;10, 6.50&#10;30, 14.99, Heavy" style="width:100%;font-family:ui-monospace,monospace;font-size:12px" onchange="shipSetParseBands(${i}, this.value)">${escapeHtml((c.bands || []).map(b => [b.maxKg, b.price, b.name].filter(v => v !== '' && v != null).join(', ')).join('\n'))}</textarea>
-          <input value="${escapeAttr(c.notes || '')}" placeholder="Notes (e.g. next-day, no NI)" style="width:100%;margin-top:6px" onchange="_shipEdit.couriers[${i}].notes=this.value">
+          <textarea id="shipset-bands-${i}" rows="3" placeholder="2, 3.20, Small parcel&#10;10, 6.50&#10;30, 14.99, Heavy" style="width:100%;font-family:ui-monospace,monospace;font-size:12px" onchange="shipSetParseBands(${i}, this.value)">${escapeHtml((c.bands || []).map(b => [b.maxKg, b.price, b.name].filter(v => v !== '' && v != null).join(', ')).join('\n'))}</textarea>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+            <input value="${escapeAttr(c.notes || '')}" placeholder="Notes (e.g. next-day, no NI)" style="flex:1;min-width:160px" onchange="_shipEdit.couriers[${i}].notes=this.value">
+            <input type="file" id="shipset-csv-${i}" accept=".csv,.txt,text/csv" style="display:none" onchange="shipSetImportCsv(${i}, this)">
+            <button class="btn btn-outline btn-sm" type="button" onclick="el('shipset-csv-${i}').click()" title="Import the courier's rate sheet as a CSV — expects weight and price columns (headers and £ signs are handled).">📄 Import rate sheet (CSV)</button>
+          </div>
         </div>`).join('')}</div>
       <button class="btn btn-outline btn-sm" onclick="_shipEdit.couriers.push({name:'',volumetricDivisor:5000,bands:[]});shipSetRender()">+ Add courier</button>
     </div>
@@ -15823,6 +15854,45 @@ function shipSetRender() {
       <button class="btn btn-outline btn-sm" onclick="openShippingQuote()">💷 Try the quote calculator</button>
     </div>`;
 }
+// Import a courier's CSV rate sheet into the band list. The industry sheets
+// are near-universal in shape: a weight column + a price column (sometimes a
+// service/band name). Tolerates headers, £ signs, "0-2kg" ranges and extra
+// columns — it keeps the LAST number in a range and the first price-looking
+// value after it.
+async function shipSetImportCsv(i, input) {
+  const f = input.files && input.files[0]; input.value = '';
+  if (!f) return;
+  try {
+    const text = await f.text();
+    const bands = [];
+    for (const line of text.split(/\r?\n/)) {
+      const cells = line.split(/[,\t;]+/).map(s => s.trim().replace(/^["']|["']$/g, ''));
+      if (!cells.length) continue;
+      // Find the weight cell: "2", "2kg", "0-2kg", "up to 2 kg" → take the last number.
+      let maxKg = null, price = null, name = '';
+      for (let ci = 0; ci < cells.length; ci++) {
+        const c = cells[ci];
+        if (maxKg == null && /(\d+(\.\d+)?)\s*(kg)?\s*$/i.test(c) && /\d/.test(c) && !/[£$€]/.test(c)) {
+          const nums = c.match(/\d+(\.\d+)?/g);
+          if (nums) { maxKg = parseFloat(nums[nums.length - 1]); continue; }
+        }
+        if (maxKg != null && price == null && /[£$€]?\s*\d+(\.\d+)?/.test(c)) {
+          price = parseFloat(c.replace(/[^\d.]/g, ''));
+          continue;
+        }
+        if (maxKg != null && price != null && c && !name && !/^\d/.test(c)) name = c.slice(0, 60);
+      }
+      if (Number.isFinite(maxKg) && Number.isFinite(price) && maxKg > 0 && price > 0) bands.push({ maxKg, price, name });
+    }
+    if (!bands.length) { toast('Couldn\'t find weight + price columns in that file — check it\'s the rate sheet CSV (rows like "2, 3.20").', 'warn', 7000); return; }
+    bands.sort((a, z) => a.maxKg - z.maxKg);
+    _shipEdit.couriers[i].bands = bands;
+    const ta = el('shipset-bands-' + i);
+    if (ta) ta.value = bands.map(b => [b.maxKg, b.price, b.name].filter(v => v !== '' && v != null).join(', ')).join('\n');
+    toast(`Imported ${bands.length} rate band${bands.length > 1 ? 's' : ''} — hit Save shipping settings to keep them`, 'success', 6000);
+  } catch (e) { toast('Import failed: ' + e.message, 'error'); }
+}
+
 function shipSetParseBands(i, text) {
   const bands = [];
   for (const line of String(text || '').split(/\n+/)) {
@@ -22624,7 +22694,7 @@ async function loadCompManager() {
   const rows = competitors.map(c => {
     const src = c.source_type === 'ebay' ? `eBay: ${escapeHtml(c.ebay_username || '—')}` : `Web: ${escapeHtml(c.website_url || '—')}`;
     const status = c.last_status === 'error'
-      ? `<span style="color:var(--red)" title="${escapeHtml(c.last_error || '')}">error</span>`
+      ? `<span style="color:var(--red)">error</span>${c.last_error ? `<div style="font-size:10px;color:var(--red);max-width:260px;white-space:normal;line-height:1.4">${escapeHtml(String(c.last_error).slice(0, 180))}</div>` : ''}`
       : (c.last_status || '—');
     return `<tr>
       <td><strong>${escapeHtml(c.name)}</strong>${c.active ? '' : ' <span style="color:var(--ink-soft);font-size:11px">(paused)</span>'}<br><span style="font-size:11px;color:var(--ink-soft)">${src}</span></td>

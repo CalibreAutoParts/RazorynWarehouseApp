@@ -25,17 +25,43 @@ const samePrice = (a, b) => cents(a) === cents(b);
 // Decide the best match for a competitor listing. Returns the match row fields:
 //   { product_id, match_type, confidence, is_opportunity }
 async function computeMatch(listing) {
-  // 1. Exact part number (normalised) against our part_number OR sku.
+  // 1. Exact part number (normalised) against our part_number, SKU, OR any of
+  //    the product's ALTERNATE part numbers (factory/country codes) — the same
+  //    physical part often carries a different code in the competitor's title.
   if (listing.parsed_part_number) {
     const r = await query(
-      `SELECT id FROM products
-         WHERE active = true
-           AND ( REGEXP_REPLACE(UPPER(COALESCE(part_number,'')), '[^A-Z0-9]', '', 'g') = $1
-              OR REGEXP_REPLACE(UPPER(sku), '[^A-Z0-9]', '', 'g') = $1 )
+      `SELECT p.id FROM products p
+         WHERE p.active = true
+           AND ( REGEXP_REPLACE(UPPER(COALESCE(p.part_number,'')), '[^A-Z0-9]', '', 'g') = $1
+              OR REGEXP_REPLACE(UPPER(p.sku), '[^A-Z0-9]', '', 'g') = $1
+              OR EXISTS (SELECT 1 FROM product_part_numbers ppn
+                          WHERE ppn.product_id = p.id
+                            AND REGEXP_REPLACE(UPPER(ppn.code), '[^A-Z0-9]', '', 'g') = $1) )
          LIMIT 1`,
       [listing.parsed_part_number]
     );
     if (r.rows[0]) return { product_id: r.rows[0].id, match_type: 'exact_part_number', confidence: 1.0, is_opportunity: false };
+  }
+
+  // 1b. Our part numbers INSIDE their title — catches titles carrying several
+  //     codes where the extractor picked a different token than ours.
+  if (listing.title && listing.title.length >= 8) {
+    const r = await query(
+      `WITH t AS (SELECT REGEXP_REPLACE(UPPER($1), '[^A-Z0-9]', '', 'g') AS norm)
+       SELECT p.id FROM products p, t
+        WHERE p.active = true
+          AND (
+            (LENGTH(REGEXP_REPLACE(UPPER(COALESCE(p.part_number,'')), '[^A-Z0-9]', '', 'g')) >= 6
+              AND t.norm LIKE '%' || REGEXP_REPLACE(UPPER(p.part_number), '[^A-Z0-9]', '', 'g') || '%')
+            OR EXISTS (SELECT 1 FROM product_part_numbers ppn
+                        WHERE ppn.product_id = p.id
+                          AND LENGTH(REGEXP_REPLACE(UPPER(ppn.code), '[^A-Z0-9]', '', 'g')) >= 6
+                          AND t.norm LIKE '%' || REGEXP_REPLACE(UPPER(ppn.code), '[^A-Z0-9]', '', 'g') || '%')
+          )
+        LIMIT 1`,
+      [listing.title]
+    );
+    if (r.rows[0]) return { product_id: r.rows[0].id, match_type: 'part_number_in_title', confidence: 0.95, is_opportunity: false };
   }
 
   // 2. Make + part-type (model boosts confidence). Practical matcher for body parts.
