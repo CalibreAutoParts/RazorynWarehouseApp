@@ -6447,6 +6447,14 @@ function labelFitsModels(it, prod) {
       .map(x => [x.brand, x.model].filter(Boolean).join(' ').trim())
       .filter(Boolean);
   }
+  // Shared stock pool = the same physical part even when the listings carry
+  // different codes — union in every pool member's make + model so the label
+  // shows the FULL fitment list (2 models or 20).
+  if (prod?.stockGroupId) {
+    (State.products || [])
+      .filter(x => x.stockGroupId === prod.stockGroupId)
+      .forEach(x => { const bm = [x.brand, x.model].filter(Boolean).join(' ').trim(); if (bm) models.push(bm); });
+  }
   models = [...new Set(models)];
   if (!models.length && prod) {
     const bm = [prod.brand, prod.model].filter(Boolean).join(' ').trim();
@@ -6537,14 +6545,27 @@ function labelsPrint(itemsArg) {
   // auto-fitter shrinks it to fit the label.
   const fitsBlock = (it) => {
     const models = it.fitsModels || [];
-    if (models.length > 1) return `<div class="title fits"><span class="fits-lbl">Fits ${models.length} models:</span> ${escapeHtml(models.join(' · '))}</div>`;
+    // Shared parts list EVERY make/model they fit. The auto-fitter shrinks the
+    // block to fit the label, so 2 models print big and 20 print smaller but
+    // complete; a tighter line-height kicks in past 8 to buy extra rows.
+    if (models.length > 1) return `<div class="title fits${models.length > 8 ? ' fits-many' : ''}"><span class="fits-lbl">Fits ${models.length} models:</span> ${escapeHtml(models.join(' · '))}</div>`;
     const one = it.title || models[0] || '';
     return one ? `<div class="title">${escapeHtml(one)}</div>` : '';
   };
-  // Compact single-line description for the tiny thermal labels.
+  // Compact description for the tiny thermal labels. Shared parts append the
+  // fitment list too — capped at 6 models (then "+N more") so the auto-shrunk
+  // text stays legible on a 50×25; the part number remains the shelf identity.
   const smallTitle = (it) => {
     const typed = [it.type, it.position].filter(Boolean).join(' ');
-    return escapeHtml(typed || it.title || '');
+    const base = typed || it.title || '';
+    const models = it.fitsModels || [];
+    if (models.length > 1) {
+      const cap = 6;
+      const shown = models.slice(0, cap).join(' · ');
+      const more = models.length - Math.min(models.length, cap);
+      return escapeHtml((base ? base + ' — ' : '') + `fits ${models.length}: ` + shown + (more > 0 ? ` +${more} more` : ''));
+    }
+    return escapeHtml(base);
   };
 
   // Per-layout label HTML
@@ -6701,6 +6722,8 @@ function labelsPrint(itemsArg) {
     overflow: hidden; flex: 0 1 auto; min-height: 0; margin-top: 1mm;
   }
   .label.large-landscape .fits .fits-lbl { font-weight: 700; color: ${brandColor}; text-transform: uppercase; font-size: 0.8em; letter-spacing: 0.03em; }
+  /* Long fitment lists (9+ models): tighter lines so the fitter keeps them readable. */
+  .label .title.fits-many { line-height: 1.16; }
   .label.large-landscape .barcode-wrap {
     border-top: 1px solid #ddd; padding-top: 4mm; margin-top: auto; flex-shrink: 0;
   }
