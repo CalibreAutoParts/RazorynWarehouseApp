@@ -19627,8 +19627,8 @@ function renderSettings() {
           </div>
 
           <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px">
-            <div style="font-weight:600;font-size:14px;margin-bottom:4px">Tracking callback (DropFleet → warehouse)</div>
-            <p style="color:var(--ink-soft);font-size:12px;margin-bottom:8px">When DropFleet books an order and assigns a tracking number, point it at this URL. The app records the tracking, marks the order dispatched, and pushes the tracking to eBay/Shopify so the buyer is notified. DropFleet must send header <code>X-Integration-Key</code> = the same key above.</p>
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">Tracking + delivery callback (DropFleet → warehouse)</div>
+            <p style="color:var(--ink-soft);font-size:12px;margin-bottom:8px">Point DropFleet at this URL for two events: <strong>booked</strong> (tracking assigned — the app records it, marks the order dispatched, and pushes the tracking to eBay/Shopify) and <strong>delivered</strong> (send <code>"status": "delivered"</code> in the body — the app marks the order delivered and completes any missing channel push). Going the other way, fulfilments here (dispatched / collected / delivered / cancelled) automatically withdraw the order from DropFleet's Integrated Orders queue. DropFleet must send header <code>X-Integration-Key</code> = the same key above.</p>
             <div class="field"><label>Webhook URL</label>
               <input id="df-webhook-url" readonly onclick="this.select()" style="font-family:ui-monospace,monospace;font-size:12px">
             </div>

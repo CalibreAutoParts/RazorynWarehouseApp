@@ -294,6 +294,9 @@ router.post('/bulk-mark-dispatched', requireAdmin, async (req, res) => {
   await audit(req, 'bulk_dispatch', null, null, {
     requested: ids.length, dispatched, collected, skipped, carrier, pushToChannel,
   });
+  // Anything fulfilled in this batch drops out of DropFleet's review queue
+  // (withdraw is keyed by external id and skips orders never pushed).
+  setImmediate(() => require('../services/dropfleet').withdrawSales(ids).catch(() => {}));
   res.json({ ok: true, requested: ids.length, dispatched, collected, skipped, errors });
 });
 
@@ -340,10 +343,17 @@ router.post('/:saleId/mark-dispatched', requirePermission('dispatch'), async (re
   if (result.error) return res.status(409).json(result);
   await audit(req, 'dispatch_order', 'sale', result.sale.id, { carrier, trackingNumber: trackingClean });
 
-  // If this order was previously pushed to DropFleet, tell DropFleet it has now
-  // shipped (tracking assigned) so it drops off DropFleet's pending list.
-  if (trackingClean && result.sale.dropfleet_pushed_at) {
-    setImmediate(() => require('../services/dropfleet').notifyShipped(result.sale.id).catch(e => console.warn('[dispatch.dropfleet-withdraw]', e.message)));
+  // If this order was previously pushed to DropFleet, tell DropFleet it's
+  // fulfilled so it drops off their Integrated Orders queue: with a tracking
+  // number we re-push status 'shipped' (keeps the tracking on their side), and
+  // ALWAYS follow with the withdraw call (their dedicated remove endpoint) so
+  // untracked dispatches clear too.
+  if (result.sale.dropfleet_pushed_at) {
+    setImmediate(async () => {
+      const df = require('../services/dropfleet');
+      if (trackingClean) await df.notifyShipped(result.sale.id).catch(() => {});
+      await df.withdrawSales(result.sale.id).catch(() => {});
+    });
   }
 
   // Async push to source channel. Don't block the response on this.
@@ -413,6 +423,10 @@ router.post('/:saleId/mark-collected', requirePermission('dispatch'), async (req
 
   if (result.error) return res.status(409).json(result);
   await audit(req, 'collect_order', 'sale', result.sale.id, {});
+  // Collected in person → pull it out of DropFleet's review queue (best-effort).
+  if (result.sale.dropfleet_pushed_at) {
+    setImmediate(() => require('../services/dropfleet').withdrawSales(result.sale.id).catch(() => {}));
+  }
   res.json({ ok: true, sale: result.sale });
 });
 
@@ -487,6 +501,8 @@ router.post('/:saleId/remove-cancelled', requirePermission('dispatch'), async (r
     if (s.rows[0].dispatched_at || s.rows[0].collected_at) return res.status(400).json({ error: 'already_done', message: 'Already dispatched/collected — nothing to remove.' });
     await query(`UPDATE sales SET status = 'cancelled' WHERE id = $1`, [req.params.saleId]);
     await audit(req, 'dispatch_remove_cancelled', 'sale', req.params.saleId, { was: s.rows[0].status });
+    // Cancelled → pull it out of DropFleet's review queue too (best-effort).
+    setImmediate(() => require('../services/dropfleet').withdrawSales(req.params.saleId).catch(() => {}));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'remove_failed', message: e.message }); }
 });
@@ -514,6 +530,10 @@ router.post('/:saleId/mark-delivered', requireAdmin, async (req, res) => {
     [when, req.params.saleId]);
   if (!r.rows[0]) return res.status(404).json({ error: 'not_found', message: 'Order not found or not dispatched yet.' });
   await audit(req, 'mark_delivered', 'sale', r.rows[0].id, {});
+  // Delivered → make sure it's out of DropFleet's review queue (best-effort).
+  if (r.rows[0].dropfleet_pushed_at) {
+    setImmediate(() => require('../services/dropfleet').withdrawSales(r.rows[0].id).catch(() => {}));
+  }
   res.json({ ok: true, sale: r.rows[0] });
 });
 
@@ -788,7 +808,11 @@ async function syncEbayDispatchCore({ days = 14 } = {}) {
     );
     dispatched++;
     // If we'd pushed it to DropFleet, withdraw it (it shipped on eBay).
-    setImmediate(() => require('../services/dropfleet').notifyShipped(sale.id).catch(() => {}));
+    setImmediate(async () => {
+      const df = require('../services/dropfleet');
+      await df.notifyShipped(sale.id).catch(() => {});   // carries tracking when we have it
+      await df.withdrawSales(sale.id).catch(() => {});   // clears the queue even without tracking
+    });
   }
   // shippedReported = how many shipped orders eBay returned for the window;
   // matched = how many of those line up with an open (undispatched) sale here.
@@ -896,7 +920,11 @@ async function syncShopifyDispatchCore({ days = 14 } = {}) {
     );
     dispatched++;
     // If we'd pushed it to DropFleet, withdraw it (it shipped on Shopify).
-    setImmediate(() => require('../services/dropfleet').notifyShipped(sale.id).catch(() => {}));
+    setImmediate(async () => {
+      const df = require('../services/dropfleet');
+      await df.notifyShipped(sale.id).catch(() => {});   // carries tracking when we have it
+      await df.withdrawSales(sale.id).catch(() => {});   // clears the queue even without tracking
+    });
   }
   return { checked: rows.length, dispatched, shippedReported: ids.length, matched: rows.length };
 }

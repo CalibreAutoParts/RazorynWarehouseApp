@@ -19,6 +19,7 @@ const { query } = require('../db');
 const { isGspExport } = require('../lib/uk-vat');
 
 const INGEST_URL = 'https://www.dropfleet.co.uk/api/integrations/ingest';
+const WITHDRAW_URL = 'https://www.dropfleet.co.uk/api/integrations/withdraw';
 const GSP_HUB_POSTCODE = 'WS13 8UR';
 
 let _migrated = false;
@@ -428,9 +429,35 @@ async function notifyShipped(saleId) {
   }
 }
 
+// Withdraw orders from DropFleet's Integrated Orders review queue the moment
+// they're fulfilled on OUR side — delivered, collected, cancelled, or shipped
+// by another courier — so they stop sitting there looking like they still need
+// a DropFleet run. Per their spec: POST /api/integrations/withdraw with
+// { external_ids: ["WH-<id>", …] }; idempotent, repeats are harmless. Only
+// fires for orders we actually pushed (dropfleet_pushed_at set). Best-effort —
+// never throws, never blocks the fulfilment that triggered it.
+async function withdrawSales(saleIds) {
+  try {
+    const ids = (Array.isArray(saleIds) ? saleIds : [saleIds]).map(n => parseInt(n)).filter(Number.isFinite);
+    if (!ids.length) return { ok: false, error: 'no_ids' };
+    const cfg = await getConfig();
+    if (!cfg.apiKey) return { ok: false, error: 'not_configured' };
+    const { rows } = await query(
+      `SELECT id FROM sales WHERE id = ANY($1::int[]) AND dropfleet_pushed_at IS NOT NULL`, [ids]);
+    if (!rows.length) return { ok: true, withdrawn: 0, skipped: 'none_pushed' };
+    const external_ids = rows.map(r => 'WH-' + r.id);
+    const r = await axios.post(WITHDRAW_URL, { external_ids },
+      { headers: { 'Content-Type': 'application/json', 'X-Integration-Key': cfg.apiKey }, timeout: 15000 });
+    return { ok: true, withdrawn: r.data?.withdrawn ?? external_ids.length };
+  } catch (e) {
+    console.warn('[dropfleet] withdraw failed:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
 module.exports = {
   INGEST_URL, getConfig, saveConfig, mapSaleToOrder, parseAddress,
   channelTag, extractGspReference,
   pushOrders, pushSaleIds, testConnection, autoPushSale,
-  pushUnshipped, countUnshipped, pendingBreakdown, notifyShipped,
+  pushUnshipped, countUnshipped, pendingBreakdown, notifyShipped, withdrawSales,
 };

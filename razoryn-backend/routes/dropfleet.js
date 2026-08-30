@@ -35,7 +35,12 @@ router.post('/tracking', async (req, res) => {
     const extId = String(b.external_id || b.externalId || '').trim();
     const tracking = String(b.tracking_number || b.trackingNumber || '').trim();
     const carrier = String(b.carrier || 'Dropfleet').trim() || 'Dropfleet';
-    if (!extId || !tracking) return res.status(400).json({ error: 'external_id_and_tracking_required' });
+    // Optional lifecycle status from DropFleet: 'delivered' (their driver handed
+    // it over) or 'collected'. Without one, this is the original "booked, here's
+    // the tracking number" event.
+    const evStatus = String(b.status || b.event || '').trim().toLowerCase();
+    const isDelivered = ['delivered', 'collected', 'completed_delivery'].includes(evStatus);
+    if (!extId || (!tracking && !isDelivered)) return res.status(400).json({ error: 'external_id_and_tracking_required' });
     // We key DropFleet orders as WH-<saleId>.
     const m = extId.match(/(?:^|[^0-9])(\d+)\s*$/);
     const saleId = m ? parseInt(m[1]) : NaN;
@@ -48,27 +53,33 @@ router.post('/tracking', async (req, res) => {
     const sale = sel.rows[0];
     if (!sale) return res.status(404).json({ error: 'sale_not_found', saleId });
 
-    // Idempotent: if it already carries this tracking number, do nothing.
-    if ((sale.tracking_number || '').trim() === tracking && sale.dispatched_at) {
+    // Idempotent: same tracking + already dispatched (and not a new delivered event) → no-op.
+    if (!isDelivered && (sale.tracking_number || '').trim() === tracking && sale.dispatched_at) {
       return res.json({ ok: true, saleId, alreadyRecorded: true });
     }
 
+    const when = b.delivered_at ? new Date(b.delivered_at) : new Date();
     const updated = await query(`
       UPDATE sales SET
-        tracking_number = $1,
+        tracking_number = COALESCE(NULLIF($1,''), tracking_number),
         carrier = COALESCE(NULLIF($2,''), carrier),
         dispatched_at = COALESCE(dispatched_at, now()),
         status = CASE WHEN status = 'paid' THEN 'dispatched' ELSE status END,
-        channel_push_state = CASE WHEN channel ~ '^(shopify|ebay_)' THEN 'pending' ELSE 'na' END,
-        channel_push_error = NULL
-      WHERE id = $3 RETURNING *`, [tracking, carrier, saleId]);
+        delivered_at = CASE WHEN $4 THEN COALESCE(delivered_at, $5::timestamptz) ELSE delivered_at END,
+        shipping_status = CASE WHEN $4 THEN 'delivered' ELSE shipping_status END,
+        channel_push_state = CASE WHEN channel ~ '^(shopify|ebay_)' AND channel_push_state IS DISTINCT FROM 'ok' THEN 'pending' ELSE channel_push_state END,
+        channel_push_error = CASE WHEN channel ~ '^(shopify|ebay_)' AND channel_push_state IS DISTINCT FROM 'ok' THEN NULL ELSE channel_push_error END
+      WHERE id = $3 RETURNING *`, [tracking, carrier, saleId, isDelivered, when]);
     const s = updated.rows[0];
 
-    // Push the tracking to the source marketplace (best-effort, async).
-    if ((s.channel || '').match(/^(shopify|ebay_)/) && typeof dispatch.pushDispatchToChannel === 'function') {
+    // Push the tracking/fulfilment to the source marketplace (best-effort,
+    // async) — for a delivered event this also covers orders whose shipped
+    // push never happened, so eBay/Shopify get the fulfilment either way.
+    if ((s.channel || '').match(/^(shopify|ebay_)/) && s.channel_push_state === 'pending' && s.tracking_number
+        && typeof dispatch.pushDispatchToChannel === 'function') {
       setImmediate(() => dispatch.pushDispatchToChannel(s).catch(e => console.warn('[dropfleet.webhook] channel push failed:', e.message)));
     }
-    res.json({ ok: true, saleId, tracking, carrier, channel: s.channel, pushingToChannel: !!(s.channel || '').match(/^(shopify|ebay_)/) });
+    res.json({ ok: true, saleId, event: isDelivered ? 'delivered' : 'tracking', tracking: s.tracking_number, carrier: s.carrier, channel: s.channel, deliveredAt: isDelivered ? s.delivered_at : undefined });
   } catch (e) {
     console.error('[dropfleet.webhook]', e.message);
     res.status(500).json({ error: 'webhook_failed', message: e.message });
