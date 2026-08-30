@@ -17,7 +17,10 @@ async function fetchListings(competitor) {
   if (conditionIds === 'all' || conditionIds === null) conditionIds = undefined;
   const items = await ebay.getSellerActiveListings(username, {
     marketplaceId: cfg.marketplaceId,
-    limit: cfg.limit || 1000,
+    // Big sellers run 9k+ listings — pull the Browse API's full search window
+    // (10,000 items) so nothing is invisible to matching. Overridable per
+    // competitor via config.limit.
+    limit: cfg.limit || 10000,
     conditionIds,
     categoryIds: cfg.categoryIds,   // optional override; defaults to Vehicle Parts & Accessories
   });

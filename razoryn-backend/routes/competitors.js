@@ -144,6 +144,27 @@ router.get('/compare', canRead, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'compare_failed', message: e.message }); }
 });
 
+// POST /api/competitors/:id/rematch — re-run matching over the stored listings
+// (no re-fetch). Runs in the background (9k listings take a few minutes);
+// GET /api/competitors/rematch/status reports progress.
+let _rematchStatus = { running: false };
+router.post('/:id/rematch', requireAdmin, async (req, res) => {
+  if (_rematchStatus.running) return res.status(409).json({ error: 'already_running', status: _rematchStatus });
+  _rematchStatus = { running: true, competitorId: req.params.id, done: 0, total: 0, matched: 0, startedAt: new Date().toISOString() };
+  res.json({ ok: true, started: true });
+  (async () => {
+    try {
+      const monitor = require('../services/competitor-monitor');
+      const r = await monitor.rematchCompetitor(req.params.id, _rematchStatus);
+      _rematchStatus = { ..._rematchStatus, running: false, finishedAt: new Date().toISOString(), ...r };
+    } catch (e) {
+      console.error('[competitors] rematch failed:', e.message);
+      _rematchStatus = { ..._rematchStatus, running: false, error: e.message };
+    }
+  })();
+});
+router.get('/rematch/status', canRead, (req, res) => res.json(_rematchStatus));
+
 // GET /api/competitors/opportunities — parts/models they sell that we don't.
 router.get('/opportunities', canRead, async (req, res) => {
   const { rows } = await query(`
@@ -247,26 +268,43 @@ router.delete('/:id', requireAdmin, async (req, res) => {
 // ---------- manual scan (admin) ----------
 
 // POST /api/competitors/:id/scan — scan one competitor now.
+// Scans now run in the BACKGROUND: a 9k-listing seller takes minutes (50 Browse
+// pages + per-listing matching), which would time the request out. The endpoint
+// returns immediately; GET /scan/status reports progress/result.
+let _scanStatus = { running: false };
 router.post('/:id/scan', requireAdmin, async (req, res) => {
-  try {
-    const summary = await monitor.scanCompetitor(Number(req.params.id));
-    await audit(req, 'competitor.scan', 'competitor', req.params.id, summary);
-    res.json({ ok: true, summary });
-  } catch (e) {
-    res.status(502).json({ error: e.message });
-  }
+  if (_scanStatus.running) return res.status(409).json({ error: 'already_running', status: _scanStatus });
+  _scanStatus = { running: true, scope: 'one', competitorId: req.params.id, startedAt: new Date().toISOString() };
+  res.json({ ok: true, started: true });
+  (async () => {
+    try {
+      const summary = await monitor.scanCompetitor(Number(req.params.id));
+      await audit(req, 'competitor.scan', 'competitor', req.params.id, summary);
+      _scanStatus = { ..._scanStatus, running: false, finishedAt: new Date().toISOString(), summary };
+    } catch (e) {
+      console.error('[competitors] scan failed:', e.message);
+      _scanStatus = { ..._scanStatus, running: false, error: e.message };
+    }
+  })();
 });
 
-// POST /api/competitors/scan — scan all active competitors now.
+// POST /api/competitors/scan — scan all active competitors now (background).
 router.post('/scan', requireAdmin, async (req, res) => {
-  try {
-    const result = await monitor.scanAll();
-    await audit(req, 'competitor.scanAll', null, null, { competitors: result.competitors, alerts: result.alerts });
-    res.json({ ok: true, result });
-  } catch (e) {
-    res.status(502).json({ error: e.message });
-  }
+  if (_scanStatus.running) return res.status(409).json({ error: 'already_running', status: _scanStatus });
+  _scanStatus = { running: true, scope: 'all', startedAt: new Date().toISOString() };
+  res.json({ ok: true, started: true });
+  (async () => {
+    try {
+      const result = await monitor.scanAll();
+      await audit(req, 'competitor.scanAll', null, null, { competitors: result.competitors, alerts: result.alerts });
+      _scanStatus = { ..._scanStatus, running: false, finishedAt: new Date().toISOString(), result };
+    } catch (e) {
+      console.error('[competitors] scanAll failed:', e.message);
+      _scanStatus = { ..._scanStatus, running: false, error: e.message };
+    }
+  })();
 });
+router.get('/scan/status', canRead, (req, res) => res.json(_scanStatus));
 
 // ---------- review an opportunity / match (admin) ----------
 
