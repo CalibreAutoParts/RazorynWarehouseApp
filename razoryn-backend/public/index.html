@@ -1150,6 +1150,10 @@
 
       <div class="nav-section admin-only">
         <div class="nav-label">Resources</div>
+        <button class="nav-item" data-page="vinsearch">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          VIN Search
+        </button>
         <button class="nav-item admin-only" data-page="schedule">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
           Schedule
@@ -2832,7 +2836,7 @@ function initKiosk() {
 // warehouse workflow: operational pages + Settings only (no marketing/admin
 // management), a bottom quick-bar for one-tap Scan/Inventory/Dispatch/Returns,
 // bigger touch targets, and global hardware-scanner capture.
-const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','locations','returns','dispatch','notifications','schedule','settings','createlisting']);
+const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','locations','returns','dispatch','notifications','schedule','settings','createlisting','vinsearch']);
 // Pages surfaced in the bottom quick-bar (order = left→right). Home is leftmost.
 // Only shown if the user has permission for them. Scan lives inside Stock Check
 // now (hardware scanner is automatic), so there's no separate Scan tab.
@@ -3166,6 +3170,7 @@ function hasPerm(page) {
   const map = {
     dashboard:     true,
     clock:         true,
+    vinsearch:     true,
     inventory:    'inventory',
     incoming:     'inventory',
     scan:         'scan',
@@ -3242,7 +3247,8 @@ function routeTo(page) {
     labels: renderLabels, notes: renderNotes, dispatch: renderDispatch,
     competitors: renderCompetitors, bundles: renderBundles, createlisting: renderCreateListing,
     sharedstock: renderSharedStock, editlisting: renderEditListing, costs: renderCosts,
-    drafts: renderDrafts, clonestore: renderCloneStore
+    drafts: renderDrafts, clonestore: renderCloneStore,
+    vinsearch: renderVinSearch
   };
   try {
     (pages[page] || renderDashboard)();
@@ -15692,6 +15698,47 @@ async function qsSavePackage(id) {
   } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
+// ── VIN Search (external portal launcher + shared login card) ───────────────
+// The portal is a third-party web client with its own login session, so it
+// can't be embedded or auto-logged-in — instead the app is the launcher:
+// one tap opens it (external browser on the handheld), and the shared login
+// is one tap away to copy. Admin manages the login in Settings.
+async function renderVinSearch() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head"><div><h1>🔎 VIN Search</h1><div class="desc">Look up a vehicle's details by VIN on the VIN Search portal.</div></div></div>
+      <div id="vs-body" class="card"><div class="card-body"><div class="empty"><div class="t">Loading…</div></div></div></div>
+    </div>`;
+  let cfg;
+  try { cfg = await Api.get('/api/settings/vinsearch'); }
+  catch (e) { el('vs-body').innerHTML = `<div class="card-body"><div style="color:var(--red)">Couldn't load: ${escapeHtml(e.message)}</div></div>`; return; }
+  const box = el('vs-body'); if (!box || State.page !== 'vinsearch') return;
+  const credRow = (label, value, mask) => value ? `
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line-2)">
+      <div style="width:90px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);font-weight:600">${label}</div>
+      <div id="vs-${label.toLowerCase()}" style="flex:1;font-family:ui-monospace,monospace;font-size:14px">${mask ? '••••••••' : escapeHtml(value)}</div>
+      ${mask ? `<button class="btn btn-ghost btn-sm" onclick="var n=el('vs-password');n.textContent=n.textContent.startsWith('•')?n.dataset.v:'••••••••'" title="Show / hide">👁</button>` : ''}
+      <button class="btn btn-outline btn-sm" onclick="copyToClipboard(this.dataset.v)" data-v="${escapeAttr(value)}">📋 Copy</button>
+    </div>` : '';
+  box.innerHTML = `
+    <div class="card-body">
+      <a class="btn btn-primary" style="display:block;text-align:center;padding:14px;font-size:15px;margin-bottom:14px" href="${escapeAttr(cfg.url)}" target="_blank" rel="noopener">🔎 Open the VIN Search portal ↗</a>
+      ${cfg.email || cfg.password ? `
+        <div style="font-weight:700;font-size:13px;margin-bottom:2px">Shared login</div>
+        <div style="font-size:12px;color:var(--ink-soft);margin-bottom:4px">Copy these into the portal's sign-in — it keeps you logged in for a while afterwards.</div>
+        ${credRow('Email', cfg.email, false)}
+        ${credRow('Password', cfg.password, true)}
+      ` : cfg.email === null ? `
+        <div style="font-size:13px;color:var(--ink-soft)">The login for this portal is admin-only on this account — ask an admin to sign you in (or to enable "show login to staff" in Settings).</div>
+      ` : `
+        <div style="font-size:13px;color:var(--ink-soft)">No login saved yet${cfg.isAdmin ? ' — add the shared email + password in <strong>Settings → 🔎 VIN Search portal</strong> and it will show here for everyone' : ' — ask an admin to add it in Settings'}.</div>
+      `}
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:12px">The portal opens in its own ${State.appShell ? 'browser window' : 'tab'} — it runs its own login session, so it can't sit inside this page.</div>
+    </div>`;
+  // Stash the raw password for the reveal toggle without inlining it twice.
+  const pw = el('vs-password'); if (pw && cfg.password) pw.dataset.v = cfg.password;
+}
+
 // ── Returns drop-off banner ─────────────────────────────────────────────────
 async function paintReturnsDropoff() {
   const box = el('ret-dropoff'); if (!box) return;
@@ -20213,6 +20260,20 @@ function renderSettings() {
         <div class="card-body"><div id="shipset-body"><div class="empty"><div class="t">Loading…</div></div></div></div>
       </div>
 
+      <div class="card admin-only" style="margin-bottom:16px">
+        <div class="card-head"><h3>🔎 VIN Search portal</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">The external VIN lookup portal + its shared login. Everyone gets a <strong>VIN Search</strong> item under Resources (computer + handheld) with a one-tap "open portal" button and the login ready to copy.</p>
+          <div class="field"><label>Portal URL</label><input id="vs-set-url" placeholder="https://login.vinsearch.online/…"></div>
+          <div class="grid-2" style="grid-template-columns:1fr 1fr">
+            <div class="field"><label>Shared email</label><input id="vs-set-email" autocomplete="off" placeholder="login email"></div>
+            <div class="field"><label>Shared password</label><input id="vs-set-pass" type="password" autocomplete="new-password" placeholder="leave blank to keep current"></div>
+          </div>
+          <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="vs-set-staff" checked><span></span></label> Show the login to warehouse staff (off = admins only)</label></div>
+          <button class="btn btn-primary" onclick="saveVinSearchSettings(this)">Save VIN Search config</button>
+        </div>
+      </div>
+
       <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>Knowledge base visibility</h3></div>
         <div class="card-body">
@@ -20234,7 +20295,33 @@ function renderSettings() {
   loadDropfleetConfig();
   loadThumbnailConfig();
   loadFitmentConfig();
-  if (State.user?.role === 'admin') loadShippingSettingsUI();
+  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); }
+}
+
+async function loadVinSearchSettings() {
+  try {
+    const cfg = await Api.get('/api/settings/vinsearch');
+    if (el('vs-set-url')) el('vs-set-url').value = cfg.url || '';
+    if (el('vs-set-email')) el('vs-set-email').value = cfg.email || '';
+    if (el('vs-set-staff')) el('vs-set-staff').checked = cfg.showToStaff !== false;
+    // Password field stays blank — blank on save = keep the stored one.
+  } catch (_) {}
+}
+async function saveVinSearchSettings(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const body = {
+      url: el('vs-set-url')?.value || '',
+      email: el('vs-set-email')?.value || '',
+      showToStaff: !!el('vs-set-staff')?.checked,
+    };
+    const pass = el('vs-set-pass')?.value || '';
+    if (pass) body.password = pass;   // blank = keep current
+    await Api.post('/api/settings/vinsearch', body);
+    if (el('vs-set-pass')) el('vs-set-pass').value = '';
+    toast('VIN Search config saved', 'success');
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
 }
 
 // ── eBay fitment-confirmation messages ──

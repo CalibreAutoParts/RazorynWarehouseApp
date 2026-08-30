@@ -918,5 +918,51 @@ async function serveLogo(col, res) {
 }
 publicLogoRouter.get('/public-logo', (req, res) => serveLogo('logo_data_url', res));
 publicLogoRouter.get('/public-logo-dark', (req, res) => serveLogo('logo_dark_data_url', res));
+// ──────────────────────────────────────────────────────────────────────────
+// VIN Search portal — an external tool the warehouse uses to look up VINs.
+// The shared login is stored here (admin-managed) and served to staff so the
+// portal is one tap away from inside the app. The portal itself can't be
+// embedded or auto-logged-in (it's a third-party web client with its own
+// session), so the app acts as the launcher + credential card.
+// Stored in app_settings.data.vinsearch = { url, email, password, showToStaff }.
+// ──────────────────────────────────────────────────────────────────────────
+const VINSEARCH_DEFAULT_URL = 'https://login.vinsearch.online/portal/webclient/index.html?applicationId=VinSearch';
+
+router.get('/vinsearch', async (req, res) => {
+  try {
+    const d = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+    const v = d.vinsearch || {};
+    const isAdmin = req.user.role === 'admin';
+    // Default ON — the whole point is the warehouse floor using it. Admin can
+    // flip showToStaff off to keep the login admin-only.
+    const showLogin = isAdmin || v.showToStaff !== false;
+    res.json({
+      url: v.url || VINSEARCH_DEFAULT_URL,
+      email: showLogin ? (v.email || '') : null,
+      password: showLogin ? (v.password || '') : null,
+      showToStaff: v.showToStaff !== false,
+      configured: !!(v.email || v.password),
+      isAdmin,
+    });
+  } catch (e) { res.status(500).json({ error: 'load_failed', message: e.message }); }
+});
+
+router.post('/vinsearch', requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+    const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+    const v = { ...(cur.vinsearch || {}) };
+    if (b.url !== undefined) v.url = String(b.url || '').trim().slice(0, 500) || VINSEARCH_DEFAULT_URL;
+    if (b.email !== undefined) v.email = String(b.email || '').trim().slice(0, 200);
+    if (b.password !== undefined) v.password = String(b.password || '').slice(0, 200);
+    if (b.showToStaff !== undefined) v.showToStaff = !!b.showToStaff;
+    await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`,
+      [JSON.stringify({ ...cur, vinsearch: v })]);
+    await audit(req, 'vinsearch_config', null, null, { showToStaff: v.showToStaff });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+});
+
 module.exports = router;
 module.exports.publicLogoRouter = publicLogoRouter;
