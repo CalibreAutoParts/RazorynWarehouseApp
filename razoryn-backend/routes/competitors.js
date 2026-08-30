@@ -278,7 +278,7 @@ router.post('/:id/scan', requireAdmin, async (req, res) => {
   res.json({ ok: true, started: true });
   (async () => {
     try {
-      const summary = await monitor.scanCompetitor(Number(req.params.id));
+      const summary = await monitor.scanCompetitor(Number(req.params.id), _scanStatus);
       await audit(req, 'competitor.scan', 'competitor', req.params.id, summary);
       _scanStatus = { ..._scanStatus, running: false, finishedAt: new Date().toISOString(), summary };
     } catch (e) {
@@ -295,7 +295,7 @@ router.post('/scan', requireAdmin, async (req, res) => {
   res.json({ ok: true, started: true });
   (async () => {
     try {
-      const result = await monitor.scanAll();
+      const result = await monitor.scanAll(_scanStatus);
       await audit(req, 'competitor.scanAll', null, null, { competitors: result.competitors, alerts: result.alerts });
       _scanStatus = { ..._scanStatus, running: false, finishedAt: new Date().toISOString(), result };
     } catch (e) {

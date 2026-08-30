@@ -156,12 +156,15 @@ async function hasUnread(type, listingId) {
 
 // ---------- scan one competitor ----------
 
-async function scanCompetitor(competitorId) {
+async function scanCompetitor(competitorId, status = {}) {
   const c = (await query(`SELECT * FROM competitors WHERE id = $1`, [competitorId])).rows[0];
   if (!c) throw new Error(`competitor ${competitorId} not found`);
 
   const firstScan = !c.last_scanned_at;
   const summary = { competitor: c.code, listings: 0, priceChanges: 0, alerts: 0, opportunities: 0 };
+  // Live progress for the UI's bar: 'fetching' while pulling pages from eBay
+  // (no total known yet), then 'matching' with done/total counts.
+  status.competitor = c.name || c.code; status.phase = 'fetching'; status.done = 0; status.total = null;
 
   let items;
   try {
@@ -179,8 +182,10 @@ async function scanCompetitor(competitorId) {
   const seenExternalIds = [];
   let newItemAlerts = 0;
   const newItemCap = NEW_ITEM_MAX();
+  status.phase = 'matching'; status.total = items.length;
 
   for (const it of items) {
+    status.done = (status.done || 0) + 1;
     if (!it.external_id || !it.title) continue;
     seenExternalIds.push(String(it.external_id));
 
@@ -343,12 +348,15 @@ async function scanCompetitor(competitorId) {
 
 // ---------- scan all active competitors ----------
 
-async function scanAll() {
+async function scanAll(status = {}) {
   const { rows } = await query(`SELECT id, code FROM competitors WHERE active = true ORDER BY id`);
   const result = { competitors: 0, listings: 0, priceChanges: 0, alerts: 0, opportunities: 0, perCompetitor: [] };
-  for (const c of rows) {
+  status.ofCompetitors = rows.length;
+  for (let ci = 0; ci < rows.length; ci++) {
+    const c = rows[ci];
+    status.competitorIndex = ci + 1;
     try {
-      const s = await scanCompetitor(c.id);
+      const s = await scanCompetitor(c.id, status);
       result.competitors++;
       result.listings += s.listings || 0;
       result.priceChanges += s.priceChanges || 0;
