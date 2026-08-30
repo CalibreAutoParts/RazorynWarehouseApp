@@ -15720,9 +15720,22 @@ async function renderVinSearch() {
       ${mask ? `<button class="btn btn-ghost btn-sm" onclick="var n=el('vs-password');n.textContent=n.textContent.startsWith('•')?n.dataset.v:'••••••••'" title="Show / hide">👁</button>` : ''}
       <button class="btn btn-outline btn-sm" onclick="copyToClipboard(this.dataset.v)" data-v="${escapeAttr(value)}">📋 Copy</button>
     </div>` : '';
+  // Launch link: the portal is a VMware-Horizon-style web client, which reads
+  // login details from URL parameters. userName prefills the sign-in on every
+  // version; with auto-login enabled the password + start-session ride along
+  // too, which signs straight in on versions that accept it. Harmless if the
+  // portal ignores them — the copy buttons below stay as the fallback.
+  let launchUrl = cfg.url;
+  try {
+    const u = new URL(cfg.url);
+    if (cfg.email) u.searchParams.set('userName', cfg.email);
+    if (cfg.autoLogin && cfg.password) { u.searchParams.set('password', cfg.password); u.searchParams.set('action', 'start-session'); }
+    launchUrl = u.toString();
+  } catch (_) {}
   box.innerHTML = `
     <div class="card-body">
-      <a class="btn btn-primary" style="display:block;text-align:center;padding:14px;font-size:15px;margin-bottom:14px" href="${escapeAttr(cfg.url)}" target="_blank" rel="noopener">🔎 Open the VIN Search portal ↗</a>
+      <a class="btn btn-primary" style="display:block;text-align:center;padding:14px;font-size:15px;margin-bottom:4px" href="${escapeAttr(launchUrl)}" target="_blank" rel="noopener">🔎 Open the VIN Search portal ↗</a>
+      ${cfg.email ? `<div style="font-size:11px;color:var(--ink-soft);text-align:center;margin-bottom:12px">${cfg.autoLogin && cfg.password ? 'The link carries the login — it should sign in by itself (if the portal ignores it, the email is still pre-filled: just paste the password).' : 'The email is pre-filled on the portal’s sign-in — just paste the password.'}</div>` : '<div style="margin-bottom:10px"></div>'}
       ${cfg.email || cfg.password ? `
         <div style="font-weight:700;font-size:13px;margin-bottom:2px">Shared login</div>
         <div style="font-size:12px;color:var(--ink-soft);margin-bottom:4px">Copy these into the portal's sign-in — it keeps you logged in for a while afterwards.</div>
@@ -20270,6 +20283,8 @@ function renderSettings() {
             <div class="field"><label>Shared password</label><input id="vs-set-pass" type="password" autocomplete="new-password" placeholder="leave blank to keep current"></div>
           </div>
           <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="vs-set-staff" checked><span></span></label> Show the login to warehouse staff (off = admins only)</label></div>
+          <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="vs-set-auto"><span></span></label> Auto sign-in via the launch link</label>
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">The email is always pre-filled via the link. This ALSO puts the password + "start session" into it, which logs straight in on portals that accept it. Note the password then appears in the link itself (browser history) — fine for a shared floor login, switch off if that bothers you.</div></div>
           <button class="btn btn-primary" onclick="saveVinSearchSettings(this)">Save VIN Search config</button>
         </div>
       </div>
@@ -20304,6 +20319,7 @@ async function loadVinSearchSettings() {
     if (el('vs-set-url')) el('vs-set-url').value = cfg.url || '';
     if (el('vs-set-email')) el('vs-set-email').value = cfg.email || '';
     if (el('vs-set-staff')) el('vs-set-staff').checked = cfg.showToStaff !== false;
+    if (el('vs-set-auto')) el('vs-set-auto').checked = !!cfg.autoLogin;
     // Password field stays blank — blank on save = keep the stored one.
   } catch (_) {}
 }
@@ -20314,6 +20330,7 @@ async function saveVinSearchSettings(btn) {
       url: el('vs-set-url')?.value || '',
       email: el('vs-set-email')?.value || '',
       showToStaff: !!el('vs-set-staff')?.checked,
+      autoLogin: !!el('vs-set-auto')?.checked,
     };
     const pass = el('vs-set-pass')?.value || '';
     if (pass) body.password = pass;   // blank = keep current
