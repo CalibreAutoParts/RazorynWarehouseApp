@@ -843,6 +843,7 @@
   .table tbody tr:hover { background: var(--bg-soft); }
   .toast { animation: toastIn .18s ease; }
   @keyframes toastIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  @keyframes compIndet { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
   *::-webkit-scrollbar { width: 10px; height: 10px; }
   *::-webkit-scrollbar-track { background: transparent; }
   *::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
@@ -22664,6 +22665,7 @@ function renderCompetitors() {
           <button class="btn btn-outline btn-sm" onclick="renderCompetitors()">↻ Refresh</button>
         </div>
       </div>
+      <div id="comp-progress" style="display:none;margin-bottom:12px"></div>
       <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
         ${compTabBtn('manager', 'Competitors')}
         ${compTabBtn('compare', '🆚 Compare')}
@@ -22675,6 +22677,56 @@ function renderCompetitors() {
       <div id="comp-body"><div class="empty"><div class="t">Loading…</div></div></div>
     </div>`;
   loadCompTab();
+  compProgressPoll();
+}
+
+// ── Live progress bar for background scans / re-matches ─────────────────────
+// Polls the job statuses while the Competitors page is open. Shows a real bar
+// (done/total) once matching starts; a pulsing bar while eBay pages are still
+// being fetched. Auto-hides and refreshes the tab when the job finishes.
+function compProgressPoll() {
+  if (window._compProgTimer) clearInterval(window._compProgTimer);
+  const tick = async () => {
+    if (State.page !== 'competitors') { clearInterval(window._compProgTimer); window._compProgTimer = null; return; }
+    const box = el('comp-progress'); if (!box) return;
+    let scan = null, rem = null;
+    try { scan = await Api.get('/api/competitors/scan/status'); } catch (_) {}
+    try { rem = await Api.get('/api/competitors/rematch/status'); } catch (_) {}
+    const act = (scan && scan.running) ? { ...scan, kind: 'scan' } : (rem && rem.running) ? { ...rem, kind: 'rematch' } : null;
+    if (!act) {
+      if (window._compProgWasRunning) {
+        window._compProgWasRunning = false;
+        box.style.display = 'none';
+        loadCompTab();   // job just finished → fresh numbers
+      }
+      return;
+    }
+    window._compProgWasRunning = true;
+    const done = act.done || 0, total = act.total || null;
+    const pct = total ? Math.min(100, Math.round(done / total * 100)) : null;
+    let label, detail;
+    if (act.kind === 'rematch') {
+      label = '🔗 Re-matching listings against our catalogue';
+      detail = total ? `${done.toLocaleString()} / ${total.toLocaleString()} · ${(act.matched || 0).toLocaleString()} linked so far` : 'preparing…';
+    } else {
+      const who = act.competitor ? escapeHtml(act.competitor) : 'competitor';
+      const multi = act.ofCompetitors > 1 ? ` (${act.competitorIndex || 1} of ${act.ofCompetitors})` : '';
+      label = `⟳ Scanning ${who}${multi}`;
+      detail = act.phase === 'fetching' ? 'fetching listings from eBay…'
+        : total ? `matching ${done.toLocaleString()} / ${total.toLocaleString()} listings` : 'starting…';
+    }
+    box.style.display = '';
+    box.innerHTML = `<div class="card"><div class="card-body" style="padding:10px 14px">
+      <div style="display:flex;justify-content:space-between;gap:10px;font-size:12px;margin-bottom:7px;flex-wrap:wrap">
+        <strong>${label}</strong><span style="color:var(--ink-soft)">${detail}${pct != null ? ` · ${pct}%` : ''}</span>
+      </div>
+      <div style="height:8px;background:var(--line-2);border-radius:6px;overflow:hidden">
+        <div style="height:100%;background:var(--brand-primary);border-radius:6px;transition:width .6s ease;${pct != null ? `width:${Math.max(2, pct)}%` : 'width:100%;animation:compIndet 1.4s ease-in-out infinite'}"></div>
+      </div>
+    </div></div>`;
+  };
+  tick();
+  window._compProgTimer = setInterval(tick, 2500);
 }
 
 function compTabBtn(tab, label) {
