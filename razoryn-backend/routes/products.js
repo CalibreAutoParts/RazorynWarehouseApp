@@ -313,13 +313,17 @@ router.get('/barcode/:code', requirePermission('scan'), async (req, res) => {
 });
 
 // GET /api/products/low-stock
+// One row per PHYSICAL part: shared-pool members carry the same quantity, so
+// without the dedupe a low pool spammed the alert list once per listing.
 router.get('/low-stock', requirePermission('inventory'), async (req, res) => {
   const { rows } = await query(
-    `SELECT id, sku, title, qty_on_hand, low_stock_threshold, brand, model
+    `SELECT DISTINCT ON (COALESCE(stock_group_id, -id))
+            id, sku, title, qty_on_hand, low_stock_threshold, brand, model, stock_group_id
      FROM products
      WHERE active = true AND hidden = false AND qty_on_hand <= low_stock_threshold
-     ORDER BY qty_on_hand ASC, title`
+     ORDER BY COALESCE(stock_group_id, -id), id`
   );
+  rows.sort((a, z) => a.qty_on_hand - z.qty_on_hand || String(a.title).localeCompare(String(z.title)));
   res.json({ products: rows });
 });
 
