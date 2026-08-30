@@ -824,6 +824,36 @@
   /* "Copy to 2nd store" — only when the brand has more than one eBay store. */
   body:not(.is-multistore) .nav-item.multistore-only { display: none !important; }
 
+  /* ==================== POLISH PASS ====================
+     Small, cheap touches that make the whole app feel smoother: gentle page
+     fade-in on navigation, button/nav transitions, visible keyboard-focus
+     rings, row hovers, and tidy scrollbars. Pure CSS — no behaviour changes. */
+  #content > .page { animation: pageIn .16s ease; }
+  @keyframes pageIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .btn { transition: background .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease, transform .06s ease; }
+  .btn:not(:disabled):active { transform: translateY(1px); }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .nav-item { transition: background .15s ease, color .15s ease; }
+  .card { transition: box-shadow .18s ease; }
+  .btn:focus-visible, .nav-item:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--brand-primary); outline-offset: 1px;
+  }
+  .table tbody tr { transition: background .12s ease; }
+  .table tbody tr:hover { background: var(--bg-soft); }
+  .toast { animation: toastIn .18s ease; }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+  *::-webkit-scrollbar-thumb:hover { background: var(--ink-soft); border: 2px solid transparent; background-clip: padding-box; }
+  /* Respect users (and slow devices) that ask for less motion. */
+  @media (prefers-reduced-motion: reduce) {
+    #content > .page, .toast { animation: none; }
+    .btn, .nav-item, .card, .table tbody tr { transition: none; }
+  }
+  /* The handheld skips the entrance animation entirely — snappier feel. */
+  body.is-app #content > .page { animation: none; }
+
   /* ==================== NATIVE APP SHELL (handheld) ====================
      Applied only inside the Android APK shell (body.is-app). Bigger touch targets,
      fit-to-screen, a persistent bottom quick-bar, and safe-area padding for the
@@ -2170,8 +2200,12 @@ function enterApp() {
   initNativeApp();          // register device + native push (FCM) when in the APK
   initEditingTracker();
   initTableLabeller();
-  routeTo(State.appShell && !APP_PAGES.has('dashboard') ? 'dashboard'
-         : (State.kiosk && !KIOSK_PAGES.has('dashboard') ? 'inventory' : 'dashboard'));
+  // Deep link: a #hash in the URL (from "open in new tab", a bookmark, or a
+  // shared link) boots straight into that section when this login can see it.
+  const hashPage = (location.hash || '').replace(/^#/, '');
+  const startPage = (hashPage && typeof hasPerm === 'function' && hasPerm(hashPage)) ? hashPage : 'dashboard';
+  routeTo(State.appShell && !APP_PAGES.has(startPage) ? 'dashboard'
+         : (State.kiosk && !KIOSK_PAGES.has(startPage) ? 'inventory' : startPage));
   refreshNavCounts();
   refreshClockDot();
   refreshCostFloors();   // admin-only cost floors for app-wide price warnings
@@ -2669,12 +2703,19 @@ function bindHeader() {
    ========================================================== */
 function bindNav() {
   document.querySelectorAll('.nav-item').forEach(n => {
-    n.addEventListener('click', () => {
+    n.addEventListener('click', (e) => {
+      // Ctrl/Cmd-click = open this section in a NEW browser tab (pages have
+      // #hash URLs now, so the new tab boots straight into it).
+      if ((e.ctrlKey || e.metaKey) && n.dataset.page) { window.open(location.pathname + '#' + n.dataset.page, '_blank'); return; }
       // Action items (e.g. Create listing) open a flow instead of routing to a page.
       if (n.dataset.action === 'create-listing') { if (typeof openCreateListing === 'function') openCreateListing(); return; }
       // Direction-specific nav items deep-link into the Bulk Editor's source tab.
       if (n.dataset.source) MirrorState.sourceTab = n.dataset.source;
       routeTo(n.dataset.page);
+    });
+    // Middle-click = new browser tab too (buttons don't get the native link menu).
+    n.addEventListener('auxclick', (e) => {
+      if (e.button === 1 && n.dataset.page) { e.preventDefault(); window.open(location.pathname + '#' + n.dataset.page, '_blank'); }
     });
   });
 }
@@ -3221,6 +3262,30 @@ function routeTo(page) {
   } else {
     try { history.replaceState({ page }, '', '#' + page); } catch (_) {}
   }
+  // Silent background refresh: the tab paints instantly from cache, fresh data
+  // is fetched behind it, and the list soft-repaints only if you're still on
+  // the tab with no modal open — so a listing created a moment ago shows up
+  // without anything ever feeling like a page refresh.
+  queueBackgroundRefresh(page);
+}
+
+const _BG_REFRESH_KEYS = { inventory: 'products', returns: 'returns' };
+function queueBackgroundRefresh(page) {
+  const key = _BG_REFRESH_KEYS[page];
+  if (!key || !State.user) return;
+  Store.refresh(key).then(() => {
+    if (State.page !== page) return;                                           // moved on already
+    const ov = document.getElementById('modal-overlay');
+    if (ov && ov.classList.contains('open')) return;                           // don't repaint under a modal
+    const a = document.activeElement;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.type !== 'search') return;  // mid-typing
+    if (page === 'inventory') { repaintInventoryList(); }
+    if (page === 'returns' && typeof filterReturns === 'function') {
+      const active = document.querySelector('[data-rfilter].active')?.dataset.rfilter || 'open';
+      filterReturns(active);
+    }
+    if (typeof refreshNavCounts === 'function') refreshNavCounts();
+  }).catch(() => {});
 }
 
 // ── Back-button navigation (desktop, mobile browser AND the APK, where the
