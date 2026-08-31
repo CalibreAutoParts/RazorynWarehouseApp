@@ -2254,7 +2254,10 @@ function enterApp() {
     if (!State.user || document.hidden) return;
     try {
       await Store.refresh('notifications');
-      if (['dashboard','inventory'].includes(State.page)) await Store.refresh('products');
+      // Products refresh EVERY tick regardless of page — a listing created on
+      // another device/tab becomes searchable everywhere (inventory, labels,
+      // stock check, quick tools, scanner lookups) within a minute, silently.
+      await Store.refresh('products');
       if (State.page === 'dashboard') {
         await Store.refresh('sales');
         const currentIds = new Set((State.sales || []).map(s => s.id));
@@ -2308,11 +2311,9 @@ function enterApp() {
         lastLowStockIds = currentLow;
       }
       if (State.page === 'schedule') await Store.refresh('schedule');
-      // Stock Check live sync: pull fresh products AND the counted-set so a
-      // quantity set on another device (e.g. the handheld's scan sheet) shows
-      // up here without any refresh.
+      // Stock Check live sync: also pull the counted-set so a quantity set on
+      // another device (e.g. the handheld's scan sheet) ticks off here too.
       if (State.page === 'stocktake') {
-        try { await Store.refresh('products'); } catch (_) {}
         try {
           const r = await Api.get('/api/stock-checks/progress');
           State._stChecked = new Set((r.productIds || []).map(String)); State._stPeriod = r;
@@ -2343,7 +2344,10 @@ function enterApp() {
             sales: null,   // handled above via salesReload (respects the active filter)
             returns: typeof renderReturns === 'function' ? renderReturns : null,
             schedule: typeof renderSchedule === 'function' ? renderSchedule : null,
-            stocktake: typeof stPaint === 'function' ? stPaint : null,   // list-only; keeps search/filters
+            stocktake: typeof stPaint === 'function' ? stPaint : null,       // list-only; keeps search/filters
+            incoming: typeof loadIncoming === 'function' ? loadIncoming : null, // refetches with the current filter/search, repaints the list only
+            locations: typeof renderLocations === 'function' ? renderLocations : null,
+            sharedstock: typeof renderSharedStock === 'function' ? renderSharedStock : null,
           };
           if (repaintMap[State.page] && !scrolled) repaintMap[State.page]();
         }
