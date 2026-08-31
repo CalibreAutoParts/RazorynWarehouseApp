@@ -2308,6 +2308,16 @@ function enterApp() {
         lastLowStockIds = currentLow;
       }
       if (State.page === 'schedule') await Store.refresh('schedule');
+      // Stock Check live sync: pull fresh products AND the counted-set so a
+      // quantity set on another device (e.g. the handheld's scan sheet) shows
+      // up here without any refresh.
+      if (State.page === 'stocktake') {
+        try { await Store.refresh('products'); } catch (_) {}
+        try {
+          const r = await Api.get('/api/stock-checks/progress');
+          State._stChecked = new Set((r.productIds || []).map(String)); State._stPeriod = r;
+        } catch (_) {}
+      }
       // Dispatch auto-refreshes (the app has no manual sync/refresh button) so the
       // worklist stays live as orders come in and get shipped/collected.
       if (State.page === 'dispatch' && typeof loadDispatch === 'function') { try { await loadDispatch(); } catch (_) {} }
@@ -2333,6 +2343,7 @@ function enterApp() {
             sales: null,   // handled above via salesReload (respects the active filter)
             returns: typeof renderReturns === 'function' ? renderReturns : null,
             schedule: typeof renderSchedule === 'function' ? renderSchedule : null,
+            stocktake: typeof stPaint === 'function' ? stPaint : null,   // list-only; keeps search/filters
           };
           if (repaintMap[State.page] && !scrolled) repaintMap[State.page]();
         }
@@ -15721,7 +15732,7 @@ function openProductQuickSheet(id) {
         <div style="font-weight:700;font-size:12px;margin-bottom:6px">Stock quantity</div>
         <div style="display:flex;gap:8px;align-items:center">
           <button class="btn btn-outline" style="width:52px;font-size:18px" onclick="var q=el('qs-qty');q.value=Math.max(0,(parseInt(q.value)||0)-1)">−</button>
-          <input id="qs-qty" type="number" min="0" inputmode="numeric" value="${p.qtyOnHand ?? 0}" style="flex:1;text-align:center;font-size:18px;font-weight:700">
+          <input id="qs-qty" type="number" min="0" inputmode="numeric" value="${p.qtyOnHand ?? 0}" data-orig="${p.qtyOnHand ?? 0}" style="flex:1;text-align:center;font-size:18px;font-weight:700">
           <button class="btn btn-outline" style="width:52px;font-size:18px" onclick="var q=el('qs-qty');q.value=(parseInt(q.value)||0)+1">+</button>
           <button class="btn btn-primary" onclick="qsSaveQty('${p.id}')">💾</button>
         </div>
@@ -15730,7 +15741,7 @@ function openProductQuickSheet(id) {
 
       <div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px">
         <div style="font-weight:700;font-size:12px;margin-bottom:6px">📍 Location</div>
-        <input id="qs-loc" value="${escapeAttr(p.locationNote || '')}" placeholder="e.g. Aisle B, Rack 3, top shelf" style="width:100%;margin-bottom:6px">
+        <input id="qs-loc" value="${escapeAttr(p.locationNote || '')}" data-orig="${escapeAttr(p.locationNote || '')}" placeholder="e.g. Aisle B, Rack 3, top shelf" style="width:100%;margin-bottom:6px">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input type="file" id="qs-loc-photo" accept="image/*" capture="environment" style="display:none" onchange="qsLocPhotoPicked(this)">
           <button class="btn btn-outline btn-sm" type="button" onclick="el('qs-loc-photo').click()">📷 Photo of the spot</button>
@@ -15754,11 +15765,27 @@ function openProductQuickSheet(id) {
           <input id="qs-pack-cost" type="number" step="0.01" min="0" inputmode="decimal" value="${p.packagingCost ?? ''}" placeholder="£ packaging per item" style="width:100%">
           <div style="font-size:10px;color:var(--ink-soft);margin-top:2px">Bought separately — this £ goes into the item's cost maths.</div>
         </div>
-        <button class="btn btn-primary" style="width:100%" onclick="qsSavePackage('${p.id}')">💾 Save parcel &amp; packaging</button>
+        <button class="btn btn-outline" style="width:100%" onclick="qsSavePackage('${p.id}')">💾 Save parcel &amp; packaging</button>
       </div>`,
-    actions: [{ label: 'Close', onClick: closeModal }],
+    actions: [
+      { label: 'Close', onClick: closeModal },
+      { label: '💾 Save everything', primary: true, onClick: () => qsSaveAll(p.id) },
+    ],
   });
   populateCartonPresets('qs-preset');
+}
+// One tap saves the whole sheet: the count (when changed), the location +
+// photo (when changed), and the parcel/packaging details — so a scan-and-fill
+// never needs three separate saves.
+async function qsSaveAll(id) {
+  const qtyEl = el('qs-qty');
+  const qtyChanged = qtyEl && String(qtyEl.value) !== String(qtyEl.dataset.orig ?? '');
+  const locEl = el('qs-loc');
+  const locChanged = (locEl && (locEl.value || '').trim() !== (locEl.dataset.orig || '').trim()) || !!_qsLocPhoto;
+  if (qtyChanged) await qsSaveQty(id);
+  if (locChanged) await qsSaveLocation(id);
+  await qsSavePackage(id);
+  closeModal();
 }
 function qsApplyPreset(idx) {
   if (idx === '' || idx == null) return;
@@ -15772,10 +15799,17 @@ async function qsSaveQty(id) {
   if (!Number.isInteger(qty) || qty < 0) { toast('Enter a quantity', 'warn'); return; }
   const taskId = Task.start('Updating stock');
   try {
-    const r = await Api.post(`/api/products/${id}/set-quantity`, { quantity: qty, notes: 'Quick sheet (scan)' });
+    // Goes through the STOCK-CHECK endpoint (not plain set-quantity) so a scan
+    // count on the device does everything a Stock Check "Adjust" does: sets the
+    // quantity, pushes to Shopify + eBay, AND records the item as counted in
+    // the current stock-check period — the Stock Check page ticks it off.
+    const r = await Api.post('/api/stock-checks', { productId: id, actualQty: qty, reason: 'stock_take', notes: 'Quick sheet (scan)', forcePush: true });
     Task.done(taskId);
-    toast(r.channelPush ? summarizeChannelPush(r.channelPush) : 'Stock updated', 'success', 5000);
-    Store.refresh('products').catch(() => {});
+    if (State._stChecked instanceof Set) State._stChecked.add(String(id));
+    toast('Counted ✓ · ' + summarizeChannelPush(r && r.channelPush), 'success', 5000);
+    await Store.refresh('products').catch(() => {});
+    const q2 = el('qs-qty'); if (q2) q2.dataset.orig = String(qty);
+    if (State.page === 'stocktake' && typeof stPaint === 'function') stPaint();
   } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 let _qsLocPhoto = null;
