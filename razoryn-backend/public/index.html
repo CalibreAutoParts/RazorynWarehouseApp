@@ -4189,7 +4189,10 @@ function renderIncoming() {
     <div class="page">
       <div class="page-head">
         <div><h1>Incoming stock</h1><div class="desc">Stock ordered in but not with us yet — receive it when a container is unloaded to update stock and push to Shopify + eBay.</div></div>
-        <div class="actions"><button class="btn btn-primary" onclick="openAddIncoming()">+ Add incoming</button></div>
+        <div class="actions">
+          <button class="btn btn-outline admin-only" onclick="openSupplierImport()" title="Upload a supplier's invoice / packing list (.xlsx) — the lines are read, matched to your listings by part number, sub part numbers and remembered supplier SKUs, then land here as a container after your review.">📄 Import supplier file</button>
+          <button class="btn btn-primary" onclick="openAddIncoming()">+ Add incoming</button>
+        </div>
       </div>
       <div class="grid-4" id="incoming-stats" style="margin-bottom:16px"></div>
       <div id="incoming-containers" style="margin-bottom:14px"></div>
@@ -15874,6 +15877,169 @@ async function qsSavePackage(id) {
     toast(errs.length ? '⚠ Saved, but: ' + errs.join(' · ') : 'Parcel & packaging saved' + (pp ? ' — pushed to channels' : ''), errs.length ? 'warn' : 'success', 6000);
     Store.refresh('products').catch(() => {});
   } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// ── Supplier invoice / packing-list import ──────────────────────────────────
+// Upload the supplier's .xlsx → the backend finds the parts table (any of the
+// usual supplier layouts), matches each line to OUR listings by part number,
+// sub part numbers and remembered supplier SKUs, and this review screen makes
+// the human settle every line — confirm the matched listing (fitment checked!),
+// pick a different one, or mark it "new item" to draft a listing later. On
+// import the lines land in Incoming as a container, and each supplier SKU is
+// remembered against the product for future restocks (price kept for tracking
+// only — never pushed to listings).
+const SIMP = { lines: [], fileName: '' };
+function openSupplierImport() {
+  loadSuppliersOnce();
+  modal({
+    title: '📄 Import supplier invoice / packing list',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Drop in the supplier's <strong>.xlsx</strong> invoice or packing list — any of the usual layouts. Lines are matched to your listings by <strong>part number → sub part numbers → remembered supplier SKUs</strong>; you review and confirm fitment before anything is created.</div>
+      <div class="field"><label>File</label><input type="file" id="simp-file" accept=".xlsx,.xls"></div>
+      <div id="simp-review"></div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '⬆ Read the file', primary: true, onClick: simpParse },
+    ],
+  });
+}
+async function simpParse() {
+  const f = el('simp-file')?.files?.[0];
+  if (!f) { toast('Pick the supplier file first', 'warn'); return; }
+  const taskId = Task.start('Reading supplier file');
+  let data;
+  try {
+    const fd = new FormData(); fd.append('file', f);
+    const r = await fetch('/api/supplier-import/parse', { method: 'POST', body: fd, credentials: 'include' });
+    data = await r.json();
+    if (!r.ok) throw new Error(data?.message || data?.error || ('HTTP ' + r.status));
+    Task.done(taskId, data.lines.length + ' lines');
+  } catch (e) { Task.fail(taskId); toast('Couldn\'t read it: ' + e.message, 'error', 8000); return; }
+  SIMP.lines = data.lines || [];
+  SIMP.fileName = data.fileName || f.name;
+  // Default choice per line: the auto-match, else the strongest candidate,
+  // else "new item".
+  SIMP.lines.forEach(l => {
+    l.include = true;
+    l.choice = l.autoProductId || (l.candidates[0]?.productId ?? 'new');
+  });
+  simpRenderReview(data);
+}
+function simpRenderReview(meta) {
+  const box = el('simp-review'); if (!box) return;
+  const matched = SIMP.lines.filter(l => l.candidates.length).length;
+  box.innerHTML = `
+    <div style="border-top:1px solid var(--line);margin-top:6px;padding-top:12px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;font-size:12px">
+        <span class="pill" style="background:var(--bg-soft)">${SIMP.lines.length} lines</span>
+        <span class="pill green">${matched} matched</span>
+        <span class="pill ${SIMP.lines.length - matched ? 'amber' : ''}" style="${SIMP.lines.length - matched ? '' : 'background:var(--bg-soft)'}">${SIMP.lines.length - matched} new items</span>
+        <span style="color:var(--ink-soft)">sheet: ${escapeHtml(meta.sheet || '')}</span>
+      </div>
+      <div class="grid-2" style="grid-template-columns:1fr 1fr 1fr;gap:8px">
+        <div class="field"><label>Supplier</label>${supplierComboHtml('simp-supplier', meta.supplierGuess || '', 'Supplier name')}</div>
+        <div class="field"><label>Container / invoice ref</label><input id="simp-container" value="${escapeAttr(meta.invoiceGuess || '')}" placeholder="e.g. ${escapeAttr(meta.invoiceGuess || 'PI-1234')}"></div>
+        <div class="field"><label>Rough ETA</label><input id="simp-eta" type="date"></div>
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:8px">Prices import in <strong>CNY</strong> for cost history + supplier price tracking only — they never touch listing prices. ⚠ rows = the part number matches a listing for a <em>different make/model</em> (shared part) — confirm it's genuinely the same part, or switch it to “New item”.</div>
+      <div style="max-height:44vh;overflow-y:auto;border:1px solid var(--line);border-radius:8px">
+        ${SIMP.lines.map((l, i) => simpLineHtml(l, i)).join('')}
+      </div>
+      <button class="btn btn-primary" style="width:100%;margin-top:12px" onclick="simpImport(this)">📦 Import ${SIMP.lines.length} lines into Incoming</button>
+    </div>`;
+}
+function simpLineHtml(l, i) {
+  const chosen = l.choice;
+  const mismatchChosen = l.candidates.find(c => c.productId === chosen)?.fitMismatch;
+  const viaLabel = { part_number: 'part №', sub_part_number: 'sub part №', supplier_sku: 'supplier SKU', our_sku: 'our SKU', barcode: 'barcode' };
+  return `
+    <div style="display:flex;gap:8px;padding:9px 10px;border-bottom:1px solid var(--line-2);align-items:flex-start;${l.include ? '' : 'opacity:.45'}" id="simp-row-${i}">
+      <input type="checkbox" ${l.include ? 'checked' : ''} onchange="SIMP.lines[${i}].include=this.checked;el('simp-row-${i}').style.opacity=this.checked?'':'0.45'" style="margin-top:4px">
+      <div style="flex:1;min-width:0;font-size:12px">
+        <div style="font-weight:600">${escapeHtml(l.title || '(no description)')}${l.make || l.model ? ` <span style="font-weight:400;color:var(--ink-soft)">· ${escapeHtml([l.make, l.model, l.year].filter(Boolean).join(' '))}</span>` : ''}</div>
+        <div style="color:var(--ink-soft);font-family:ui-monospace,monospace;font-size:11px">
+          ${l.partNumber ? 'PN ' + escapeHtml(l.partNumber) : ''}${l.supplierSku ? ' · their SKU ' + escapeHtml(l.supplierSku) : ''}${l.unitPrice != null && canSeeMoney() ? ' · ¥' + l.unitPrice : ''}${l.lengthCm ? ` · 📦 ${l.lengthCm}×${l.widthCm ?? '?'}×${l.heightCm ?? '?'}cm` : ''}${l.weightKg ? ' ' + l.weightKg + 'kg' : ''}
+        </div>
+        <div style="display:flex;gap:6px;margin-top:5px;flex-wrap:wrap;align-items:center">
+          <select onchange="SIMP.lines[${i}].choice=(this.value==='new'?'new':parseInt(this.value));simpRefreshRow(${i})" style="flex:1;min-width:200px;font-size:12px">
+            ${l.candidates.map(c => `<option value="${c.productId}" ${chosen === c.productId ? 'selected' : ''}>${c.fitMismatch ? '⚠ ' : '✓ '}${escapeHtml(c.sku)} — ${escapeHtml((c.title || '').slice(0, 60))} (via ${viaLabel[c.via] || c.via})</option>`).join('')}
+            <option value="new" ${chosen === 'new' ? 'selected' : ''}>➕ New item — create the listing later</option>
+          </select>
+          <input placeholder="find listing…" style="width:120px;font-size:11px" onkeydown="if(event.key==='Enter'){event.preventDefault();simpSearch(${i}, this.value)}" title="Type part of a name/SKU and press Enter to add matching listings to the dropdown">
+          <input type="number" min="1" value="${l.qty}" onchange="SIMP.lines[${i}].qty=parseInt(this.value)||1" style="width:64px;font-size:12px" title="Quantity">
+        </div>
+        ${mismatchChosen ? `<div id="simp-warn-${i}" style="color:var(--amber);font-size:11px;margin-top:3px">⚠ Their line says <strong>${escapeHtml([l.make, l.model].filter(Boolean).join(' ') || 'a different vehicle')}</strong> but this listing is for another make/model — same part shared across both? Confirm before importing.</div>` : `<div id="simp-warn-${i}"></div>`}
+      </div>
+    </div>`;
+}
+function simpRefreshRow(i) {
+  const l = SIMP.lines[i];
+  const warn = el('simp-warn-' + i); if (!warn) return;
+  const c = l.candidates.find(x => x.productId === l.choice);
+  warn.innerHTML = c?.fitMismatch ? `⚠ Their line says <strong>${escapeHtml([l.make, l.model].filter(Boolean).join(' ') || 'a different vehicle')}</strong> but this listing is for another make/model — confirm it's the same part.` : '';
+  warn.style.color = 'var(--amber)'; warn.style.fontSize = '11px'; warn.style.marginTop = '3px';
+}
+// Manual pick: search our catalogue and add the hits to this line's dropdown.
+function simpSearch(i, q) {
+  q = (q || '').trim().toLowerCase();
+  if (q.length < 2) return;
+  const hits = (State.products || []).filter(p =>
+    matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model)).slice(0, 8);
+  if (!hits.length) { toast('No listings match', 'info', 2000); return; }
+  const l = SIMP.lines[i];
+  for (const h of hits) {
+    if (!l.candidates.some(c => c.productId === h.id)) {
+      l.candidates.push({ productId: h.id, sku: h.sku, title: h.title, brand: h.brand, model: h.model, via: 'manual', fitMismatch: false });
+    }
+  }
+  l.choice = hits[0].id;
+  const row = el('simp-row-' + i);
+  if (row) row.outerHTML = simpLineHtml(l, i);
+}
+async function simpImport(btn) {
+  const supplier = (el('simp-supplier')?.value || '').trim();
+  if (!supplier) { toast('Enter the supplier name — it powers the supplier-SKU memory for restocks', 'warn'); return; }
+  const picked = SIMP.lines.filter(l => l.include && (l.qty || 0) > 0);
+  if (!picked.length) { toast('Tick at least one line', 'warn'); return; }
+  if (btn) btn.disabled = true;
+  const taskId = Task.start('Importing ' + picked.length + ' lines');
+  try {
+    const lines = picked.map(l => {
+      const base = { qty: l.qty, unitCostForeign: l.unitPrice != null ? l.unitPrice : undefined, notes: l.remark || undefined };
+      if (l.choice !== 'new') return { ...base, productId: l.choice };
+      // New/unlisted: keep their description + OEM part number; OUR sku is
+      // assigned later when the listing is drafted (their code is NOT our code).
+      return { ...base, title: l.title || l.partNumber || l.supplierSku, partNumber: l.partNumber || undefined };
+    });
+    const r = await Api.post('/api/incoming/bulk', {
+      supplier, containerRef: (el('simp-container')?.value || '').trim() || null,
+      expectedDate: el('simp-eta')?.value || null,
+      currency: 'CNY', status: 'on_order',
+      notes: 'Imported from ' + SIMP.fileName,
+      lines,
+    });
+    // Supplier-SKU memory: remember THEIR code + price against each matched
+    // product, so future restocks find the supplier + track price over time.
+    let remembered = 0;
+    for (const l of picked) {
+      if (l.choice === 'new' || !l.supplierSku) continue;
+      try {
+        await Api.post('/api/suppliers/links', {
+          productId: l.choice, supplierName: supplier, supplierSku: l.supplierSku,
+          unitCost: l.unitPrice != null ? l.unitPrice : null, currency: 'CNY',
+          lastPurchasedAt: new Date().toISOString(),
+        });
+        remembered++;
+      } catch (_) {}
+    }
+    Task.done(taskId);
+    closeModal();
+    const newN = (r.newItems || []).length;
+    toast(`📦 Imported ${(r.created || []).length || picked.length} lines into Incoming${newN ? ` · ${newN} new item${newN > 1 ? 's' : ''} to draft listings for` : ''}${remembered ? ` · ${remembered} supplier SKU${remembered > 1 ? 's' : ''} remembered` : ''}`, 'success', 9000);
+    if (State.page === 'incoming' && typeof loadIncoming === 'function') loadIncoming();
+    State._suppliersLoaded = false;
+  } catch (e) { Task.fail(taskId); toast('Import failed: ' + (e.data?.message || e.message), 'error', 9000); }
+  if (btn) btn.disabled = false;
 }
 
 // ── VIN Search (external portal launcher + shared login card) ───────────────
