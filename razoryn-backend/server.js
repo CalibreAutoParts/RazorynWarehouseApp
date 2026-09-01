@@ -95,6 +95,7 @@ app.use('/api/notes',        require('./routes/notes'));
 app.use('/api/brand',        require('./routes/brand'));
 app.use('/api/dispatch',     require('./routes/dispatch'));
 app.use('/api/shipping',     require('./routes/shipping'));
+app.use('/api/supplier-import', require('./routes/supplier-import'));
 app.use('/api/dropfleet',    require('./routes/dropfleet'));
 app.use('/api/thumbnail',    require('./routes/thumbnail'));
 app.use('/api/messages',     require('./routes/messages'));
