@@ -6559,7 +6559,17 @@ function labelsPrint(itemsArg) {
     const type = labelItemType(it.title || prod?.title || '');
     const position = (prod?.position || labelPositionFromTitle(it.title || '')).trim();
     const fitsModels = labelFitsModels(it, prod);
-    return { ...it, type, position, fitsModels };
+    return {
+      ...it, type, position, fitsModels,
+      // The item name must ALWAYS print — fall back to the product's title
+      // when the queued line arrived without one (e.g. goods-in imports).
+      title: it.title || prod?.title || '',
+      // Box size + weight from the product record, so the label shows them.
+      pkgLengthCm: it.pkgLengthCm ?? prod?.pkgLengthCm ?? null,
+      pkgWidthCm: it.pkgWidthCm ?? prod?.pkgWidthCm ?? null,
+      pkgHeightCm: it.pkgHeightCm ?? prod?.pkgHeightCm ?? null,
+      pkgWeightG: it.pkgWeightG ?? prod?.pkgWeightG ?? null,
+    };
   });
   const size = el('lab-size').value;
   // For 4x6 the user can choose landscape (default) or portrait.
@@ -6616,33 +6626,34 @@ function labelsPrint(itemsArg) {
     const sub = (pn && sku && pn !== sku) ? sku : '';
     return `<div class="pn">${escapeHtml(main)}</div>${sub ? `<div class="sku-sub">${escapeHtml(sub)}</div>` : ''}`;
   };
-  // Type chip: the kind of part (Headlight / Bumper …) + its side/end, so staff
-  // can sort by type at a glance.
-  const typeChip = (it) => {
-    const label = [it.type, it.position].filter(Boolean).join(' · ');
-    return label ? `<div class="type">${escapeHtml(label)}</div>` : '';
-  };
-  // Fitment line: a part shared across models lists every vehicle it fits; a
-  // single-model part just shows its descriptive title. Uses .title so the
-  // auto-fitter shrinks it to fit the label.
-  const fitsBlock = (it) => {
+  // Label body — internal warehouse label, straight to the point:
+  //   1. The ITEM NAME, always, big (what the box actually is — never replaced
+  //      by a derived type snippet or the fitment list).
+  //   2. The fitment list for shared parts (smaller, under the name).
+  //   3. The box size + weight when recorded.
+  // One .title container so the auto-fitter scales the whole block together
+  // (children are sized in em).
+  const bodyBlock = (it) => {
     const models = it.fitsModels || [];
-    // Shared parts list EVERY make/model they fit. The auto-fitter shrinks the
-    // block to fit the label, so 2 models print big and 20 print smaller but
-    // complete; a tighter line-height kicks in past 8 to buy extra rows.
-    if (models.length > 1) return `<div class="title fits${models.length > 8 ? ' fits-many' : ''}"><span class="fits-lbl">Fits ${models.length} models:</span> ${escapeHtml(models.join(' · '))}</div>`;
-    const one = it.title || models[0] || '';
-    return one ? `<div class="title">${escapeHtml(one)}</div>` : '';
+    const fmt = (v) => (+v % 1 ? (+v).toFixed(1) : String(+v));
+    const dims = [it.pkgLengthCm, it.pkgWidthCm, it.pkgHeightCm];
+    const hasDims = dims.every(v => v != null && v !== '' && +v > 0);
+    const kg = (it.pkgWeightG != null && +it.pkgWeightG > 0) ? +(it.pkgWeightG / 1000).toFixed(2) : null;
+    const boxLine = (hasDims || kg != null)
+      ? `<div class="t-box">📦 ${hasDims ? dims.map(fmt).join(' × ') + ' cm' : ''}${hasDims && kg != null ? ' · ' : ''}${kg != null ? kg + ' kg' : ''}</div>` : '';
+    return `<div class="title${models.length > 8 ? ' fits-many' : ''}">
+      ${it.title ? `<div class="t-name">${escapeHtml(it.title)}</div>` : ''}
+      ${models.length > 1 ? `<div class="t-fits"><span class="fits-lbl">Fits ${models.length}:</span> ${escapeHtml(models.join(' · '))}</div>` : ''}
+      ${boxLine}
+    </div>`;
   };
-  // Compact description for the tiny thermal labels. Shared parts append the
-  // fitment list too — capped at 6 models (then "+N more") so the auto-shrunk
-  // text stays legible on a 50×25; the part number remains the shelf identity.
+  // Compact description for the tiny thermal labels — the item NAME first,
+  // fitments capped at 4 (then "+N more") so the auto-shrunk text stays legible.
   const smallTitle = (it) => {
-    const typed = [it.type, it.position].filter(Boolean).join(' ');
-    const base = typed || it.title || '';
+    const base = it.title || [it.type, it.position].filter(Boolean).join(' ');
     const models = it.fitsModels || [];
     if (models.length > 1) {
-      const cap = 6;
+      const cap = 4;
       const shown = models.slice(0, cap).join(' · ');
       const more = models.length - Math.min(models.length, cap);
       return escapeHtml((base ? base + ' — ' : '') + `fits ${models.length}: ` + shown + (more > 0 ? ` +${more} more` : ''));
@@ -6659,12 +6670,10 @@ function labelsPrint(itemsArg) {
         <div class="header">
           <img src="${logoUrl}" class="logo" alt="${escapeAttr(brandName)}" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
           <div class="logo-text" style="display:none">${wordmark}</div>
-          ${brandTagline || brandDomain ? `<div class="tagline">${escapeHtml(brandTagline)}${brandTagline && brandDomain ? ' · ' : ''}${escapeHtml(brandDomain)}</div>` : ''}
         </div>
         <div class="body">
-          ${typeChip(it)}
+          ${bodyBlock(it)}
           ${idBlock(it)}
-          ${fitsBlock(it)}
         </div>
         <div class="barcode-wrap">
           <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
@@ -6679,14 +6688,12 @@ function labelsPrint(itemsArg) {
           <div class="logo-text" style="display:none">${wordmark}</div>
         </div>
         <div class="body">
-          ${typeChip(it)}
+          ${bodyBlock(it)}
           ${idBlock(it)}
-          ${fitsBlock(it)}
         </div>
         <div class="barcode-wrap">
           <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
         </div>
-        ${brandDomain ? `<div class="footer">${escapeHtml(brandDomain)}</div>` : ''}
       </div>`;
   } else if (s.layout === 'tall') {
     // 25×50 portrait small thermal — minimal layout
@@ -6773,6 +6780,13 @@ function labelsPrint(itemsArg) {
     overflow: hidden; flex: 0 1 auto; min-height: 0; }
   .label.tall .pn { font-size: ${s.fontSku}pt; font-weight: 700; font-family: ui-monospace, Menlo, monospace; color: #111; margin-top: 1mm; flex-shrink: 0; }
   .label.tall .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 1mm; flex-shrink: 0; }
+
+  /* Composite title block (internal label): item NAME big, fitments + box
+     size smaller underneath. Children size in em so the auto-fitter scales
+     the whole block together. */
+  .label .title .t-name { font-weight: 800; }
+  .label .title .t-fits { font-size: .68em; font-weight: 500; margin-top: .35em; line-height: 1.25; color: #222; }
+  .label .title .t-box  { font-size: .68em; font-weight: 700; margin-top: .35em; color: #111; }
 
   /* ============ LARGE 4×6 landscape — logo top, title middle, barcode bottom ============ */
   .label.large-landscape { padding: 8mm 10mm; }
