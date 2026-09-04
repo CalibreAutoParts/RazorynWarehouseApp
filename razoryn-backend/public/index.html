@@ -3063,6 +3063,9 @@ function onHardwareScan(code) {
     // the trigger works exactly like the USB/keyboard box on those screens.
     if (State.page === 'stocktake' && typeof handleStScan === 'function') { handleStScan(code); return; }
     if (State.page === 'scan' && typeof handleScan === 'function') { handleScan(code); return; }
+    // Pick-check open? Scans VERIFY the picked item against the order — they
+    // must never fall through to the quick sheet while picking.
+    if (el('pick-scan') && typeof pickVerifyCode === 'function') { pickVerifyCode(code); return; }
     // A recognised barcode/SKU anywhere else → the product quick sheet: update
     // stock, set the location + photo, size/weight, fixed box, packaging — all
     // in one tap-friendly modal. Falls back to the inventory search otherwise.
@@ -7694,9 +7697,12 @@ function paintDispatchApp() {
       ? (s.item_count > 1 ? `${escapeHtml(s.first_item_title)} +${s.item_count - 1}` : escapeHtml(s.first_item_title))
       : '(no items)';
     const age = describeAge(s.age_hours, true);
-    const action = isCollect
-      ? `<button class="btn btn-primary" onclick="event.stopPropagation();openCollectModal('${s.id}')">✓ Collected</button>`
-      : `<button class="btn btn-primary" onclick="event.stopPropagation();openDispatchModal('${s.id}')">📦 Shipped</button>`;
+    const action = `<div style="display:flex;flex-direction:column;gap:6px;flex:none">
+      <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openPickCheck('${s.id}')" title="Scan each item to verify it's the right part — shows locations to find them">🎯 Pick</button>
+      ${isCollect
+        ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();openCollectModal('${s.id}')">✓ Collected</button>`
+        : `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();openDispatchModal('${s.id}')">📦 Shipped</button>`}
+    </div>`;
     const moveLink = (isCollect
       ? `<a href="#" onclick="event.stopPropagation();reclassifyOrder('${s.id}','ship');return false" style="font-size:11px;color:var(--ink-soft)">↪ Move to shipping</a>`
       : `<a href="#" onclick="event.stopPropagation();reclassifyOrder('${s.id}','collect');return false" style="font-size:11px;color:var(--ink-soft)">↪ It's a collection</a>`)
@@ -7739,6 +7745,7 @@ function renderDispatchRow(s, kind) {
         <td>${ageBadge}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
           <button class="btn btn-ghost btn-sm" onclick="openSaleDetail('${s.id}')" title="Preview what's in this order">🧾</button>
+          <button class="btn btn-ghost btn-sm" onclick="openPickCheck('${s.id}')" title="Pick-check: scan each item to verify it's the right part (shows locations)">🎯</button>
           <button class="btn btn-ghost btn-sm" onclick="pushDropfleet('${s.id}',this)" title="${s.dropfleet_pushed_at ? 'Re-send this order to DropFleet (updates the pending order)' : "Send this order to DropFleet's Integrated Orders for booking"}">🚚 ${s.dropfleet_pushed_at ? 'Re-send' : 'DropFleet'}</button>
           <button class="btn btn-primary btn-sm" onclick="openDispatchModal('${s.id}')">📦 Mark dispatched</button>
           <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','collect');return false" style="color:var(--ink-soft)">↪ It's a collection</a> · <a href="#" onclick="removeCancelledOrder('${s.id}');return false" style="color:var(--red)" title="Cancelled/refunded on the channel — remove from this list (marks the order cancelled)">✕ cancelled</a></div>
@@ -16094,6 +16101,85 @@ async function renderVinSearch() {
     </div>`;
   // Stash the raw password for the reveal toggle without inlining it twice.
   const pw = el('vs-password'); if (pw && cfg.password) pw.dataset.v = cfg.password;
+}
+
+// ── Dispatch pick-check: scan each item to verify it's the RIGHT part ───────
+// Opens from an order's 🎯 Pick button. Shows every item with its part number,
+// storage area/shelf and the location photo so staff can FIND it, then each
+// trigger-pull verifies the part in hand belongs to this order (shared-pool
+// siblings count — same physical part). While this modal is open, scans are
+// captured here and never fall through to the product quick sheet.
+const PICK = { saleId: null, items: [] };
+async function openPickCheck(saleId) {
+  let data;
+  try { data = await Api.get(`/api/dispatch/${saleId}/label-data`); }
+  catch (e) { toast('Couldn\'t load the order: ' + (e.data?.message || e.message), 'error'); return; }
+  PICK.saleId = saleId;
+  PICK.items = (data.items || []).map((it, i) => {
+    const prod = (State.products || []).find(p => (p.sku || '').toLowerCase() === (it.sku || '').toLowerCase()) || null;
+    return { idx: i, title: it.title, sku: it.sku, qty: it.qty || 1, picked: 0, prod };
+  });
+  const ref = data.sale?.invoice_number || data.sale?.payment_reference || data.sale?.external_order_id || ('#' + saleId);
+  modal({
+    title: '🎯 Pick — ' + ref,
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Find each part using its location below, then <strong>scan its barcode</strong> to verify it's the right one — a wrong part flashes red before it can go in the box. Scan once per unit.</div>
+      <input id="pick-scan" placeholder="Scan item barcode…" autocomplete="off" style="width:100%;font-family:ui-monospace,monospace;font-size:15px;margin-bottom:10px"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();pickVerifyCode(this.value);this.value='';}">
+      <div id="pick-list">${PICK.items.map(pickRowHtml).join('')}</div>
+      <div id="pick-done" style="display:none;text-align:center;padding:10px;background:color-mix(in srgb, var(--green) 12%, transparent);border:1px solid var(--green);border-radius:10px;margin-top:10px">
+        <div style="font-weight:800;font-size:15px;color:var(--green)">✓ All items picked &amp; verified</div>
+      </div>`,
+    actions: [
+      { label: 'Close', onClick: closeModal },
+      { label: '📦 Dispatch →', primary: true, onClick: () => { const id = PICK.saleId; closeModal(); openDispatchModal(id); } },
+    ],
+  });
+  setTimeout(() => el('pick-scan')?.focus(), 150);
+}
+function pickRowHtml(it) {
+  const p = it.prod;
+  const done = it.picked >= it.qty;
+  return `
+    <div id="pick-row-${it.idx}" style="display:flex;gap:10px;border:1px solid ${done ? 'var(--green)' : 'var(--line)'};border-radius:10px;padding:9px 11px;margin-bottom:7px;${done ? 'background:color-mix(in srgb, var(--green) 8%, transparent)' : ''}">
+      <div style="width:34px;height:34px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;border:2px solid ${done ? 'var(--green)' : 'var(--line)'};background:${done ? 'var(--green)' : 'transparent'};color:${done ? '#fff' : 'var(--ink-soft)'}">${done ? '✓' : `${it.picked}/${it.qty}`}</div>
+      <div style="flex:1;min-width:0;font-size:12px">
+        <div style="font-weight:600;font-size:13px">${escapeHtml(it.title || '')} ${it.qty > 1 ? `<span class="pill" style="font-size:10px;background:var(--bg-soft)">× ${it.qty}</span>` : ''}</div>
+        <div style="font-family:ui-monospace,monospace;color:var(--ink-soft)">${p?.partNumber ? 'PN <span class="copyable">' + escapeHtml(p.partNumber) + '</span> · ' : ''}${escapeHtml(it.sku || '')}</div>
+        ${p && (p.location || p.locationNote) ? `<div style="margin-top:3px">📍 <strong>${escapeHtml([p.location, p.locationNote].filter(Boolean).join(' — '))}</strong></div>` : '<div style="margin-top:3px;color:var(--ink-soft)">📍 No location recorded</div>'}
+      </div>
+      ${p?.locationPhoto ? `<img src="${escapeAttr(p.locationPhoto)}" loading="lazy" onclick="window.open(this.src,'_blank')" style="width:46px;height:46px;object-fit:cover;border-radius:8px;flex:none;cursor:pointer" title="Where it lives — tap to enlarge">` : (p?.itemPhoto || p?.imageUrl) ? `<img src="${escapeAttr(p.itemPhoto || p.imageUrl)}" loading="lazy" style="width:46px;height:46px;object-fit:cover;border-radius:8px;flex:none">` : ''}
+    </div>`;
+}
+function pickVerifyCode(code) {
+  code = String(code || '').trim();
+  if (code.length < 3) return;
+  const c = code.toLowerCase();
+  // What product is this barcode? (barcode / SKU / part number / alternates)
+  const scanned = (State.products || []).find(p =>
+    (p.barcode || '').toLowerCase() === c || (p.sku || '').toLowerCase() === c ||
+    (p.partNumber || '').toLowerCase() === c || (p.partNumbers || []).some(pn => String(pn.code || pn).toLowerCase() === c));
+  // Which order line does it satisfy? Direct product match, shared-pool sibling
+  // (same physical part), or a raw code match against the line's SKU.
+  const row = PICK.items.find(it => it.picked < it.qty && (
+    (scanned && it.prod && (it.prod.id === scanned.id || (it.prod.stockGroupId && it.prod.stockGroupId === scanned.stockGroupId)))
+    || (it.sku || '').toLowerCase() === c
+    || (it.prod && ((it.prod.barcode || '').toLowerCase() === c || (it.prod.partNumber || '').toLowerCase() === c))));
+  const inp = el('pick-scan'); if (inp) { inp.value = ''; inp.focus(); }
+  if (row) {
+    row.picked++;
+    const rowEl = el('pick-row-' + row.idx);
+    if (rowEl) rowEl.outerHTML = pickRowHtml(row);
+    toast(`✓ ${row.title ? row.title.slice(0, 50) : code} — ${row.picked}/${row.qty}`, 'success', 1800);
+    if (PICK.items.every(it => it.picked >= it.qty)) { const d = el('pick-done'); if (d) d.style.display = ''; }
+    return;
+  }
+  // Fully-picked line rescanned vs genuinely wrong part — different messages.
+  const already = PICK.items.find(it => scanned && it.prod && (it.prod.id === scanned.id || (it.prod.stockGroupId && it.prod.stockGroupId === scanned.stockGroupId)));
+  if (already) { toast(`That line is already fully picked (${already.picked}/${already.qty})`, 'info', 3000); return; }
+  toast(scanned
+    ? `✗ WRONG ITEM — that's "${(scanned.title || '').slice(0, 45)}"${scanned.location || scanned.locationNote ? ' (belongs at ' + [scanned.location, scanned.locationNote].filter(Boolean).join(' — ') + ')' : ''}, not in this order`
+    : `✗ Not recognised: ${code} — not in this order`, 'error', 5000);
 }
 
 // ── Returns drop-off banner ─────────────────────────────────────────────────
