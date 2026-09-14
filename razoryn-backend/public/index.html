@@ -862,6 +862,33 @@
      device's system bars. Kept scoped so the browser/desktop experience is
      untouched. */
   body.is-app { -webkit-tap-highlight-color: transparent; }
+  /* Plain warehouse tool, not a branded site: neutral colour, system font,
+     no logo (staff know which app they opened — accounts differ per brand).
+     Fewer downloaded fonts + flat colours = snappier on the handheld. */
+  body.is-app {
+    --brand-primary: #3f4a5f; --brand-primary-light: rgba(63,74,95,.14); --brand-on-primary: #fff;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+  body.is-app .topbar .logo img.brand-logo { display: none !important; }
+  body.is-app .topbar .logo::after {
+    content: 'Warehouse'; font-weight: 800; font-size: 17px; letter-spacing: .01em; color: var(--ink);
+  }
+  body.is-app .topbar .logo .sub { display: none; }
+  /* Workbench home grid */
+  body.is-app .wb-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  body.is-app .wb-tile {
+    border: 1px solid var(--line); border-radius: 14px; background: var(--white);
+    padding: 16px 12px; text-align: center; cursor: pointer; position: relative;
+    display: flex; flex-direction: column; align-items: center; gap: 6px; min-height: 92px; justify-content: center;
+  }
+  body.is-app .wb-tile:active { background: var(--bg-soft); }
+  body.is-app .wb-tile .wi { font-size: 26px; line-height: 1; }
+  body.is-app .wb-tile .wl { font-weight: 700; font-size: 13px; }
+  body.is-app .wb-tile .ws { font-size: 10px; color: var(--ink-soft); }
+  body.is-app .wb-tile .wb-badge {
+    position: absolute; top: 8px; right: 10px; background: var(--red); color: #fff;
+    border-radius: 10px; min-width: 20px; padding: 1px 6px; font-size: 11px; font-weight: 700;
+  }
   /* No long-press context menu (copy/message/call) or accidental text selection
      on the handheld — it gets in the way of quick scanning. Inputs stay editable,
      and anything marked .copyable stays tappable-to-copy (handled in JS). */
@@ -2863,16 +2890,16 @@ function initKiosk() {
 // warehouse workflow: operational pages + Settings only (no marketing/admin
 // management), a bottom quick-bar for one-tap Scan/Inventory/Dispatch/Returns,
 // bigger touch targets, and global hardware-scanner capture.
-const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','locations','returns','dispatch','notifications','schedule','settings','createlisting','vinsearch']);
+const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','qtycheck','iteminfo','locations','returns','dispatch','notifications','schedule','settings','createlisting','vinsearch']);
 // Pages surfaced in the bottom quick-bar (order = left→right). Home is leftmost.
 // Only shown if the user has permission for them. Scan lives inside Stock Check
 // now (hardware scanner is automatic), so there's no separate Scan tab.
 const APP_TAB_BAR = [
   { page: 'dashboard', label: 'Home',     icon: 'M3 12l9-9 9 9M5 10v10h14V10' },
-  { page: 'stocktake', label: 'Stock',    icon: 'M20 7 12 3 4 7l8 4 8-4zM4 7v10l8 4 8-4V7M12 11v10' },
   { page: 'dispatch',  label: 'Dispatch', icon: 'M1 3h15v13H1zM16 8h4l3 3v5h-7V8zM5.5 18.5a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM16.5 18.5a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0z' },
   { page: 'returns',   label: 'Returns',  icon: 'M3 7v6h6M3 13a9 9 0 1 0 3-7.7L3 8' },
-  { page: 'schedule',  label: 'Tasks',    icon: 'M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9' },
+  { page: 'qtycheck',  label: 'Quantity', icon: 'M20 7 12 3 4 7l8 4 8-4zM4 7v10l8 4 8-4V7M12 11v10' },
+  { page: 'iteminfo',  label: 'Add info', icon: 'M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z' },
 ];
 function detectAppShell() {
   try {
@@ -3201,6 +3228,8 @@ function hasPerm(page) {
     dashboard:     true,
     clock:         true,
     vinsearch:     true,
+    qtycheck:     'scan',
+    iteminfo:     'inventory',
     inventory:    'inventory',
     incoming:     'inventory',
     scan:         'scan',
@@ -3278,8 +3307,11 @@ function routeTo(page) {
     competitors: renderCompetitors, bundles: renderBundles, createlisting: renderCreateListing,
     sharedstock: renderSharedStock, editlisting: renderEditListing, costs: renderCosts,
     drafts: renderDrafts, clonestore: renderCloneStore,
-    vinsearch: renderVinSearch
+    vinsearch: renderVinSearch,
+    qtycheck: renderQtyCheck, iteminfo: renderItemInfo
   };
+  // The handheld's Home is the plain task workbench, not the money dashboard.
+  if (State.appShell && page === 'dashboard') pages.dashboard = renderAppHome;
   try {
     (pages[page] || renderDashboard)();
   } catch (e) {
@@ -3730,9 +3762,10 @@ async function stCount(pid, adjust) {
   }
   try {
     const res = await Api.post('/api/stock-checks', payload);
-    State._stChecked.add(String(pid));
+    (State._stChecked = State._stChecked || new Set()).add(String(pid));
     if (res && res.variance) await Store.refresh('products');
     stPaint();
+    if (State.page === 'qtycheck' && typeof qc2Paint === 'function') qc2Paint();
     const base = (adjustedTo != null && res && res.variance) ? `Counted — adjusted to ${adjustedTo}` : 'Counted ✓';
     toast(`${base} · ${summarizeChannelPush(res && res.channelPush)}`, 'success', 2600);
   } catch (e) {
@@ -7014,6 +7047,7 @@ function filterReturns(f) {
             ${r.refundAmount > 0 ? `<div style="font-size:12px;margin-top:2px"><strong>Refund:</strong> ${gbp(r.refundAmount)}</div>` : ''}
           </div>
           <div style="display:flex;flex-direction:column;gap:5px;flex-shrink:0">
+            ${['open', 'received'].includes(r.status) ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openGuidedReturn(${r.id})" title="Guided check: condition, photos, notes → admins emailed → restock / refurb / scrap">▶ Process</button>` : ''}
             ${r.externalReturnId ? `<a class="btn btn-ghost btn-sm" href="https://www.ebay.co.uk/sh/ord/details?mode=RT&srn=${r.externalReturnId}" target="_blank" onclick="event.stopPropagation()" style="text-decoration:none;font-size:11px">Open on eBay →</a>` : ''}
           </div>
         </div>
@@ -7109,6 +7143,7 @@ async function openReturnDetail(id) {
     `,
     actions: [
       { label: 'Close', onClick: closeModal },
+      ...(['open', 'received'].includes(r.status) ? [{ label: '▶ Process (guided)', onClick: () => { closeModal(); openGuidedReturn(r.id); } }] : []),
       ...(r.status === 'open' ? [{ label: 'Mark received', onClick: () => advanceReturn(r.id, 'received', true) }] : []),
       ...(r.status === 'received' ? [{ label: 'Mark processed', onClick: () => advanceReturn(r.id, 'processed', true) }] : []),
       { label: 'Save', primary: true, onClick: () => saveReturnDetail(r.id) },
@@ -15921,6 +15956,372 @@ async function qsSavePackage(id) {
   } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// HANDHELD WORKBENCH — the app's rebuilt, no-frills home + focused task screens
+// ════════════════════════════════════════════════════════════════════════════
+
+// Home: a flat grid of the jobs staff actually do. No stats, no money, no
+// branding — tap a job, do it, back. Badges show live workloads.
+function renderAppHome() {
+  const isAdmin = State.user?.role === 'admin';
+  const tiles = [
+    { page: 'dispatch', icon: '📦', label: 'Dispatch', sub: 'pick, pack, ship', badgeId: 'wb-dispatch' },
+    { page: 'returns', icon: '↩️', label: 'Returns', sub: 'check & process', badgeId: 'wb-returns' },
+    { page: 'qtycheck', icon: '🔢', label: 'Quantity check', sub: 'count & correct' },
+    { page: 'iteminfo', icon: '📝', label: 'Add item info', sub: 'sizes, locations, photos' },
+    { page: 'incoming', icon: '🚢', label: 'Incoming', sub: 'containers & goods-in' },
+    { page: 'schedule', icon: '🗓', label: 'Tasks', sub: 'today\'s jobs' },
+    ...(isAdmin ? [{ act: 'openPricingTool()', icon: '💷', label: 'Pricing', sub: 'set & push prices' }] : []),
+    ...(isAdmin || State.user?.permissions?.competitors ? [{ act: 'openPocketBook()', icon: '🆚', label: 'Competitors', sub: 'quick price check' }] : []),
+    { page: 'vinsearch', icon: '🔎', label: 'VIN Search', sub: 'vehicle lookup' },
+    { page: 'clock', icon: '⏱', label: 'Clock', sub: 'in / out' },
+  ];
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head" style="margin-bottom:10px"><div><h1 style="font-size:20px">Hi ${escapeHtml((State.user?.name || '').split(' ')[0])}</h1><div class="desc">Pull the scanner trigger on any item, anywhere, to open it.</div></div></div>
+      <div class="wb-grid">
+        ${tiles.map(t => `
+          <div class="wb-tile" onclick="${t.act ? t.act : `routeTo('${t.page}')`}">
+            ${t.badgeId ? `<span class="wb-badge" id="${t.badgeId}" style="display:none"></span>` : ''}
+            <div class="wi">${t.icon}</div><div class="wl">${t.label}</div><div class="ws">${t.sub}</div>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  // Live workload badges (best-effort, quiet).
+  Api.get('/api/dispatch/outstanding').then(r => {
+    const n = (r.toShip || []).length + (r.toCollect || []).length;
+    const b = el('wb-dispatch'); if (b && n) { b.textContent = n; b.style.display = ''; }
+    State.dispatch = { ...(State.dispatch || {}), ...r };
+  }).catch(() => {});
+  const openReturns = (State.returns || []).filter(r => r.status === 'open' || r.status === 'received').length;
+  const rb = el('wb-returns'); if (rb && openReturns) { rb.textContent = openReturns; rb.style.display = ''; }
+}
+
+// ── Quantity check: counting and nothing else ───────────────────────────────
+function renderQtyCheck() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head" style="margin-bottom:10px"><div><h1>Quantity check</h1><div class="desc">Scan or search an item, check the number, correct it if it's wrong. That's it.</div></div></div>
+      <input type="search" id="qc2-q" placeholder="Scan barcode or search name / SKU / part #…" style="width:100%;font-size:16px;margin-bottom:10px" oninput="qc2Paint()">
+      <div id="qc2-list"></div>
+    </div>`;
+  qc2Paint();
+  setTimeout(() => el('qc2-q')?.focus(), 100);
+}
+function qc2Paint() {
+  const box = el('qc2-list'); if (!box) return;
+  const q = (el('qc2-q')?.value || '').trim().toLowerCase();
+  let list = dedupeSharedPools((State.products || []).filter(p => !p.isPrelisted && !p.hidden));
+  if (q) list = list.filter(p => matchesKeywords(q, p.title, p.sku, p.partNumber, p.barcode, ...(p.partNumbers || []).map(x => x.code)));
+  list = list.slice(0, 60);
+  box.innerHTML = list.length ? list.map(p => `
+    <div style="display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:7px">
+      ${(p.itemPhoto || p.imageUrl) ? `<img src="${escapeAttr(p.itemPhoto || p.imageUrl)}" loading="lazy" style="width:44px;height:44px;object-fit:cover;border-radius:8px;flex:none">` : '<div style="width:44px;height:44px;border-radius:8px;background:var(--line-2);flex:none"></div>'}
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(p.title || '')}</div>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')}</div>
+      </div>
+      <div style="text-align:right;flex:none"><div style="font-size:10px;color:var(--ink-soft)">System</div><div style="font-weight:800;font-size:18px">${totalQty(p)}</div></div>
+      <button class="btn btn-primary" style="flex:none" onclick="stCount('${p.id}', true)">Count</button>
+    </div>`).join('') : `<div class="empty" style="padding:30px;text-align:center"><div class="t">${q ? 'No matches' : 'Type or scan to find an item'}</div></div>`;
+}
+
+// ── Add item info: a worklist of everything still MISSING data ──────────────
+// Filter by the one thing you're walking the racks to fill in (box sizes,
+// locations, photos, costs…); each row opens the quick sheet; done items drop
+// out on the next paint. "No fixed box" marks size as intentionally not
+// applicable so the item stops nagging.
+function renderItemInfo() {
+  if (!State.infoFilter) State.infoFilter = 'size';
+  const isAdmin = State.user?.role === 'admin';
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head" style="margin-bottom:10px"><div><h1>Add item info</h1><div class="desc">Everything still missing the selected detail — fill it in as you pass the shelf.</div></div></div>
+      <div class="seg" style="margin-bottom:8px;flex-wrap:wrap">
+        <button data-if="size" class="${State.infoFilter === 'size' ? 'active' : ''}">📦 Size/weight</button>
+        <button data-if="location" class="${State.infoFilter === 'location' ? 'active' : ''}">📍 Location</button>
+        <button data-if="photo" class="${State.infoFilter === 'photo' ? 'active' : ''}">📷 Photos</button>
+        ${isAdmin ? `<button data-if="cost" class="${State.infoFilter === 'cost' ? 'active' : ''}">💷 Cost</button>
+        <button data-if="supplier" class="${State.infoFilter === 'supplier' ? 'active' : ''}">🏭 Supplier</button>` : ''}
+      </div>
+      <input type="search" id="ii-q" placeholder="Filter…" style="width:100%;margin-bottom:8px" oninput="iiPaint()">
+      <div id="ii-count" style="font-size:12px;color:var(--ink-soft);margin-bottom:8px"></div>
+      <div id="ii-list"></div>
+    </div>`;
+  document.querySelectorAll('[data-if]').forEach(b => b.addEventListener('click', () => { State.infoFilter = b.dataset.if; renderItemInfo(); }));
+  // Cost/supplier need extra data (admin): load the costs list once for gaps.
+  if (isAdmin && ['cost', 'supplier'].includes(State.infoFilter) && !State._iiCosts) {
+    Api.get('/api/costs/products').then(r => { State._iiCosts = r.items || []; iiPaint(); }).catch(() => {});
+  }
+  iiPaint();
+}
+function iiNeeds(p, f) {
+  if (f === 'size') return p.fixedBox !== false && !(p.pkgLengthCm && p.pkgWidthCm && p.pkgHeightCm && p.pkgWeightG);
+  if (f === 'location') return !p.location && !p.locationNote;
+  if (f === 'photo') return !p.itemPhoto && !p.locationPhoto && !p.imageUrl;
+  if (f === 'cost') { const c = (State._iiCosts || []).find(x => x.id === p.id); return c ? (c.costPrice == null && !c.costShared) : false; }
+  if (f === 'supplier') { const c = (State._iiCosts || []).find(x => x.id === p.id); return c ? !c.lastSupplier : true; }
+  return false;
+}
+function iiPaint() {
+  const box = el('ii-list'); if (!box) return;
+  const f = State.infoFilter || 'size';
+  const q = (el('ii-q')?.value || '').trim().toLowerCase();
+  let list = dedupeSharedPools((State.products || []).filter(p => !p.isPrelisted && !p.hidden)).filter(p => iiNeeds(p, f));
+  if (q) list = list.filter(p => matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model));
+  const cnt = el('ii-count'); if (cnt) cnt.textContent = `${list.length} item${list.length === 1 ? '' : 's'} still missing this`;
+  box.innerHTML = list.slice(0, 80).map(p => `
+    <div style="display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:7px" onclick="openProductQuickSheet('${p.id}')">
+      ${(p.itemPhoto || p.imageUrl) ? `<img src="${escapeAttr(p.itemPhoto || p.imageUrl)}" loading="lazy" style="width:44px;height:44px;object-fit:cover;border-radius:8px;flex:none">` : '<div style="width:44px;height:44px;border-radius:8px;background:var(--line-2);flex:none"></div>'}
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(p.title || '')}</div>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')}${p.location ? ' · 📍 ' + escapeHtml(p.location) : ''}</div>
+      </div>
+      ${f === 'size' ? `<button class="btn btn-ghost btn-sm" style="flex:none" onclick="event.stopPropagation();iiNoFixedBox('${p.id}', this)" title="This item has no standard carton — stop asking for a size">No fixed box</button>` : ''}
+      <span style="color:var(--ink-soft)">›</span>
+    </div>`).join('') || `<div class="empty" style="padding:30px;text-align:center"><div class="t">All done 🎉</div><div style="font-size:12px;color:var(--ink-soft)">Nothing is missing this detail${q ? ' (matching your filter)' : ''}.</div></div>`;
+}
+async function iiNoFixedBox(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await Api.post(`/api/products/${id}/package`, { fixedBox: false });
+    toast('Marked: no fixed box — it won\'t nag for a size', 'success', 3000);
+    await Store.refresh('products').catch(() => {});
+    iiPaint();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
+}
+
+// ── Pricing tool (admin): find → breakdown → set & push ─────────────────────
+function openPricingTool() {
+  modal({
+    title: '💷 Pricing',
+    body: `
+      <input type="search" id="pt-q" placeholder="Scan or search an item…" style="width:100%;margin-bottom:8px" oninput="ptSearch(this.value)">
+      <div id="pt-matches"></div>
+      <div id="pt-form"></div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
+  if (!CT.settings || !Object.keys(CT.settings).length) {
+    Api.get('/api/costs/settings').then(r => { CT.settings = r.settings || {}; }).catch(() => {});
+  }
+  setTimeout(() => el('pt-q')?.focus(), 100);
+}
+function ptSearch(q) {
+  const box = el('pt-matches'); if (!box) return;
+  q = (q || '').trim().toLowerCase();
+  if (q.length < 2) { box.innerHTML = ''; return; }
+  const hits = (State.products || []).filter(p => matchesKeywords(q, p.title, p.sku, p.partNumber, p.barcode)).slice(0, 6);
+  box.innerHTML = hits.map(p => `
+    <div onclick="ptPick('${p.id}')" style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:4px;cursor:pointer;font-size:12px">
+      <strong>${escapeHtml(p.title)}</strong> <span style="color:var(--ink-soft)">· ${gbp(p.priceEbay)} eBay</span>
+    </div>`).join('');
+}
+async function ptPick(id) {
+  const p = (State.products || []).find(x => String(x.id) === String(id)); if (!p) return;
+  el('pt-matches').innerHTML = ''; const q = el('pt-q'); if (q) q.value = '';
+  let cost = null;
+  try { const r = await Api.get('/api/costs/products/' + id); cost = r.product?.cost_price != null ? parseFloat(r.product.cost_price) : null; } catch (_) {}
+  const f = el('pt-form'); if (!f) return;
+  const pseudo = { costPrice: cost, postageInPrice: p.postageInPrice, largePanel: p.largePanel, shippingBand: p.shippingBand, shippingCost: p.shippingCost, landedKnown: false, landedCost: null };
+  const cur = p.priceEbay != null ? ctComputeBreakdown(p.priceEbay, pseudo, 'ebay') : null;
+  const rec = cost != null ? clRecommendPrice(cost, 'ebay', parseFloat(CT.settings?.targetMarginPct) || 25) : null;
+  f.innerHTML = `
+    <div style="background:var(--bg-soft);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:13px">
+      <strong>${escapeHtml(p.title)}</strong>
+      <div style="font-size:12px;margin-top:4px">eBay ${gbp(p.priceEbay)} · Shopify ${gbp(p.priceShopify)}${cost != null ? ' · cost ' + gbp(cost) : ' · no cost recorded'}</div>
+      ${cur && cost != null ? `<div style="font-size:12px;margin-top:2px">margin now: <strong style="color:${cur.marginPct < 10 ? 'var(--amber)' : 'var(--green)'}">${ctMoney(cur.net)} · ${ctPct(cur.marginPct)}</strong></div>` : ''}
+      ${rec ? `<div style="font-size:12px;margin-top:2px">recommended: <strong>£${rec.reco.toFixed(2)}</strong> (breakeven £${rec.breakeven.toFixed(2)})</div>` : ''}
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <input type="number" step="0.01" min="0" id="pt-price" value="${p.priceEbay ?? ''}" inputmode="decimal" style="flex:1;font-size:16px" oninput="ptLive('${p.id}')">
+      ${rec ? `<button class="btn btn-ghost btn-sm" onclick="el('pt-price').value='${rec.reco.toFixed(2)}';ptLive('${p.id}')">Use reco</button>` : ''}
+    </div>
+    <div id="pt-live" style="font-size:12px;margin-bottom:10px;color:var(--ink-soft)"></div>
+    <button class="btn btn-primary" style="width:100%" onclick="ptPush('${p.id}', this)">💾 Set &amp; push to eBay + Shopify</button>`;
+  window._ptCost = cost; window._ptPseudo = pseudo;
+  ptLive(id);
+}
+function ptLive(id) {
+  const out = el('pt-live'); if (!out) return;
+  const price = parseFloat(el('pt-price')?.value);
+  if (!(price > 0) || window._ptCost == null) { out.textContent = ''; return; }
+  const b = ctComputeBreakdown(price, window._ptPseudo, 'ebay');
+  out.innerHTML = `at £${price.toFixed(2)} → <strong style="color:${b.marginPct < 0 ? 'var(--red)' : b.marginPct < 10 ? 'var(--amber)' : 'var(--green)'}">${ctMoney(b.net)} net · ${ctPct(b.marginPct)}</strong>`;
+}
+async function ptPush(id, btn) {
+  const price = parseFloat(el('pt-price')?.value);
+  if (!(price > 0)) { toast('Enter the price', 'warn'); return; }
+  if (btn) btn.disabled = true;
+  const taskId = Task.start('Pushing price');
+  try {
+    const r = await Api.post('/api/pricing/set-ebay-price', { productId: id, ebayPrice: price });
+    Task.done(taskId);
+    toast(`£${price.toFixed(2)} pushed — eBay ×${r.ebayPushed}${r.shopifyPushed ? ` · Shopify £${r.shopifyPrice}` : ''}`, (r.errors || []).length ? 'warn' : 'success', 6000);
+    Store.refresh('products').catch(() => {});
+  } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
+}
+
+// ── Competitors pocket book: rival prices in the hand, match on the spot ────
+async function openPocketBook() {
+  modal({
+    title: '🆚 Competitor pocket book',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Every shared part with rivals' delivered prices — search, quote the customer the right number, match if it's worth it.</div>
+      <input type="search" id="pb-q" placeholder="Search part / SKU / name…" style="width:100%;margin-bottom:8px" oninput="pbPaint()">
+      <div id="pb-list"><div class="empty"><div class="t">Loading…</div></div></div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
+  if (!CT.settings || !Object.keys(CT.settings).length) {
+    try { CT.settings = (await Api.get('/api/costs/settings')).settings || {}; } catch (_) {}
+  }
+  try {
+    const d = await Api.get('/api/competitors/compare');
+    State.comp = State.comp || {}; State.comp.compare = d;
+  } catch (e) { const b = el('pb-list'); if (b) b.innerHTML = `<div style="color:var(--red);font-size:12px">${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  pbPaint();
+}
+function pbPaint() {
+  const box = el('pb-list'); if (!box) return;
+  const q = (el('pb-q')?.value || '').trim().toLowerCase();
+  let items = State.comp?.compare?.items || [];
+  if (q) items = items.filter(it => [it.title, it.sku, it.partNumber].some(v => (v || '').toLowerCase().includes(q)));
+  box.innerHTML = items.slice(0, 30).map(it => {
+    const cheapest = (it.offers || []).find(o => o.delivered != null);
+    const worse = it.delta != null && it.delta < 0;
+    const m = typeof compMarginAt === 'function' && cheapest ? compMarginAt(it, cheapest.delivered) : null;
+    return `<div style="border:1px solid ${worse ? 'var(--red)' : 'var(--line)'};border-radius:12px;padding:10px 12px;margin-bottom:7px;font-size:12px">
+      <div style="font-weight:600;font-size:13px">${escapeHtml(it.title || '')}</div>
+      <div style="display:flex;gap:12px;margin-top:4px;align-items:baseline;flex-wrap:wrap">
+        <span>us: <strong style="font-size:15px">${gbp(it.priceEbay)}</strong></span>
+        ${cheapest ? `<span>their best: <strong style="font-size:15px;${worse ? 'color:var(--red)' : ''}">£${cheapest.delivered.toFixed(2)}</strong> <span style="color:var(--ink-soft)">(${escapeHtml(cheapest.competitor)})</span></span>` : ''}
+        ${it.delta != null ? (worse ? `<span class="pill red">they're £${Math.abs(it.delta).toFixed(2)} under</span>` : `<span class="pill green">we're £${it.delta.toFixed(2)} under</span>`) : ''}
+      </div>
+      ${m && canSeeMoney() ? `<div style="color:var(--ink-soft);margin-top:2px">if we matched £${cheapest.delivered.toFixed(2)} → ${ctMoney(m.net)} net · ${ctPct(m.marginPct)}</div>` : ''}
+      ${State.user?.role === 'admin' && cheapest ? `<div style="display:flex;gap:6px;margin-top:6px">
+        <input type="number" step="0.01" id="pb-price-${it.productId}" value="${cheapest.delivered.toFixed(2)}" style="width:92px">
+        <button class="btn btn-outline btn-sm" onclick="compSetPrice(${it.productId}, this)">💾 Set &amp; push</button>
+      </div>` : ''}
+    </div>`;
+  }).join('') || `<div class="empty" style="padding:24px;text-align:center"><div class="t">${q ? 'No shared parts match' : 'No competitor matches yet — run a scan on the Competitors page'}</div></div>`;
+}
+
+// ── Guided return processing (the handheld flow) ────────────────────────────
+// Condition checklist → photos → notes → saves + emails the chosen admins →
+// outcome: back to stock (with a put-away screen showing WHERE it lives),
+// set aside for refurb, or scrap.
+const GR = { id: null, photos: 0 };
+function openGuidedReturn(returnId) {
+  const r = (State.returns || []).find(x => x.id == returnId);
+  if (!r) { toast('Return not found', 'error'); return; }
+  GR.id = returnId;
+  const checks = [
+    ['gr-c1', 'Item matches what we sent (right part, right SKU)'],
+    ['gr-c2', 'Returned in OUR original packaging'],
+    ['gr-c3', 'Packaging in good, reusable condition'],
+    ['gr-c4', 'Item itself undamaged / unused'],
+  ];
+  modal({
+    title: '↩ Process return',
+    body: `
+      <div style="background:var(--bg-soft);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:13px">
+        <strong>${escapeHtml(r.title || '(item)')}</strong>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(r.sku || '')}${r.buyerUsername ? ' · ' + escapeHtml(r.buyerUsername) : ''} · qty ${r.qty || 1}</div>
+      </div>
+      <div style="font-weight:700;font-size:12px;margin-bottom:6px">1 · Check the condition</div>
+      ${checks.map(([id, label]) => `
+        <label style="display:flex;align-items:center;gap:10px;font-size:13px;padding:8px 0;border-bottom:1px solid var(--line-2);cursor:pointer">
+          <label class="switch"><input type="checkbox" id="${id}" checked><span></span></label> ${label}
+        </label>`).join('')}
+      <div style="font-weight:700;font-size:12px;margin:12px 0 6px">2 · Photos of the condition</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="file" id="gr-photos" accept="image/*" capture="environment" multiple style="display:none" onchange="grAddPhotos(this)">
+        <button class="btn btn-outline" type="button" onclick="el('gr-photos').click()">📷 Take photos</button>
+        <span id="gr-photo-note" style="font-size:12px;color:var(--ink-soft)">None yet — snap the item + packaging</span>
+      </div>
+      <div style="font-weight:700;font-size:12px;margin:12px 0 6px">3 · Notes for the admin</div>
+      <textarea id="gr-notes" rows="2" style="width:100%" placeholder="Anything they should know before completing the return / refund…"></textarea>
+      <button class="btn btn-primary" style="width:100%;margin-top:10px" onclick="grSave(this)">💾 Save &amp; notify admins</button>
+      <div id="gr-outcome" style="display:none;border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
+        <div style="font-weight:700;font-size:12px;margin-bottom:6px">4 · What happens to the item?</div>
+        <div style="display:grid;gap:8px">
+          <button class="btn btn-outline" onclick="grOutcome('restock')">✅ Back into stock — show me where it goes</button>
+          <button class="btn btn-outline" onclick="grOutcome('relist_used')">♻️ Set aside for refurb / sell as used</button>
+          <button class="btn btn-outline" onclick="grOutcome('dispose')">🗑 Too damaged — scrap it</button>
+        </div>
+      </div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
+  GR.photos = 0;
+}
+async function grAddPhotos(input) {
+  const files = Array.from(input.files || []); input.value = '';
+  if (!files.length) return;
+  const note = el('gr-photo-note');
+  if (note) note.textContent = 'Uploading…';
+  try {
+    for (const f of files) {
+      const small = await downscaleImage(f, { maxDim: 1600 });
+      const fd = new FormData(); fd.append('photo', small, f.name || 'photo.jpg');
+      const resp = await fetch('/api/returns/' + GR.id + '/photos', { method: 'POST', body: fd, credentials: 'include' });
+      if (!resp.ok) throw new Error('upload failed (' + resp.status + ')');
+      GR.photos++;
+    }
+    if (note) note.textContent = `✓ ${GR.photos} photo${GR.photos > 1 ? 's' : ''} attached`;
+  } catch (e) { if (note) note.textContent = '⚠ ' + e.message; toast('Photo upload failed: ' + e.message, 'error'); }
+}
+async function grSave(btn) {
+  if (btn) btn.disabled = true;
+  const taskId = Task.start('Saving return check');
+  const checklist = [
+    { label: 'Item matches what we sent', ok: !!el('gr-c1')?.checked },
+    { label: 'In our original packaging', ok: !!el('gr-c2')?.checked },
+    { label: 'Packaging reusable', ok: !!el('gr-c3')?.checked },
+    { label: 'Item undamaged', ok: !!el('gr-c4')?.checked },
+  ];
+  const notes = (el('gr-notes')?.value || '').trim();
+  try {
+    const summary = checklist.map(c => `${c.ok ? '✓' : '✗'} ${c.label}`).join(' · ');
+    await Api.patch('/api/returns/' + GR.id, { status: 'received', notes: (notes ? notes + '\n' : '') + '[Floor check] ' + summary });
+    const n = await Api.post(`/api/returns/${GR.id}/process-notify`, { checklist, notes });
+    Task.done(taskId);
+    toast(`Saved ✓${n.emailed ? ` — emailed ${n.emailed} admin${n.emailed > 1 ? 's' : ''}` : ' — admins notified in-app'}`, 'success', 5000);
+    Store.refresh('returns').catch(() => {});
+    const o = el('gr-outcome'); if (o) { o.style.display = ''; o.scrollIntoView({ behavior: 'smooth' }); }
+  } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
+}
+async function grOutcome(resolution) {
+  const r = (State.returns || []).find(x => x.id == GR.id);
+  const taskId = Task.start('Recording outcome');
+  try {
+    await Api.patch('/api/returns/' + GR.id, { status: 'processed', resolution });
+    Task.done(taskId);
+    Store.refresh('returns').catch(() => {});
+    if (resolution === 'restock') {
+      // Stock is added back server-side; now WALK it back to its home.
+      const prod = r?.productId ? (State.products || []).find(p => p.id == r.productId)
+        : (State.products || []).find(p => (p.sku || '').toLowerCase() === (r?.sku || '').toLowerCase());
+      closeModal();
+      modal({
+        title: '📍 Put it back',
+        body: prod ? `
+          <div style="text-align:center">
+            <div style="font-weight:700;font-size:15px;margin-bottom:6px">${escapeHtml(prod.title || '')}</div>
+            <div style="font-size:20px;font-weight:800;margin-bottom:8px">📍 ${escapeHtml([prod.location, prod.locationNote].filter(Boolean).join(' — ') || 'No location recorded')}</div>
+            ${prod.locationPhoto ? `<img src="${escapeAttr(prod.locationPhoto)}" style="max-width:100%;border-radius:12px;margin-bottom:8px">` : ''}
+            ${!prod.location && !prod.locationNote ? '<div style="font-size:12px;color:var(--amber)">No location on file — put it somewhere sensible and set the location from the item (scan it).</div>' : ''}
+          </div>` : '<div style="text-align:center;color:var(--ink-soft)">Stock added back. This return isn\'t linked to a product, so there\'s no location to show.</div>',
+        actions: [{ label: '✓ Returned to its spot', primary: true, onClick: closeModal }],
+      });
+      toast('Stock added back ✓', 'success');
+    } else {
+      closeModal();
+      toast(resolution === 'relist_used' ? 'Set aside for refurb — list it as used/damaged when ready' : 'Marked as scrapped', 'success', 5000);
+    }
+  } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
 // ── Supplier invoice / packing-list import ──────────────────────────────────
 // Upload the supplier's .xlsx → the backend finds the parts table (any of the
 // usual supplier layouts), matches each line to OUR listings by part number,
@@ -20783,6 +21184,15 @@ function renderSettings() {
       </div>
 
       <div class="card admin-only" style="margin-bottom:16px">
+        <div class="card-head"><h3>↩ Returns notifications</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">When staff finish the guided return check on the handheld (condition + photos + notes), these admins get the email with everything needed to complete the return / refund on eBay. Leave empty to email <strong>every active admin</strong>.</p>
+          <div class="field"><label>Admin emails <span style="font-weight:400;color:var(--ink-soft)">— comma separated</span></label><input id="rn-emails" placeholder="you@company.co.uk, ops@company.co.uk"></div>
+          <button class="btn btn-primary" onclick="saveReturnsNotify(this)">Save returns notifications</button>
+        </div>
+      </div>
+
+      <div class="card admin-only" style="margin-bottom:16px">
         <div class="card-head"><h3>🔎 VIN Search portal</h3></div>
         <div class="card-body">
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">The external VIN lookup portal + its shared login. Everyone gets a <strong>VIN Search</strong> item under Resources (computer + handheld) with a one-tap "open portal" button and the login ready to copy.</p>
@@ -20819,7 +21229,23 @@ function renderSettings() {
   loadDropfleetConfig();
   loadThumbnailConfig();
   loadFitmentConfig();
-  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); }
+  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); }
+}
+
+async function loadReturnsNotify() {
+  try {
+    const r = await Api.get('/api/settings/returns-notify');
+    if (el('rn-emails')) el('rn-emails').value = (r.emails || []).join(', ');
+  } catch (_) {}
+}
+async function saveReturnsNotify(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/settings/returns-notify', { emails: el('rn-emails')?.value || '' });
+    if (el('rn-emails')) el('rn-emails').value = (r.emails || []).join(', ');
+    toast(r.emails.length ? `Saved — ${r.emails.length} admin${r.emails.length > 1 ? 's' : ''} will get return emails` : 'Saved — every active admin will get return emails', 'success');
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
 }
 
 async function loadVinSearchSettings() {

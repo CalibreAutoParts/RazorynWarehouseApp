@@ -381,6 +381,14 @@ if (cron.validate(dispatchCronExpr)) {
           if (cr.cleared) console.log(`[cron dispatch] cleared ${cr.cleared} cancelled/refunded eBay order(s) from the worklist`);
         } catch (e) { if (!/ebay_not_configured/.test(e.message)) console.warn('[cron dispatch] cancel-sync failed:', e.message); }
       }
+      // Shopify cancellations (seller- or buyer-initiated) — mark the sale
+      // cancelled/refunded so it leaves Sales revenue AND the dispatch worklist.
+      if (typeof dispatch.syncShopifyCancellationsCore === 'function') {
+        try {
+          const sc = await dispatch.syncShopifyCancellationsCore({ days: 14 });
+          if (sc.cancelled) console.log(`[cron dispatch] cleared ${sc.cancelled} cancelled Shopify order(s)`);
+        } catch (e) { console.warn('[cron dispatch] shopify cancel-sync failed:', e.message); }
+      }
       // Shopify counterpart — mark orders fulfilled on Shopify as dispatched so
       // they drop off the worklist and aren't wrongly pushed to DropFleet.
       if (typeof dispatch.syncShopifyDispatchCore === 'function') {

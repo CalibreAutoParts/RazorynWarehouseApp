@@ -384,6 +384,67 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
   res.json({ return: result });
 });
 
+// POST /api/returns/:id/process-notify — the guided handheld return check
+// finished: email the configured admins (Settings → Returns notifications;
+// fallback = every active admin with an email) the condition checklist, the
+// staff notes and links to the photos, so they can complete the eBay side.
+// Also raises an in-app notification. Best-effort on the email — the return
+// itself is already saved before this fires.
+router.post('/:id/process-notify', requirePermission('returns'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const r = await query(`
+      SELECT r.*, COALESCE(p.sku, r.item_sku) AS sku, COALESCE(p.title, r.item_title) AS title
+        FROM returns r LEFT JOIN products p ON p.id = r.product_id WHERE r.id = $1`, [req.params.id]);
+    const ret = r.rows[0];
+    if (!ret) return res.status(404).json({ error: 'not_found' });
+    const photos = (await query(`SELECT photo_path FROM return_photos WHERE return_id = $1 ORDER BY id`, [req.params.id])).rows;
+    const checklist = Array.isArray(b.checklist) ? b.checklist : [];
+    const notes = String(b.notes || '').trim();
+
+    await query(
+      `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+       VALUES ('return_checked', $1, $2, 'info', 'return', $3)`,
+      [`Return checked on the floor: ${(ret.title || ret.sku || ('#' + ret.id)).slice(0, 60)}`,
+       `${checklist.map(c => `${c.ok ? '✓' : '✗'} ${c.label}`).join(' · ')}${notes ? ' — ' + notes.slice(0, 140) : ''}`,
+       ret.id]);
+
+    let emailed = 0;
+    try {
+      const email = require('../services/email');
+      if (email.isConfigured && email.isConfigured()) {
+        const d = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+        let recipients = Array.isArray(d.returnsNotifyEmails) ? d.returnsNotifyEmails.filter(Boolean) : [];
+        if (!recipients.length) {
+          recipients = (await query(`SELECT email FROM users WHERE role = 'admin' AND active = true AND email IS NOT NULL`)).rows.map(u => u.email);
+        }
+        if (recipients.length) {
+          const base = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
+          const photoLinks = photos.map((p, i) => {
+            const url = `${base}/uploads/returns/${String(p.photo_path).split('/').pop()}`;
+            return `<a href="${url}">Photo ${i + 1}</a>`;
+          }).join(' · ');
+          const html = `
+            <h2 style="margin:0 0 8px">Return checked on the warehouse floor</h2>
+            <p style="margin:0 0 10px"><strong>${ret.title || ''}</strong><br>
+            SKU ${ret.sku || '—'} · qty ${ret.qty || 1}${ret.buyer_username ? ' · buyer ' + ret.buyer_username : ''}${ret.external_return_id ? ' · eBay case ' + ret.external_return_id : ''}</p>
+            <table style="border-collapse:collapse;margin:0 0 10px">${checklist.map(c => `
+              <tr><td style="padding:2px 8px 2px 0">${c.ok ? '✅' : '❌'}</td><td style="padding:2px 0">${c.label}</td></tr>`).join('')}
+            </table>
+            ${notes ? `<p style="margin:0 0 10px"><strong>Staff notes:</strong> ${notes}</p>` : ''}
+            ${photoLinks ? `<p style="margin:0 0 10px"><strong>Photos:</strong> ${photoLinks}</p>` : '<p>No photos attached.</p>'}
+            <p style="margin:0;color:#777;font-size:12px">Complete the return on eBay / issue the refund, then mark the outcome in the Warehouse Hub if not already set.</p>`;
+          for (const to of recipients) {
+            try { await email.sendEmail({ to, subject: `↩ Return checked: ${(ret.title || ret.sku || ('#' + ret.id)).slice(0, 60)}`, html }); emailed++; }
+            catch (e) { console.warn('[returns] notify email failed:', to, e.message); }
+          }
+        }
+      }
+    } catch (e) { console.warn('[returns] notify failed:', e.message); }
+    res.json({ ok: true, emailed });
+  } catch (e) { res.status(500).json({ error: 'notify_failed', message: e.message }); }
+});
+
 // POST /api/returns/resync-statuses
 // Re-applies the state→status mapping to all existing returns. Useful after the mapping
 // is tightened — fixes old returns that were imported before unknown states were handled

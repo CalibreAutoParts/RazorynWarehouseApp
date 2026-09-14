@@ -1030,19 +1030,72 @@ router.post('/sync-ebay', requireAdmin, async (req, res) => {
     // looks back further (60d min) so stale cancellations clear too.
     let cancelled = { cleared: 0 };
     try { cancelled = await syncEbayCancellationsCore({ days: Math.min(90, Math.max(days, 60)) }); } catch (e) { console.warn('[dispatch] cancel-sync:', e.message); }
-    if (result.dispatched || cancelled.cleared) await audit(req, 'ebay_dispatch_sync', null, null, { ...result, cancelled });
-    res.json({ ok: true, ...result, cancelledCleared: cancelled.cleared || 0 });
+    // Shopify cancellations too — same look-back, same clearing.
+    let shopCancelled = { cancelled: 0 };
+    try { shopCancelled = await syncShopifyCancellationsCore({ days: Math.min(90, Math.max(days, 60)) }); } catch (e) { console.warn('[dispatch] shopify cancel-sync:', e.message); }
+    if (result.dispatched || cancelled.cleared || shopCancelled.cancelled) await audit(req, 'ebay_dispatch_sync', null, null, { ...result, cancelled, shopCancelled });
+    res.json({ ok: true, ...result, cancelledCleared: (cancelled.cleared || 0) + (shopCancelled.cancelled || 0) });
   } catch (e) {
     res.status(500).json({ error: 'sync_failed', message: e.message });
   }
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// Shopify cancellations — the missing half of the cancel sync. An order
+// cancelled on Shopify (by us OR at the customer's request) previously never
+// updated the sale here: it kept showing in Sales as live and sat on the
+// dispatch worklist (and the handheld) as "to dispatch" forever. This pulls
+// recently-updated orders, finds the ones with cancelled_at, and marks the
+// matching sale cancelled (refunded when the money actually went back) —
+// which clears dispatch, fixes the revenue figures, withdraws it from
+// DropFleet's queue, and raises a notification. A sale that was ALREADY
+// dispatched still flips (it's not live revenue any more) but the
+// notification says so loudly, since the parcel may need chasing back.
+// ──────────────────────────────────────────────────────────────────────────
+async function syncShopifyCancellationsCore({ days = 14 } = {}) {
+  const shopify = require('../services/shopify');
+  if (!shopify.isConfigured || !shopify.isConfigured()) return { checked: 0, cancelled: 0, skipped: 'not_configured' };
+  await ensureDispatchColumns();
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+  const { orders } = await shopify.getRecentOrders(since);
+  const cancelledOrders = (orders || []).filter(o => o.cancelled_at);
+  let cancelled = 0;
+  const details = [];
+  for (const o of cancelledOrders) {
+    try {
+      const r = await query(
+        `SELECT id, status, dispatched_at, collected_at, invoice_number, payment_reference FROM sales
+          WHERE channel = 'shopify' AND is_estimate = false
+            AND (external_order_id = $1 OR external_order_id = $2 OR order_number = $2 OR order_number = $3)
+          LIMIT 1`,
+        [String(o.id), String(o.order_number || ''), String(o.name || '')]);
+      const s = r.rows[0];
+      if (!s || ['cancelled', 'refunded'].includes(s.status)) continue;
+      const refInfo = typeof shopify.orderRefundInfo === 'function' ? shopify.orderRefundInfo(o) : { fullyRefunded: false };
+      const newStatus = refInfo.fullyRefunded ? 'refunded' : 'cancelled';
+      await query(`UPDATE sales SET status = $2 WHERE id = $1`, [s.id, newStatus]);
+      cancelled++;
+      details.push({ saleId: s.id, order: o.name || o.order_number, status: newStatus });
+      setImmediate(() => require('../services/dropfleet').withdrawSales(s.id).catch(() => {}));
+      try {
+        await query(
+          `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+           VALUES ('order_cancelled', $1, $2, 'warn', 'sale', $3)`,
+          [`Shopify order cancelled: ${o.name || o.order_number || s.invoice_number || ('#' + s.id)}`,
+           `Marked ${newStatus} — removed from dispatch and revenue.${(s.dispatched_at || s.collected_at) ? ' ⚠ It was ALREADY dispatched/collected — chase the parcel!' : ''}`,
+           s.id]);
+      } catch (_) {}
+    } catch (e) { console.warn('[dispatch] shopify cancel-sync order failed:', o.id, e.message); }
+  }
+  return { checked: cancelledOrders.length, cancelled, details };
+}
 module.exports = router;
 module.exports.trackingUrlFor = trackingUrlFor;
 module.exports.CARRIERS = CARRIERS;
 module.exports.EBAY_NATIVE_CARRIERS = EBAY_NATIVE_CARRIERS;
 module.exports.syncEbayDispatchCore = syncEbayDispatchCore;
 module.exports.syncEbayCancellationsCore = syncEbayCancellationsCore;
+module.exports.syncShopifyCancellationsCore = syncShopifyCancellationsCore;
 module.exports.syncShopifyDispatchCore = syncShopifyDispatchCore;
 module.exports.flagStaleShipments = flagStaleShipments;
 module.exports.refreshTrackingStatuses = refreshTrackingStatuses;
