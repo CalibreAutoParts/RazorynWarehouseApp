@@ -966,5 +966,27 @@ router.post('/vinsearch', requireAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
 });
 
+// ── Returns notifications: which admins get the "return processed on the
+// floor" email (photos + condition checklist + notes). Stored as a plain
+// email list in app_settings.data.returnsNotifyEmails.
+router.get('/returns-notify', requireAdmin, async (req, res) => {
+  try {
+    const d = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+    res.json({ emails: Array.isArray(d.returnsNotifyEmails) ? d.returnsNotifyEmails : [] });
+  } catch (e) { res.status(500).json({ error: 'load_failed', message: e.message }); }
+});
+router.post('/returns-notify', requireAdmin, async (req, res) => {
+  try {
+    const emails = (Array.isArray(req.body?.emails) ? req.body.emails : String(req.body?.emails || '').split(/[,;\s]+/))
+      .map(e => String(e).trim().toLowerCase()).filter(e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)).slice(0, 10);
+    await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+    const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+    await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`,
+      [JSON.stringify({ ...cur, returnsNotifyEmails: emails })]);
+    await audit(req, 'returns_notify_config', null, null, { count: emails.length });
+    res.json({ ok: true, emails });
+  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+});
+
 module.exports = router;
 module.exports.publicLogoRouter = publicLogoRouter;
