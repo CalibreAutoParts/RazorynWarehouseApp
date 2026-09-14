@@ -2270,7 +2270,8 @@ function enterApp() {
         // let it re-render — the tab/search/period are restored from State. Skip
         // entirely while the user is typing/interacting so we never yank focus.
         const a0 = document.activeElement;
-        const busy = a0 && /^(INPUT|TEXTAREA|SELECT)$/.test(a0.tagName) && document.getElementById('content')?.contains(a0);
+        const busy = (a0 && /^(INPUT|TEXTAREA|SELECT)$/.test(a0.tagName) && document.getElementById('content')?.contains(a0))
+          || !!(State.salesSearch || '').trim();   // an active search must never be clobbered by the poll
         if (!busy && typeof salesReload === 'function') {
           const prev = lastSalesIds;
           try { await salesReload(); } catch (_) {}
@@ -8584,7 +8585,7 @@ function renderSales() {
       </div>
 
       <div class="toolbar" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <input type="search" class="search-input" id="sales-search" placeholder="Search invoice / reference, customer, item, order #…" value="${escapeAttr(State.salesSearch || '')}" style="flex:1;min-width:220px">
+        <input type="search" class="search-input" id="sales-search" placeholder="Search invoice / reference, customer, phone, item, order #…" value="${escapeAttr(State.salesSearch || '')}" style="flex:1;min-width:220px">
         <select id="sales-period" onchange="salesSetPeriod(this.value)" style="padding:6px 8px;font-size:13px">
           ${[['all','All time'],['7d','Last 7 days'],['30d','Last 30 days'],['tm','This month'],['lm','Last month'],['tq','This quarter'],['lq','Last quarter'],['year','This year'],['ly','Last year'],['custom','Custom…']]
             .map(([v,l]) => `<option value="${v}" ${(State.salesPeriod||'all')===v?'selected':''}>${l}</option>`).join('')}
@@ -8638,7 +8639,18 @@ function renderSales() {
     else if (filter === 'cash' || filter === 'bank' || filter === 'card') list = State.sales.filter(s => s.paymentMethod === filter && !s.isEstimate);
     else list = State.sales.filter(s => s.channel === filter && !s.isEstimate);
     const q = (State.salesSearch || '').trim();
-    if (q) list = list.filter(s => matchesKeywords(q, s.invoice, s.paymentReference, s.customer, s.customerEmail, s.title, s.orderNumber, s.externalOrderId));
+    if (q) {
+      const qd = q.replace(/\D/g, '');
+      list = list.filter(s => matchesKeywords(q, s.invoice, s.paymentReference, s.customer, s.customerEmail, s.title, s.orderNumber, s.externalOrderId)
+        // Phone: digits-only contains, tolerant of 07… vs +447… — collection
+        // customers often only leave a number.
+        || (qd.length >= 5 && (() => {
+          const pd = String(s.customerPhone || '').replace(/\D/g, '');
+          if (!pd) return false;
+          const alt = qd.startsWith('0') ? '44' + qd.slice(1) : qd.startsWith('44') ? '0' + qd.slice(2) : null;
+          return pd.includes(qd) || (alt && pd.includes(alt));
+        })()));
+    }
     return list;
   }
 
@@ -8801,7 +8813,30 @@ function renderSales() {
   }));
   if (salesSearch) salesSearch.addEventListener('input', () => {
     State.salesSearch = salesSearch.value;
-    paintTable(currentFilter);
+    paintTable(currentFilter);   // instant filter over what's loaded
+    // The page only holds ONE page of sales, so a search must also ask the
+    // SERVER — that's how an old invoice or a phone number from months back is
+    // found on "All time". Debounced; clearing the box restores the period view.
+    clearTimeout(window._salesQTimer);
+    const q = salesSearch.value.trim();
+    window._salesQTimer = setTimeout(async () => {
+      if ((State.salesSearch || '').trim() !== q) return;   // superseded
+      if (q.length < 2) {
+        if (window._salesQActive) { window._salesQActive = false; salesReload(); }
+        return;
+      }
+      try {
+        const { from, to } = salesPeriodRange();
+        const qs = new URLSearchParams({ pageSize: '1000', includeUnpaid: '1', q });
+        if (from) qs.set('from', from);
+        if (to) qs.set('to', to);
+        const r = await Api.get('/api/sales?' + qs.toString());
+        if ((State.salesSearch || '').trim() !== q) return;  // stale response
+        State.sales = (r.sales || []).map(adaptSale);
+        window._salesQActive = true;
+        paintStats(currentFilter); paintTable(currentFilter);
+      } catch (_) { /* keep the local filter results */ }
+    }, 450);
   });
 }
 
