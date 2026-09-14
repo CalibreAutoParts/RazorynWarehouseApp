@@ -168,6 +168,32 @@ router.get('/', requireAdmin, async (req, res) => {
   if (from)    { params.push(from); where.push(`s.occurred_at >= $${params.length}`); }
   if (to)      { params.push(to); where.push(`s.occurred_at <= $${params.length}`); }
   if (status)  { params.push(status); where.push(`s.status = $${params.length}`); }
+  // Server-side search — the frontend only holds a page of sales, so "all time"
+  // lookups (old invoices, a collection customer's PHONE NUMBER) must hit the
+  // whole table. Phone matching is digits-only and tolerant of 07… vs +447…
+  if (req.query.q && String(req.query.q).trim()) {
+    const raw = String(req.query.q).trim();
+    params.push(`%${raw}%`);
+    const i = params.length;
+    const conds = [
+      `s.invoice_number ILIKE $${i}`, `s.payment_reference ILIKE $${i}`,
+      `s.customer_name ILIKE $${i}`, `s.customer_email ILIKE $${i}`,
+      `s.external_order_id ILIKE $${i}`, `s.order_number ILIKE $${i}`,
+      `EXISTS (SELECT 1 FROM sale_items si WHERE si.sale_id = s.id AND (si.title ILIKE $${i} OR si.sku ILIKE $${i}))`,
+    ];
+    const digits = raw.replace(/\D/g, '');
+    if (digits.length >= 5) {
+      params.push('%' + digits + '%');
+      conds.push(`REGEXP_REPLACE(COALESCE(s.customer_phone,''), '[^0-9]', '', 'g') LIKE $${params.length}`);
+      const alt = digits.startsWith('0') ? '44' + digits.slice(1)
+                : digits.startsWith('44') ? '0' + digits.slice(2) : null;
+      if (alt) {
+        params.push('%' + alt + '%');
+        conds.push(`REGEXP_REPLACE(COALESCE(s.customer_phone,''), '[^0-9]', '', 'g') LIKE $${params.length}`);
+      }
+    }
+    where.push('(' + conds.join(' OR ') + ')');
+  }
   const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
   // UNPAID direct invoices (cash/bank/card, parts given, awaiting payment) must
   // never drop off the list just because they're older than the date window — they
