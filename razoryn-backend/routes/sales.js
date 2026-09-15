@@ -42,6 +42,14 @@ async function ensurePaidColumn() {
   try {
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_paid BOOLEAN NOT NULL DEFAULT true`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ`);
+    // Backfill the payment-date hole: is_paid DEFAULTED to true when this
+    // feature shipped, so every pre-existing invoice was "paid" with paid_at
+    // NULL — invisible to any payment-date view (VAT report "paid only", the
+    // bank run-down). Stamp those rows with the invoice date (the best truth
+    // available for legacy records). Idempotent; new paid-flips always stamp
+    // paid_at themselves.
+    await query(`UPDATE sales SET paid_at = occurred_at
+                  WHERE is_paid = true AND paid_at IS NULL AND is_estimate = false`);
     // International/export orders: goods exported from the UK are ZERO-RATED for
     // UK VAT (business AND consumer buyers alike) provided export evidence is
     // kept. We record the destination + the buyer's VAT number (useful for their
@@ -1041,19 +1049,22 @@ function resolveVatWindow(q) {
 // accounting) using paid_at; otherwise uses occurred_at (accrual).
 async function vatReportData(win, basis) {
   await ensurePaidColumn();
-  const dateCol = basis === 'paid' ? 'paid_at' : 'occurred_at';
+  // Payment-date basis falls back to the invoice date for any row that is
+  // paid but (still) missing paid_at — a paid invoice must NEVER silently
+  // vanish from the VAT figures over a missing timestamp.
+  const dateCol = basis === 'paid' ? 'COALESCE(s.paid_at, s.occurred_at)' : 's.occurred_at';
   const paidClause = basis === 'paid' ? 'AND s.is_paid = true' : '';
   const rows = await query(`
-    SELECT s.id, s.${dateCol} AS date, s.invoice_number, s.payment_reference, s.payment_method,
+    SELECT s.id, ${dateCol} AS date, s.invoice_number, s.payment_reference, s.payment_method,
            s.customer_name, s.subtotal, s.vat, s.shipping, s.total, s.is_paid, s.paid_at, s.occurred_at,
            COALESCE(s.refunded_amount, 0) AS refunded_amount
       FROM sales s
      WHERE s.is_estimate = false
        AND s.status NOT IN ('refunded','cancelled')
        AND s.payment_method IN ('bank','card')
-       AND s.${dateCol} >= $1 AND s.${dateCol} < $2
+       AND ${dateCol} >= $1 AND ${dateCol} < $2
        ${paidClause}
-     ORDER BY s.${dateCol} ASC
+     ORDER BY ${dateCol} ASC
   `, [win.from, win.toExclusive]);
   // Cash total is net of partial refunds too (fully-refunded rows already excluded
   // by status). SUM(total - refunded) so a part-refunded order counts at what was kept.
