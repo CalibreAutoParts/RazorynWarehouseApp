@@ -27,6 +27,10 @@ async function loadBankRows(from, to) {
     `s.is_estimate = false`, `s.is_paid = true`,
     `s.status NOT IN ('refunded','cancelled')`,
     `(s.payment_method = 'bank' OR s.channel = 'direct_bank')`,
+    // Belt AND braces: cash never appears on this statement, even if a sale
+    // carries mixed/edited payment fields — cash stays internal.
+    `COALESCE(s.payment_method, '') <> 'cash'`,
+    `s.channel <> 'direct_cash'`,
   ];
   if (from) { params.push(from); where.push(`COALESCE(s.paid_at, s.occurred_at) >= $${params.length}`); }
   if (to)   { params.push(to);   where.push(`COALESCE(s.paid_at, s.occurred_at) <= $${params.length}::date + interval '1 day'`); }
