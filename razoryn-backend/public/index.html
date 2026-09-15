@@ -8594,6 +8594,7 @@ function renderSales() {
         <div class="actions">
           <button class="btn btn-primary admin-only" onclick="openManualSale()">+ New sale / estimate</button>
           <button class="btn btn-outline admin-only" onclick="openVatReport()" title="VAT due per quarter — bank + card sales, with a download for your VAT return">📊 VAT returns</button>
+          <button class="btn btn-outline admin-only" onclick="openBankRundown()" title="Statement of completed bank-transfer payments — per-order VAT / subtotal / total breakdown. Preview, download, or email it to your accountant / colleagues in two formats.">🏦 Bank run-down</button>
           <button class="btn btn-outline admin-only" onclick="relinkUnmatchedSales()" title="Try to match unlinked orders to products by SKU again">🔗 Re-link unmatched</button>
           <button class="btn btn-outline admin-only" onclick="reconcileRefunds(this)" title="Pull the latest eBay return cases and re-check every sale, so returned/refunded items (incl. open returns) are correctly deducted from the totals">↩ Reconcile returns</button>
           <button class="btn btn-outline" onclick="exportSalesXlsx()" title="Excel workbook with one sheet per channel">⬇ Excel (per-channel)</button>
@@ -9070,6 +9071,76 @@ async function markSalePaid(id) {
   } catch (e) {
     toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
+}
+
+// ── Bank transfer run-down: preview / download / email a period statement ───
+// Two layouts rendered server-side: "Accountant" (formal A4 statement — VAT
+// summary, net/VAT/gross per order, CSV attached on email) and "Company"
+// (light shareable summary). Preview opens the real document; Print/Save-as-
+// PDF is built into it.
+function openBankRundown() {
+  const now = new Date();
+  const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  const today = now.toISOString().slice(0, 10);
+  modal({
+    title: '🏦 Bank transfer run-down',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Every <strong>completed</strong> bank-transfer payment in the period, each order broken down into subtotal, VAT and total (zero-rated exports flagged). Preview it, download it, or email it straight to the accountant.</div>
+      <div class="grid-2" style="grid-template-columns:1fr 1fr;gap:8px">
+        <div class="field"><label>From</label><input type="date" id="br-from" value="${monthStart}"></div>
+        <div class="field"><label>To</label><input type="date" id="br-to" value="${today}"></div>
+      </div>
+      <div class="field"><label>Format</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <label style="border:1px solid var(--line);border-radius:10px;padding:10px;cursor:pointer;display:flex;gap:8px;align-items:flex-start">
+            <input type="radio" name="br-fmt" value="accountant" checked style="margin-top:2px">
+            <span><strong style="font-size:13px">📑 Accountant</strong><br><span style="font-size:11px;color:var(--ink-soft)">Formal A4 statement — VAT summary, net/VAT/gross columns, CSV attached when emailed.</span></span>
+          </label>
+          <label style="border:1px solid var(--line);border-radius:10px;padding:10px;cursor:pointer;display:flex;gap:8px;align-items:flex-start">
+            <input type="radio" name="br-fmt" value="company" style="margin-top:2px">
+            <span><strong style="font-size:13px">👥 Company</strong><br><span style="font-size:11px;color:var(--ink-soft)">Light one-pager — period total up front, simple order list. Easy to read &amp; share.</span></span>
+          </label>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+        <button class="btn btn-outline" onclick="brOpen(false)">👁 Preview</button>
+        <button class="btn btn-outline" onclick="brOpen(true)">⬇ Download</button>
+        <button class="btn btn-outline" onclick="window.open('/api/rundown/bank.csv?' + brQs(), '_blank')">⬇ CSV</button>
+      </div>
+      <div style="border-top:1px solid var(--line);padding-top:12px">
+        <div style="font-weight:700;font-size:12px;margin-bottom:6px">✉ Email it</div>
+        <div class="field"><label>To <span style="font-weight:400;color:var(--ink-soft)">— accountant / colleagues, comma separated</span></label><input id="br-emails" placeholder="accountant@firm.co.uk, director@company.co.uk"></div>
+        <div class="field"><label>Message <span style="font-weight:400;color:var(--ink-soft)">— optional, goes above the statement</span></label><input id="br-msg" placeholder="e.g. Bank transfers for August, as requested"></div>
+        <button class="btn btn-primary" style="width:100%" onclick="brEmail(this)">✉ Send the run-down</button>
+      </div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
+}
+function brQs() {
+  const qs = new URLSearchParams();
+  if (el('br-from')?.value) qs.set('from', el('br-from').value);
+  if (el('br-to')?.value) qs.set('to', el('br-to').value);
+  qs.set('format', document.querySelector('input[name="br-fmt"]:checked')?.value || 'accountant');
+  return qs.toString();
+}
+function brOpen(download) {
+  window.open('/api/rundown/bank?' + brQs() + (download ? '&download=1' : ''), '_blank');
+}
+async function brEmail(btn) {
+  const recipients = (el('br-emails')?.value || '').trim();
+  if (!recipients) { toast('Enter at least one email address', 'warn'); return; }
+  if (btn) btn.disabled = true;
+  const taskId = Task.start('Sending run-down');
+  try {
+    const r = await Api.post('/api/rundown/bank/email', {
+      from: el('br-from')?.value || null, to: el('br-to')?.value || null,
+      format: document.querySelector('input[name="br-fmt"]:checked')?.value || 'accountant',
+      recipients, message: el('br-msg')?.value || '',
+    });
+    Task.done(taskId);
+    toast(`✉ Sent to ${r.sent} recipient${r.sent > 1 ? 's' : ''} — ${r.rows} payment${r.rows === 1 ? '' : 's'}${r.attachedCsv ? ' · CSV attached' : ''}`, 'success', 7000);
+  } catch (e) { Task.fail(taskId); toast('Send failed: ' + (e.data?.message || e.message), 'error', 8000); }
+  if (btn) btn.disabled = false;
 }
 
 // ── VAT returns ────────────────────────────────────────────────────────────

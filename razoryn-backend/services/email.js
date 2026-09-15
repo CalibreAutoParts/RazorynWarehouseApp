@@ -11,10 +11,12 @@ function isConfigured() {
 }
 
 /**
- * @param {{to:string|string[], subject:string, html:string, from?:string, replyTo?:string}} opts
+ * @param {{to:string|string[], subject:string, html:string, from?:string, replyTo?:string,
+ *          attachments?: Array<{filename:string, content:string}>}} opts
+ *        attachments[].content = base64 (Resend's format).
  * @returns {Promise<{ok:boolean, id?:string, error?:string}>}
  */
-async function sendEmail({ to, subject, html, from, replyTo } = {}) {
+async function sendEmail({ to, subject, html, from, replyTo, attachments } = {}) {
   if (!isConfigured()) {
     console.warn('[email] RESEND_API_KEY not set — skipping send to', Array.isArray(to) ? to.join(',') : to);
     return { ok: false, error: 'email_not_configured' };
@@ -28,6 +30,7 @@ async function sendEmail({ to, subject, html, from, replyTo } = {}) {
       subject,
       html,
       ...(replyTo ? { reply_to: replyTo } : {}),
+      ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}),
     }, {
       headers: {
         Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
