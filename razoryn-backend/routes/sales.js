@@ -1073,7 +1073,7 @@ async function vatReportData(win, basis) {
       FROM sales s
      WHERE s.is_estimate = false AND s.status NOT IN ('refunded','cancelled')
        AND s.payment_method = 'cash'
-       AND s.${dateCol} >= $1 AND s.${dateCol} < $2 ${paidClause}
+       AND ${dateCol} >= $1 AND ${dateCol} < $2 ${paidClause}
   `, [win.from, win.toExclusive]);
   // Partial refunds reduce the VATable figures proportionally: a £120 order (£20 VAT)
   // refunded £60 keeps £60 gross / £10 VAT. Fully-refunded orders are excluded above.
