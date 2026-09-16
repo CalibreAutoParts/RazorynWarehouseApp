@@ -34,8 +34,9 @@ const DEFAULT_PERMS = {
 // GET /api/staff
 router.get('/', async (req, res) => {
   try { await require('../lib/digest').ensureColumns(); } catch (_) {}
+  try { await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(8,2)`); } catch (_) {}
   const { rows } = await query(`
-    SELECT id, username, email, name, role, permissions, active, last_login_at, created_at, notify_prefs
+    SELECT id, username, email, name, role, permissions, active, last_login_at, created_at, notify_prefs, hourly_rate
     FROM users ORDER BY active DESC, name
   `);
   res.json({ users: rows });
@@ -90,6 +91,11 @@ router.patch('/:id', async (req, res) => {
     sets.push(`notify_prefs = COALESCE(notify_prefs, '{}'::jsonb) || $${params.length}::jsonb`);
   }
   if (b.role)         { params.push(b.role); sets.push(`role = $${params.length}`); }
+  if (b.hourlyRate !== undefined) {
+    try { await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(8,2)`); } catch (_) {}
+    params.push(b.hourlyRate === '' || b.hourlyRate == null ? null : parseFloat(b.hourlyRate));
+    sets.push(`hourly_rate = $${params.length}`);
+  }
   if (b.active !== undefined) { params.push(b.active); sets.push(`active = $${params.length}`); }
   if (b.permissions)  { params.push(JSON.stringify(b.permissions)); sets.push(`permissions = $${params.length}::jsonb`); }
   if (b.password)     {
