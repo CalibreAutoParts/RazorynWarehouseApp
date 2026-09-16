@@ -1183,7 +1183,7 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           VIN Search
         </button>
-        <button class="nav-item admin-only" data-page="schedule">
+        <button class="nav-item" data-page="schedule">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
           Schedule
         </button>
@@ -1585,6 +1585,9 @@ function adaptTask(t) {
     date: t.scheduled_for,
     done: t.status === 'done',
     status: t.status,
+    inProgress: t.status === 'in_progress',
+    startedAt: t.started_at || null,
+    startedBy: t.started_by_name || null,
     assigneeId: t.assigned_to || null,
     assignee: t.assignee_name || (t.assigned_to ? '#' + t.assigned_to : null),
     frequency: t.recurrence || 'none',
@@ -3246,7 +3249,10 @@ function hasPerm(page) {
     activity:     false,
     pricingrules: false,
     pricing:      false,
-    schedule:     false,
+    // Tasks are operational: every staff member must SEE what they're meant to
+    // do (the backend already allows viewing + status changes for everyone;
+    // creating/editing/deleting tasks stays admin-only in the UI + API).
+    schedule:     true,
     videos:       false,
     kb:           false,
     notes:        false,
@@ -11117,15 +11123,25 @@ function paintSchedule() {
     return true;
   });
   list.innerHTML = filtered.length ? filtered.map(t => `
-    <div class="task-row ${t.done?'done':''}">
-      <button class="task-check ${t.done?'done':''}" onclick="toggleTask('${t.id}')">${t.done?'✓':''}</button>
+    <div class="task-row ${t.done?'done':''}" ${t.inProgress ? 'style="background:color-mix(in srgb, var(--amber) 8%, transparent)"' : ''}>
+      <button class="task-check ${t.done?'done':''}" onclick="toggleTask('${t.id}')" title="${t.done ? 'Reopen' : 'Mark done'}">${t.done?'✓':(t.inProgress?'⏱':'')}</button>
       <div class="task-info">
         <div class="task-title">${t.task}</div>
-        <div class="task-meta">${t.when} · ${t.frequency} · <strong>${t.assignee || 'unassigned'}</strong></div>
+        <div class="task-meta">${t.when} · ${t.frequency} · <strong>${t.assignee || 'unassigned'}</strong>${t.inProgress ? ` · <span style="color:var(--amber);font-weight:600">⏱ in progress${t.startedBy ? ' — ' + escapeHtml(t.startedBy) : ''}${t.startedAt ? ' since ' + new Date(t.startedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''}</span>` : ''}${t.done && t.startedBy ? ` · done` : ''}</div>
       </div>
+      ${!t.done && !t.inProgress ? `<button class="btn btn-outline btn-sm" onclick="taskSetStatus('${t.id}', 'in_progress')" title="Take this task — everyone sees you're on it">▶ Start</button>` : ''}
+      ${t.inProgress ? `<button class="btn btn-primary btn-sm" onclick="taskSetStatus('${t.id}', 'done')">✓ Finish</button>` : ''}
       ${State.user?.role === 'admin' ? `<button class="btn btn-ghost btn-sm" onclick="deleteTask('${t.id}')">Remove</button>`:''}
     </div>
   `).join('') : '<div class="empty"><div class="t">No tasks ' + (filter==='mine'?'assigned to you':filter==='unassigned'?'without an assignee':'') + '</div></div>';
+}
+async function taskSetStatus(id, status) {
+  try {
+    await Api.patch('/api/schedule/' + id, { status });
+    await Store.refresh('schedule');
+    paintSchedule();
+    toast(status === 'in_progress' ? '▶ Task started — it shows as yours until you finish it' : '✓ Task finished', 'success', 3000);
+  } catch (e) { toast('Update failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function toggleTask(id) {
   const t = State.schedule.find(x => x.id == id);
