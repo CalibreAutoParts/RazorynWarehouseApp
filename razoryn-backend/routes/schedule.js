@@ -7,6 +7,16 @@ const { audit } = require('../middleware/audit');
 const router = express.Router();
 router.use(requireAuth);
 
+// Self-healing: task lifecycle stamps. A task now moves pending →
+// in_progress → done, recording who started it and when (alongside the
+// existing completed_at/completed_by), so "who's on it" is visible.
+(async () => {
+  try {
+    await query(`ALTER TABLE schedule_tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ`);
+    await query(`ALTER TABLE schedule_tasks ADD COLUMN IF NOT EXISTS started_by INTEGER`);
+  } catch (e) { console.warn('[schedule] migration warning:', e.message); }
+})();
+
 // GET /api/schedule?date=YYYY-MM-DD&from=&to=
 // Any signed-in staff member can VIEW tasks (they need to see what's assigned /
 // due on the handheld). Creating/editing tasks stays admin-only below.
@@ -18,9 +28,10 @@ router.get('/', async (req, res) => {
   if (to)    { params.push(to); where.push(`scheduled_for <= $${params.length}`); }
   const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const { rows } = await query(`
-    SELECT t.*, u.name AS assignee_name
+    SELECT t.*, u.name AS assignee_name, us.name AS started_by_name
     FROM schedule_tasks t
     LEFT JOIN users u ON u.id = t.assigned_to
+    LEFT JOIN users us ON us.id = t.started_by
     ${w}
     ORDER BY scheduled_for, due_time NULLS LAST
   `, params);
@@ -60,10 +71,19 @@ router.patch('/:id', async (req, res) => {
   for (const [k, v] of Object.entries(updates)) {
     if (v !== undefined) { params.push(v); sets.push(`${k} = $${params.length}`); }
   }
+  if (b.status === 'in_progress') {
+    sets.push(`started_at = COALESCE(started_at, now())`);
+    params.push(req.user.id);
+    sets.push(`started_by = COALESCE(started_by, $${params.length})`);
+  }
   if (b.status === 'done') {
     sets.push(`completed_at = now()`);
     params.push(req.user.id);
     sets.push(`completed_by = $${params.length}`);
+  }
+  if (b.status === 'pending') {
+    // Reopened — clear the lifecycle stamps so it can be started fresh.
+    sets.push(`started_at = NULL`, `started_by = NULL`, `completed_at = NULL`, `completed_by = NULL`);
   }
   if (!sets.length) return res.status(400).json({ error: 'no_updatable_fields' });
   params.push(req.params.id);
