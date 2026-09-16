@@ -1601,6 +1601,7 @@ function adaptUser(u) {
     username: u.username,
     email: u.email,
     notifyPrefs: u.notify_prefs || {},
+    hourlyRate: u.hourly_rate != null ? parseFloat(u.hourly_rate) : null,
     role: u.role,
     perms: u.permissions || {},          // legacy
     permissions: u.permissions || {},
@@ -3097,6 +3098,11 @@ function onHardwareScan(code) {
     // Pick-check open? Scans VERIFY the picked item against the order — they
     // must never fall through to the quick sheet while picking.
     if (el('pick-scan') && typeof pickVerifyCode === 'function') { pickVerifyCode(code); return; }
+    // Clock-in QR scan open? Route the trigger-pull there.
+    if (el('ck-scan') && typeof ckSubmitScan === 'function') {
+      const act = el('ck-scan-break') ? 'out' : 'in';
+      ckSubmitScan(act, code); return;
+    }
     // A recognised barcode/SKU anywhere else → the product quick sheet: update
     // stock, set the location + photo, size/weight, fixed box, packaging — all
     // in one tap-friendly modal. Falls back to the inventory search otherwise.
@@ -3158,15 +3164,24 @@ async function paintClock() {
     if (State.user?.role === 'admin') report = await Api.get('/api/timeclock/report?' + q.toString()).catch(() => null);
   } catch (e) { body.innerHTML = `<div class="empty"><div class="t">Failed to load</div>${escapeHtml(e.data?.message || e.message)}</div>`; return; }
   State._clockedIn = st.clockedIn;
+  State._clockQrRequired = !!st.qrRequired;
+  // Today's hours — the number staff actually want at a glance. Live while
+  // clocked in (the open session counts up).
+  const todayLine = `<div style="font-size:12px;color:var(--ink-soft);margin-top:8px">Worked today: <strong style="font-size:15px;color:var(--ink)">${clockFmt(st.todayMinutes || 0)}</strong></div>`;
   const inCard = st.clockedIn
     ? `<div class="card" style="border:2px solid var(--green);margin-bottom:16px"><div class="card-body" style="text-align:center;padding:22px">
          <div style="font-size:13px;color:var(--ink-soft)">Clocked in since <strong>${clockTime(st.session.clock_in)}</strong></div>
          <div style="font-size:34px;font-weight:800;margin:6px 0" id="clock-elapsed">${clockFmt(st.sinceMinutes)}</div>
-         <button class="btn btn-primary" style="background:var(--red);border-color:var(--red)" onclick="clockOut(this)">■ Clock out</button>
+         <div style="display:flex;gap:8px;justify-content:center;align-items:center;margin-bottom:8px">
+           <label style="font-size:12px;color:var(--ink-soft)">Break taken <input type="number" id="ck-break" min="0" max="480" value="0" style="width:64px;text-align:center"> mins</label>
+         </div>
+         <button class="btn btn-primary" style="background:var(--red);border-color:var(--red)" onclick="${st.qrRequired ? "openClockScan('out')" : 'clockOut(this)'}">${st.qrRequired ? '📷 Scan QR to clock out' : '■ Clock out'}</button>
+         ${todayLine}
        </div></div>`
     : `<div class="card" style="margin-bottom:16px"><div class="card-body" style="text-align:center;padding:22px">
          <div style="font-size:13px;color:var(--ink-soft);margin-bottom:10px">You're not clocked in.</div>
-         <button class="btn btn-primary" onclick="clockIn(this)">▶ Clock in</button>
+         <button class="btn btn-primary" onclick="${st.qrRequired ? "openClockScan('in')" : 'clockIn(this)'}">${st.qrRequired ? '📷 Scan QR to clock in' : '▶ Clock in'}</button>
+         ${todayLine}
        </div></div>`;
   const myRows = (me.sessions || []).map(s => `
     <tr><td>${clockDate(s.clock_in)}</td><td>${clockTime(s.clock_in)}</td><td>${s.open ? '<span style="color:var(--green)">in progress</span>' : clockTime(s.clock_out)}</td>
@@ -3176,12 +3191,22 @@ async function paintClock() {
       <div class="table-wrap"><table class="table"><thead><tr><th>Day</th><th>In</th><th>Out</th><th class="num">Hours</th></tr></thead><tbody>${myRows}</tbody></table></div></div>`;
   let teamCard = '';
   if (report) {
-    const rows = (report.staff || []).map(u => `
-      <tr><td>${escapeHtml(u.name)}</td><td class="num"><strong>${clockFmt(u.totalMinutes)}</strong></td>
-      <td class="num" style="color:var(--ink-soft)">${u.sessions.length} session(s)${u.sessions.some(x => x.open) ? ' · <span style="color:var(--green)">on now</span>' : ''}</td></tr>`).join('')
-      || '<tr><td colspan="3"><div class="empty" style="padding:16px">No hours logged in this period</div></td></tr>';
-    teamCard = `<div class="card admin-only"><div class="card-head"><h3>👥 Team hours (for pay)</h3><div class="card-desc">Everyone's total for the selected period.</div></div>
-      <div class="table-wrap"><table class="table"><thead><tr><th>Staff</th><th class="num">Total hours</th><th class="num">Sessions</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    // Hours → breaks → PAYABLE → rate → pay. Rate comes off the staff record
+    // (Staff & Access → Hourly rate); no rate = pay column shows "set rate".
+    let totPay = 0, anyPay = false;
+    const rows = (report.staff || []).map(u => {
+      if (u.pay != null) { totPay += u.pay; anyPay = true; }
+      return `
+      <tr><td>${escapeHtml(u.name)}${u.sessions.some(x => x.open) ? ' <span style="color:var(--green);font-size:11px">· on now</span>' : ''}</td>
+      <td class="num">${clockFmt(u.totalMinutes)}</td>
+      <td class="num" style="color:var(--ink-soft)">${u.breakMinutes ? '− ' + clockFmt(u.breakMinutes) : '—'}</td>
+      <td class="num"><strong>${clockFmt(u.payableMinutes)}</strong></td>
+      <td class="num" style="color:var(--ink-soft)">${u.hourlyRate != null ? '£' + u.hourlyRate.toFixed(2) + '/h' : '<a href="#" onclick="routeTo(\'staff\');return false" style="font-size:11px">set rate</a>'}</td>
+      <td class="num"><strong>${u.pay != null ? '£' + u.pay.toFixed(2) : '—'}</strong></td></tr>`;
+    }).join('')
+      || '<tr><td colspan="6"><div class="empty" style="padding:16px">No hours logged in this period</div></td></tr>';
+    teamCard = `<div class="card admin-only"><div class="card-head" style="display:flex;justify-content:space-between;align-items:center"><div><h3>👥 Team hours &amp; pay</h3><div class="card-desc">Worked − unpaid breaks = payable · × hourly rate = pay, for the selected period.</div></div>${anyPay ? `<div style="font-weight:800;font-size:16px">£${totPay.toFixed(2)}</div>` : ''}</div>
+      <div class="table-wrap"><table class="table"><thead><tr><th>Staff</th><th class="num">Worked</th><th class="num">Breaks</th><th class="num">Payable</th><th class="num">Rate</th><th class="num">Pay</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
   }
   body.innerHTML = inCard + myCard + teamCard;
   // Live elapsed timer while clocked in + on this page.
@@ -3192,16 +3217,65 @@ async function paintClock() {
     }, 30000);
   }
 }
-async function clockIn(btn) {
+async function clockIn(btn, qrToken) {
   if (btn) btn.disabled = true;
-  try { await Api.post('/api/timeclock/clock-in', {}); toast('Clocked in ✓', 'success'); await paintClock(); refreshClockDot(); }
+  try { await Api.post('/api/timeclock/clock-in', { qrToken }); toast('Clocked in ✓', 'success'); await paintClock(); refreshClockDot(); }
   catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
+}
+
+// ── QR-gated clocking: scan the wall poster to clock in/out ─────────────────
+// The handheld's trigger reads the QR straight into the focused input; phones
+// can use the camera. The token is verified server-side.
+function openClockScan(action) {
+  modal({
+    title: action === 'in' ? '📷 Scan to clock in' : '📷 Scan to clock out',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Point the scanner at the <strong>clock-in QR poster</strong> on the wall${action === 'out' ? ' — and put in any break you took' : ''}.</div>
+      <input id="ck-scan" placeholder="Scan the QR…" autocomplete="off" style="width:100%;font-family:ui-monospace,monospace;font-size:15px"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();ckSubmitScan('${action}', this.value)}">
+      ${action === 'out' ? `<label style="display:block;font-size:12px;color:var(--ink-soft);margin-top:10px">Break taken <input type="number" id="ck-scan-break" min="0" max="480" value="${el('ck-break')?.value || 0}" style="width:64px;text-align:center"> mins (unpaid)</label>` : ''}
+      <div style="margin-top:10px"><button class="btn btn-outline btn-sm" onclick="ckStartCamera('${action}')">📸 Use the camera instead</button></div>
+      <div id="ck-cam" style="margin-top:10px"></div>`,
+    actions: [{ label: 'Cancel', onClick: () => { ckStopCamera(); closeModal(); } }],
+  });
+  setTimeout(() => el('ck-scan')?.focus(), 150);
+}
+let _ckCam = null;
+async function ckStartCamera(action) {
+  const box = el('ck-cam'); if (!box || typeof Html5Qrcode === 'undefined') { toast('Camera scanner unavailable — use the trigger scanner', 'warn'); return; }
+  box.innerHTML = '<div id="ck-cam-view" style="width:100%;border-radius:10px;overflow:hidden"></div>';
+  try {
+    _ckCam = new Html5Qrcode('ck-cam-view');
+    await _ckCam.start({ facingMode: 'environment' }, { fps: 8, qrbox: 200 },
+      (text) => { ckStopCamera(); ckSubmitScan(action, text); }, () => {});
+  } catch (e) { toast('Camera failed: ' + e, 'error'); }
+}
+function ckStopCamera() { try { if (_ckCam) { _ckCam.stop().catch(() => {}); _ckCam = null; } } catch (_) {} }
+async function ckSubmitScan(action, code) {
+  code = String(code || '').trim();
+  if (code.length < 4) { toast('Scan the QR poster first', 'warn'); return; }
+  ckStopCamera();
+  try {
+    if (action === 'in') {
+      await Api.post('/api/timeclock/clock-in', { qrToken: code });
+      toast('Clocked in ✓', 'success');
+    } else {
+      const breakMinutes = parseInt(el('ck-scan-break')?.value) || 0;
+      const r = await Api.post('/api/timeclock/clock-out', { qrToken: code, breakMinutes });
+      toast(`Clocked out ✓ · ${clockFmt(r.minutes)}${breakMinutes ? ` (− ${breakMinutes}m break)` : ''}`, 'success', 4000);
+    }
+    closeModal();
+    await paintClock(); refreshClockDot();
+  } catch (e) {
+    toast(e.data?.error === 'qr_required' ? '✗ That\'s not the clock-in QR — scan the poster on the wall' : 'Failed: ' + (e.data?.message || e.message), 'error', 5000);
+    const inp = el('ck-scan'); if (inp) { inp.value = ''; inp.focus(); }
+  }
 }
 async function clockOut(btn) {
   if (btn) btn.disabled = true;
   try {
-    const r = await Api.post('/api/timeclock/clock-out', {});
-    toast(`Clocked out ✓ · ${clockFmt(r.minutes)} this session`, 'success', 4000);
+    const r = await Api.post('/api/timeclock/clock-out', { breakMinutes: parseInt(el('ck-break')?.value) || 0 });
+    toast(`Clocked out ✓ · ${clockFmt(r.minutes)} this session${r.breakMinutes ? ` (− ${r.breakMinutes}m break)` : ''}`, 'success', 4000);
     await paintClock(); refreshClockDot();
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
 }
@@ -12584,6 +12658,7 @@ function openStaffModal(id) {
       <div class="field"><label>Password</label><input id="s-pwd" type="password" autocomplete="new-password" placeholder="${id ? 'Leave blank to keep current' : 'Set a password (min 8 chars)'}"></div>
       <div class="field" style="background:var(--bg-soft);border-radius:8px;padding:10px 12px">
         <label>📧 Emails to this user <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— uses the email above</span></label>
+        <div class="field" style="margin-top:8px"><label>Hourly rate (£) <span style="font-weight:400;color:var(--ink-soft)">— used by the Clock page's team pay report</span></label><input type="number" step="0.01" min="0" id="s-rate" value="${u.hourlyRate ?? ''}" placeholder="e.g. 12.50"></div>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:6px;cursor:pointer"><input type="checkbox" id="s-notif-email" ${u.notifyPrefs?.emailNotifications ? 'checked' : ''}> Email app notifications (hourly batch — orders, returns, low stock…)</label>
         <div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px">Email reports:
           <select id="s-report-freq" style="padding:4px 8px;font-size:13px">
@@ -12603,6 +12678,7 @@ function openStaffModal(id) {
           username,
           email: el('s-email').value || null,
           role: el('s-role').value,
+          hourlyRate: el('s-rate')?.value ?? undefined,
           notifyPrefs: {
             emailNotifications: !!el('s-notif-email')?.checked,
             reportFreq: el('s-report-freq')?.value || 'none',
@@ -21271,6 +21347,19 @@ function renderSettings() {
       </div>
 
       <div class="card admin-only" style="margin-bottom:16px">
+        <div class="card-head"><h3>⏱ Clock-in QR</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">Print the QR poster and stick it on the warehouse wall — with the requirement ON, staff must physically scan it to clock in or out (no clocking from home). Regenerating invalidates the old poster.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:10px;font-size:13px"><label class="switch"><input type="checkbox" id="cq-required" onchange="saveClockQr({ required: this.checked })"><span></span></label> Require the QR scan</label>
+            <button class="btn btn-outline btn-sm" onclick="saveClockQr({ regenerate: true })">♻ Generate / regenerate code</button>
+            <button class="btn btn-outline btn-sm" onclick="printClockQrPoster()">🖨 Print QR poster</button>
+            <span id="cq-token" style="font-family:ui-monospace,monospace;font-size:12px;color:var(--ink-soft)"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card admin-only" style="margin-bottom:16px">
         <div class="card-head"><h3>↩ Returns notifications</h3></div>
         <div class="card-body">
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">When staff finish the guided return check on the handheld (condition + photos + notes), these admins get the email with everything needed to complete the return / refund on eBay. Leave empty to email <strong>every active admin</strong>.</p>
@@ -21316,7 +21405,64 @@ function renderSettings() {
   loadDropfleetConfig();
   loadThumbnailConfig();
   loadFitmentConfig();
-  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); }
+  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); }
+}
+
+// ── Clock-in QR admin controls ──────────────────────────────────────────────
+let _clockQrCfg = null;
+async function loadClockQr() {
+  try {
+    _clockQrCfg = await Api.get('/api/timeclock/qr-config');
+    if (el('cq-required')) el('cq-required').checked = !!_clockQrCfg.required;
+    if (el('cq-token')) el('cq-token').textContent = _clockQrCfg.token ? 'code: ' + _clockQrCfg.token : 'no code yet — generate one';
+  } catch (_) {}
+}
+async function saveClockQr(patch) {
+  try {
+    _clockQrCfg = await Api.post('/api/timeclock/qr-config', patch);
+    if (el('cq-required')) el('cq-required').checked = !!_clockQrCfg.required;
+    if (el('cq-token')) el('cq-token').textContent = _clockQrCfg.token ? 'code: ' + _clockQrCfg.token : '';
+    toast(patch.regenerate ? 'New code generated — reprint the poster' : (_clockQrCfg.required ? 'QR scan is now REQUIRED to clock in/out' : 'QR requirement off'), 'success', 5000);
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+function printClockQrPoster() {
+  const token = _clockQrCfg?.token;
+  if (!token) { toast('Generate the code first', 'warn'); return; }
+  const w = window.open('', '_blank', 'width=700,height=900');
+  if (!w) { toast('Pop-up blocked — allow pop-ups for this site', 'error'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title></title>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"><\/script>
+<style>
+  @page { size: A4; margin: 16mm; }
+  body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; text-align: center; margin: 0; padding: 30px 20px; }
+  h1 { font-size: 34px; margin: 0 0 4px; letter-spacing: .01em; }
+  .sub { font-size: 16px; color: #555; margin-bottom: 26px; }
+  #qr { margin: 0 auto; }
+  #qr img, #qr svg { width: 340px; height: 340px; }
+  .steps { font-size: 15px; color: #333; margin-top: 26px; line-height: 1.9; text-align: left; display: inline-block; }
+  .actions { margin-top: 22px; }
+  .actions button { padding: 10px 26px; font-size: 14px; border: none; border-radius: 6px; background: #111; color: #fff; cursor: pointer; }
+  @media print { .actions { display: none; } }
+</style></head><body>
+  <h1>⏱ CLOCK IN / OUT</h1>
+  <div class="sub">Scan this code with your handheld or phone camera</div>
+  <div id="qr"></div>
+  <div class="steps">
+    1 · Open <strong>Clock</strong> on the warehouse app<br>
+    2 · Tap <strong>Scan QR to clock in</strong> (or out)<br>
+    3 · Point the scanner at this code — done
+  </div>
+  <div class="actions"><button onclick="window.print()">🖨 Print</button></div>
+  <script>
+    window.addEventListener('load', () => {
+      try {
+        const qr = qrcode(0, 'M'); qr.addData(${JSON.stringify(token)}); qr.make();
+        document.getElementById('qr').innerHTML = qr.createImgTag(10, 8);
+      } catch (e) { document.getElementById('qr').textContent = ${JSON.stringify(token)}; }
+    });
+  <\/script>
+</body></html>`);
+  w.document.close();
 }
 
 async function loadReturnsNotify() {
