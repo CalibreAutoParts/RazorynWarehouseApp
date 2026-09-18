@@ -2202,7 +2202,12 @@ function repaintCurrent() {
     if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;
     if (document.getElementById('modal-overlay')?.classList.contains('open')) return;
     const fns = {
-      dashboard: typeof renderDashboard === 'function' ? renderDashboard : null,
+      // Home differs per surface: the handheld's workbench must never be
+      // repainted with the desktop money dashboard (that was the "flips back
+      // to the old menu" bug).
+      dashboard: State.appShell
+        ? (typeof renderAppHome === 'function' ? renderAppHome : null)
+        : (typeof renderDashboard === 'function' ? renderDashboard : null),
       // List-only repaint — preserves toolbar/scroll (never the full page).
       inventory: typeof repaintInventoryList === 'function' ? repaintInventoryList : null,
       returns:   typeof renderReturns === 'function' ? renderReturns : null,
@@ -2372,7 +2377,10 @@ function enterApp() {
           const contentEl = document.getElementById('content');
           const scrolled = (contentEl?.scrollTop || 0) > 150 || window.scrollY > 150;
           const repaintMap = {
-            dashboard: typeof renderDashboard === 'function' ? renderDashboard : null,
+            // App home = workbench, never the desktop dashboard (see fns above).
+            dashboard: State.appShell
+              ? (typeof renderAppHome === 'function' ? renderAppHome : null)
+              : (typeof renderDashboard === 'function' ? renderDashboard : null),
             sales: null,   // handled above via salesReload (respects the active filter)
             returns: typeof renderReturns === 'function' ? renderReturns : null,
             schedule: typeof renderSchedule === 'function' ? renderSchedule : null,
@@ -3125,6 +3133,12 @@ function clockTime(iso) { return iso ? new Date(iso).toLocaleTimeString('en-GB',
 function clockDate(iso) { return iso ? new Date(iso).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }) : ''; }
 function clockPeriodRange(v) {
   const now = new Date(); const d = new Date(now);
+  if (v === 'today') { d.setHours(0, 0, 0, 0); return { from: d.toISOString(), to: null }; }
+  if (v === 'yesterday') {
+    const start = new Date(now); start.setDate(now.getDate() - 1); start.setHours(0, 0, 0, 0);
+    const end = new Date(now); end.setHours(0, 0, 0, 0);
+    return { from: start.toISOString(), to: end.toISOString() };
+  }
   if (v === 'week') { const day = (now.getDay() + 6) % 7; d.setDate(now.getDate() - day); d.setHours(0, 0, 0, 0); return { from: d.toISOString(), to: null }; }
   if (v === 'lastweek') { const day = (now.getDay() + 6) % 7; const end = new Date(now); end.setDate(now.getDate() - day); end.setHours(0, 0, 0, 0); const start = new Date(end); start.setDate(end.getDate() - 7); return { from: start.toISOString(), to: end.toISOString() }; }
   if (v === 'month') { const m = new Date(now.getFullYear(), now.getMonth(), 1); return { from: m.toISOString(), to: null }; }
@@ -3143,8 +3157,8 @@ function renderClock() {
         <div><h1>Clock in / out</h1><div class="desc">Clock in when you start, out when you finish — your hours are totted up for pay.</div></div>
         <div class="actions">
           <select id="clock-period" onchange="State.clockPeriod=this.value;paintClock()" style="padding:6px 10px;font-size:13px">
-            <option value="week">This week</option><option value="lastweek">Last week</option>
-            <option value="month">This month</option><option value="14d">Last 14 days</option>
+            ${[['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'This week'], ['lastweek', 'Last week'], ['month', 'This month'], ['14d', 'Last 14 days']]
+              .map(([v, l]) => `<option value="${v}" ${State.clockPeriod === v ? 'selected' : ''}>${l}</option>`).join('')}
           </select>
         </div>
       </div>
@@ -3231,7 +3245,7 @@ function openClockScan(action) {
     title: action === 'in' ? '📷 Scan to clock in' : '📷 Scan to clock out',
     body: `
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Point the scanner at the <strong>clock-in QR poster</strong> on the wall${action === 'out' ? ' — and put in any break you took' : ''}.</div>
-      <input id="ck-scan" placeholder="Scan the QR…" autocomplete="off" style="width:100%;font-family:ui-monospace,monospace;font-size:15px"
+      <input id="ck-scan" placeholder="Scan the QR…" autocomplete="off" ${State.appShell ? 'inputmode="none"' : ''} style="width:100%;font-family:ui-monospace,monospace;font-size:15px"
         onkeydown="if(event.key==='Enter'){event.preventDefault();ckSubmitScan('${action}', this.value)}">
       ${action === 'out' ? `<label style="display:block;font-size:12px;color:var(--ink-soft);margin-top:10px">Break taken <input type="number" id="ck-scan-break" min="0" max="480" value="${el('ck-break')?.value || 0}" style="width:64px;text-align:center"> mins (unpaid)</label>` : ''}
       <div style="margin-top:10px"><button class="btn btn-outline btn-sm" onclick="ckStartCamera('${action}')">📸 Use the camera instead</button></div>
@@ -15516,7 +15530,7 @@ function shSetTab(t) {
       <input id="sh-find-q" type="search" placeholder="Scan or type a code…" style="width:100%;margin-bottom:10px" onkeydown="if(event.key==='Enter'){event.preventDefault();shFind()}">
       <div style="margin-bottom:10px"><button class="btn btn-primary btn-sm" onclick="shFind()">Search</button></div>
       <div id="sh-find-out"></div>`;
-    setTimeout(() => el('sh-find-q')?.focus(), 100);
+    if (!State.appShell) setTimeout(() => el('sh-find-q')?.focus(), 100);   // handheld: no auto-keyboard
     return;
   }
   const admin = State.user?.role === 'admin';
@@ -15778,7 +15792,7 @@ function openQuickCost() {
       <div id="qc-form" style="display:none"></div>`,
     actions: [{ label: 'Close', onClick: closeModal }],
   });
-  setTimeout(() => el('qc-q')?.focus(), 100);
+  if (!State.appShell) setTimeout(() => el('qc-q')?.focus(), 100);   // handheld: no auto-keyboard
 }
 function qcSearch(q, autopick) {
   const box = el('qc-matches'); if (!box) return;
@@ -15877,7 +15891,7 @@ function openScanTracking() {
     body: `
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Scan the tracking barcode on the parcel label (or type it), then tap the order it belongs to. The order is marked dispatched and the tracking is pushed to eBay/Shopify so the customer gets the shipped notification.</div>
       <div id="stk-step1">
-        <input id="stk-code" placeholder="Scan tracking number…" style="width:100%;font-family:ui-monospace,monospace;font-size:15px" onkeydown="if(event.key==='Enter'){event.preventDefault();stCodeEntered()}">
+        <input id="stk-code" placeholder="Scan tracking number…" ${State.appShell ? 'inputmode="none"' : ''} style="width:100%;font-family:ui-monospace,monospace;font-size:15px" onkeydown="if(event.key==='Enter'){event.preventDefault();stCodeEntered()}">
         <div style="margin-top:8px"><button class="btn btn-primary" onclick="stCodeEntered()">Next →</button></div>
       </div>
       <div id="stk-step2" style="display:none">
@@ -16027,6 +16041,12 @@ function openProductQuickSheet(id) {
           <div style="font-size:10px;color:var(--ink-soft);margin-top:2px">Bought separately — this £ goes into the item's cost maths.</div>
         </div>
         <button class="btn btn-outline" style="width:100%" onclick="qsSavePackage('${p.id}')">💾 Save parcel &amp; packaging</button>
+        ${State.user?.role === 'admin' ? `
+        <div style="border-top:1px solid var(--line-2);margin-top:10px;padding-top:10px">
+          <button class="btn btn-outline btn-sm" style="width:100%" onclick="qsEstimatePostage('${p.id}', this)">💷 Estimate postage from courier rate sheets</button>
+          <div id="qs-post-out" style="margin-top:8px"></div>
+          <div style="font-size:10px;color:var(--ink-soft);margin-top:4px">Uses the size/weight above against your saved rate cards (incl. fuel surcharge) — a rough figure that moves with the surcharge; keep the rate sheets current in Settings.</div>
+        </div>` : ''}
       </div>`,
     actions: [
       { label: 'Close', onClick: closeModal },
@@ -16094,6 +16114,42 @@ async function qsSaveLocation(id) {
     Store.refresh('products').catch(() => {});
   } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
+// Rate-sheet postage: quote the parcel (dims/weight from the sheet) against
+// every courier rate card, then one tap stores the cheapest as the item's
+// exact per-item postage — the margin maths use it instead of the rough
+// small/large default.
+async function qsEstimatePostage(id, btn) {
+  const v = (x) => { const n = el(x); return n && n.value !== '' ? n.value : null; };
+  if (!v('qs-kg') && !(v('qs-l') && v('qs-w') && v('qs-h'))) { toast('Enter the size or weight first (a carton preset fills them)', 'warn'); return; }
+  if (btn) btn.disabled = true;
+  const out = el('qs-post-out'); if (out) out.innerHTML = '<span style="font-size:12px;color:var(--ink-soft)">Quoting…</span>';
+  try {
+    const r = await Api.post('/api/shipping/quote', { lengthCm: v('qs-l'), widthCm: v('qs-w'), heightCm: v('qs-h'), weightKg: v('qs-kg') });
+    const quotes = (r.quotes || []).filter(q => q.price != null);
+    if (!quotes.length) { if (out) out.innerHTML = '<span style="font-size:12px;color:var(--amber)">No courier rate covers this parcel — upload/extend the rate sheets in Settings → Shipping.</span>'; }
+    else if (out) {
+      out.innerHTML = quotes.slice(0, 3).map((q, i) => `
+        <div style="display:flex;align-items:center;gap:8px;border:1px solid ${i === 0 ? 'var(--green)' : 'var(--line)'};border-radius:8px;padding:7px 10px;margin-bottom:5px;font-size:12px">
+          <div style="flex:1"><strong>${escapeHtml(q.courier)}</strong>${i === 0 ? ' <span class="pill green" style="font-size:9px">CHEAPEST</span>' : ''}
+            <div style="font-size:10px;color:var(--ink-soft)">${q.chargeableKg}kg chargeable${q.fuelPct ? ` · £${(q.basePrice ?? 0).toFixed(2)} + ${q.fuelPct}% fuel` : ''}</div></div>
+          <strong>£${q.price.toFixed(2)}</strong>
+          <button class="btn btn-outline btn-sm" onclick="qsSetPostage('${id}', ${q.price}, this)">Use</button>
+        </div>`).join('');
+    }
+  } catch (e) { if (out) out.innerHTML = `<span style="font-size:12px;color:var(--red)">${escapeHtml(e.data?.message || e.message)}</span>`; }
+  if (btn) btn.disabled = false;
+}
+async function qsSetPostage(id, price, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await Api.patch('/api/products/' + id, { shippingCost: +price, shippingBand: 'custom' });
+    toast(`🚚 Postage set to £${(+price).toFixed(2)} — used in this item's margins`, 'success', 5000);
+    Store.refresh('products').catch(() => {});
+    State._iiCosts = null;   // the Add-info postage worklist refreshes on next open
+    if (State.page === 'iteminfo') { try { const r = await Api.get('/api/costs/products'); State._iiCosts = r.items || []; iiPaint(); } catch (_) {} }
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
+}
+
 async function qsSavePackage(id) {
   const v = (x) => { const n = el(x); return n && n.value !== '' ? n.value : null; };
   const prepack = !!el('qs-prepack')?.checked;
@@ -16169,7 +16225,7 @@ function renderQtyCheck() {
       <div id="qc2-list"></div>
     </div>`;
   qc2Paint();
-  setTimeout(() => el('qc2-q')?.focus(), 100);
+  if (!State.appShell) setTimeout(() => el('qc2-q')?.focus(), 100);   // handheld: no auto-keyboard
 }
 function qc2Paint() {
   const box = el('qc2-list'); if (!box) return;
@@ -16205,6 +16261,7 @@ function renderItemInfo() {
         <button data-if="location" class="${State.infoFilter === 'location' ? 'active' : ''}">📍 Location</button>
         <button data-if="photo" class="${State.infoFilter === 'photo' ? 'active' : ''}">📷 Photos</button>
         ${isAdmin ? `<button data-if="cost" class="${State.infoFilter === 'cost' ? 'active' : ''}">💷 Cost</button>
+        <button data-if="postage" class="${State.infoFilter === 'postage' ? 'active' : ''}">🚚 Postage</button>
         <button data-if="supplier" class="${State.infoFilter === 'supplier' ? 'active' : ''}">🏭 Supplier</button>` : ''}
       </div>
       <input type="search" id="ii-q" placeholder="Filter…" style="width:100%;margin-bottom:8px" oninput="iiPaint()">
@@ -16213,7 +16270,7 @@ function renderItemInfo() {
     </div>`;
   document.querySelectorAll('[data-if]').forEach(b => b.addEventListener('click', () => { State.infoFilter = b.dataset.if; renderItemInfo(); }));
   // Cost/supplier need extra data (admin): load the costs list once for gaps.
-  if (isAdmin && ['cost', 'supplier'].includes(State.infoFilter) && !State._iiCosts) {
+  if (isAdmin && ['cost', 'supplier', 'postage'].includes(State.infoFilter) && !State._iiCosts) {
     Api.get('/api/costs/products').then(r => { State._iiCosts = r.items || []; iiPaint(); }).catch(() => {});
   }
   iiPaint();
@@ -16223,6 +16280,9 @@ function iiNeeds(p, f) {
   if (f === 'location') return !p.location && !p.locationNote;
   if (f === 'photo') return !p.itemPhoto && !p.locationPhoto && !p.imageUrl;
   if (f === 'cost') { const c = (State._iiCosts || []).find(x => x.id === p.id); return c ? (c.costPrice == null && !c.costShared) : false; }
+  // "Missing exact postage" = no named shipping band AND no per-item £ — the
+  // margin maths falls back to the rough small/large default for these.
+  if (f === 'postage') { const c = (State._iiCosts || []).find(x => x.id === p.id); return c ? (c.shippingBand == null && c.shippingCost == null) : false; }
   if (f === 'supplier') { const c = (State._iiCosts || []).find(x => x.id === p.id); return c ? !c.lastSupplier : true; }
   return false;
 }
@@ -16267,7 +16327,7 @@ function openPricingTool() {
   if (!CT.settings || !Object.keys(CT.settings).length) {
     Api.get('/api/costs/settings').then(r => { CT.settings = r.settings || {}; }).catch(() => {});
   }
-  setTimeout(() => el('pt-q')?.focus(), 100);
+  if (!State.appShell) setTimeout(() => el('pt-q')?.focus(), 100);   // handheld: no auto-keyboard
 }
 function ptSearch(q) {
   const box = el('pt-matches'); if (!box) return;
@@ -16723,7 +16783,7 @@ async function openPickCheck(saleId) {
     title: '🎯 Pick — ' + ref,
     body: `
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Find each part using its location below, then <strong>scan its barcode</strong> to verify it's the right one — a wrong part flashes red before it can go in the box. Scan once per unit.</div>
-      <input id="pick-scan" placeholder="Scan item barcode…" autocomplete="off" style="width:100%;font-family:ui-monospace,monospace;font-size:15px;margin-bottom:10px"
+      <input id="pick-scan" placeholder="Scan item barcode…" autocomplete="off" ${State.appShell ? 'inputmode="none"' : ''} style="width:100%;font-family:ui-monospace,monospace;font-size:15px;margin-bottom:10px"
         onkeydown="if(event.key==='Enter'){event.preventDefault();pickVerifyCode(this.value);this.value='';}">
       <div id="pick-list">${PICK.items.map(pickRowHtml).join('')}</div>
       <div id="pick-done" style="display:none;text-align:center;padding:10px;background:color-mix(in srgb, var(--green) 12%, transparent);border:1px solid var(--green);border-radius:10px;margin-top:10px">
