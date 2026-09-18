@@ -210,11 +210,13 @@ app.get('/app', (req, res) => {
   const code = (brand.code || '').toLowerCase();
   apks.sort((a, b) => (b.file.toLowerCase().includes(code) ? 1 : 0) - (a.file.toLowerCase().includes(code) ? 1 : 0));
   const accent = /^#[0-9a-fA-F]{3,8}$/.test(brand.primaryColor || '') ? brand.primaryColor : '#0D1B2A';
-  const cards = apks.length ? apks.map(a => `
+  const hasOwn = apks.some(a => a.file.toLowerCase().includes(code));
+  const cards = (apks.length ? apks.map(a => `
     <a class="dl" href="/downloads/${encodeURIComponent(a.file)}">
       <div class="dl-main"><span class="dl-name">${a.label}</span><span class="dl-meta">${a.sizeMB} MB · Android</span></div>
       <span class="dl-btn">Download</span>
-    </a>`).join('') : '<p style="opacity:.7">No app builds are available yet.</p>';
+    </a>`).join('') : '<p style="opacity:.7">No app builds are available yet.</p>')
+    + (hasOwn ? '' : `<p style="opacity:.6;font-size:12px;margin-top:10px">The ${brand.name || ''} build hasn't been uploaded yet — run the "Build Android app" GitHub Action for this brand and drop the APK into public/downloads/.</p>`);
   res.type('html').send(`<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Install ${brand.name || 'Warehouse'} App</title>
