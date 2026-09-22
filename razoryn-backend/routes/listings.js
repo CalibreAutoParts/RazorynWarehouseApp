@@ -2544,11 +2544,20 @@ router.get('/publish-all-channels/status', requireAdmin, (req, res) => res.json(
 // POST /category-audit/cancel   → stop a running scan (keeps findings so far)
 // POST /category-audit/apply    → move listing(s) to the suggested category
 // ──────────────────────────────────────────────────────────────────────────
-let _catAudit = { state: 'idle', total: 0, done: 0, wrongCategory: 0, missingSpecifics: 0, ok: 0, errors: 0, issues: [], startedAt: null, finishedAt: null };
+let _catAudit = { state: 'idle', total: 0, done: 0, wrongCategory: 0, missingSpecifics: 0, ok: 0, errors: 0, issues: [], ai: null, startedAt: null, finishedAt: null };
 
-router.post('/category-audit', requireAdmin, async (req, res) => {
-  if (_catAudit.state === 'running') return res.json({ ok: true, alreadyRunning: true });
-  if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
+// Core scan — callable from the route (manual) AND the nightly AI cron.
+// When Claude automation is enabled (Settings → Claude AI automation), each
+// flagged listing also gets an AI verdict: the model picks the right category
+// from eBay's own candidates (or says "keep current" — killing the title-
+// suggester's false positives) and drafts values for missing required
+// specifics. In 'auto' mode, verdicts at/above the confidence threshold are
+// applied immediately; everything else lands in the review queue, where
+// approve/correct/reject decisions feed the learning loop.
+async function runCategoryAudit(trigger = 'manual') {
+  if (_catAudit.state === 'running') return { ok: true, alreadyRunning: true };
+  if (!ebay.isConfigured()) return { error: 'ebay_not_configured' };
+  const aiSvc = require('../services/ai');
   // Enumerate every live listing on every enabled store — "all previous
   // listings" includes ones the warehouse has no product row for.
   let listings = [];
@@ -2559,36 +2568,43 @@ router.post('/category-audit', requireAdmin, async (req, res) => {
       const ls = await ebay.getActiveListings(code);
       listings.push(...ls.map(l => ({ itemId: String(l.itemId), title: l.title, sku: l.sku, storeCode: code || l.storeCode || null, viewUrl: l.viewItemURL || null })));
     }
-  } catch (e) { return res.status(502).json({ error: 'ebay_error', message: e.message }); }
+  } catch (e) { return { error: 'ebay_error', message: e.message }; }
   const seen = new Set();
   listings = listings.filter(l => l.itemId && !seen.has(l.itemId) && seen.add(l.itemId));
   // Map item → warehouse product so an applied fix also stamps the product row
   // (future edits/copies then start from the RIGHT category).
   const prodByItem = new Map();
   try {
-    const { rows } = await query(`SELECT ml.ebay_item_id, p.id AS product_id, p.sku
+    const { rows } = await query(`SELECT ml.ebay_item_id, p.id AS product_id, p.sku, p.part_number
       FROM mirror_links ml JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text`);
     for (const r of rows) prodByItem.set(String(r.ebay_item_id), r);
   } catch (_) {}
 
-  _catAudit = { state: 'running', total: listings.length, done: 0, wrongCategory: 0, missingSpecifics: 0, ok: 0, errors: 0, issues: [], startedAt: Date.now(), finishedAt: null };
-  await audit(req, 'ebay_category_audit', null, null, { total: listings.length });
-  res.json({ ok: true, started: true, total: listings.length });
+  // AI on? (key configured + enabled in Settings)
+  let aiCfg = null;
+  try { if (aiSvc.isConfigured()) { const c = await aiSvc.getAiConfig(); if (c.enabled) aiCfg = c; } } catch (_) {}
+
+  _catAudit = {
+    state: 'running', total: listings.length, done: 0, wrongCategory: 0, missingSpecifics: 0,
+    ok: 0, errors: 0, issues: [], trigger,
+    ai: aiCfg ? { mode: aiCfg.mode, verdicts: 0, keptCurrent: 0, autoApplied: 0, queued: 0, budgetStopped: false } : null,
+    startedAt: Date.now(), finishedAt: null,
+  };
 
   setImmediate(async () => {
-    // Required-specific names per category, cached — most listings share a
-    // handful of categories, so this costs a few taxonomy calls, not thousands.
+    // Required specifics per category, cached — most listings share a handful
+    // of categories, so this costs a few taxonomy calls, not thousands.
     const requiredByCat = new Map();
     const requiredFor = async (catId) => {
       if (!catId) return [];
       if (requiredByCat.has(catId)) return requiredByCat.get(catId);
-      let names = [];
+      let reqs = [];
       try {
         const r = await ebay.getCategorySpecifics(null, catId);
-        names = (r.specifics || []).filter(s => s.required).map(s => s.name);
+        reqs = (r.specifics || []).filter(s => s.required).map(s => ({ name: s.name, values: (s.values || []).slice(0, 30) }));
       } catch (_) {}
-      requiredByCat.set(catId, names);
-      return names;
+      requiredByCat.set(catId, reqs);
+      return reqs;
     };
     for (const l of listings) {
       if (_catAudit.state !== 'running') break;   // cancelled
@@ -2596,38 +2612,137 @@ router.post('/category-audit', requireAdmin, async (req, res) => {
         const d = await ebay.getItemDetails(l.itemId, l.storeCode);
         const curId = d.categoryId ? String(d.categoryId) : null;
         const curName = d.categoryName || (curId ? await ebay.getCategoryName(curId) : null);
-        // eBay's own suggestion for this title (prefer automotive branches).
-        let best = null;
+        // eBay's own suggestions for this title (prefer automotive branches).
+        let best = null, suggList = [];
         try {
-          const sugg = await ebay.getSuggestedCategories(d.title || l.title);
-          best = sugg.find(c => c.automotive) || sugg[0] || null;
+          suggList = await ebay.getSuggestedCategories(d.title || l.title);
+          best = suggList.find(c => c.automotive) || suggList[0] || null;
         } catch (_) {}
         const haveSpecs = new Set((d.specifics || []).map(s => (s.name || '').toLowerCase()));
-        const missing = (await requiredFor(curId)).filter(n => !haveSpecs.has((n || '').toLowerCase()));
+        const requiredDetail = await requiredFor(curId);
+        const missingDetail = requiredDetail.filter(r => !haveSpecs.has((r.name || '').toLowerCase()));
+        const missing = missingDetail.map(r => r.name);
         const wrongCat = !!(best && curId && String(best.id) !== curId);
-        if (wrongCat || missing.length) {
-          if (wrongCat) _catAudit.wrongCategory++; else _catAudit.missingSpecifics++;
-          const p = prodByItem.get(l.itemId);
-          _catAudit.issues.push({
-            itemId: l.itemId, storeCode: l.storeCode, productId: p ? p.product_id : null,
-            sku: d.sku || l.sku || (p && p.sku) || null,
-            title: d.title || l.title,
-            currentCategoryId: curId, currentCategoryName: curName,
-            suggestedCategoryId: wrongCat ? String(best.id) : null,
-            suggestedCategoryName: wrongCat ? best.name : null,
-            suggestedCategoryPath: wrongCat ? best.path : null,
-            missingRequired: missing,
-            viewUrl: l.viewUrl,
-            applied: false, applyError: null,
-          });
-        } else { _catAudit.ok++; }
+        if (!wrongCat && !missing.length) { _catAudit.ok++; _catAudit.done++; await new Promise(r2 => setTimeout(r2, 350)); continue; }
+
+        if (wrongCat) _catAudit.wrongCategory++; else _catAudit.missingSpecifics++;
+        const p = prodByItem.get(l.itemId);
+        const partNumber = (p && p.part_number) || null;
+        const issue = {
+          itemId: l.itemId, storeCode: l.storeCode, productId: p ? p.product_id : null,
+          sku: d.sku || l.sku || (p && p.sku) || null,
+          title: d.title || l.title,
+          currentCategoryId: curId, currentCategoryName: curName,
+          suggestedCategoryId: wrongCat ? String(best.id) : null,
+          suggestedCategoryName: wrongCat ? best.name : null,
+          suggestedCategoryPath: wrongCat ? best.path : null,
+          missingRequired: missing,
+          viewUrl: l.viewUrl,
+          applied: false, applyError: null, ai: null, aiFill: null,
+        };
+        _catAudit.issues.push(issue);
+
+        // ── Claude verdicts (budget-guarded; a budget stop turns AI off for
+        //    the rest of the run but the plain scan keeps going) ──
+        if (aiCfg) {
+          const auto = aiCfg.mode === 'auto';
+          const thr = aiCfg.autoThreshold || 0.85;
+          try {
+            if (wrongCat) {
+              const verdict = await aiSvc.categoryVerdict({
+                title: issue.title, partNumber, specifics: d.specifics,
+                current: { id: curId, name: curName },
+                candidates: suggList.slice(0, 6).map(c => ({ id: c.id, name: c.name, path: c.path })),
+              });
+              if (verdict) {
+                issue.ai = verdict;
+                _catAudit.ai.verdicts++;
+                if (verdict.keepCurrent) {
+                  _catAudit.ai.keptCurrent++;   // AI says the suggester is wrong — current is fine
+                } else if (auto && verdict.confidence >= thr) {
+                  try {
+                    await ebay.reviseItem(issue.itemId, { categoryId: verdict.categoryId, call: 'ReviseFixedPriceItem' }, issue.storeCode);
+                    if (issue.productId) { try { await query(`UPDATE products SET ebay_category_id = $1 WHERE id = $2`, [verdict.categoryId, issue.productId]); } catch (_) {} }
+                    issue.applied = true; issue.autoApplied = true;
+                    issue.suggestedCategoryId = verdict.categoryId;
+                    _catAudit.ai.autoApplied++;
+                  } catch (e) { issue.applyError = e.message; }
+                } else {
+                  await aiSvc.queueSuggestion({
+                    kind: 'category', ebayItemId: issue.itemId, productId: issue.productId, storeCode: issue.storeCode,
+                    title: issue.title,
+                    payload: { categoryId: verdict.categoryId, categoryName: (suggList.find(c => String(c.id) === verdict.categoryId) || {}).name || null },
+                    context: { title: issue.title, partNumber, current: { id: curId, name: curName }, candidates: suggList.slice(0, 6).map(c => ({ id: c.id, name: c.name })) },
+                    confidence: verdict.confidence, reason: verdict.reason,
+                  });
+                  _catAudit.ai.queued++;
+                }
+              }
+            }
+            if (missingDetail.length) {
+              const fill = await aiSvc.fillSpecifics({ title: issue.title, partNumber, existing: d.specifics, required: missingDetail });
+              if (fill) {
+                issue.aiFill = fill;
+                if (auto && fill.confidence >= thr) {
+                  try {
+                    // ReviseItem REPLACES specifics — merge fills into the full live set.
+                    const byName = new Map();
+                    for (const sp of (d.specifics || [])) {
+                      const val = Array.isArray(sp.values) ? sp.values.join(', ') : (sp.value || '');
+                      if (sp.name && val) byName.set(sp.name.toLowerCase(), { name: sp.name, value: val });
+                    }
+                    for (const sp of fill.specifics) byName.set(sp.name.toLowerCase(), sp);
+                    await ebay.reviseItem(issue.itemId, { itemSpecifics: [...byName.values()] }, issue.storeCode);
+                    issue.aiFillApplied = true;
+                    _catAudit.ai.autoApplied++;
+                  } catch (e) { issue.applyError = (issue.applyError ? issue.applyError + ' · ' : '') + e.message; }
+                } else {
+                  await aiSvc.queueSuggestion({
+                    kind: 'specifics', ebayItemId: issue.itemId, productId: issue.productId, storeCode: issue.storeCode,
+                    title: issue.title,
+                    payload: { specifics: fill.specifics },
+                    context: { title: issue.title, partNumber, missing },
+                    confidence: fill.confidence, reason: fill.reason,
+                  });
+                  _catAudit.ai.queued++;
+                }
+              }
+            }
+          } catch (e) {
+            if (e.code === 'budget') { _catAudit.ai.budgetStopped = true; aiCfg = null; }
+            // other AI errors: silent per-listing — the plain scan result stands
+          }
+        }
       } catch (_) { _catAudit.errors++; }
       _catAudit.done++;
       await new Promise(r2 => setTimeout(r2, 350));   // eBay rate-limit headroom
     }
     if (_catAudit.state === 'running') _catAudit.state = 'done';
     _catAudit.finishedAt = Date.now();
+    // Nightly runs leave a notification so the team sees what happened.
+    if (trigger === 'nightly') {
+      const a = _catAudit.ai || {};
+      try {
+        await query(
+          `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+           VALUES ('ai_audit', $1, $2, $3, NULL, NULL)`,
+          [`Nightly eBay category audit finished`,
+           `${_catAudit.done} listings checked — ${_catAudit.wrongCategory} wrong category, ${_catAudit.missingSpecifics} missing required specifics.` +
+           (a.autoApplied ? ` ${a.autoApplied} fixed automatically.` : '') +
+           (a.queued ? ` ${a.queued} waiting for review in Settings → Claude AI automation.` : '') +
+           (a.budgetStopped ? ' AI stopped early: daily token budget reached.' : ''),
+           (_catAudit.wrongCategory || _catAudit.missingSpecifics) ? 'warn' : 'info']);
+      } catch (e) { console.warn('[ai-audit] notification:', e.message); }
+    }
   });
+  return { ok: true, started: true, total: listings.length, ai: !!aiCfg };
+}
+
+router.post('/category-audit', requireAdmin, async (req, res) => {
+  const r = await runCategoryAudit('manual');
+  if (r.error) return res.status(r.error === 'ebay_not_configured' ? 400 : 502).json(r);
+  if (r.started) await audit(req, 'ebay_category_audit', null, null, { total: r.total, ai: r.ai });
+  res.json(r);
 });
 router.get('/category-audit/status', requireAdmin, (req, res) => {
   if (req.query.slim === '1') {
@@ -4581,4 +4696,5 @@ router.get('/restyle-descriptions/status', requireAdmin, (req, res) => res.json(
 // Expose the single-flight runner so the sync cron can run the warehouse import
 // automatically without racing a manual run.
 router.runWarehouseImport = runImportSingleFlight;
+router.runCategoryAudit = runCategoryAudit;   // nightly AI cron entry point
 module.exports = router;

@@ -97,6 +97,7 @@ app.use('/api/dispatch',     require('./routes/dispatch'));
 app.use('/api/shipping',     require('./routes/shipping'));
 app.use('/api/supplier-import', require('./routes/supplier-import'));
 app.use('/api/rundown',      require('./routes/rundown'));
+app.use('/api/ai',           require('./routes/ai'));
 app.use('/api/dropfleet',    require('./routes/dropfleet'));
 app.use('/api/thumbnail',    require('./routes/thumbnail'));
 app.use('/api/messages',     require('./routes/messages'));
@@ -452,6 +453,28 @@ if (cron.validate(prelistCronExpr)) {
   });
   console.log(`[boot] eBay pre-listing go-live scheduled: ${prelistCronExpr}`);
 }
+
+// Nightly Claude-powered listing audit — when enabled in Settings → Claude AI
+// automation, runs the full category audit once a day at the configured UK
+// hour: AI verdicts on wrong categories + missing specifics, auto-fixing the
+// confident ones (auto mode) and queueing the rest for review. The cron ticks
+// hourly and checks the settings, so schedule changes need no redeploy.
+cron.schedule('20 * * * *', async () => {
+  try {
+    const ai = require('./services/ai');
+    if (!ai.isConfigured()) return;
+    const cfg = await ai.getAiConfig();
+    if (!cfg.enabled || !cfg.nightly?.enabled) return;
+    const ukHour = parseInt(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: 'numeric', hour12: false }).format(new Date()));
+    if (ukHour !== (cfg.nightly.hourUK ?? 3)) return;
+    console.log(`[cron ai-audit] tick @ ${new Date().toISOString()} — starting nightly listing audit`);
+    const r = await listings.runCategoryAudit('nightly');
+    if (r.alreadyRunning) console.log('[cron ai-audit] skipped — an audit is already running');
+    else if (r.error) console.warn('[cron ai-audit] not run:', r.error, r.message || '');
+    else console.log(`[cron ai-audit] started — ${r.total} listings, AI ${r.ai ? 'on' : 'off'}`);
+  } catch (e) { console.error('[cron ai-audit] failed:', e.message); }
+});
+console.log('[boot] nightly AI listing audit armed (fires only when enabled in Settings)');
 
 // Market analysis — periodically snapshot whole-eBay saturation + our ranking for
 // products that have competitor matches. Daily by default (heavier API use).
