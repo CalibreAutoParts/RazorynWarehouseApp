@@ -852,16 +852,20 @@ function buildItemSpecificsXml(specifics) {
   return lists ? `<ItemSpecifics>${lists}</ItemSpecifics>` : '';
 }
 
-async function reviseItem(itemId, { sku, title, price, description, itemSpecifics, pictureUrls, packageDetails, call } = {}, storeArg) {
+async function reviseItem(itemId, { sku, title, price, description, itemSpecifics, pictureUrls, packageDetails, categoryId, call } = {}, storeArg) {
   if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
   if (!itemId) throw new Error('missing_item_id');
   if (sku == null && title == null && price == null && description == null
       && !(itemSpecifics && itemSpecifics.length) && !(pictureUrls && pictureUrls.length)
-      && !packageDetails) {
+      && !packageDetails && !categoryId) {
     return { skipped: true };
   }
 
   const fields = [`<ItemID>${itemId}</ItemID>`];
+  // Move the listing to a different eBay category (the category-audit fixer).
+  // eBay may reject the move when the NEW category has required item specifics
+  // the listing lacks — that error surfaces to the caller per item.
+  if (categoryId) fields.push(`<PrimaryCategory><CategoryID>${escapeXml(String(categoryId))}</CategoryID></PrimaryCategory>`);
   if (title) fields.push(`<Title>${escapeXml(title)}</Title>`);
   if (sku) fields.push(`<SKU>${escapeXml(sku)}</SKU>`);
   if (price != null) {
@@ -1784,6 +1788,22 @@ async function getSuggestedCategories(query) {
   }).filter(c => c.id);
 }
 
+// Resolve a category id → its leaf name (taxonomy subtree call, cached — the
+// audit hits the same few categories hundreds of times).
+const _catNameCache = new Map();
+async function getCategoryName(categoryId) {
+  const id = String(categoryId || '').trim();
+  if (!id) return null;
+  if (_catNameCache.has(id)) return _catNameCache.get(id);
+  try {
+    const treeId = process.env.EBAY_CATEGORY_TREE_ID || '3';
+    const r = await taxonomyGet(`/commerce/taxonomy/v1/category_tree/${treeId}/get_category_subtree?category_id=${encodeURIComponent(id)}`);
+    const name = r.data?.categorySubtreeNode?.category?.categoryName || null;
+    _catNameCache.set(id, name);
+    return name;
+  } catch (_) { _catNameCache.set(id, null); return null; }
+}
+
 // GetCategorySpecifics — fetch the item-specific names eBay recommends/requires
 // for a category, so we can pre-validate an AddItem before submitting it (and
 // surface exactly which required specifics are missing). Returns:
@@ -2083,6 +2103,7 @@ module.exports = {
   getItemDetails,
   getCategorySpecifics,
   getSuggestedCategories,
+  getCategoryName,
   getSellerActiveListings,
   searchActiveListings,
   countActiveListings,

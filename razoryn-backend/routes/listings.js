@@ -26,7 +26,12 @@ router.get('/category-specifics', requireAdmin, async (req, res) => {
   const primary = brand.getPrimaryStore();
   const storeCode = req.query.storeCode || (primary && primary.code);
   try {
-    res.json(await ebay.getCategorySpecifics(storeCode, categoryId));
+    const data = await ebay.getCategorySpecifics(storeCode, categoryId);
+    // Resolve the category's NAME too, so the edit form can show what a bare
+    // numeric ID actually is (key for spotting a listing filed in the wrong branch).
+    let categoryName = null;
+    try { categoryName = await ebay.getCategoryName(categoryId); } catch (_) {}
+    res.json({ ...data, categoryName });
   } catch (e) {
     res.status(502).json({ error: 'ebay_error', message: e.message });
   }
@@ -2176,6 +2181,16 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
        productId]);
   } catch (_) {}
 
+  // eBay category change (from the edit form's category picker / the audit) —
+  // persisted on the product so future edits & copies start from the right one.
+  const ebayCategoryId = b.ebayCategoryId != null && String(b.ebayCategoryId).trim() !== '' ? String(b.ebayCategoryId).trim() : null;
+  if (ebayCategoryId) {
+    try {
+      await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_category_id TEXT`);
+      await query(`UPDATE products SET ebay_category_id = $1 WHERE id = $2`, [ebayCategoryId, productId]);
+    } catch (_) {}
+  }
+
   result.ebay = [];
   try {
     const links = await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [product.shopify_product_id]);
@@ -2186,11 +2201,15 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
       try {
         // Read the listing's CURRENT specifics so anything set directly on eBay
         // (or that we never persisted) also survives. Best-effort.
-        let liveSpecifics = [], liveOk = false;
+        let liveSpecifics = [], liveOk = false, liveCategoryId = null;
         try {
           const det = await ebay.getItemDetails(link.ebay_item_id, store.code);
           if (det && Array.isArray(det.specifics)) { liveSpecifics = det.specifics; liveOk = true; }
+          if (det && det.categoryId) liveCategoryId = String(det.categoryId);
         } catch (_) { /* fall back to persisted + derived */ }
+        // Only send a category when it actually CHANGES the listing — a category
+        // move is a heavyweight revision, so unchanged saves must not repeat it.
+        const sendCategory = ebayCategoryId && liveCategoryId && ebayCategoryId !== liveCategoryId ? ebayCategoryId : undefined;
         // Only REPLACE specifics when we have a trustworthy full baseline — a
         // successful live read OR a previously-persisted set. If the live read
         // failed and we've never persisted (a listing predating this feature),
@@ -2206,9 +2225,12 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
           description: b.ebayDescription != null && String(b.ebayDescription).trim() !== '' ? b.ebayDescription : undefined,
           itemSpecifics: specificsToSend,
           pictureUrls: ebayPictureUrls && ebayPictureUrls.length ? ebayPictureUrls : undefined,
+          categoryId: sendCategory,
+          // ReviseFixedPriceItem is the call that applies category moves reliably.
+          call: sendCategory ? 'ReviseFixedPriceItem' : undefined,
         }, store.code);
         try { await ebay.setQuantityTradingAPI(link.ebay_item_id, qty, store.code); } catch (e) { /* qty push best-effort */ }
-        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true, specificsSent: fullSpecifics.length });
+        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true, specificsSent: fullSpecifics.length, categoryMoved: sendCategory || undefined });
       } catch (e) {
         result.ebay.push({ itemId: link.ebay_item_id, store: store.code, error: e.message });
       }
@@ -2508,6 +2530,159 @@ router.post('/publish-all-channels', requireAdmin, async (req, res) => {
   });
 });
 router.get('/publish-all-channels/status', requireAdmin, (req, res) => res.json(_pubAllStatus));
+
+// ──────────────────────────────────────────────────────────────────────────
+// eBay category audit — copied listings often went live with the TEMPLATE's
+// category, so they sit in the wrong eBay branch, miss category searches, and
+// never show the new category's required item specifics. This scans EVERY live
+// listing on every store: reads the listing's actual category + specifics
+// (GetItem), asks eBay's taxonomy what category its title belongs in, and flags
+//   1. wrong category  — live category ≠ eBay's best (automotive) suggestion
+//   2. missing required specifics for the category it's actually in
+// POST /category-audit          → start the background scan
+// GET  /category-audit/status   → progress + issues (?slim=1 → counts only)
+// POST /category-audit/cancel   → stop a running scan (keeps findings so far)
+// POST /category-audit/apply    → move listing(s) to the suggested category
+// ──────────────────────────────────────────────────────────────────────────
+let _catAudit = { state: 'idle', total: 0, done: 0, wrongCategory: 0, missingSpecifics: 0, ok: 0, errors: 0, issues: [], startedAt: null, finishedAt: null };
+
+router.post('/category-audit', requireAdmin, async (req, res) => {
+  if (_catAudit.state === 'running') return res.json({ ok: true, alreadyRunning: true });
+  if (!ebay.isConfigured()) return res.status(400).json({ error: 'ebay_not_configured' });
+  // Enumerate every live listing on every enabled store — "all previous
+  // listings" includes ones the warehouse has no product row for.
+  let listings = [];
+  try {
+    const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
+    const codes = stores.length ? stores.map(s => s.code) : [null];
+    for (const code of codes) {
+      const ls = await ebay.getActiveListings(code);
+      listings.push(...ls.map(l => ({ itemId: String(l.itemId), title: l.title, sku: l.sku, storeCode: code || l.storeCode || null, viewUrl: l.viewItemURL || null })));
+    }
+  } catch (e) { return res.status(502).json({ error: 'ebay_error', message: e.message }); }
+  const seen = new Set();
+  listings = listings.filter(l => l.itemId && !seen.has(l.itemId) && seen.add(l.itemId));
+  // Map item → warehouse product so an applied fix also stamps the product row
+  // (future edits/copies then start from the RIGHT category).
+  const prodByItem = new Map();
+  try {
+    const { rows } = await query(`SELECT ml.ebay_item_id, p.id AS product_id, p.sku
+      FROM mirror_links ml JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text`);
+    for (const r of rows) prodByItem.set(String(r.ebay_item_id), r);
+  } catch (_) {}
+
+  _catAudit = { state: 'running', total: listings.length, done: 0, wrongCategory: 0, missingSpecifics: 0, ok: 0, errors: 0, issues: [], startedAt: Date.now(), finishedAt: null };
+  await audit(req, 'ebay_category_audit', null, null, { total: listings.length });
+  res.json({ ok: true, started: true, total: listings.length });
+
+  setImmediate(async () => {
+    // Required-specific names per category, cached — most listings share a
+    // handful of categories, so this costs a few taxonomy calls, not thousands.
+    const requiredByCat = new Map();
+    const requiredFor = async (catId) => {
+      if (!catId) return [];
+      if (requiredByCat.has(catId)) return requiredByCat.get(catId);
+      let names = [];
+      try {
+        const r = await ebay.getCategorySpecifics(null, catId);
+        names = (r.specifics || []).filter(s => s.required).map(s => s.name);
+      } catch (_) {}
+      requiredByCat.set(catId, names);
+      return names;
+    };
+    for (const l of listings) {
+      if (_catAudit.state !== 'running') break;   // cancelled
+      try {
+        const d = await ebay.getItemDetails(l.itemId, l.storeCode);
+        const curId = d.categoryId ? String(d.categoryId) : null;
+        const curName = d.categoryName || (curId ? await ebay.getCategoryName(curId) : null);
+        // eBay's own suggestion for this title (prefer automotive branches).
+        let best = null;
+        try {
+          const sugg = await ebay.getSuggestedCategories(d.title || l.title);
+          best = sugg.find(c => c.automotive) || sugg[0] || null;
+        } catch (_) {}
+        const haveSpecs = new Set((d.specifics || []).map(s => (s.name || '').toLowerCase()));
+        const missing = (await requiredFor(curId)).filter(n => !haveSpecs.has((n || '').toLowerCase()));
+        const wrongCat = !!(best && curId && String(best.id) !== curId);
+        if (wrongCat || missing.length) {
+          if (wrongCat) _catAudit.wrongCategory++; else _catAudit.missingSpecifics++;
+          const p = prodByItem.get(l.itemId);
+          _catAudit.issues.push({
+            itemId: l.itemId, storeCode: l.storeCode, productId: p ? p.product_id : null,
+            sku: d.sku || l.sku || (p && p.sku) || null,
+            title: d.title || l.title,
+            currentCategoryId: curId, currentCategoryName: curName,
+            suggestedCategoryId: wrongCat ? String(best.id) : null,
+            suggestedCategoryName: wrongCat ? best.name : null,
+            suggestedCategoryPath: wrongCat ? best.path : null,
+            missingRequired: missing,
+            viewUrl: l.viewUrl,
+            applied: false, applyError: null,
+          });
+        } else { _catAudit.ok++; }
+      } catch (_) { _catAudit.errors++; }
+      _catAudit.done++;
+      await new Promise(r2 => setTimeout(r2, 350));   // eBay rate-limit headroom
+    }
+    if (_catAudit.state === 'running') _catAudit.state = 'done';
+    _catAudit.finishedAt = Date.now();
+  });
+});
+router.get('/category-audit/status', requireAdmin, (req, res) => {
+  if (req.query.slim === '1') {
+    const { issues, ...counts } = _catAudit;
+    return res.json({ ...counts, issueCount: issues.length });
+  }
+  res.json(_catAudit);
+});
+router.post('/category-audit/cancel', requireAdmin, (req, res) => {
+  if (_catAudit.state === 'running') { _catAudit.state = 'cancelled'; _catAudit.finishedAt = Date.now(); }
+  res.json({ ok: true, state: _catAudit.state });
+});
+
+// Apply: move listing(s) into the suggested category (ReviseFixedPriceItem —
+// the reliable revise call for category moves) and stamp the linked product's
+// ebay_category_id. eBay may REFUSE a move when the new category requires
+// specifics the listing lacks — that error is surfaced per item, and the fix
+// is the edit form (which now shows the full required list with live values).
+router.post('/category-audit/apply', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  let targets = [];
+  if (b.all) {
+    targets = _catAudit.issues.filter(i => i.suggestedCategoryId && !i.applied);
+  } else if (Array.isArray(b.items)) {
+    for (const it of b.items) {
+      const found = _catAudit.issues.find(i => i.itemId === String(it.itemId));
+      if (found && (it.categoryId || found.suggestedCategoryId)) {
+        targets.push(it.categoryId ? { ...found, suggestedCategoryId: String(it.categoryId) } : found);
+      } else if (it.itemId && it.categoryId) {
+        // Direct apply (e.g. from a stale UI after a restart) — still honoured.
+        targets.push({ itemId: String(it.itemId), storeCode: it.storeCode || null, suggestedCategoryId: String(it.categoryId), productId: it.productId || null });
+      }
+    }
+  }
+  targets = targets.filter(t => t.itemId && t.suggestedCategoryId);
+  if (!targets.length) return res.status(400).json({ error: 'nothing_to_apply' });
+  const results = [];
+  for (const t of targets) {
+    const issue = _catAudit.issues.find(i => i.itemId === t.itemId);
+    try {
+      const r = await ebay.reviseItem(t.itemId, { categoryId: t.suggestedCategoryId, call: 'ReviseFixedPriceItem' }, t.storeCode);
+      if (t.productId) {
+        try { await query(`UPDATE products SET ebay_category_id = $1 WHERE id = $2`, [t.suggestedCategoryId, t.productId]); } catch (_) {}
+      }
+      if (issue) { issue.applied = true; issue.applyError = null; }
+      results.push({ itemId: t.itemId, ok: true, warnings: r.warnings });
+    } catch (e) {
+      if (issue) issue.applyError = e.message;
+      results.push({ itemId: t.itemId, ok: false, error: e.message });
+    }
+    await new Promise(r2 => setTimeout(r2, 400));   // eBay rate-limit headroom
+  }
+  await audit(req, 'ebay_category_audit_apply', null, null, { count: targets.length, ok: results.filter(r => r.ok).length });
+  res.json({ ok: true, results, summary: { total: results.length, ok: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length } });
+});
 
 // ──────────────────────────────────────────────────────────────────────────
 // GET /api/listings/shopify-duplicates — scan the whole Shopify catalogue and

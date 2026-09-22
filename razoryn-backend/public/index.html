@@ -13364,7 +13364,7 @@ async function renderEditListing() {
     shopify_product_id: p.shopify_product_id || null,
     shopify_price: p.price_shopify, price_shopify: p.price_shopify,
   };
-  await openCreateEbayListing(productId, { draft: true, edit: true, container: 'cl-ebay-panel', draftProduct, editSpecifics: eb.specifics || [] });
+  await openCreateEbayListing(productId, { draft: true, edit: true, container: 'cl-ebay-panel', draftProduct, editSpecifics: eb.specifics || [], editCategoryId: eb.categoryId || '' });
   // Pre-fill eBay fields from the live listing (specifics already rendered above).
   set('ce-title', eb.title || draftProduct.title);
   if (el('ce-title-count') && el('ce-title')) el('ce-title-count').textContent = el('ce-title').value.length + '/80';
@@ -13421,6 +13421,12 @@ async function submitUnifiedUpdate(btn) {
     const value = (row.querySelector('.ce-cust-val')?.value || '').trim();
     if (name && value) itemSpecifics.push({ name, value });
   });
+  // Placement-on-Vehicle renders as checkboxes in the full category grid
+  // (no data-spec input), so collect it explicitly like the create flow does.
+  const cePlacements = [...document.querySelectorAll('#ce-specifics .ce-placement:checked')].map(c => c.value);
+  if (cePlacements.length && !itemSpecifics.some(s => /placement on vehicle/i.test(s.name))) {
+    itemSpecifics.push({ name: 'Placement on Vehicle', value: cePlacements.join(', ') });
+  }
 
   if (btn) btn.disabled = true;
   const taskId = Task.start('Saving & pushing everywhere…');
@@ -13442,6 +13448,7 @@ async function submitUnifiedUpdate(btn) {
       templateSuffix: el('cl-template')?.value || null,
       shippingProfileId: el('cl-shipprofile')?.value || null,
       categoryId: CL.categoryId || null,
+      ebayCategoryId: (el('ce-category')?.value || '').trim() || null,
       subPartNumbers: (el('cl-subpn')?.value || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean),
       metafields,
       itemSpecifics,
@@ -18147,10 +18154,16 @@ async function openCreateEbayListing(productId, opts = {}) {
     payment:  policies.payment  || cfg.ebayPolicyPayment,
     return:   policies.return   || cfg.ebayPolicyReturn,
   });
-  // Load the item-specific fields. In edit mode, render the live listing's own
-  // specifics (passed in) so the async category load can't overwrite them.
+  // Load the item-specific fields. In edit mode, load the CATEGORY's full
+  // required/recommended list and overlay the live listing's values on top —
+  // the old behaviour rendered ONLY the live values, so required specifics the
+  // listing never had stayed invisible until the category was manually
+  // re-picked (the "27 specifics only appear after re-entering the category" bug).
+  State._ceLiveSpecs = null;
   if (opts.edit && Array.isArray(opts.editSpecifics) && opts.editSpecifics.length) {
-    ceRenderSpecificsFromList(opts.editSpecifics);
+    State._ceLiveSpecs = new Map(opts.editSpecifics.filter(s => s && s.name).map(s =>
+      [s.name.toLowerCase(), { name: s.name, value: Array.isArray(s.values) ? s.values.join(', ') : (s.value || '') }]));
+    ceLoadSpecifics(opts.editCategoryId || el('ce-category')?.value || '');
   } else {
     ceLoadSpecifics(el('ce-category')?.value || '');
   }
@@ -18300,7 +18313,13 @@ function ceCategoryManual(v) {
 }
 
 // Map an eBay specific name to a value we already know from the product.
+// In edit mode, the LIVE listing's value for that specific always wins — so a
+// category re-pick (or the full-list overlay) keeps everything already set.
 function cePrefillSpec(name) {
+  if (State._ceLiveSpecs instanceof Map) {
+    const hit = State._ceLiveSpecs.get((name || '').toLowerCase());
+    if (hit && hit.value) return hit.value;
+  }
   const ctx = State._ceCtx || {}; const p = ctx.product || {}; const cfg = ctx.cfg || {};
   const n = (name || '').toLowerCase();
   if (n.includes('manufacturer part') || n === 'mpn') return p.part_number || '';
@@ -18388,20 +18407,39 @@ async function ceLoadSpecifics(categoryId) {
   const wrap = el('ce-specifics');
   if (!wrap) return;
   wrap.innerHTML = '<div style="font-size:12px;color:var(--ink-soft);padding:6px 0">Loading specifics…</div>';
-  let specs = [];
+  let specs = [], catName = '';
   try {
     const store = el('ce-store')?.value || '';
     const r = await Api.get('/api/listings/category-specifics?categoryId=' + encodeURIComponent(categoryId) + (store ? '&storeCode=' + encodeURIComponent(store) : ''));
     specs = r.specifics || [];
+    catName = r.categoryName || '';
   } catch (e) { /* deprecated call / no OAuth — fall back to the standard set */ }
+  // Show what the numeric ID actually IS — a bare ID told nobody the listing
+  // was filed under the wrong branch. Never overwrites a path already shown.
+  if (catName && el('ce-cat-path') && !(el('ce-cat-path').textContent || '').trim()) {
+    el('ce-cat-path').textContent = catName;
+  }
+  // Edit mode: the live listing's specifics, overlaid onto the category's list.
+  const live = (State._ceLiveSpecs instanceof Map && State._ceLiveSpecs.size) ? State._ceLiveSpecs : null;
 
   if (specs.length) {
     const have = new Set(specs.map(s => (s.name || '').toLowerCase()));
     const merged = [...specs];
     if (!have.has('brand')) merged.unshift({ name: 'Brand', required: true, values: [] });
     if (!have.has('manufacturer part number')) merged.unshift({ name: 'Manufacturer Part Number', required: true, values: [] });
+    // Keep every live specific visible even when the category list doesn't
+    // mention it — nothing already on the listing may silently disappear.
+    if (live) {
+      const names = new Set(merged.map(s => (s.name || '').toLowerCase()));
+      for (const s of live.values()) {
+        if (s.value && !names.has((s.name || '').toLowerCase())) merged.push({ name: s.name, required: false, values: [] });
+      }
+    }
     const reqN = merged.filter(s => s.required).length;
-    wrap.innerHTML = `<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">${reqN} required · ${merged.length} specifics for this category</div>` + ceSpecsGrid(merged);
+    wrap.innerHTML = `<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">${reqN} required · ${merged.length} specifics for this category${live ? ' — the live listing’s values are kept' : ''}</div>` + ceSpecsGrid(merged);
+  } else if (live) {
+    // No category list available — at least show the live listing's own values.
+    ceRenderSpecificsFromList([...live.values()].map(s => ({ name: s.name, value: s.value })));
   } else {
     // eBay's live per-category list is unavailable — use the standard car-parts set.
     wrap.innerHTML = '<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Standard car-parts fields (eBay’s live per-category list isn’t available). Fill what applies; eBay flags anything else on submit.</div>' + ceSpecsGrid(CAR_PART_SPECIFICS);
@@ -20837,6 +20875,18 @@ function renderSettings() {
           </div>
           <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">Sync now / Re-pull report exactly what each channel fetched and imported (and any error) in the popup — so you can see whether orders came through, rather than a silent “nothing happened”.</div>
           <div id="ebay-health-result" style="margin-bottom:12px"></div>
+
+          <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px;margin-bottom:12px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">🗂 eBay category audit</div>
+            <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">Copied listings often went live with the <strong>template's</strong> category, so they sit in the wrong branch of eBay, miss category-filtered searches, and rank poorly. This checks <strong>every live listing</strong> against the category eBay itself suggests for its title, flags wrong categories and missing <em>required</em> item specifics, and can move listings to the right category — one at a time or all at once.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <button class="btn btn-primary" id="cat-audit-btn" onclick="startCategoryAudit(this)">🔎 Scan all live listings</button>
+              <button class="btn btn-outline" id="cat-audit-cancel" style="display:none" onclick="cancelCategoryAudit()">■ Stop scan</button>
+            </div>
+            <div id="cat-audit-progress" style="margin-top:10px"></div>
+            <div id="cat-audit-result" style="margin-top:10px"></div>
+          </div>
+
           <div style="padding:12px;background:var(--blue-light);color:var(--blue);border-radius:8px;font-size:12px">
             Required Railway variables: <strong>EBAY_CLIENT_ID</strong> + <strong>EBAY_CLIENT_SECRET</strong> (app keys), plus your account token — <strong>EBAY_AUTH_TOKEN</strong> (Auth’n’Auth) or <strong>EBAY_REFRESH_TOKEN</strong> (OAuth). Update the token, redeploy, then click <em>Test eBay connection</em>.
           </div>
@@ -21466,6 +21516,19 @@ function renderSettings() {
   loadThumbnailConfig();
   loadFitmentConfig();
   if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); }
+  // Re-attach to a category audit that's running (or finished) in the background.
+  Api.get('/api/listings/category-audit/status?slim=1').then(s => {
+    if (!s || s.state === 'idle') return;
+    if (s.state === 'running') {
+      const btn = el('cat-audit-btn'); if (btn) btn.disabled = true;
+      const cancel = el('cat-audit-cancel'); if (cancel) cancel.style.display = '';
+      catAuditPaintProgress(s);
+      catAuditWatch();
+    } else {
+      const btn = el('cat-audit-btn'); if (btn) btn.textContent = '🔎 Re-scan all live listings';
+      Api.get('/api/listings/category-audit/status').then(catAuditPaintResults).catch(() => {});
+    }
+  }).catch(() => {});
 }
 
 // ── Clock-in QR admin controls ──────────────────────────────────────────────
@@ -22066,6 +22129,122 @@ async function fixPartNumbers(btn) {
     toast('Failed to start: ' + (e.data?.message || e.message), 'error');
     if (btn) btn.disabled = false;
   }
+}
+
+// ── eBay category audit — scan every live listing for a wrong category (vs
+// eBay's own suggestion for the title) and missing required specifics, then
+// move flagged listings to the right category (per-row or all at once). ──
+let _catAuditPoll = null;
+async function startCategoryAudit(btn) {
+  try {
+    const r = await Api.post('/api/listings/category-audit', {});
+    if (r.alreadyRunning) toast('The audit is already running — watching its progress.', 'info');
+    else toast('Checking ' + r.total + ' live listing(s)… you can leave this page and come back.', 'success', 6000);
+    if (btn) btn.disabled = true;
+    const cancel = el('cat-audit-cancel'); if (cancel) cancel.style.display = '';
+    catAuditWatch();
+  } catch (e) {
+    toast('Couldn’t start the audit: ' + (e.data?.message || e.message), 'error');
+  }
+}
+function cancelCategoryAudit() {
+  Api.post('/api/listings/category-audit/cancel', {}).catch(() => {});
+  toast('Stopping after the current listing — findings so far are kept.', 'info');
+}
+function catAuditWatch() {
+  clearInterval(_catAuditPoll);
+  _catAuditPoll = setInterval(async () => {
+    try {
+      const s = await Api.get('/api/listings/category-audit/status?slim=1');
+      catAuditPaintProgress(s);
+      if (s.state !== 'running') {
+        clearInterval(_catAuditPoll);
+        const btn = el('cat-audit-btn'); if (btn) { btn.disabled = false; btn.textContent = '🔎 Re-scan all live listings'; }
+        const cancel = el('cat-audit-cancel'); if (cancel) cancel.style.display = 'none';
+        const full = await Api.get('/api/listings/category-audit/status');
+        catAuditPaintResults(full);
+      }
+    } catch (_) {
+      clearInterval(_catAuditPoll);
+      const btn = el('cat-audit-btn'); if (btn) btn.disabled = false;
+    }
+  }, 2500);
+}
+function catAuditPaintProgress(s) {
+  const box = el('cat-audit-progress');
+  if (!box) return;
+  if (!s || s.state === 'idle') { box.innerHTML = ''; return; }
+  const pct = s.total ? Math.round(s.done / s.total * 100) : 0;
+  const label = s.state === 'running' ? 'Checking' : (s.state === 'cancelled' ? 'Stopped at' : 'Checked');
+  box.innerHTML = `
+    <div style="height:8px;background:var(--line-2);border-radius:4px;overflow:hidden">
+      <div style="height:100%;width:${pct}%;background:var(--blue);transition:width .4s"></div>
+    </div>
+    <div style="font-size:12px;color:var(--ink-soft);margin-top:4px">
+      ${label} ${s.done}/${s.total} (${pct}%) — <strong>${s.wrongCategory}</strong> in the wrong category, <strong>${s.missingSpecifics}</strong> missing required specifics, ${s.ok} fine${s.errors ? ', ' + s.errors + ' couldn’t be read' : ''}
+    </div>`;
+}
+function catAuditPaintResults(s) {
+  catAuditPaintProgress(s);
+  const box = el('cat-audit-result');
+  if (!box) return;
+  const issues = s.issues || [];
+  if (!issues.length) {
+    box.innerHTML = '<div style="font-size:13px;color:var(--green);font-weight:600">✓ Every live listing is in its suggested category with all required specifics filled.</div>';
+    return;
+  }
+  State._catAuditIssues = issues;
+  const rows = issues.map((i, idx) => `
+    <tr>
+      <td style="max-width:280px"><div style="font-weight:600">${escapeHtml(i.title || '')}</div>
+        <div style="color:var(--ink-soft)">${escapeHtml(i.sku || i.itemId)}${i.viewUrl ? ` · <a href="${escapeAttr(i.viewUrl)}" target="_blank" rel="noopener">view on eBay</a>` : ''}</div></td>
+      <td>${escapeHtml(i.currentCategoryName || i.currentCategoryId || '—')}</td>
+      <td>${i.suggestedCategoryId
+        ? `<div style="font-weight:600">${escapeHtml(i.suggestedCategoryName || i.suggestedCategoryId)}</div><div style="color:var(--ink-soft);font-size:11px">${escapeHtml(i.suggestedCategoryPath || '')}</div>`
+        : '<span style="color:var(--green)">category OK</span>'}</td>
+      <td style="max-width:180px">${(i.missingRequired || []).length ? escapeHtml(i.missingRequired.join(', ')) : '—'}</td>
+      <td style="white-space:nowrap">
+        ${i.applied ? '<span style="color:var(--green)">✓ moved</span>'
+          : i.suggestedCategoryId ? `<button class="btn btn-outline btn-sm" onclick="applyCategoryAudit(${idx}, this)">Move</button>` : ''}
+        ${i.applyError ? `<div style="color:var(--red);font-size:11px;max-width:180px;white-space:normal">${escapeHtml(i.applyError)}</div>` : ''}
+      </td>
+    </tr>`).join('');
+  const fixable = issues.filter(i => i.suggestedCategoryId && !i.applied).length;
+  box.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px">
+      <div style="font-weight:600;font-size:13px">${issues.length} listing(s) need attention</div>
+      ${fixable ? `<button class="btn btn-primary btn-sm" onclick="applyCategoryAudit('all', this)">✓ Move all ${fixable} to their suggested category</button>` : ''}
+    </div>
+    <div style="max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:8px">
+      <table class="table" style="font-size:12px"><thead><tr>
+        <th>Listing</th><th>Current category</th><th>Suggested category</th><th>Missing required specifics</th><th></th>
+      </tr></thead><tbody>${rows}</tbody></table>
+    </div>
+    <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Missing required specifics: open the listing in Listing Mirror → Edit — the form now shows the category’s <strong>full</strong> required list with the live values kept, so you can fill the gaps and save. eBay may refuse a category move when the new category requires specifics the listing lacks; any refusal shows on the row.</div>`;
+}
+async function applyCategoryAudit(which, btn) {
+  const issues = State._catAuditIssues || [];
+  let body;
+  if (which === 'all') {
+    const n = issues.filter(i => i.suggestedCategoryId && !i.applied).length;
+    if (!confirm(`Move ${n} listing(s) to their suggested eBay category? Each move is a live listing revision.`)) return;
+    body = { all: true };
+  } else {
+    const it = issues[which];
+    if (!it) return;
+    body = { items: [{ itemId: it.itemId }] };
+  }
+  if (btn) { btn.disabled = true; btn.textContent = 'Moving…'; }
+  const taskId = Task.start('Moving listings to their suggested eBay category');
+  try {
+    const r = await Api.post('/api/listings/category-audit/apply', body);
+    Task.done(taskId, `${r.summary.ok} moved${r.summary.failed ? ', ' + r.summary.failed + ' refused' : ''}`);
+    toast(`${r.summary.ok} listing(s) moved to their suggested category${r.summary.failed ? ' — ' + r.summary.failed + ' refused by eBay (see the rows for why)' : ''}`, r.summary.failed ? 'warn' : 'success', 8000);
+  } catch (e) {
+    Task.fail(taskId, 'Move failed');
+    toast('Move failed: ' + (e.data?.message || e.message), 'error');
+  }
+  try { catAuditPaintResults(await Api.get('/api/listings/category-audit/status')); } catch (_) {}
 }
 
 // One-click: publish every linked Shopify product to ALL sales channels.
