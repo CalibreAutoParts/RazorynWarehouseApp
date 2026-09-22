@@ -467,11 +467,22 @@ cron.schedule('20 * * * *', async () => {
     if (!cfg.enabled || !cfg.nightly?.enabled) return;
     const ukHour = parseInt(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: 'numeric', hour12: false }).format(new Date()));
     if (ukHour !== (cfg.nightly.hourUK ?? 3)) return;
-    console.log(`[cron ai-audit] tick @ ${new Date().toISOString()} — starting nightly listing audit`);
+    console.log(`[cron ai-audit] tick @ ${new Date().toISOString()} — starting nightly AI scans`);
     const r = await listings.runCategoryAudit('nightly');
-    if (r.alreadyRunning) console.log('[cron ai-audit] skipped — an audit is already running');
-    else if (r.error) console.warn('[cron ai-audit] not run:', r.error, r.message || '');
-    else console.log(`[cron ai-audit] started — ${r.total} listings, AI ${r.ai ? 'on' : 'off'}`);
+    if (r.alreadyRunning) console.log('[cron ai-audit] category audit already running');
+    else if (r.error) console.warn('[cron ai-audit] category audit not run:', r.error, r.message || '');
+    else console.log(`[cron ai-audit] category audit started — ${r.total} listings, AI ${r.ai ? 'on' : 'off'}`);
+    // Part-number check + pricing review run alongside (DB + Claude only, no
+    // heavy eBay traffic — the category audit owns the eBay call budget).
+    const aiRoutes = require('./routes/ai');
+    try {
+      const pn = await aiRoutes.runPartNumberScan('nightly');
+      console.log('[cron ai-audit] part-number scan:', pn.started ? `started (${pn.total})` : (pn.error || 'already running'));
+    } catch (e) { console.warn('[cron ai-audit] part-number scan failed:', e.message); }
+    try {
+      const pr = await aiRoutes.runPricingScan('nightly');
+      console.log('[cron ai-audit] pricing scan:', pr.started ? `started (${pr.total})` : (pr.error || 'already running'));
+    } catch (e) { console.warn('[cron ai-audit] pricing scan failed:', e.message); }
   } catch (e) { console.error('[cron ai-audit] failed:', e.message); }
 });
 console.log('[boot] nightly AI listing audit armed (fires only when enabled in Settings)');

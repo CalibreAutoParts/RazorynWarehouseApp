@@ -262,6 +262,64 @@ Fill only what you can infer confidently from the title/part number/existing spe
   return { specifics, confidence: Math.max(0, Math.min(1, +v.confidence || 0)), reason: String(v.reason || '').slice(0, 300) };
 }
 
+// ── Decision: part-number sanity for a BATCH of products ───────────────────
+// House convention: the SKU's root IS the part number (suffixes like "-2008"
+// or an appended word mark shared-pool variants). Two jobs per item:
+//   1. missing part number that's clearly derivable from the SKU → "set"
+//   2. part number that doesn't belong to the part TYPE being listed (a
+//      headlight listing carrying a bumper's number) → "mismatch" for review
+async function partNumberBatch(items) {
+  const cfg = await getAiConfig();
+  const system = baseSystem(cfg.guidance) + await fewShotBlock('part_number');
+  const user = `Check the part numbers on these car-part listings. House rules:
+- The SKU's ROOT is normally the part number: SKUs are the part number plus an optional variant suffix (e.g. "7450B289-2008") or an appended word (e.g. "9820422880CITROEN").
+- Every listing's part number must genuinely belong to the part TYPE in its title — a headlight listing must carry a headlight part number, not a bumper's or a grille's. Use your knowledge of OEM/aftermarket numbering and cross-check against the SKU.
+For each item give a verdict:
+- "ok" — part number present, consistent with the SKU root and plausible for the item type.
+- "set" — part number missing but clearly derivable from the SKU: give partNumber.
+- "mismatch" — the part number looks wrong for what is being listed, or contradicts the SKU root: explain in reason, and give partNumber ONLY when the correct one is clearly derivable (otherwise null — a human will review).
+Items:
+${JSON.stringify(items.map(i => ({ id: i.id, sku: i.sku, partNumber: i.part_number || null, title: i.title })))}
+Reply with ONLY: {"items":[{"id":<id>,"verdict":"ok"|"set"|"mismatch","partNumber":"..."|null,"confidence":<0..1>,"reason":"<short>"}]}`;
+  const out = await callClaude({ kind: 'part_number', system, user, maxTokens: 1800 });
+  const ids = new Set(items.map(i => i.id));
+  return (out.json && Array.isArray(out.json.items) ? out.json.items : [])
+    .filter(v => v && ids.has(v.id))
+    .map(v => ({
+      id: v.id,
+      verdict: ['ok', 'set', 'mismatch'].includes(v.verdict) ? v.verdict : 'ok',
+      partNumber: v.partNumber ? String(v.partNumber).trim().slice(0, 60) : null,
+      confidence: Math.max(0, Math.min(1, +v.confidence || 0)),
+      reason: String(v.reason || '').slice(0, 300),
+    }));
+}
+
+// ── Decision: what should this listing's price be? ─────────────────────────
+// The maths (cost floor, breakeven, competitor delivered prices) is computed in
+// code and handed over — the model only makes the judgement call. The caller
+// clamps the answer to the floor regardless, so the model can never underprice.
+async function pricingVerdict(ctx) {
+  const cfg = await getAiConfig();
+  const system = baseSystem(cfg.guidance) + await fewShotBlock('pricing');
+  const user = `Decide the right eBay price for our car-part listing.
+Our listing: ${JSON.stringify({ title: ctx.title, sku: ctx.sku, partNumber: ctx.partNumber, currentPrice: ctx.currentPrice, qtyInStock: ctx.qty })}
+Cost floor — NEVER price below this: £${ctx.floor != null ? ctx.floor : 'unknown'} (breakeven £${ctx.breakeven != null ? ctx.breakeven : 'unknown'}, floor includes our target margin)
+Competitor listings matched to the SAME part (delivered = item price + postage):
+${JSON.stringify(ctx.competitors)}
+Rules: undercut sensibly but do not race to the bottom; never go below the floor; a gap under ~2% is not worth a change ("keep"); with no meaningful competition price for margin, not down.
+Reply with ONLY: {"action":"keep"|"set","price":<number|null>,"confidence":<0..1>,"reason":"<one short sentence>"}`;
+  const out = await callClaude({ kind: 'pricing', system, user, maxTokens: 250 });
+  const v = out.json;
+  if (!v || !v.action) return null;
+  const set = v.action === 'set' && v.price != null && isFinite(+v.price) && +v.price > 0;
+  return {
+    action: set ? 'set' : 'keep',
+    price: set ? +(+v.price).toFixed(2) : null,
+    confidence: Math.max(0, Math.min(1, +v.confidence || 0)),
+    reason: String(v.reason || '').slice(0, 300),
+  };
+}
+
 // ── Learning: distil recent feedback into standing rules ──────────────────
 // Reads the recent feedback log and asks the smart model to write/refresh the
 // auto-learned section of the guidance (the hand-written part is untouched).
@@ -301,12 +359,16 @@ async function recordFeedback(kind, context, suggestion, humanAction, final) {
 // ── Suggestion queue helpers (used by the audit + the review endpoints) ────
 async function queueSuggestion({ kind, ebayItemId, productId, storeCode, title, payload, context, confidence, reason }) {
   await ensureTables();
-  // One pending suggestion per (kind, item) — a re-scan refreshes it.
-  await query(`DELETE FROM ai_suggestions WHERE kind = $1 AND ebay_item_id = $2 AND status = 'pending'`, [kind, String(ebayItemId)]).catch(() => {});
+  // One pending suggestion per (kind, item/product) — a re-scan refreshes it.
+  if (ebayItemId) {
+    await query(`DELETE FROM ai_suggestions WHERE kind = $1 AND ebay_item_id = $2 AND status = 'pending'`, [kind, String(ebayItemId)]).catch(() => {});
+  } else if (productId) {
+    await query(`DELETE FROM ai_suggestions WHERE kind = $1 AND product_id = $2 AND status = 'pending'`, [kind, productId]).catch(() => {});
+  }
   const { rows } = await query(
     `INSERT INTO ai_suggestions (kind, ebay_item_id, product_id, store_code, title, payload, context, confidence, reason)
      VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9) RETURNING id`,
-    [kind, String(ebayItemId), productId || null, storeCode || null, title || null,
+    [kind, ebayItemId ? String(ebayItemId) : null, productId || null, storeCode || null, title || null,
      JSON.stringify(payload || {}), JSON.stringify(context || {}), confidence != null ? confidence : null, reason || null]);
   return rows[0].id;
 }
@@ -321,6 +383,8 @@ module.exports = {
   callClaude,
   categoryVerdict,
   fillSpecifics,
+  partNumberBatch,
+  pricingVerdict,
   learnFromFeedback,
   recordFeedback,
   queueSuggestion,

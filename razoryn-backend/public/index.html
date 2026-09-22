@@ -1223,6 +1223,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
           Competitors
         </button>
+        <button class="nav-item admin-only" data-page="ai">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>
+          AI <span id="nav-ai-badge" style="display:none;margin-left:auto;background:var(--blue);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;line-height:18px"></span>
+        </button>
         <button class="nav-item admin-only" data-page="createlisting">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           Create listing
@@ -1932,6 +1936,10 @@ async function init() {
     enterApp();
     Store.refreshAll().then(repaintCurrent).catch(() => {});
     Api.get('/api/settings/pricing-config').then(c => { State.pricingConfig = c; }).catch(() => {});
+    // AI nav badge — how many suggestions are waiting for review (admins only).
+    if (me.role === 'admin' && !State.appShell) {
+      Api.get('/api/ai/config').then(r => aiSetPendingCount(r.pendingSuggestions || 0)).catch(() => {});
+    }
     return;
   } catch (e) {
     // Not logged in — show login screen
@@ -3351,6 +3359,7 @@ function hasPerm(page) {
     createlisting: false,
     staff:        false,
     settings:     false,
+    ai:           false,
   };
   const v = map[page];
   if (v === true) return true;
@@ -3402,7 +3411,8 @@ function routeTo(page) {
     sharedstock: renderSharedStock, editlisting: renderEditListing, costs: renderCosts,
     drafts: renderDrafts, clonestore: renderCloneStore,
     vinsearch: renderVinSearch,
-    qtycheck: renderQtyCheck, iteminfo: renderItemInfo
+    qtycheck: renderQtyCheck, iteminfo: renderItemInfo,
+    ai: renderAiPage
   };
   // The handheld's Home is the plain task workbench, not the money dashboard.
   if (State.appShell && page === 'dashboard') pages.dashboard = renderAppHome;
@@ -20934,7 +20944,10 @@ function renderSettings() {
           <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
               <div style="font-weight:600;font-size:14px">Suggestions waiting for review <span id="ai-pending-count" style="display:inline-block;min-width:20px;text-align:center;background:var(--blue-light);color:var(--blue);border-radius:10px;padding:1px 7px;font-size:12px">0</span></div>
-              <button class="btn btn-ghost btn-sm" onclick="loadAiSuggestions()">↻ Refresh</button>
+              <div style="display:flex;gap:8px">
+                <button class="btn btn-outline btn-sm" onclick="routeTo('ai')">Open the AI tab →</button>
+                <button class="btn btn-ghost btn-sm" onclick="loadAiSuggestions()">↻ Refresh</button>
+              </div>
             </div>
             <div id="ai-suggestions" style="font-size:13px;color:var(--ink-soft)">No pending suggestions.</div>
             <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Every approve, correction and reject here teaches the AI — its future suggestions copy what you accept and avoid what you turn down.</div>
@@ -22364,45 +22377,88 @@ async function aiLearn(btn) {
   } catch (e) { if (out) out.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
   if (btn) { btn.disabled = false; btn.textContent = '🧠 Learn from recent decisions'; }
 }
+// What a suggestion of each kind proposes, in plain words (shared by the
+// Settings queue and the AI tab).
+const AI_KIND_LABELS = {
+  category: { name: 'eBay categories', icon: '🗂' },
+  specifics: { name: 'Item specifics', icon: '📋' },
+  part_number: { name: 'Part numbers', icon: '🔢' },
+  pricing: { name: 'Pricing & margins', icon: '💷' },
+};
+function aiSuggestionCard(s) {
+  const conf = s.confidence != null ? Math.round(parseFloat(s.confidence) * 100) + '%' : '—';
+  let what = '', editBtn = '', approveLabel = '✓ Approve &amp; apply';
+  if (s.kind === 'category') {
+    what = 'Move to <strong>' + escapeHtml(s.payload?.categoryName || s.payload?.categoryId || '?') + '</strong>'
+      + (s.payload?.categoryName ? ' <span style="color:var(--ink-soft)">(' + escapeHtml(s.payload?.categoryId || '') + ')</span>' : '')
+      + (s.context?.current?.name ? ' <span style="color:var(--ink-soft)">— currently ' + escapeHtml(s.context.current.name) + '</span>' : '');
+    editBtn = '<button class="btn btn-outline btn-sm" onclick="aiApproveEdited(' + s.id + ')">✎ Different category…</button>';
+  } else if (s.kind === 'specifics') {
+    what = 'Fill specifics: ' + escapeHtml((s.payload?.specifics || []).map(x => x.name + ': ' + x.value).join(' · '));
+  } else if (s.kind === 'part_number') {
+    const cur = s.payload?.currentPartNumber;
+    if (s.payload?.partNumber) {
+      what = (s.payload?.issue === 'mismatch' ? '⚠ Part number looks wrong — change to ' : 'Set part number to ')
+        + '<strong>' + escapeHtml(s.payload.partNumber) + '</strong>'
+        + (cur ? ' <span style="color:var(--ink-soft)">(currently ' + escapeHtml(cur) + ')</span>' : ' <span style="color:var(--ink-soft)">(currently blank — found in SKU ' + escapeHtml(s.payload?.sku || '') + ')</span>');
+    } else {
+      what = '⚠ Part number <strong>' + escapeHtml(cur || '—') + '</strong> doesn’t look right for this item — needs a human check';
+      approveLabel = '✓ Mark reviewed';
+    }
+    editBtn = '<button class="btn btn-outline btn-sm" onclick="aiApproveEdited(' + s.id + ')">✎ Set part number…</button>';
+  } else if (s.kind === 'pricing') {
+    const cur = s.payload?.currentPrice, np = s.payload?.price, fl = s.payload?.floor;
+    const dir = np > cur ? '↑' : '↓';
+    what = 'Change price <strong>£' + (+cur).toFixed(2) + ' ' + dir + ' £' + (+np).toFixed(2) + '</strong>'
+      + (fl != null ? ' <span style="color:var(--ink-soft)">(floor £' + (+fl).toFixed(2) + ')</span>' : '')
+      + (s.payload?.locked ? ' <span style="color:var(--red);font-size:11px">price-locked product</span>' : '');
+    editBtn = '<button class="btn btn-outline btn-sm" onclick="aiApproveEdited(' + s.id + ')">✎ Different price…</button>';
+  } else what = escapeHtml(s.kind);
+  const err = s.applied_result?.error ? '<div style="color:var(--red);font-size:11px">Last apply failed: ' + escapeHtml(s.applied_result.error) + '</div>' : '';
+  return '<div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px" id="ai-sug-' + s.id + '">'
+    + '<div style="font-weight:600;color:var(--ink)">' + escapeHtml(s.title || s.ebay_item_id || ('product #' + s.product_id)) + (s.ebay_item_id ? ' <span style="font-weight:400;color:var(--ink-soft);font-size:11px">· item ' + escapeHtml(s.ebay_item_id) + '</span>' : '') + '</div>'
+    + '<div style="margin:4px 0">' + what + '</div>'
+    + '<div style="font-size:11px;color:var(--ink-soft)">🤖 ' + conf + (s.reason ? ' — ' + escapeHtml(s.reason) : '') + '</div>' + err
+    + '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'
+    + '<button class="btn btn-primary btn-sm" onclick="aiApprove(' + s.id + ', this)">' + approveLabel + '</button>'
+    + editBtn
+    + '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="aiReject(' + s.id + ', this)">✗ Reject</button>'
+    + '</div></div>';
+}
+function aiSetPendingCount(n) {
+  const pc = el('ai-pending-count'); if (pc) pc.textContent = n;
+  const nb = el('nav-ai-badge');
+  if (nb) { nb.textContent = n; nb.style.display = n > 0 ? '' : 'none'; }
+}
 async function loadAiSuggestions() {
   const box = el('ai-suggestions');
-  if (!box) return;
   try {
     const r = await Api.get('/api/ai/suggestions?status=pending');
     const list = r.suggestions || [];
     State._aiSuggestions = list;
-    const pc = el('ai-pending-count'); if (pc) pc.textContent = list.length;
-    if (!list.length) { box.innerHTML = 'No pending suggestions — run a scan (eBay integration → category audit) or wait for the nightly one.'; return; }
-    box.innerHTML = list.map(s => {
-      const conf = s.confidence != null ? Math.round(parseFloat(s.confidence) * 100) + '%' : '—';
-      let what = '';
-      if (s.kind === 'category') {
-        what = 'Move to <strong>' + escapeHtml(s.payload?.categoryName || s.payload?.categoryId || '?') + '</strong>'
-          + (s.payload?.categoryName ? ' <span style="color:var(--ink-soft)">(' + escapeHtml(s.payload?.categoryId || '') + ')</span>' : '')
-          + (s.context?.current?.name ? ' <span style="color:var(--ink-soft)">— currently ' + escapeHtml(s.context.current.name) + '</span>' : '');
-      } else if (s.kind === 'specifics') {
-        what = 'Fill specifics: ' + escapeHtml((s.payload?.specifics || []).map(x => x.name + ': ' + x.value).join(' · '));
-      } else what = escapeHtml(s.kind);
-      const err = s.applied_result?.error ? '<div style="color:var(--red);font-size:11px">Last apply failed: ' + escapeHtml(s.applied_result.error) + '</div>' : '';
-      return '<div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px" id="ai-sug-' + s.id + '">'
-        + '<div style="font-weight:600;color:var(--ink)">' + escapeHtml(s.title || s.ebay_item_id) + ' <span style="font-weight:400;color:var(--ink-soft);font-size:11px">· item ' + escapeHtml(s.ebay_item_id || '') + '</span></div>'
-        + '<div style="margin:4px 0">' + what + '</div>'
-        + '<div style="font-size:11px;color:var(--ink-soft)">🤖 ' + conf + (s.reason ? ' — ' + escapeHtml(s.reason) : '') + '</div>' + err
-        + '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'
-        + '<button class="btn btn-primary btn-sm" onclick="aiApprove(' + s.id + ', this)">✓ Approve &amp; apply</button>'
-        + (s.kind === 'category' ? '<button class="btn btn-outline btn-sm" onclick="aiApproveEdited(' + s.id + ')">✎ Different category…</button>' : '')
-        + '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="aiReject(' + s.id + ', this)">✗ Reject</button>'
-        + '</div></div>';
+    aiSetPendingCount(list.length);
+    if (!box) return;
+    if (!list.length) { box.innerHTML = 'No pending suggestions — run a scan or wait for the nightly one.'; return; }
+    // Group by kind so categories / specifics / part numbers / pricing read as
+    // separate worklists.
+    const groups = {};
+    for (const s of list) (groups[s.kind] = groups[s.kind] || []).push(s);
+    box.innerHTML = Object.keys(groups).map(kind => {
+      const meta = AI_KIND_LABELS[kind] || { name: kind, icon: '🤖' };
+      return '<div style="margin-bottom:14px">'
+        + '<div style="font-weight:700;font-size:13px;margin-bottom:6px;color:var(--ink)">' + meta.icon + ' ' + escapeHtml(meta.name) + ' <span style="color:var(--ink-soft);font-weight:400">(' + groups[kind].length + ')</span></div>'
+        + groups[kind].map(aiSuggestionCard).join('')
+        + '</div>';
     }).join('');
-  } catch (e) { box.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
+  } catch (e) { if (box) box.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
 }
 async function aiApprove(id, btn, payload) {
   if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
   try {
-    await Api.post('/api/ai/suggestions/' + id + '/approve', payload ? { payload } : {});
-    toast('Applied to the live listing ✓ (and recorded so the AI learns)', 'success');
+    const r = await Api.post('/api/ai/suggestions/' + id + '/approve', payload ? { payload } : {});
+    toast(r.result?.acknowledged ? 'Marked reviewed ✓ (recorded so the AI learns)' : 'Applied ✓ (and recorded so the AI learns)', 'success');
     const card = el('ai-sug-' + id); if (card) card.remove();
-    const pc = el('ai-pending-count'); if (pc) pc.textContent = Math.max(0, (parseInt(pc.textContent) || 1) - 1);
+    aiSetPendingCount(Math.max(0, (parseInt(el('ai-pending-count')?.textContent) || 1) - 1));
   } catch (e) {
     toast('Apply failed: ' + (e.data?.message || e.message), 'error', 8000);
     if (btn) { btn.disabled = false; btn.textContent = '✓ Approve & apply'; }
@@ -22410,19 +22466,165 @@ async function aiApprove(id, btn, payload) {
 }
 function aiApproveEdited(id) {
   const s = (State._aiSuggestions || []).find(x => x.id === id);
-  const cur = s?.payload?.categoryId || '';
-  const entered = prompt('eBay category ID to apply instead (the correction is recorded so the AI learns from it):', cur);
-  if (!entered || !entered.trim()) return;
-  aiApprove(id, null, { categoryId: entered.trim() });
+  if (!s) return;
+  if (s.kind === 'pricing') {
+    const entered = prompt('Price (£) to apply instead — your correction is recorded so the AI learns:', s.payload?.price != null ? (+s.payload.price).toFixed(2) : '');
+    const v = parseFloat(entered);
+    if (!entered || isNaN(v) || v <= 0) return;
+    aiApprove(id, null, { ...s.payload, price: +v.toFixed(2) });
+  } else if (s.kind === 'part_number') {
+    const entered = prompt('Part number to set — your correction is recorded so the AI learns:', s.payload?.partNumber || '');
+    if (!entered || !entered.trim()) return;
+    aiApprove(id, null, { ...s.payload, partNumber: entered.trim() });
+  } else {
+    const entered = prompt('eBay category ID to apply instead — your correction is recorded so the AI learns:', s.payload?.categoryId || '');
+    if (!entered || !entered.trim()) return;
+    aiApprove(id, null, { categoryId: entered.trim() });
+  }
 }
 async function aiReject(id, btn) {
   if (btn) btn.disabled = true;
   try {
     await Api.post('/api/ai/suggestions/' + id + '/reject', {});
     const card = el('ai-sug-' + id); if (card) card.remove();
-    const pc = el('ai-pending-count'); if (pc) pc.textContent = Math.max(0, (parseInt(pc.textContent) || 1) - 1);
+    aiSetPendingCount(Math.max(0, (parseInt(el('ai-pending-count')?.textContent) || 1) - 1));
     toast('Rejected — the AI will avoid suggesting this again', 'info');
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
+}
+
+// ── The AI tab — one place to run scans, review suggestions, and act ───────
+let _aiPagePoll = null;
+function renderAiPage() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>🤖 AI</h1><div class="desc">Claude checks your listings, prices, part numbers and categories — changes it’s sure of get applied (auto mode), everything else lands here for a yes/no. Every decision you make teaches it.</div></div>
+        <div class="actions">
+          <button class="btn btn-outline btn-sm" onclick="routeTo('settings')">⚙ AI settings</button>
+          <button class="btn btn-outline btn-sm" onclick="aiLearn(this)">🧠 Learn from decisions</button>
+        </div>
+      </div>
+      <div id="ai-page-banner"></div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Scans</h3><div class="card-desc">Run on demand here, or let the nightly schedule (Settings) run all three.</div></div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px">
+            <div style="border:1px solid var(--line);border-radius:8px;padding:12px">
+              <div style="font-weight:600;margin-bottom:4px">🗂 eBay categories</div>
+              <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Every live listing vs the category it should be in (kills copied-template categories) + missing required specifics.</div>
+              <button class="btn btn-primary btn-sm" onclick="aiStartScan('category', this)">Run scan</button>
+              <div id="ai-scan-category" style="font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
+            </div>
+            <div style="border:1px solid var(--line);border-radius:8px;padding:12px">
+              <div style="font-weight:600;margin-bottom:4px">🔢 Part numbers</div>
+              <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Finds part numbers hiding in the SKU, and flags numbers that don’t match what’s listed (a headlight must carry a headlight number).</div>
+              <button class="btn btn-primary btn-sm" onclick="aiStartScan('pn', this)">Run scan</button>
+              <div id="ai-scan-pn" style="font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
+            </div>
+            <div style="border:1px solid var(--line);border-radius:8px;padding:12px">
+              <div style="font-weight:600;margin-bottom:4px">💷 Pricing &amp; margins</div>
+              <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Competitor delivered prices + your cost floor per item — suggests keep/raise/lower, never below the floor.</div>
+              <button class="btn btn-primary btn-sm" onclick="aiStartScan('pricing', this)">Run scan</button>
+              <div id="ai-scan-pricing" style="font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head">
+          <h3>To review <span id="ai-pending-count" style="display:inline-block;min-width:20px;text-align:center;background:var(--blue-light);color:var(--blue);border-radius:10px;padding:1px 7px;font-size:12px">0</span></h3>
+          <div style="display:flex;gap:8px"><button class="btn btn-ghost btn-sm" onclick="loadAiSuggestions()">↻ Refresh</button></div>
+        </div>
+        <div class="card-body"><div id="ai-suggestions" style="font-size:13px;color:var(--ink-soft)">Loading…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Recent decisions</h3><div class="card-desc">What was approved, corrected or rejected — this is what the AI learns from.</div></div>
+        <div class="card-body"><div id="ai-history" style="font-size:13px;color:var(--ink-soft)">Loading…</div></div>
+      </div>
+    </div>`;
+  loadAiPageBanner();
+  loadAiSuggestions();
+  loadAiHistory();
+  clearInterval(_aiPagePoll);
+  _aiPagePoll = setInterval(aiPagePollTick, 2500);
+  aiPagePollTick();
+}
+async function loadAiPageBanner() {
+  const b = el('ai-page-banner');
+  if (!b) return;
+  try {
+    const r = await Api.get('/api/ai/config');
+    const tok = rows => (rows || []).reduce((a, x) => a + (x.inputTokens || 0) + (x.outputTokens || 0), 0);
+    if (!r.configured) {
+      b.innerHTML = '<div class="card" style="margin-bottom:16px"><div class="card-body" style="color:var(--red);font-size:13px">✗ No API key — add <strong>ANTHROPIC_API_KEY</strong> to Railway variables and redeploy, then enable Claude decisions in Settings.</div></div>';
+    } else if (!r.config?.enabled) {
+      b.innerHTML = '<div class="card" style="margin-bottom:16px"><div class="card-body" style="font-size:13px">Claude decisions are <strong>off</strong> — scans will run without AI verdicts. Turn them on in <a href="#settings" onclick="routeTo(\'settings\');return false">Settings → Claude AI automation</a>.</div></div>';
+    } else {
+      b.innerHTML = '<div style="font-size:12px;color:var(--ink-soft);margin-bottom:12px">Claude decisions <strong style="color:var(--green)">ON</strong> · mode: <strong>' + (r.config.mode === 'auto' ? 'auto-apply ≥ ' + Math.round((r.config.autoThreshold || .85) * 100) + '%' : 'review first') + '</strong> · nightly scan: <strong>' + (r.config.nightly?.enabled ? ('on, ' + r.config.nightly.hourUK + ':00 UK') : 'off') + '</strong> · tokens today: ' + tok(r.usage?.today).toLocaleString() + '</div>';
+    }
+  } catch (_) {}
+}
+function aiScanLine(s, noun) {
+  if (!s || s.state === 'idle') return 'Not run yet.';
+  const pct = s.total ? Math.round(s.done / s.total * 100) : 0;
+  const bar = '<div style="height:6px;background:var(--line-2);border-radius:3px;overflow:hidden;margin-bottom:4px"><div style="height:100%;width:' + pct + '%;background:var(--blue);transition:width .4s"></div></div>';
+  const label = s.state === 'running' ? 'Checking' : (s.state === 'cancelled' ? 'Stopped at' : 'Done —');
+  return bar + label + ' ' + s.done + '/' + s.total + ' ' + noun
+    + (s.flagged != null ? ' · ' + s.flagged + ' flagged' : '')
+    + (s.wrongCategory != null ? ' · ' + s.wrongCategory + ' wrong category, ' + s.missingSpecifics + ' missing specifics' : '')
+    + (s.autoApplied ? ' · <strong>' + s.autoApplied + ' auto-fixed</strong>' : '')
+    + ((s.queued || s.ai?.queued) ? ' · ' + (s.queued || s.ai.queued) + ' to review' : '')
+    + ((s.budgetStopped || s.ai?.budgetStopped) ? ' · <span style="color:var(--red)">token budget reached</span>' : '');
+}
+async function aiPagePollTick() {
+  if (State.page !== 'ai') { clearInterval(_aiPagePoll); return; }
+  try {
+    const [cat, pn, pr] = await Promise.all([
+      Api.get('/api/listings/category-audit/status?slim=1').catch(() => null),
+      Api.get('/api/ai/scan/part-numbers/status').catch(() => null),
+      Api.get('/api/ai/scan/pricing/status').catch(() => null),
+    ]);
+    if (el('ai-scan-category') && cat) el('ai-scan-category').innerHTML = aiScanLine({ ...cat, autoApplied: cat.ai?.autoApplied }, 'listings');
+    if (el('ai-scan-pn') && pn) el('ai-scan-pn').innerHTML = aiScanLine(pn, 'products');
+    if (el('ai-scan-pricing') && pr) el('ai-scan-pricing').innerHTML = aiScanLine({ ...pr, flagged: pr.flagged }, 'products');
+    // A finished scan may have queued new suggestions — keep the list fresh
+    // without stomping on it while the user is mid-review.
+    const anyJustFinished = [cat, pn, pr].some(s => s && s.finishedAt && Date.now() - s.finishedAt < 6000);
+    if (anyJustFinished && !document.querySelector('#modal-overlay.open')) loadAiSuggestions();
+  } catch (_) {}
+}
+async function aiStartScan(which, btn) {
+  const urls = { category: '/api/listings/category-audit', pn: '/api/ai/scan/part-numbers', pricing: '/api/ai/scan/pricing' };
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post(urls[which], {});
+    if (r.alreadyRunning) toast('That scan is already running.', 'info');
+    else toast('Scan started — ' + (r.total || 0) + ' to check. You can leave this page.', 'success');
+  } catch (e) {
+    toast(e.data?.message || e.data?.error || e.message, 'error', 7000);
+  }
+  if (btn) setTimeout(() => { btn.disabled = false; }, 2000);
+}
+async function loadAiHistory() {
+  const box = el('ai-history');
+  if (!box) return;
+  try {
+    const r = await Api.get('/api/ai/suggestions?status=resolved');
+    const list = r.suggestions || [];
+    if (!list.length) { box.innerHTML = 'Nothing yet — decisions you make above will show here.'; return; }
+    box.innerHTML = '<table class="table" style="font-size:12px"><thead><tr><th>What</th><th>Item</th><th>Decision</th><th>When</th></tr></thead><tbody>'
+      + list.map(s => {
+        const meta = AI_KIND_LABELS[s.kind] || { name: s.kind, icon: '' };
+        const badge = s.status === 'rejected'
+          ? '<span style="color:var(--red)">✗ rejected</span>'
+          : (s.status === 'edited' ? '<span style="color:var(--blue)">✎ corrected</span>' : '<span style="color:var(--green)">✓ approved</span>');
+        return '<tr><td>' + meta.icon + ' ' + escapeHtml(meta.name) + '</td>'
+          + '<td style="max-width:320px">' + escapeHtml(s.title || s.ebay_item_id || ('product #' + s.product_id)) + '</td>'
+          + '<td>' + badge + '</td>'
+          + '<td style="color:var(--ink-soft)">' + (s.resolved_at ? new Date(s.resolved_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—') + '</td></tr>';
+      }).join('')
+      + '</tbody></table>';
+  } catch (e) { box.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
 }
 
 // One-click: publish every linked Shopify product to ALL sales channels.
