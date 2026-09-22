@@ -20894,6 +20894,55 @@ function renderSettings() {
       </div>
 
       <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>🤖 Claude AI automation</h3>
+          <div class="card-desc">Let Claude run the scans and fixes itself — it picks the right eBay category from eBay’s own candidates, drafts missing required specifics, and learns from what you approve, correct or reject.</div>
+        </div>
+        <div class="card-body">
+          <div id="ai-key-status" style="font-size:12px;margin-bottom:10px;color:var(--ink-soft)">Checking…</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="field"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="ai-enabled"> Enable Claude decisions</label>
+              <div style="font-size:11px;color:var(--ink-soft)">Off = the category audit runs exactly as before — no AI calls, no cost.</div></div>
+            <div class="field"><label>Mode</label>
+              <select id="ai-mode">
+                <option value="review">Review first — queue every suggestion for approval</option>
+                <option value="auto">Auto-apply confident fixes, queue the rest</option>
+              </select></div>
+            <div class="field"><label>Auto-apply confidence (%)</label><input type="number" id="ai-threshold" min="50" max="100" step="1" placeholder="85">
+              <div style="font-size:11px;color:var(--ink-soft)">Only used in auto mode — anything below this waits for review.</div></div>
+            <div class="field"><label>Daily token budget</label><input type="number" id="ai-budget" min="0" step="100000" placeholder="2000000">
+              <div style="font-size:11px;color:var(--ink-soft)">Hard spending stop per UK day (input + output tokens). 0 = unlimited.</div></div>
+            <div class="field"><label>Bulk model (the thousands of routine checks)</label>
+              <select id="ai-bulk-model">
+                <option value="claude-haiku-4-5-20251001">Haiku 4.5 — fast &amp; cheap (recommended)</option>
+                <option value="claude-sonnet-5">Sonnet 5 — smarter, pricier</option>
+              </select></div>
+            <div class="field"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="ai-escalate"> Escalate unsure cases to Sonnet 5</label>
+              <div style="font-size:11px;color:var(--ink-soft)">Cheap model answers first; the smart one only re-checks low-confidence verdicts.</div></div>
+            <div class="field"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="ai-nightly"> Nightly automatic scan</label>
+              <div style="font-size:11px;color:var(--ink-soft)">Runs the full category audit every night and leaves a notification with what it found/fixed.</div></div>
+            <div class="field"><label>Nightly scan hour (UK, 0–23)</label><input type="number" id="ai-nightly-hour" min="0" max="23" placeholder="3"></div>
+          </div>
+          <div class="field" style="margin-top:8px"><label>Standing rules — guidance Claude always follows (🧠 Learn appends auto-learned rules here; edit freely)</label>
+            <textarea id="ai-guidance" rows="4" placeholder="e.g. Brand is always Unbranded for our aftermarket parts. Wing mirrors belong in Exterior Mirrors, never Wings & Fenders."></textarea></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
+            <button class="btn btn-primary" onclick="saveAiConfig(this)">Save AI settings</button>
+            <button class="btn btn-outline" onclick="testAi(this)">🔌 Test connection</button>
+            <button class="btn btn-outline" onclick="aiLearn(this)">🧠 Learn from recent decisions</button>
+            <span id="ai-usage" style="font-size:12px;color:var(--ink-soft)"></span>
+          </div>
+          <div id="ai-learn-result" style="font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
+          <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+              <div style="font-weight:600;font-size:14px">Suggestions waiting for review <span id="ai-pending-count" style="display:inline-block;min-width:20px;text-align:center;background:var(--blue-light);color:var(--blue);border-radius:10px;padding:1px 7px;font-size:12px">0</span></div>
+              <button class="btn btn-ghost btn-sm" onclick="loadAiSuggestions()">↻ Refresh</button>
+            </div>
+            <div id="ai-suggestions" style="font-size:13px;color:var(--ink-soft)">No pending suggestions.</div>
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Every approve, correction and reject here teaches the AI — its future suggestions copy what you accept and avoid what you turn down.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>Quote pricing rules</h3><div class="card-desc">Drives quotes on the Quote Builder page and unit prices for manual sales.</div></div>
         <div class="card-body">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
@@ -21515,7 +21564,7 @@ function renderSettings() {
   loadDropfleetConfig();
   loadThumbnailConfig();
   loadFitmentConfig();
-  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); }
+  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); loadAiSettings(); }
   // Re-attach to a category audit that's running (or finished) in the background.
   Api.get('/api/listings/category-audit/status?slim=1').then(s => {
     if (!s || s.state === 'idle') return;
@@ -22181,7 +22230,7 @@ function catAuditPaintProgress(s) {
       <div style="height:100%;width:${pct}%;background:var(--blue);transition:width .4s"></div>
     </div>
     <div style="font-size:12px;color:var(--ink-soft);margin-top:4px">
-      ${label} ${s.done}/${s.total} (${pct}%) — <strong>${s.wrongCategory}</strong> in the wrong category, <strong>${s.missingSpecifics}</strong> missing required specifics, ${s.ok} fine${s.errors ? ', ' + s.errors + ' couldn’t be read' : ''}
+      ${label} ${s.done}/${s.total} (${pct}%) — <strong>${s.wrongCategory}</strong> in the wrong category, <strong>${s.missingSpecifics}</strong> missing required specifics, ${s.ok} fine${s.errors ? ', ' + s.errors + ' couldn’t be read' : ''}${s.ai ? ` · 🤖 ${s.ai.autoApplied} auto-fixed, ${s.ai.queued} queued for review, ${s.ai.keptCurrent} confirmed fine${s.ai.budgetStopped ? ' — <span style="color:var(--red)">daily token budget reached</span>' : ''}` : ''}
     </div>`;
 }
 function catAuditPaintResults(s) {
@@ -22201,10 +22250,12 @@ function catAuditPaintResults(s) {
       <td>${escapeHtml(i.currentCategoryName || i.currentCategoryId || '—')}</td>
       <td>${i.suggestedCategoryId
         ? `<div style="font-weight:600">${escapeHtml(i.suggestedCategoryName || i.suggestedCategoryId)}</div><div style="color:var(--ink-soft);font-size:11px">${escapeHtml(i.suggestedCategoryPath || '')}</div>`
-        : '<span style="color:var(--green)">category OK</span>'}</td>
-      <td style="max-width:180px">${(i.missingRequired || []).length ? escapeHtml(i.missingRequired.join(', ')) : '—'}</td>
+        : '<span style="color:var(--green)">category OK</span>'}
+        ${i.ai ? `<div style="font-size:11px;color:${i.ai.keepCurrent ? 'var(--green)' : 'var(--blue)'}">🤖 ${i.ai.keepCurrent ? 'AI says the current category is right' : Math.round((i.ai.confidence || 0) * 100) + '% sure' + (i.ai.reason ? ' — ' + escapeHtml(i.ai.reason) : '')}</div>` : ''}</td>
+      <td style="max-width:180px">${(i.missingRequired || []).length ? escapeHtml(i.missingRequired.join(', ')) : '—'}
+        ${i.aiFill ? `<div style="font-size:11px;color:var(--blue)">🤖 draft${i.aiFillApplied ? ' (applied)' : ''}: ${escapeHtml((i.aiFill.specifics || []).map(x => x.name + ': ' + x.value).join(' · '))}</div>` : ''}</td>
       <td style="white-space:nowrap">
-        ${i.applied ? '<span style="color:var(--green)">✓ moved</span>'
+        ${i.applied ? (i.autoApplied ? '<span style="color:var(--green)">🤖 auto-fixed</span>' : '<span style="color:var(--green)">✓ moved</span>')
           : i.suggestedCategoryId ? `<button class="btn btn-outline btn-sm" onclick="applyCategoryAudit(${idx}, this)">Move</button>` : ''}
         ${i.applyError ? `<div style="color:var(--red);font-size:11px;max-width:180px;white-space:normal">${escapeHtml(i.applyError)}</div>` : ''}
       </td>
@@ -22245,6 +22296,133 @@ async function applyCategoryAudit(which, btn) {
     toast('Move failed: ' + (e.data?.message || e.message), 'error');
   }
   try { catAuditPaintResults(await Api.get('/api/listings/category-audit/status')); } catch (_) {}
+}
+
+// ── Claude AI automation (Settings) — config, usage, review queue ──────────
+let _aiCfgLoaded = null;
+async function loadAiSettings() {
+  try {
+    const r = await Api.get('/api/ai/config');
+    _aiCfgLoaded = r.config || {};
+    const ks = el('ai-key-status');
+    if (ks) ks.innerHTML = r.configured
+      ? '<span style="color:var(--green);font-weight:600">✓ API key configured</span> <span>(ANTHROPIC_API_KEY on Railway)</span>'
+      : '<span style="color:var(--red);font-weight:600">✗ No API key</span> — add <strong>ANTHROPIC_API_KEY</strong> to Railway variables and redeploy (get a key at console.anthropic.com). Everything here stays off until then.';
+    const c = _aiCfgLoaded;
+    if (el('ai-enabled')) el('ai-enabled').checked = !!c.enabled;
+    if (el('ai-mode')) el('ai-mode').value = c.mode || 'review';
+    if (el('ai-threshold')) el('ai-threshold').value = Math.round((c.autoThreshold || 0.85) * 100);
+    if (el('ai-budget')) el('ai-budget').value = c.dailyTokenBudget != null ? c.dailyTokenBudget : 2000000;
+    if (el('ai-bulk-model')) el('ai-bulk-model').value = c.bulkModel || 'claude-haiku-4-5-20251001';
+    if (el('ai-escalate')) el('ai-escalate').checked = c.escalate !== false;
+    if (el('ai-nightly')) el('ai-nightly').checked = !!(c.nightly && c.nightly.enabled);
+    if (el('ai-nightly-hour')) el('ai-nightly-hour').value = (c.nightly && c.nightly.hourUK != null) ? c.nightly.hourUK : 3;
+    if (el('ai-guidance')) el('ai-guidance').value = c.guidance || '';
+    const tok = rows => (rows || []).reduce((a, x) => a + (x.inputTokens || 0) + (x.outputTokens || 0), 0);
+    if (el('ai-usage')) el('ai-usage').textContent =
+      'Used today: ' + tok(r.usage?.today).toLocaleString() + ' tokens · last 30 days: ' + tok(r.usage?.last30d).toLocaleString();
+    const pc = el('ai-pending-count'); if (pc) pc.textContent = r.pendingSuggestions || 0;
+    if (r.pendingSuggestions) loadAiSuggestions();
+  } catch (_) {}
+}
+async function saveAiConfig(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/ai/config', {
+      enabled: !!el('ai-enabled')?.checked,
+      mode: el('ai-mode')?.value || 'review',
+      autoThreshold: (parseInt(el('ai-threshold')?.value) || 85) / 100,
+      dailyTokenBudget: parseInt(el('ai-budget')?.value) || 0,
+      bulkModel: el('ai-bulk-model')?.value,
+      escalate: !!el('ai-escalate')?.checked,
+      nightly: { enabled: !!el('ai-nightly')?.checked, hourUK: parseInt(el('ai-nightly-hour')?.value) || 3 },
+      guidance: el('ai-guidance')?.value || '',
+    });
+    _aiCfgLoaded = r.config;
+    toast('AI settings saved' + (r.config.enabled ? ' — Claude decisions are ON' : ' — Claude decisions are off'), 'success');
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
+}
+async function testAi(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
+  try {
+    const r = await Api.post('/api/ai/test', {});
+    toast(r.ok ? 'Claude replied ✓ (' + r.model + ')' : 'Connected, but got an unexpected reply — check the model name.', r.ok ? 'success' : 'warn');
+  } catch (e) { toast('Test failed: ' + (e.data?.message || e.message), 'error', 8000); }
+  if (btn) { btn.disabled = false; btn.textContent = '🔌 Test connection'; }
+}
+async function aiLearn(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Learning…'; }
+  const out = el('ai-learn-result');
+  try {
+    const r = await Api.post('/api/ai/learn', {});
+    if (r.learned) {
+      if (out) out.innerHTML = '<strong style="color:var(--green)">Learned from ' + r.feedbackCount + ' decisions:</strong><pre style="white-space:pre-wrap;font-size:12px;margin-top:4px">' + escapeHtml(r.rules) + '</pre>';
+      if (el('ai-guidance')) { const c = await Api.get('/api/ai/config'); el('ai-guidance').value = c.config?.guidance || ''; }
+      toast('Guidance updated from your decisions', 'success');
+    } else if (out) out.textContent = r.message || 'Nothing to learn yet.';
+  } catch (e) { if (out) out.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
+  if (btn) { btn.disabled = false; btn.textContent = '🧠 Learn from recent decisions'; }
+}
+async function loadAiSuggestions() {
+  const box = el('ai-suggestions');
+  if (!box) return;
+  try {
+    const r = await Api.get('/api/ai/suggestions?status=pending');
+    const list = r.suggestions || [];
+    State._aiSuggestions = list;
+    const pc = el('ai-pending-count'); if (pc) pc.textContent = list.length;
+    if (!list.length) { box.innerHTML = 'No pending suggestions — run a scan (eBay integration → category audit) or wait for the nightly one.'; return; }
+    box.innerHTML = list.map(s => {
+      const conf = s.confidence != null ? Math.round(parseFloat(s.confidence) * 100) + '%' : '—';
+      let what = '';
+      if (s.kind === 'category') {
+        what = 'Move to <strong>' + escapeHtml(s.payload?.categoryName || s.payload?.categoryId || '?') + '</strong>'
+          + (s.payload?.categoryName ? ' <span style="color:var(--ink-soft)">(' + escapeHtml(s.payload?.categoryId || '') + ')</span>' : '')
+          + (s.context?.current?.name ? ' <span style="color:var(--ink-soft)">— currently ' + escapeHtml(s.context.current.name) + '</span>' : '');
+      } else if (s.kind === 'specifics') {
+        what = 'Fill specifics: ' + escapeHtml((s.payload?.specifics || []).map(x => x.name + ': ' + x.value).join(' · '));
+      } else what = escapeHtml(s.kind);
+      const err = s.applied_result?.error ? '<div style="color:var(--red);font-size:11px">Last apply failed: ' + escapeHtml(s.applied_result.error) + '</div>' : '';
+      return '<div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px" id="ai-sug-' + s.id + '">'
+        + '<div style="font-weight:600;color:var(--ink)">' + escapeHtml(s.title || s.ebay_item_id) + ' <span style="font-weight:400;color:var(--ink-soft);font-size:11px">· item ' + escapeHtml(s.ebay_item_id || '') + '</span></div>'
+        + '<div style="margin:4px 0">' + what + '</div>'
+        + '<div style="font-size:11px;color:var(--ink-soft)">🤖 ' + conf + (s.reason ? ' — ' + escapeHtml(s.reason) : '') + '</div>' + err
+        + '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'
+        + '<button class="btn btn-primary btn-sm" onclick="aiApprove(' + s.id + ', this)">✓ Approve &amp; apply</button>'
+        + (s.kind === 'category' ? '<button class="btn btn-outline btn-sm" onclick="aiApproveEdited(' + s.id + ')">✎ Different category…</button>' : '')
+        + '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="aiReject(' + s.id + ', this)">✗ Reject</button>'
+        + '</div></div>';
+    }).join('');
+  } catch (e) { box.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
+}
+async function aiApprove(id, btn, payload) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+  try {
+    await Api.post('/api/ai/suggestions/' + id + '/approve', payload ? { payload } : {});
+    toast('Applied to the live listing ✓ (and recorded so the AI learns)', 'success');
+    const card = el('ai-sug-' + id); if (card) card.remove();
+    const pc = el('ai-pending-count'); if (pc) pc.textContent = Math.max(0, (parseInt(pc.textContent) || 1) - 1);
+  } catch (e) {
+    toast('Apply failed: ' + (e.data?.message || e.message), 'error', 8000);
+    if (btn) { btn.disabled = false; btn.textContent = '✓ Approve & apply'; }
+  }
+}
+function aiApproveEdited(id) {
+  const s = (State._aiSuggestions || []).find(x => x.id === id);
+  const cur = s?.payload?.categoryId || '';
+  const entered = prompt('eBay category ID to apply instead (the correction is recorded so the AI learns from it):', cur);
+  if (!entered || !entered.trim()) return;
+  aiApprove(id, null, { categoryId: entered.trim() });
+}
+async function aiReject(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await Api.post('/api/ai/suggestions/' + id + '/reject', {});
+    const card = el('ai-sug-' + id); if (card) card.remove();
+    const pc = el('ai-pending-count'); if (pc) pc.textContent = Math.max(0, (parseInt(pc.textContent) || 1) - 1);
+    toast('Rejected — the AI will avoid suggesting this again', 'info');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
 }
 
 // One-click: publish every linked Shopify product to ALL sales channels.
