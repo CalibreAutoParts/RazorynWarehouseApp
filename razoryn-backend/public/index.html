@@ -6504,7 +6504,8 @@ function promptPrintLabels(product, reason, qtyHint) {
       <div class="field">
         <label>Pcs in box <span style="font-weight:400;color:var(--ink-soft)">— optional, for a master-box label</span></label>
         <input id="ppl-pcs" type="number" min="2" placeholder="e.g. 12">
-        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Overstock kept in one master box? Enter how many pieces are inside — ONE label with a big PCS count goes on the box instead of labelling every item (labels above becomes boxes to label, usually 1).</div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;margin-top:6px"><input type="checkbox" id="ppl-pcs-blank" onchange="if(this.checked)el('ppl-pcs').value=''"> ✍ Print the PCS box <strong>blank</strong> — write the count on with a marker later</label>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Overstock kept in one master box? Enter how many pieces are inside (or tick blank) — ONE label with a big PCS box goes on the box instead of labelling every item (labels above becomes boxes to label, usually 1).</div>
       </div>
       <div class="field">
         <label>Size</label>
@@ -6519,7 +6520,7 @@ function promptPrintLabels(product, reason, qtyHint) {
       { label: 'Skip', onClick: closeModal },
       { label: '🏷 Print labels', primary: true, onClick: () => {
         const pcsIn = parseInt(el('ppl-pcs')?.value);
-        const pcs = (isFinite(pcsIn) && pcsIn > 1) ? pcsIn : null;
+        const pcs = el('ppl-pcs-blank')?.checked ? 'blank' : ((isFinite(pcsIn) && pcsIn > 1) ? pcsIn : null);
         // A master-box label defaults to ONE label (the box), not one per unit —
         // unless the user changed the qty themselves.
         const qty = pcs && +el('ppl-qty').value === suggestedQty ? 1 : (+el('ppl-qty').value || 1);
@@ -6594,7 +6595,7 @@ function paintLabelsList() {
               const stockQty = p ? totalQty(p) : '?';
               return `
               <tr>
-                <td><div style="font-weight:500">${escapeHtml(it.title)}</div>${it.pcs > 1 ? '<div style="font-size:11px;color:var(--blue);font-weight:600">📦 master-box label · ' + it.pcs + ' pcs inside</div>' : ''}</td>
+                <td><div style="font-weight:500">${escapeHtml(it.title)}</div>${it.pcs === 'blank' ? '<div style="font-size:11px;color:var(--blue);font-weight:600">📦 master-box label · blank pcs box (write with marker)</div>' : (it.pcs > 1 ? '<div style="font-size:11px;color:var(--blue);font-weight:600">📦 master-box label · ' + it.pcs + ' pcs inside</div>' : '')}</td>
                 <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(it.sku)}</td>
                 <td><span class="pill ${stockQty>0?'green':'red'}" style="font-size:10px">${stockQty}</span></td>
                 <td class="num" style="white-space:nowrap">
@@ -6603,10 +6604,12 @@ function paintLabelsList() {
                   <button class="btn btn-ghost btn-sm" onclick="labelsQty(${i},1)">+</button>
                   <button class="btn btn-ghost btn-sm" onclick="labelsMatchStock(${i})" title="Set qty = current stock on hand" style="margin-left:6px">⚖️ Match</button>
                 </td>
-                <td class="num">
-                  <input type="number" min="2" placeholder="—" value="${it.pcs > 1 ? it.pcs : ''}"
+                <td class="num" style="white-space:nowrap">
+                  <input type="number" min="2" placeholder="—" value="${it.pcs > 1 ? it.pcs : ''}" ${it.pcs === 'blank' ? 'disabled' : ''}
                     onchange="labelsSetPcs(${i}, this.value)"
                     style="width:64px;text-align:center" title="Pieces inside the master box — the label prints a big PCS count so one label on the box covers them all.">
+                  <button class="btn btn-sm ${it.pcs === 'blank' ? 'btn-primary' : 'btn-ghost'}" onclick="labelsPcsBlank(${i})"
+                    title="Print the PCS box EMPTY — count the box later and write the number in with a marker.">✍ blank</button>
                 </td>
                 <td><button class="btn btn-ghost btn-sm" onclick="labelsRemove(${i})" style="color:var(--red)">🗑</button></td>
               </tr>
@@ -6614,7 +6617,7 @@ function paintLabelsList() {
           </tbody>
         </table>
       </div>
-      <div style="padding:8px 14px;font-size:11px;color:var(--ink-soft);border-top:1px solid var(--line-2)">💡 <strong>Pcs in box</strong>: for overstock or spares kept in one master box, count what's inside, enter it here and stick ONE label on the box instead of labelling every item. Qty is how many box labels to print (usually 1 per box).</div>
+      <div style="padding:8px 14px;font-size:11px;color:var(--ink-soft);border-top:1px solid var(--line-2)">💡 <strong>Pcs in box</strong>: for overstock or spares kept in one master box, count what's inside, enter it here and stick ONE label on the box instead of labelling every item. Or hit <strong>✍ blank</strong> to print an empty PCS box and write the count on with a marker. Qty is how many box labels to print (usually 1 per box).</div>
     </div>
   `;
 }
@@ -6626,6 +6629,14 @@ function labelsSetPcs(idx, val) {
   if (!it) return;
   const n = parseInt(val);
   it.pcs = (isFinite(n) && n > 1) ? n : null;
+  paintLabelsList();
+}
+// 'blank' = print the PCS box EMPTY so the count can be written on with a
+// marker after the box is filled/counted. Toggles off back to no pcs.
+function labelsPcsBlank(idx) {
+  const it = State.labels[idx];
+  if (!it) return;
+  it.pcs = it.pcs === 'blank' ? null : 'blank';
   paintLabelsList();
 }
 
@@ -6788,7 +6799,11 @@ function labelsPrint(itemsArg) {
   // Master-box PCS badge — printed when the label represents a whole box of
   // identical pieces (overstock / spares stored in the supplier's master box):
   // one label on the box, the count says how many are inside.
-  const pcsBlock = (it) => (it.pcs > 1 ? `<div class="pcs"><span class="pcs-n">${it.pcs}</span><span class="pcs-lbl">PCS</span></div>` : '');
+  // pcs === 'blank' prints the badge with an EMPTY write-in box, so the count
+  // can be added with a marker once the box is filled and counted.
+  const pcsBlock = (it) => it.pcs === 'blank'
+    ? `<div class="pcs"><span class="pcs-write"></span><span class="pcs-lbl">PCS</span></div>`
+    : (it.pcs > 1 ? `<div class="pcs"><span class="pcs-n">${it.pcs}</span><span class="pcs-lbl">PCS</span></div>` : '');
   // Identifier block: show the OEM PART NUMBER prominently (the shelf identity,
   // shared across every model the part fits) AND the SKU underneath when they
   // differ (for system matching).
@@ -6875,7 +6890,7 @@ function labelsPrint(itemsArg) {
     labelTemplate = (it, idx) => `
       <div class="label tall">
         <div class="title">${smallTitle(it)}</div>
-        ${it.pcs > 1 ? `<div class="pcs-sm">📦 ${it.pcs} PCS IN BOX</div>` : ''}
+        ${it.pcs === 'blank' ? `<div class="pcs-sm">📦 <span class="pcs-line"></span> PCS IN BOX</div>` : (it.pcs > 1 ? `<div class="pcs-sm">📦 ${it.pcs} PCS IN BOX</div>` : '')}
         ${idBlock(it)}
         <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
       </div>`;
@@ -6884,7 +6899,7 @@ function labelsPrint(itemsArg) {
     labelTemplate = (it, idx) => `
       <div class="label small">
         <div class="title">${smallTitle(it)}</div>
-        ${it.pcs > 1 ? `<div class="pcs-sm">📦 ${it.pcs} PCS IN BOX</div>` : ''}
+        ${it.pcs === 'blank' ? `<div class="pcs-sm">📦 <span class="pcs-line"></span> PCS IN BOX</div>` : (it.pcs > 1 ? `<div class="pcs-sm">📦 ${it.pcs} PCS IN BOX</div>` : '')}
         ${idBlock(it)}
         <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
       </div>`;
@@ -6967,6 +6982,10 @@ function labelsPrint(itemsArg) {
   }
   .label .pcs .pcs-n { font-size: 26pt; font-weight: 800; line-height: 1; letter-spacing: -0.02em; }
   .label .pcs .pcs-lbl { font-size: 12pt; font-weight: 800; letter-spacing: 0.08em; }
+  /* Blank write-in box: an empty frame the size of a big number, to fill in
+     with a marker after counting the box. */
+  .label .pcs .pcs-write { display: inline-block; width: 20mm; height: 10mm; border-bottom: 0.6mm solid #111; }
+  .label .pcs-sm .pcs-line { display: inline-block; width: 10mm; border-bottom: 0.4mm solid #111; height: 0.8em; vertical-align: bottom; }
   .label.large-portrait .pcs { align-self: center; margin: 0 auto 3mm; display: flex; justify-content: center; width: fit-content; }
   /* Small thermal labels: one bold line instead of a badge. */
   .label .pcs-sm { font-size: ${Math.max(6.5, (s.fontSku || 7))}pt; font-weight: 800; flex-shrink: 0; margin-top: 0.5mm; }
