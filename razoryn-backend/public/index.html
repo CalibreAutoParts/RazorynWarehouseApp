@@ -6502,6 +6502,11 @@ function promptPrintLabels(product, reason, qtyHint) {
         <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Current on-hand stock: ${stockQty}</div>
       </div>
       <div class="field">
+        <label>Pcs in box <span style="font-weight:400;color:var(--ink-soft)">— optional, for a master-box label</span></label>
+        <input id="ppl-pcs" type="number" min="2" placeholder="e.g. 12">
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Overstock kept in one master box? Enter how many pieces are inside — ONE label with a big PCS count goes on the box instead of labelling every item (labels above becomes boxes to label, usually 1).</div>
+      </div>
+      <div class="field">
         <label>Size</label>
         <select id="ppl-size">
           <option value="100x150">Large 4×6 inch (recommended)</option>
@@ -6513,17 +6518,21 @@ function promptPrintLabels(product, reason, qtyHint) {
     actions: [
       { label: 'Skip', onClick: closeModal },
       { label: '🏷 Print labels', primary: true, onClick: () => {
-        const qty = +el('ppl-qty').value || 1;
+        const pcsIn = parseInt(el('ppl-pcs')?.value);
+        const pcs = (isFinite(pcsIn) && pcsIn > 1) ? pcsIn : null;
+        // A master-box label defaults to ONE label (the box), not one per unit —
+        // unless the user changed the qty themselves.
+        const qty = pcs && +el('ppl-qty').value === suggestedQty ? 1 : (+el('ppl-qty').value || 1);
         const size = el('ppl-size').value;
         // Queue the product and route to Labels. A shared-pool member labels as
         // the pool MASTER — one physical part, one shelf label (all fitments on it).
         const lp = (typeof poolMaster === 'function' ? poolMaster(product) : product) || product;
         State.labels = State.labels || [];
         const existing = State.labels.find(l => l.productId === lp.id);
-        if (existing) existing.qty += qty;
+        if (existing) { existing.qty += qty; if (pcs) existing.pcs = pcs; }
         else State.labels.push({
           productId: lp.id, sku: lp.sku, title: lp.title,
-          barcode: lp.barcode || lp.sku, partNumber: lp.partNumber || lp.sku, qty,
+          barcode: lp.barcode || lp.sku, partNumber: lp.partNumber || lp.sku, qty, pcs,
         });
         closeModal();
         routeTo('labels');
@@ -6578,14 +6587,14 @@ function paintLabelsList() {
       <div class="card-head"><h3>Queue (${items.length} item${items.length === 1 ? '' : 's'} · ${total} label${total === 1 ? '' : 's'})</h3></div>
       <div style="overflow-x:auto">
         <table class="table">
-          <thead><tr><th style="width:45%">Item</th><th>SKU</th><th>In stock</th><th class="num">Qty</th><th></th></tr></thead>
+          <thead><tr><th style="width:40%">Item</th><th>SKU</th><th>In stock</th><th class="num">Qty</th><th class="num" title="Master-box label: how many pieces are inside the box this label goes on. Leave blank for a normal per-item label.">Pcs in box</th><th></th></tr></thead>
           <tbody>
             ${items.map((it, i) => {
               const p = State.products.find(x => x.id === it.productId);
               const stockQty = p ? totalQty(p) : '?';
               return `
               <tr>
-                <td><div style="font-weight:500">${escapeHtml(it.title)}</div></td>
+                <td><div style="font-weight:500">${escapeHtml(it.title)}</div>${it.pcs > 1 ? '<div style="font-size:11px;color:var(--blue);font-weight:600">📦 master-box label · ' + it.pcs + ' pcs inside</div>' : ''}</td>
                 <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(it.sku)}</td>
                 <td><span class="pill ${stockQty>0?'green':'red'}" style="font-size:10px">${stockQty}</span></td>
                 <td class="num" style="white-space:nowrap">
@@ -6594,14 +6603,30 @@ function paintLabelsList() {
                   <button class="btn btn-ghost btn-sm" onclick="labelsQty(${i},1)">+</button>
                   <button class="btn btn-ghost btn-sm" onclick="labelsMatchStock(${i})" title="Set qty = current stock on hand" style="margin-left:6px">⚖️ Match</button>
                 </td>
+                <td class="num">
+                  <input type="number" min="2" placeholder="—" value="${it.pcs > 1 ? it.pcs : ''}"
+                    onchange="labelsSetPcs(${i}, this.value)"
+                    style="width:64px;text-align:center" title="Pieces inside the master box — the label prints a big PCS count so one label on the box covers them all.">
+                </td>
                 <td><button class="btn btn-ghost btn-sm" onclick="labelsRemove(${i})" style="color:var(--red)">🗑</button></td>
               </tr>
             `}).join('')}
           </tbody>
         </table>
       </div>
+      <div style="padding:8px 14px;font-size:11px;color:var(--ink-soft);border-top:1px solid var(--line-2)">💡 <strong>Pcs in box</strong>: for overstock or spares kept in one master box, count what's inside, enter it here and stick ONE label on the box instead of labelling every item. Qty is how many box labels to print (usually 1 per box).</div>
     </div>
   `;
+}
+
+// Master-box piece count: >1 turns the line into ONE label for the whole box
+// (with a big PCS count printed); blank/1 = normal per-item label.
+function labelsSetPcs(idx, val) {
+  const it = State.labels[idx];
+  if (!it) return;
+  const n = parseInt(val);
+  it.pcs = (isFinite(n) && n > 1) ? n : null;
+  paintLabelsList();
 }
 
 // Ordered most-specific → least, so "bonnet hinge" wins over "bonnet" and
@@ -6760,6 +6785,10 @@ function labelsPrint(itemsArg) {
   // Fallback wordmark text (shown only if the logo image fails to load).
   const wordmark = escapeHtml(brandName);
 
+  // Master-box PCS badge — printed when the label represents a whole box of
+  // identical pieces (overstock / spares stored in the supplier's master box):
+  // one label on the box, the count says how many are inside.
+  const pcsBlock = (it) => (it.pcs > 1 ? `<div class="pcs"><span class="pcs-n">${it.pcs}</span><span class="pcs-lbl">PCS</span></div>` : '');
   // Identifier block: show the OEM PART NUMBER prominently (the shelf identity,
   // shared across every model the part fits) AND the SKU underneath when they
   // differ (for system matching).
@@ -6814,6 +6843,7 @@ function labelsPrint(itemsArg) {
         <div class="header">
           <img src="${logoUrl}" class="logo" alt="${escapeAttr(brandName)}" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
           <div class="logo-text" style="display:none">${wordmark}</div>
+          ${pcsBlock(it)}
         </div>
         <div class="body">
           ${bodyBlock(it)}
@@ -6831,6 +6861,7 @@ function labelsPrint(itemsArg) {
           <img src="${logoUrl}" class="logo" alt="${escapeAttr(brandName)}" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
           <div class="logo-text" style="display:none">${wordmark}</div>
         </div>
+        ${pcsBlock(it)}
         <div class="body">
           ${bodyBlock(it)}
           ${idBlock(it)}
@@ -6844,6 +6875,7 @@ function labelsPrint(itemsArg) {
     labelTemplate = (it, idx) => `
       <div class="label tall">
         <div class="title">${smallTitle(it)}</div>
+        ${it.pcs > 1 ? `<div class="pcs-sm">📦 ${it.pcs} PCS IN BOX</div>` : ''}
         ${idBlock(it)}
         <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
       </div>`;
@@ -6852,6 +6884,7 @@ function labelsPrint(itemsArg) {
     labelTemplate = (it, idx) => `
       <div class="label small">
         <div class="title">${smallTitle(it)}</div>
+        ${it.pcs > 1 ? `<div class="pcs-sm">📦 ${it.pcs} PCS IN BOX</div>` : ''}
         ${idBlock(it)}
         <svg class="bc" id="bc-${idx}" data-code="${escapeAttr(it.barcode || it.sku || '')}"></svg>
       </div>`;
@@ -6924,6 +6957,19 @@ function labelsPrint(itemsArg) {
     overflow: hidden; flex: 0 1 auto; min-height: 0; }
   .label.tall .pn { font-size: ${s.fontSku}pt; font-weight: 700; font-family: ui-monospace, Menlo, monospace; color: #111; margin-top: 1mm; flex-shrink: 0; }
   .label.tall .bc { width: 100%; height: ${s.barH}px; display: block; margin-top: 1mm; flex-shrink: 0; }
+
+  /* Master-box PCS badge — big, bordered, impossible to miss: this label sits
+     on a box of N identical pieces instead of one label per item. */
+  .label .pcs {
+    display: inline-flex; align-items: baseline; gap: 2mm;
+    border: 1.2mm solid #111; border-radius: 2mm; padding: 1.5mm 4mm;
+    background: #fff; align-self: flex-start; flex-shrink: 0;
+  }
+  .label .pcs .pcs-n { font-size: 26pt; font-weight: 800; line-height: 1; letter-spacing: -0.02em; }
+  .label .pcs .pcs-lbl { font-size: 12pt; font-weight: 800; letter-spacing: 0.08em; }
+  .label.large-portrait .pcs { align-self: center; margin: 0 auto 3mm; display: flex; justify-content: center; width: fit-content; }
+  /* Small thermal labels: one bold line instead of a badge. */
+  .label .pcs-sm { font-size: ${Math.max(6.5, (s.fontSku || 7))}pt; font-weight: 800; flex-shrink: 0; margin-top: 0.5mm; }
 
   /* Composite title block (internal label): item NAME big, fitments + box
      size smaller underneath. Children size in em so the auto-fitter scales
