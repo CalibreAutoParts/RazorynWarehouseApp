@@ -144,7 +144,7 @@ function extractJson(text) {
   return null;
 }
 
-async function callClaude({ kind, system, user, model, maxTokens = 700 }) {
+async function callClaude({ kind, system, user, model, maxTokens = 700, images }) {
   if (!isConfigured()) { const e = new Error('ai_not_configured'); e.code = 'not_configured'; throw e; }
   await ensureTables();
   const cfg = await getAiConfig();
@@ -153,12 +153,23 @@ async function callClaude({ kind, system, user, model, maxTokens = 700 }) {
     const e = new Error('daily_token_budget_reached'); e.code = 'budget'; throw e;
   }
   const useModel = model || cfg.bulkModel || DEFAULT_BULK_MODEL;
+  // Vision: image URLs become image content blocks ahead of the text (the
+  // listing-audit scan sends the product photo so the model can check the
+  // part in the picture against the part number and title).
+  let content = user;
+  const imgs = (images || []).filter(u => /^https:\/\//.test(String(u))).slice(0, 3);
+  if (imgs.length) {
+    content = [
+      ...imgs.map(u => ({ type: 'image', source: { type: 'url', url: u } })),
+      { type: 'text', text: user },
+    ];
+  }
   try {
     const r = await axios.post(API_URL, {
       model: useModel,
       max_tokens: maxTokens,
       system: system || undefined,
-      messages: [{ role: 'user', content: user }],
+      messages: [{ role: 'user', content }],
     }, {
       headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': API_VERSION, 'content-type': 'application/json' },
       timeout: 90000,
@@ -320,6 +331,93 @@ Reply with ONLY: {"action":"keep"|"set","price":<number|null>,"confidence":<0..1
   };
 }
 
+// ── Deep listing audit — one multimodal call per listing ───────────────────
+// Four jobs at once (so each listing costs ONE call):
+//   1. Part-number truth check against the PHOTO and the title — and when
+//      something's off, say WHERE the mistake is: title, photo or part number.
+//   2. Superseded / regional / reference part numbers (e.g. Nissan region
+//      codes: same part + fitment, different code per market).
+//   3. eBay item specifics per the house rules (origin China, house brand,
+//      position, PN + superseded + reference, "Fit for" Make/Model as two
+//      separate specifics, vehicle model code like BC3 / AS33, trim when
+//      derivable from the part number).
+//   4. Shopify SEO: title/meta description within limits + search tags.
+async function listingAudit(ctx) {
+  const cfg = await getAiConfig();
+  const system = baseSystem(cfg.guidance) + await fewShotBlock('listing_opt', 5);
+  const hasPhoto = !!(ctx.imageUrls && ctx.imageUrls.length);
+  const user = `Audit and optimise this car-part listing.${hasPhoto ? ' The listing photo(s) are attached — LOOK at them.' : ' (No photo available — skip photo checks.)'}
+
+Listing: ${JSON.stringify({ title: ctx.title, sku: ctx.sku, partNumber: ctx.partNumber, knownAlternates: ctx.altNumbers || [], position: ctx.position || null, currentEbaySpecifics: (ctx.ebaySpecifics || []).slice(0, 25) })}
+House brand: "${ctx.brandName}"
+
+TASKS — reply with ONLY this JSON (omit nothing, use nulls/empty arrays where unknown):
+{
+ "partNumberCheck": {
+   "verdict": "ok"|"mismatch"|"unsure",
+   "faultIn": "title"|"photo"|"part_number"|null,   // where the mistake is when things disagree
+   "correctPartNumber": "..."|null,                  // only when clearly derivable
+   "confidence": <0..1>, "reason": "<short>"
+ },
+ "altNumbers": {                                     // ONLY numbers you genuinely know — never invent
+   "superseded": ["..."],                            // newer numbers replacing this one
+   "regional": ["..."],                              // region-specific codes for the SAME part+fitment
+   "reference": ["..."],                             // other OE/OEM cross-reference numbers
+   "confidence": <0..1>, "reason": "<short>"
+ },
+ "ebaySpecifics": [{"name":"...","value":"..."}],    // the full recommended set per the rules below
+ "shopify": {
+   "seoTitle": "<max 60 chars, keyword-led>",
+   "seoDescription": "<max 155 chars, readable, includes part number + fitment>",
+   "tags": ["..."]                                   // 5-12 search tags (make, model, part type, PN, codes)
+ },
+ "confidence": <0..1>, "reason": "<one short sentence>"
+}
+
+RULES for partNumberCheck: the part in the PHOTO must be the part TYPE the title says, and the part number must belong to that part and vehicle. If the photo shows a different part than the title → faultIn "photo" or "title" (whichever is more likely wrong given the part number). If title and photo agree but the number belongs to something else → faultIn "part_number".
+
+RULES for ebaySpecifics:
+- "Country/Region of Manufacture": "China" unless the data clearly says otherwise.
+- "Brand": "${ctx.brandName}".
+- "Placement on Vehicle": from position/title (e.g. "Front, Left").
+- "Manufacturer Part Number": the part number. "Superseded Part Number" and "Reference OE/OEM Number": from altNumbers + known alternates (comma-joined).
+- "Make": value MUST start with "Fit for " (e.g. "Fit for Hyundai"), and "Model": value MUST start with "Fit for " (e.g. "Fit for i20") — TWO separate specifics.
+- "Vehicle Model Code": the chassis/generation code when known (e.g. Hyundai i20 new shape = "BC3", MG HS new shape = "AS33") — key for telling similar parts apart.
+- "Trim": ONLY when the part number pins it to a specific trim level.
+- Keep every existing specific that is still correct; correct wrong ones; values max 65 chars.`;
+  const out = await callClaude({ kind: 'listing_opt', system, user, maxTokens: 1100, images: ctx.imageUrls });
+  const v = out.json;
+  if (!v) return null;
+  const clamp = (x) => Math.max(0, Math.min(1, +x || 0));
+  const strArr = (a) => (Array.isArray(a) ? a.map(x => String(x).trim()).filter(Boolean).slice(0, 12) : []);
+  const pn = v.partNumberCheck || {};
+  const alt = v.altNumbers || {};
+  const specifics = (Array.isArray(v.ebaySpecifics) ? v.ebaySpecifics : [])
+    .filter(s => s && s.name && s.value != null && String(s.value).trim() !== '')
+    .map(s => ({ name: String(s.name).slice(0, 65), value: String(s.value).slice(0, 65) }))
+    .slice(0, 30);
+  const shop = v.shopify || {};
+  return {
+    partNumberCheck: {
+      verdict: ['ok', 'mismatch', 'unsure'].includes(pn.verdict) ? pn.verdict : 'unsure',
+      faultIn: ['title', 'photo', 'part_number'].includes(pn.faultIn) ? pn.faultIn : null,
+      correctPartNumber: pn.correctPartNumber ? String(pn.correctPartNumber).trim().slice(0, 60) : null,
+      confidence: clamp(pn.confidence), reason: String(pn.reason || '').slice(0, 300),
+    },
+    altNumbers: {
+      superseded: strArr(alt.superseded), regional: strArr(alt.regional), reference: strArr(alt.reference),
+      confidence: clamp(alt.confidence), reason: String(alt.reason || '').slice(0, 300),
+    },
+    ebaySpecifics: specifics,
+    shopify: {
+      seoTitle: shop.seoTitle ? String(shop.seoTitle).slice(0, 70) : null,
+      seoDescription: shop.seoDescription ? String(shop.seoDescription).slice(0, 170) : null,
+      tags: strArr(shop.tags),
+    },
+    confidence: clamp(v.confidence), reason: String(v.reason || '').slice(0, 300),
+  };
+}
+
 // ── Learning: distil recent feedback into standing rules ──────────────────
 // Reads the recent feedback log and asks the smart model to write/refresh the
 // auto-learned section of the guidance (the hand-written part is untouched).
@@ -385,6 +483,7 @@ module.exports = {
   fillSpecifics,
   partNumberBatch,
   pricingVerdict,
+  listingAudit,
   learnFromFeedback,
   recordFeedback,
   queueSuggestion,

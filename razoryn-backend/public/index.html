@@ -22440,6 +22440,8 @@ const AI_KIND_LABELS = {
   specifics: { name: 'Item specifics', icon: '📋' },
   part_number: { name: 'Part numbers', icon: '🔢' },
   pricing: { name: 'Pricing & margins', icon: '💷' },
+  alt_numbers: { name: 'Superseded & alternative numbers', icon: '🔁' },
+  listing_opt: { name: 'Listing optimisation (eBay + Shopify)', icon: '🚀' },
 };
 function aiSuggestionCard(s) {
   const conf = s.confidence != null ? Math.round(parseFloat(s.confidence) * 100) + '%' : '—';
@@ -22453,15 +22455,35 @@ function aiSuggestionCard(s) {
     what = 'Fill specifics: ' + escapeHtml((s.payload?.specifics || []).map(x => x.name + ': ' + x.value).join(' · '));
   } else if (s.kind === 'part_number') {
     const cur = s.payload?.currentPartNumber;
+    const fault = s.payload?.faultIn ? ' <span style="color:var(--red);font-weight:600">— mistake looks to be in the ' + escapeHtml(String(s.payload.faultIn).replace('_', ' ')) + '</span>' : '';
     if (s.payload?.partNumber) {
       what = (s.payload?.issue === 'mismatch' ? '⚠ Part number looks wrong — change to ' : 'Set part number to ')
         + '<strong>' + escapeHtml(s.payload.partNumber) + '</strong>'
-        + (cur ? ' <span style="color:var(--ink-soft)">(currently ' + escapeHtml(cur) + ')</span>' : ' <span style="color:var(--ink-soft)">(currently blank — found in SKU ' + escapeHtml(s.payload?.sku || '') + ')</span>');
+        + (cur ? ' <span style="color:var(--ink-soft)">(currently ' + escapeHtml(cur) + ')</span>' : ' <span style="color:var(--ink-soft)">(currently blank — found in SKU ' + escapeHtml(s.payload?.sku || '') + ')</span>')
+        + fault;
     } else {
-      what = '⚠ Part number <strong>' + escapeHtml(cur || '—') + '</strong> doesn’t look right for this item — needs a human check';
+      what = '⚠ Part number <strong>' + escapeHtml(cur || '—') + '</strong> doesn’t look right for this item' + fault + ' — needs a human check';
       approveLabel = '✓ Mark reviewed';
     }
     editBtn = '<button class="btn btn-outline btn-sm" onclick="aiApproveEdited(' + s.id + ')">✎ Set part number…</button>';
+  } else if (s.kind === 'alt_numbers') {
+    const bits = [];
+    if ((s.payload?.superseded || []).length) bits.push('<strong>Superseded:</strong> ' + escapeHtml(s.payload.superseded.join(', ')));
+    if ((s.payload?.regional || []).length) bits.push('<strong>Regional:</strong> ' + escapeHtml(s.payload.regional.join(', ')));
+    if ((s.payload?.reference || []).length) bits.push('<strong>Reference:</strong> ' + escapeHtml(s.payload.reference.join(', ')));
+    what = '🔁 Add alternative numbers — ' + bits.join(' · ') + '<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Applies to the warehouse alternates, the Shopify alternate-numbers field, and the eBay Superseded / Reference specifics.</div>';
+  } else if (s.kind === 'listing_opt') {
+    const specs = s.payload?.ebaySpecifics || [];
+    const shop = s.payload?.shopify || {};
+    const parts = [];
+    if (specs.length) {
+      const preview = specs.slice(0, 6).map(x => escapeHtml(x.name) + ': ' + escapeHtml(x.value)).join(' · ');
+      parts.push('<div><strong>eBay specifics (' + specs.length + '):</strong> ' + preview + (specs.length > 6 ? ' <span style="color:var(--ink-soft)">+' + (specs.length - 6) + ' more</span>' : '') + '</div>');
+    }
+    if (shop.seoTitle) parts.push('<div><strong>Shopify SEO title:</strong> ' + escapeHtml(shop.seoTitle) + '</div>');
+    if (shop.seoDescription) parts.push('<div><strong>Meta description:</strong> ' + escapeHtml(shop.seoDescription) + '</div>');
+    if ((shop.tags || []).length) parts.push('<div><strong>Tags:</strong> ' + escapeHtml(shop.tags.join(', ')) + '</div>');
+    what = '🚀 Optimise listing:<div style="font-size:12px;margin-top:3px;display:grid;gap:2px">' + parts.join('') + '</div>';
   } else if (s.kind === 'pricing') {
     const cur = s.payload?.currentPrice, np = s.payload?.price, fl = s.payload?.floor;
     const dir = np > cur ? '↑' : '↓';
@@ -22583,6 +22605,13 @@ function renderAiPage() {
               <button class="btn btn-primary btn-sm" onclick="aiStartScan('pricing', this)">Run scan</button>
               <div id="ai-scan-pricing" style="font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
             </div>
+            <div style="border:1px solid var(--line);border-radius:8px;padding:12px">
+              <div style="font-weight:600;margin-bottom:4px">🚀 Deep listing audit <span style="font-weight:400;font-size:11px;color:var(--ink-soft)">(looks at photos)</span></div>
+              <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Per listing: part number vs photo vs title (says where the mistake is), superseded/regional numbers, eBay specifics (Fit-for Make/Model, model code, trim, origin, brand), Shopify SEO + tags. Only checks listings changed since their last audit.</div>
+              <button class="btn btn-primary btn-sm" onclick="aiStartScan('listing', this)">Run scan</button>
+              <a href="#" onclick="aiStartScanAll(event)" style="font-size:11px;margin-left:8px">re-check everything</a>
+              <div id="ai-scan-listing" style="font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -22635,31 +22664,38 @@ function aiScanLine(s, noun) {
 async function aiPagePollTick() {
   if (State.page !== 'ai') { clearInterval(_aiPagePoll); return; }
   try {
-    const [cat, pn, pr] = await Promise.all([
+    const [cat, pn, pr, ls] = await Promise.all([
       Api.get('/api/listings/category-audit/status?slim=1').catch(() => null),
       Api.get('/api/ai/scan/part-numbers/status').catch(() => null),
       Api.get('/api/ai/scan/pricing/status').catch(() => null),
+      Api.get('/api/ai/scan/listing-opt/status').catch(() => null),
     ]);
     if (el('ai-scan-category') && cat) el('ai-scan-category').innerHTML = aiScanLine({ ...cat, autoApplied: cat.ai?.autoApplied }, 'listings');
     if (el('ai-scan-pn') && pn) el('ai-scan-pn').innerHTML = aiScanLine(pn, 'products');
     if (el('ai-scan-pricing') && pr) el('ai-scan-pricing').innerHTML = aiScanLine({ ...pr, flagged: pr.flagged }, 'products');
+    if (el('ai-scan-listing') && ls) el('ai-scan-listing').innerHTML = aiScanLine(ls, 'listings');
     // A finished scan may have queued new suggestions — keep the list fresh
     // without stomping on it while the user is mid-review.
-    const anyJustFinished = [cat, pn, pr].some(s => s && s.finishedAt && Date.now() - s.finishedAt < 6000);
+    const anyJustFinished = [cat, pn, pr, ls].some(s => s && s.finishedAt && Date.now() - s.finishedAt < 6000);
     if (anyJustFinished && !document.querySelector('#modal-overlay.open')) loadAiSuggestions();
   } catch (_) {}
 }
-async function aiStartScan(which, btn) {
-  const urls = { category: '/api/listings/category-audit', pn: '/api/ai/scan/part-numbers', pricing: '/api/ai/scan/pricing' };
+async function aiStartScan(which, btn, body) {
+  const urls = { category: '/api/listings/category-audit', pn: '/api/ai/scan/part-numbers', pricing: '/api/ai/scan/pricing', listing: '/api/ai/scan/listing-opt' };
   if (btn) btn.disabled = true;
   try {
-    const r = await Api.post(urls[which], {});
+    const r = await Api.post(urls[which], body || {});
     if (r.alreadyRunning) toast('That scan is already running.', 'info');
     else toast('Scan started — ' + (r.total || 0) + ' to check. You can leave this page.', 'success');
   } catch (e) {
     toast(e.data?.message || e.data?.error || e.message, 'error', 7000);
   }
   if (btn) setTimeout(() => { btn.disabled = false; }, 2000);
+}
+function aiStartScanAll(ev) {
+  if (ev) ev.preventDefault();
+  if (!confirm('Re-audit EVERY listing (photos included), not just ones changed since their last check? This is the expensive pass — the daily token budget still applies.')) return;
+  aiStartScan('listing', null, { all: true });
 }
 async function loadAiHistory() {
   const box = el('ai-history');
