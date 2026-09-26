@@ -483,6 +483,12 @@ cron.schedule('20 * * * *', async () => {
       const pr = await aiRoutes.runPricingScan('nightly');
       console.log('[cron ai-audit] pricing scan:', pr.started ? `started (${pr.total})` : (pr.error || 'already running'));
     } catch (e) { console.warn('[cron ai-audit] pricing scan failed:', e.message); }
+    // Deep listing audit is incremental (only listings changed since their
+    // last check), so the nightly pass stays cheap once the backlog is done.
+    try {
+      const ls = await aiRoutes.runListingOptScan('nightly');
+      console.log('[cron ai-audit] listing audit:', ls.started ? `started (${ls.total})` : (ls.error || 'already running'));
+    } catch (e) { console.warn('[cron ai-audit] listing audit failed:', e.message); }
   } catch (e) { console.error('[cron ai-audit] failed:', e.message); }
 });
 console.log('[boot] nightly AI listing audit armed (fires only when enabled in Settings)');

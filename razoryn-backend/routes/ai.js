@@ -87,6 +87,30 @@ async function applyPartNumber(productId, partNumber) {
   return { ok: true, partNumber };
 }
 
+// Merge extra specifics into a live listing's FULL current set (ReviseItem
+// replaces specifics wholesale, so a partial send would wipe the rest).
+async function mergeIntoLiveSpecifics(itemId, storeCode, addSpecifics) {
+  const det = await ebay.getItemDetails(itemId, storeCode);
+  const byName = new Map();
+  for (const sp of (det.specifics || [])) {
+    const val = Array.isArray(sp.values) ? sp.values.join(', ') : (sp.value || '');
+    if (sp.name && val) byName.set(sp.name.toLowerCase(), { name: sp.name, value: val });
+  }
+  for (const sp of addSpecifics) if (sp && sp.name && sp.value) byName.set(String(sp.name).toLowerCase(), { name: String(sp.name), value: String(sp.value) });
+  const full = [...byName.values()];
+  const r = await ebay.reviseItem(itemId, { itemSpecifics: full }, storeCode);
+  return { ok: true, sent: full.length, warnings: r.warnings };
+}
+
+// eBay listings linked to a product (via its Shopify product id).
+async function ebayLinksForProduct(productId) {
+  const pr = await query(`SELECT shopify_product_id FROM products WHERE id = $1`, [productId]);
+  const sid = pr.rows[0]?.shopify_product_id;
+  if (!sid) return [];
+  const { rows } = await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [String(sid)]);
+  return rows;
+}
+
 // Push a new eBay (anchor) price to every channel — same behaviour as the
 // bulk-price tool: eBay revised on every linked listing, Shopify derived via
 // the configured % (skipped when the product's price is locked), warehouse
@@ -166,6 +190,83 @@ async function applySuggestion(s, payloadOverride) {
     const floor = parseFloat((s.payload || {}).floor);
     if (isFinite(floor) && floor > 0 && price < floor) throw new Error(`£${price.toFixed(2)} is below the cost floor (£${floor.toFixed(2)})`);
     return await applyPriceToProduct(s.product_id, price);
+  }
+  if (s.kind === 'alt_numbers') {
+    // Superseded / regional / reference numbers → warehouse alternates,
+    // Shopify alternate-numbers metafield, and eBay cross-reference specifics.
+    if (!s.product_id) throw new Error('suggestion has no linked product');
+    const superseded = Array.isArray(payload.superseded) ? payload.superseded : [];
+    const regional = Array.isArray(payload.regional) ? payload.regional : [];
+    const reference = Array.isArray(payload.reference) ? payload.reference : [];
+    const all = [...new Set([...superseded, ...regional, ...reference].map(x => String(x).trim()).filter(Boolean))];
+    if (!all.length) throw new Error('no numbers in suggestion');
+    const out = { ok: true, added: 0, shopify: null, ebay: [] };
+    for (const code of all) {
+      try {
+        const r = await query(
+          `INSERT INTO product_part_numbers (product_id, code) VALUES ($1, $2)
+           ON CONFLICT (product_id, upper(code)) DO NOTHING RETURNING id`, [s.product_id, code]);
+        if (r.rows[0]) out.added++;
+      } catch (_) {}
+    }
+    try {
+      const shopify = require('../services/shopify');
+      const pr = await query(`SELECT shopify_product_id FROM products WHERE id = $1`, [s.product_id]);
+      const sid = pr.rows[0]?.shopify_product_id;
+      if (sid && shopify.isConfigured()) {
+        const { rows } = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [s.product_id]);
+        await shopify.updateProduct(sid, { metafields: [{ namespace: 'custom', key: 'alternate_part_numbers', type: 'single_line_text_field', value: rows.map(r => r.code).join(', ') }] });
+        out.shopify = 'ok';
+      }
+    } catch (e) { out.shopify = 'error: ' + e.message; }
+    const specifics = [];
+    if (superseded.length) specifics.push({ name: 'Superseded Part Number', value: superseded.join(', ').slice(0, 65) });
+    const refs = [...new Set([...regional, ...reference])];
+    if (refs.length) specifics.push({ name: 'Reference OE/OEM Number', value: refs.join(', ').slice(0, 65) });
+    if (specifics.length) {
+      for (const l of await ebayLinksForProduct(s.product_id)) {
+        try { const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, specifics); out.ebay.push({ itemId: l.ebay_item_id, ok: true, sent: r.sent }); }
+        catch (e) { out.ebay.push({ itemId: l.ebay_item_id, error: e.message }); }
+      }
+    }
+    return out;
+  }
+  if (s.kind === 'listing_opt') {
+    // eBay specifics + Shopify SEO/tags in one apply.
+    if (!s.product_id) throw new Error('suggestion has no linked product');
+    const out = { ok: true, ebay: [], shopify: {} };
+    const specifics = Array.isArray(payload.ebaySpecifics) ? payload.ebaySpecifics.filter(x => x && x.name && x.value) : [];
+    if (specifics.length) {
+      for (const l of await ebayLinksForProduct(s.product_id)) {
+        try { const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, specifics); out.ebay.push({ itemId: l.ebay_item_id, ok: true, sent: r.sent }); }
+        catch (e) { out.ebay.push({ itemId: l.ebay_item_id, error: e.message }); }
+      }
+      // Persist as the product's best-known specifics set for future edits.
+      try {
+        const pr = await query(`SELECT ebay_item_specifics FROM products WHERE id = $1`, [s.product_id]);
+        const cur = Array.isArray(pr.rows[0]?.ebay_item_specifics) ? pr.rows[0].ebay_item_specifics : [];
+        const byName = new Map(cur.filter(x => x && x.name).map(x => [x.name.toLowerCase(), x]));
+        for (const sp of specifics) byName.set(sp.name.toLowerCase(), { name: sp.name, value: sp.value });
+        await query(`UPDATE products SET ebay_item_specifics = $1::jsonb WHERE id = $2`, [JSON.stringify([...byName.values()]), s.product_id]);
+      } catch (_) {}
+    }
+    const shop = payload.shopify || {};
+    try {
+      const shopify = require('../services/shopify');
+      const pr = await query(`SELECT shopify_product_id FROM products WHERE id = $1`, [s.product_id]);
+      const sid = pr.rows[0]?.shopify_product_id;
+      if (sid && shopify.isConfigured()) {
+        if (shop.seoTitle || shop.seoDescription) {
+          await shopify.applyProductSeo(sid, { seoTitle: shop.seoTitle || undefined, seoDescription: shop.seoDescription || undefined });
+          out.shopify.seo = 'ok';
+        }
+        if (Array.isArray(shop.tags) && shop.tags.length) {
+          await shopify.updateProduct(sid, { tags: shop.tags.join(', ') });
+          out.shopify.tags = 'ok';
+        }
+      } else out.shopify.skipped = sid ? 'not_configured' : 'no_shopify_product';
+    } catch (e) { out.shopify.error = e.message; }
+    return out;
   }
   throw new Error('unknown suggestion kind: ' + s.kind);
 }
@@ -435,6 +536,143 @@ router.post('/scan/pricing/cancel', (req, res) => {
   res.json({ ok: true, state: _priceScan.state });
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// AI SCAN 3: deep listing audit — ONE multimodal Claude call per listing:
+//   • part number vs PHOTO vs title, with the fault located (title / photo /
+//     part number) when they disagree — those always go to review
+//   • superseded + regional + reference part numbers (same part, different
+//     market codes) → warehouse alternates, Shopify metafield, eBay specifics
+//   • eBay item specifics per the house rules (origin China, house brand,
+//     "Fit for" Make/Model, vehicle model code, trim from PN)
+//   • Shopify SEO title/description + tags
+// Incremental by default: only products never checked, or changed since
+// their last check (ai_listing_checked_at) — re-runs cost almost nothing.
+// ──────────────────────────────────────────────────────────────────────────
+let _listScan = { state: 'idle', total: 0, done: 0, flagged: 0, autoApplied: 0, queued: 0, errors: 0, budgetStopped: false, startedAt: null, finishedAt: null };
+
+async function runListingOptScan(trigger = 'manual', opts = {}) {
+  if (_listScan.state === 'running') return { ok: true, alreadyRunning: true };
+  if (!ai.isConfigured()) return { error: 'ai_not_configured' };
+  const cfg = await ai.getAiConfig();
+  if (!cfg.enabled) return { error: 'ai_disabled' };
+  try { await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ai_listing_checked_at TIMESTAMPTZ`); } catch (_) {}
+  const gate = opts.all ? '' : `AND (p.ai_listing_checked_at IS NULL OR p.updated_at > p.ai_listing_checked_at)`;
+  const { rows } = await query(`
+    SELECT p.id, p.sku, p.title, p.part_number, p.position, p.image_url, p.shopify_product_id, p.ebay_item_specifics
+      FROM products p
+     WHERE p.active = true ${gate}
+     ORDER BY p.id`);
+  if (!rows.length) return { error: 'nothing_to_check', message: 'Every listing has already been checked since it last changed. Use "re-check everything" to force a full pass.' };
+  // Alternate numbers per product, one query.
+  const altByProduct = new Map();
+  try {
+    const alt = await query(`SELECT product_id, code FROM product_part_numbers`);
+    for (const r of alt.rows) { if (!altByProduct.has(r.product_id)) altByProduct.set(r.product_id, []); altByProduct.get(r.product_id).push(r.code); }
+  } catch (_) {}
+  const brandName = (() => { try { return require('../lib/brand').name || 'RAZORYN'; } catch (_) { return 'RAZORYN'; } })();
+
+  _listScan = { state: 'running', total: rows.length, done: 0, flagged: 0, autoApplied: 0, queued: 0, errors: 0, budgetStopped: false, startedAt: Date.now(), finishedAt: null, trigger };
+  setImmediate(async () => {
+    const auto = cfg.mode === 'auto';
+    const thr = cfg.autoThreshold || 0.85;
+    for (const p of rows) {
+      if (_listScan.state !== 'running') break;
+      try {
+        const audit_ = await ai.listingAudit({
+          title: p.title, sku: p.sku, partNumber: p.part_number,
+          altNumbers: altByProduct.get(p.id) || [], position: p.position || null,
+          ebaySpecifics: Array.isArray(p.ebay_item_specifics) ? p.ebay_item_specifics : [],
+          imageUrls: p.image_url ? [p.image_url] : [],
+          brandName,
+        });
+        if (audit_) {
+          let flaggedThis = false;
+          // 1. Part-number truth check — mismatches ALWAYS go to review, with
+          //    where the mistake sits (title / photo / part number).
+          const pc = audit_.partNumberCheck;
+          if (pc && pc.verdict === 'mismatch') {
+            flaggedThis = true;
+            await ai.queueSuggestion({
+              kind: 'part_number', productId: p.id, title: p.title,
+              payload: { partNumber: pc.correctPartNumber, sku: p.sku, currentPartNumber: p.part_number || null, issue: 'mismatch', faultIn: pc.faultIn },
+              context: { sku: p.sku, title: p.title, partNumber: p.part_number || null, faultIn: pc.faultIn, source: 'listing_audit' },
+              confidence: pc.confidence,
+              reason: (pc.faultIn ? 'Mistake looks to be in the ' + pc.faultIn.replace('_', ' ') + ': ' : '') + pc.reason,
+            });
+            _listScan.queued++;
+          }
+          // 2. Alternative numbers — auto-apply when confident (auto mode).
+          const alt = audit_.altNumbers;
+          if (alt && (alt.superseded.length || alt.regional.length || alt.reference.length)) {
+            flaggedThis = true;
+            const payload = { superseded: alt.superseded, regional: alt.regional, reference: alt.reference };
+            if (auto && alt.confidence >= thr) {
+              try {
+                await applySuggestion({ kind: 'alt_numbers', product_id: p.id, payload }, null);
+                _listScan.autoApplied++;
+              } catch (_) {
+                await ai.queueSuggestion({ kind: 'alt_numbers', productId: p.id, title: p.title, payload, context: { sku: p.sku, partNumber: p.part_number }, confidence: alt.confidence, reason: alt.reason });
+                _listScan.queued++;
+              }
+            } else {
+              await ai.queueSuggestion({ kind: 'alt_numbers', productId: p.id, title: p.title, payload, context: { sku: p.sku, partNumber: p.part_number }, confidence: alt.confidence, reason: alt.reason });
+              _listScan.queued++;
+            }
+          }
+          // 3+4. eBay specifics + Shopify SEO — one combined suggestion.
+          if ((audit_.ebaySpecifics && audit_.ebaySpecifics.length) || audit_.shopify.seoTitle || audit_.shopify.seoDescription || audit_.shopify.tags.length) {
+            flaggedThis = true;
+            const payload = { ebaySpecifics: audit_.ebaySpecifics, shopify: audit_.shopify };
+            if (auto && audit_.confidence >= thr) {
+              try {
+                await applySuggestion({ kind: 'listing_opt', product_id: p.id, payload }, null);
+                _listScan.autoApplied++;
+              } catch (_) {
+                await ai.queueSuggestion({ kind: 'listing_opt', productId: p.id, title: p.title, payload, context: { sku: p.sku, partNumber: p.part_number }, confidence: audit_.confidence, reason: audit_.reason });
+                _listScan.queued++;
+              }
+            } else {
+              await ai.queueSuggestion({ kind: 'listing_opt', productId: p.id, title: p.title, payload, context: { sku: p.sku, partNumber: p.part_number }, confidence: audit_.confidence, reason: audit_.reason });
+              _listScan.queued++;
+            }
+          }
+          if (flaggedThis) _listScan.flagged++;
+        }
+        await query(`UPDATE products SET ai_listing_checked_at = now() WHERE id = $1`, [p.id]).catch(() => {});
+      } catch (e) {
+        if (e.code === 'budget') { _listScan.budgetStopped = true; break; }
+        _listScan.errors++;
+      }
+      _listScan.done++;
+      await new Promise(r2 => setTimeout(r2, 300));
+    }
+    if (_listScan.state === 'running') _listScan.state = 'done';
+    _listScan.finishedAt = Date.now();
+    if (trigger === 'nightly') {
+      await aiScanNotify('Nightly listing audit finished',
+        `${_listScan.done} of ${_listScan.total} listings audited (photo + part number + specifics + SEO) — ${_listScan.flagged} flagged` +
+        (_listScan.autoApplied ? `, ${_listScan.autoApplied} optimised automatically` : '') +
+        (_listScan.queued ? `, ${_listScan.queued} waiting in the AI tab` : '') +
+        (_listScan.budgetStopped ? '. Stopped early: daily token budget reached.' : '.'),
+        _listScan.queued ? 'warn' : 'info');
+    }
+  });
+  return { ok: true, started: true, total: rows.length, incremental: !opts.all };
+}
+
+router.post('/scan/listing-opt', async (req, res) => {
+  const r = await runListingOptScan('manual', { all: !!req.body?.all });
+  if (r.error) return res.status(400).json(r);
+  if (r.started) await audit(req, 'ai_listing_scan', null, null, { total: r.total, all: !!req.body?.all });
+  res.json(r);
+});
+router.get('/scan/listing-opt/status', (req, res) => res.json(_listScan));
+router.post('/scan/listing-opt/cancel', (req, res) => {
+  if (_listScan.state === 'running') { _listScan.state = 'cancelled'; _listScan.finishedAt = Date.now(); }
+  res.json({ ok: true, state: _listScan.state });
+});
+
 router.runPartNumberScan = runPartNumberScan;
 router.runPricingScan = runPricingScan;
+router.runListingOptScan = runListingOptScan;
 module.exports = router;
