@@ -180,6 +180,11 @@ async function applySuggestion(s, payloadOverride) {
     // acknowledges the flag (recorded as feedback) without touching the product.
     if (!pn) return { ok: true, acknowledged: true };
     if (!s.product_id) throw new Error('suggestion has no linked product');
+    // "Proposing" the number already stored (older suggestions where the fault
+    // was in the title/photo) is also an acknowledge, not a rewrite.
+    const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const curPn = (await query(`SELECT part_number FROM products WHERE id = $1`, [s.product_id])).rows[0]?.part_number;
+    if (curPn && norm(curPn) === norm(pn)) return { ok: true, acknowledged: true };
     return await applyPartNumber(s.product_id, pn);
   }
   if (s.kind === 'pricing') {
@@ -592,9 +597,15 @@ async function runListingOptScan(trigger = 'manual', opts = {}) {
           const pc = audit_.partNumberCheck;
           if (pc && pc.verdict === 'mismatch') {
             flaggedThis = true;
+            // Only propose a part-number CHANGE when the proposal actually
+            // differs from what's stored — when the fault is in the title or
+            // photo the number itself is right, so the card must read as a
+            // review flag, not "change to <the same number>".
+            const normPn = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+            const proposedPn = (pc.correctPartNumber && normPn(pc.correctPartNumber) !== normPn(p.part_number)) ? pc.correctPartNumber : null;
             await ai.queueSuggestion({
               kind: 'part_number', productId: p.id, title: p.title,
-              payload: { partNumber: pc.correctPartNumber, sku: p.sku, currentPartNumber: p.part_number || null, issue: 'mismatch', faultIn: pc.faultIn },
+              payload: { partNumber: proposedPn, sku: p.sku, currentPartNumber: p.part_number || null, issue: 'mismatch', faultIn: pc.faultIn },
               context: { sku: p.sku, title: p.title, partNumber: p.part_number || null, faultIn: pc.faultIn, source: 'listing_audit' },
               confidence: pc.confidence,
               reason: (pc.faultIn ? 'Mistake looks to be in the ' + pc.faultIn.replace('_', ' ') + ': ' : '') + pc.reason,

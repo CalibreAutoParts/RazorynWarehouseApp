@@ -374,7 +374,7 @@ TASKS — reply with ONLY this JSON (omit nothing, use nulls/empty arrays where 
  "confidence": <0..1>, "reason": "<one short sentence>"
 }
 
-RULES for partNumberCheck: the part in the PHOTO must be the part TYPE the title says, and the part number must belong to that part and vehicle. If the photo shows a different part than the title → faultIn "photo" or "title" (whichever is more likely wrong given the part number). If title and photo agree but the number belongs to something else → faultIn "part_number".
+RULES for partNumberCheck: the part in the PHOTO must be the part TYPE the title says, and the part number must belong to that part and vehicle. If the photo shows a different part than the title → faultIn "photo" or "title" (whichever is more likely wrong given the part number). If title and photo agree but the number belongs to something else → faultIn "part_number". correctPartNumber MUST be null when the stored part number is already right (fault in title/photo) or when you can't derive the right one — NEVER echo back the same number as a "correction". A wrong number inside the eBay specifics (while the stored one is right) is faultIn "part_number" with the specifics named in the reason.
 
 RULES for ebaySpecifics:
 - "Country/Region of Manufacture": "China" unless the data clearly says otherwise.
