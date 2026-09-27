@@ -22464,17 +22464,28 @@ function aiSuggestionCard(s) {
     what = 'Fill specifics: ' + escapeHtml((s.payload?.specifics || []).map(x => x.name + ': ' + x.value).join(' · '));
   } else if (s.kind === 'part_number') {
     const cur = s.payload?.currentPartNumber;
-    const fault = s.payload?.faultIn ? ' <span style="color:var(--red);font-weight:600">— mistake looks to be in the ' + escapeHtml(String(s.payload.faultIn).replace('_', ' ')) + '</span>' : '';
-    if (s.payload?.partNumber) {
+    const faultIn = s.payload?.faultIn || null;
+    // Guard against older suggestions that "propose" the number already stored
+    // — those are review flags (the fault is in the title/photo), not changes.
+    const normPn = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const proposed = (s.payload?.partNumber && normPn(s.payload.partNumber) !== normPn(cur)) ? s.payload.partNumber : null;
+    if (proposed) {
       what = (s.payload?.issue === 'mismatch' ? '⚠ Part number looks wrong — change to ' : 'Set part number to ')
-        + '<strong>' + escapeHtml(s.payload.partNumber) + '</strong>'
+        + '<strong>' + escapeHtml(proposed) + '</strong>'
         + (cur ? ' <span style="color:var(--ink-soft)">(currently ' + escapeHtml(cur) + ')</span>' : ' <span style="color:var(--ink-soft)">(currently blank — found in SKU ' + escapeHtml(s.payload?.sku || '') + ')</span>')
-        + fault;
+        + (faultIn ? ' <span style="color:var(--red);font-weight:600">— mistake in the ' + escapeHtml(faultIn.replace('_', ' ')) + '</span>' : '');
+    } else if (faultIn === 'title') {
+      what = '⚠ Part number <strong>' + escapeHtml(cur || '—') + '</strong> and the photo agree — the <span style="color:var(--red);font-weight:700">TITLE</span> looks wrong. Open the listing edit to fix the title.';
+      approveLabel = '✓ Mark reviewed';
+    } else if (faultIn === 'photo') {
+      what = '⚠ Part number <strong>' + escapeHtml(cur || '—') + '</strong> and the title agree — the <span style="color:var(--red);font-weight:700">PHOTO</span> looks wrong (shows a different part). Open the listing edit to swap the photos.';
+      approveLabel = '✓ Mark reviewed';
     } else {
-      what = '⚠ Part number <strong>' + escapeHtml(cur || '—') + '</strong> doesn’t look right for this item' + fault + ' — needs a human check';
+      what = '⚠ Part number <strong>' + escapeHtml(cur || '—') + '</strong> doesn’t look right for this item' + (faultIn ? ' <span style="color:var(--red);font-weight:600">— mistake in the ' + escapeHtml(faultIn.replace('_', ' ')) + '</span>' : '') + ' — needs a human check (see the reason below)';
       approveLabel = '✓ Mark reviewed';
     }
-    editBtn = '<button class="btn btn-outline btn-sm" onclick="aiApproveEdited(' + s.id + ')">✎ Set part number…</button>';
+    editBtn = '<button class="btn btn-outline btn-sm" onclick="aiApproveEdited(' + s.id + ')">✎ Set part number…</button>'
+      + (s.product_id ? '<button class="btn btn-outline btn-sm" onclick="openEditListing(' + s.product_id + ')">🛠 Open listing edit</button>' : '');
   } else if (s.kind === 'alt_numbers') {
     const bits = [];
     if ((s.payload?.superseded || []).length) bits.push('<strong>Superseded:</strong> ' + escapeHtml(s.payload.superseded.join(', ')));
