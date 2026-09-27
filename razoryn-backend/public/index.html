@@ -22498,7 +22498,8 @@ function aiSuggestionCard(s) {
     const shop = s.payload?.shopify || {};
     const parts = [];
     if (specs.length) {
-      const preview = specs.slice(0, 6).map(x => escapeHtml(x.name) + ': ' + escapeHtml(x.value)).join(' · ');
+      const specVal = (x) => Array.isArray(x.values) ? x.values.join(', ') : (x.value || '');
+      const preview = specs.slice(0, 6).map(x => escapeHtml(x.name) + ': ' + escapeHtml(specVal(x))).join(' · ');
       parts.push('<div><strong>eBay specifics (' + specs.length + '):</strong> ' + preview + (specs.length > 6 ? ' <span style="color:var(--ink-soft)">+' + (specs.length - 6) + ' more</span>' : '') + '</div>');
     }
     if (shop.seoTitle) parts.push('<div><strong>Shopify SEO title:</strong> ' + escapeHtml(shop.seoTitle) + '</div>');

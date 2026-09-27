@@ -3681,11 +3681,20 @@ async function deriveEbaySpecifics(product, { countryOfOrigin, includeProductNum
   if (vYear) derived.push({ name: 'Year', value: vYear });
   if (countryOfOrigin) derived.push({ name: 'Country of Origin', value: countryOfOrigin });
   if (includeProductNumber && product.shopify_product_id) derived.push({ name: 'Product Number', value: String(product.shopify_product_id) });
-  // Sub / alternate part numbers → "Interchange Part Number" (comma-joined).
+  // Alternate part numbers + every TYPED FORM of each number (hyphenated,
+  // compact, Stellantis-style spaced groups) — buyers search all of them, so
+  // the reference/interchange specifics carry every form as its own value.
   try {
+    const { allPnForms } = require('../lib/part-numbers');
     const spn = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [product.id]);
     const codes = spn.rows.map(r => r.code).filter(Boolean);
-    if (codes.length) derived.push({ name: 'Interchange Part Number', value: codes.join(', ') });
+    if (codes.length) {
+      const interVals = allPnForms(null, codes, { cap: 20 });
+      if (interVals.length) derived.push(interVals.length > 1 ? { name: 'Interchange Part Number', values: interVals } : { name: 'Interchange Part Number', value: interVals[0] });
+    }
+    // Reference OE/OEM Number: the main number's other typed forms + alternates.
+    const refVals = allPnForms(mpnValue, codes, { cap: 20 }).filter(v => v.toLowerCase() !== String(mpnValue || '').toLowerCase());
+    if (refVals.length) derived.push(refVals.length > 1 ? { name: 'Reference OE/OEM Number', values: refVals } : { name: 'Reference OE/OEM Number', value: refVals[0] });
   } catch (_) { /* non-fatal */ }
   return derived;
 }

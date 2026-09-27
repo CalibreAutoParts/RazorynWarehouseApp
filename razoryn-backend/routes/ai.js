@@ -87,17 +87,29 @@ async function applyPartNumber(productId, partNumber) {
   return { ok: true, partNumber };
 }
 
+// Values of a specific as an array — accepts {name,value} and {name,values}.
+function specVals(sp) {
+  if (Array.isArray(sp.values)) return sp.values.map(v => String(v).trim()).filter(Boolean);
+  if (sp.value != null && String(sp.value).trim() !== '') return [String(sp.value).trim()];
+  return [];
+}
+
 // Merge extra specifics into a live listing's FULL current set (ReviseItem
 // replaces specifics wholesale, so a partial send would wipe the rest).
+// Multi-value specifics (e.g. every typed form of a part number) are kept as
+// separate values — eBay caps each VALUE at 65 chars, so joining would break.
 async function mergeIntoLiveSpecifics(itemId, storeCode, addSpecifics) {
   const det = await ebay.getItemDetails(itemId, storeCode);
   const byName = new Map();
   for (const sp of (det.specifics || [])) {
-    const val = Array.isArray(sp.values) ? sp.values.join(', ') : (sp.value || '');
-    if (sp.name && val) byName.set(sp.name.toLowerCase(), { name: sp.name, value: val });
+    const vals = specVals(sp);
+    if (sp.name && vals.length) byName.set(sp.name.toLowerCase(), { name: sp.name, values: vals });
   }
-  for (const sp of addSpecifics) if (sp && sp.name && sp.value) byName.set(String(sp.name).toLowerCase(), { name: String(sp.name), value: String(sp.value) });
-  const full = [...byName.values()];
+  for (const sp of (addSpecifics || [])) {
+    const vals = specVals(sp);
+    if (sp && sp.name && vals.length) byName.set(String(sp.name).toLowerCase(), { name: String(sp.name), values: vals.slice(0, 25) });
+  }
+  const full = [...byName.values()].map(e => e.values.length > 1 ? { name: e.name, values: e.values } : { name: e.name, value: e.values[0] });
   const r = await ebay.reviseItem(itemId, { itemSpecifics: full }, storeCode);
   return { ok: true, sent: full.length, warnings: r.warnings };
 }
@@ -161,7 +173,7 @@ async function applySuggestion(s, payloadOverride) {
     return { ok: true, categoryId, warnings: r.warnings };
   }
   if (s.kind === 'specifics') {
-    const proposed = Array.isArray(payload.specifics) ? payload.specifics.filter(x => x && x.name && x.value) : [];
+    const proposed = Array.isArray(payload.specifics) ? payload.specifics.filter(x => x && x.name && specVals(x).length) : [];
     if (!proposed.length) throw new Error('no specifics in suggestion');
     const det = await ebay.getItemDetails(s.ebay_item_id, s.store_code);
     const byName = new Map();
@@ -169,7 +181,7 @@ async function applySuggestion(s, payloadOverride) {
       const val = Array.isArray(sp.values) ? sp.values.join(', ') : (sp.value || '');
       if (sp.name && val) byName.set(sp.name.toLowerCase(), { name: sp.name, value: val });
     }
-    for (const sp of proposed) byName.set(sp.name.toLowerCase(), { name: sp.name, value: sp.value });
+    for (const sp of proposed) { const v = specVals(sp); byName.set(sp.name.toLowerCase(), v.length > 1 ? { name: sp.name, values: v } : { name: sp.name, value: v[0] }); }
     const full = [...byName.values()];
     const r = await ebay.reviseItem(s.ebay_item_id, { itemSpecifics: full }, s.store_code);
     return { ok: true, sent: full.length, added: proposed.map(p => p.name), warnings: r.warnings };
@@ -177,7 +189,7 @@ async function applySuggestion(s, payloadOverride) {
   if (s.kind === 'part_number') {
     const pn = String(payload.partNumber || '').trim();
     const fix = payload.fix || {};
-    const fixSpecifics = Array.isArray(fix.specifics) ? fix.specifics.filter(x => x && x.name && x.value) : [];
+    const fixSpecifics = Array.isArray(fix.specifics) ? fix.specifics.filter(x => x && x.name && specVals(x).length) : [];
     const hasWork = !!(pn || fix.title || fixSpecifics.length);
     // A mismatch flag with nothing to apply is review-only: approving it just
     // acknowledges the flag (recorded as feedback) without touching anything.
@@ -218,7 +230,7 @@ async function applySuggestion(s, payloadOverride) {
         const pr = await query(`SELECT ebay_item_specifics FROM products WHERE id = $1`, [s.product_id]);
         const cur = Array.isArray(pr.rows[0]?.ebay_item_specifics) ? pr.rows[0].ebay_item_specifics : [];
         const byName = new Map(cur.filter(x => x && x.name).map(x => [x.name.toLowerCase(), x]));
-        for (const sp of fixSpecifics) byName.set(sp.name.toLowerCase(), { name: sp.name, value: sp.value });
+        for (const sp of fixSpecifics) { const v = specVals(sp); byName.set(sp.name.toLowerCase(), v.length > 1 ? { name: sp.name, values: v } : { name: sp.name, value: v[0] }); }
         await query(`UPDATE products SET ebay_item_specifics = $1::jsonb WHERE id = $2`, [JSON.stringify([...byName.values()]), s.product_id]);
       } catch (_) {}
       out.actions.push('specifics corrected (' + fixSpecifics.map(x => x.name).join(', ') + ')');
@@ -279,7 +291,7 @@ async function applySuggestion(s, payloadOverride) {
     // eBay specifics + Shopify SEO/tags in one apply.
     if (!s.product_id) throw new Error('suggestion has no linked product');
     const out = { ok: true, ebay: [], shopify: {} };
-    const specifics = Array.isArray(payload.ebaySpecifics) ? payload.ebaySpecifics.filter(x => x && x.name && x.value) : [];
+    const specifics = Array.isArray(payload.ebaySpecifics) ? payload.ebaySpecifics.filter(x => x && x.name && specVals(x).length) : [];
     if (specifics.length) {
       for (const l of await ebayLinksForProduct(s.product_id)) {
         try { const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, specifics); out.ebay.push({ itemId: l.ebay_item_id, ok: true, sent: r.sent }); }
@@ -290,7 +302,7 @@ async function applySuggestion(s, payloadOverride) {
         const pr = await query(`SELECT ebay_item_specifics FROM products WHERE id = $1`, [s.product_id]);
         const cur = Array.isArray(pr.rows[0]?.ebay_item_specifics) ? pr.rows[0].ebay_item_specifics : [];
         const byName = new Map(cur.filter(x => x && x.name).map(x => [x.name.toLowerCase(), x]));
-        for (const sp of specifics) byName.set(sp.name.toLowerCase(), { name: sp.name, value: sp.value });
+        for (const sp of specifics) { const v = specVals(sp); byName.set(sp.name.toLowerCase(), v.length > 1 ? { name: sp.name, values: v } : { name: sp.name, value: v[0] }); }
         await query(`UPDATE products SET ebay_item_specifics = $1::jsonb WHERE id = $2`, [JSON.stringify([...byName.values()]), s.product_id]);
       } catch (_) {}
     }
@@ -631,6 +643,27 @@ async function runListingOptScan(trigger = 'manual', opts = {}) {
         });
         if (audit_) {
           let flaggedThis = false;
+          // Deterministic guarantee on the specifics payload: the MPN and
+          // EVERY typed form of the part number(s) — hyphenated, compact,
+          // Stellantis-style spaced — are present even when the model skimps.
+          // Buyers search all the forms, so all the forms must be on the listing.
+          if (p.part_number && Array.isArray(audit_.ebaySpecifics)) {
+            try {
+              const { allPnForms } = require('../lib/part-numbers');
+              const find = (n) => audit_.ebaySpecifics.find(x => String(x.name).toLowerCase() === n);
+              if (!find('manufacturer part number')) audit_.ebaySpecifics.push({ name: 'Manufacturer Part Number', value: p.part_number });
+              const forms = allPnForms(p.part_number, altByProduct.get(p.id) || [], { cap: 20 })
+                .filter(v => v.toLowerCase() !== String(p.part_number).toLowerCase());
+              if (forms.length) {
+                const ref = find('reference oe/oem number');
+                const existing = ref ? (Array.isArray(ref.values) ? ref.values : String(ref.value || '').split(/\s*,\s*/)) : [];
+                const merged = [...new Map([...existing, ...forms].filter(Boolean).map(v => [v.toLowerCase(), v])).values()].slice(0, 20);
+                const entry = merged.length > 1 ? { name: 'Reference OE/OEM Number', values: merged } : { name: 'Reference OE/OEM Number', value: merged[0] };
+                if (ref) Object.assign(ref, { value: undefined, values: undefined }, entry);
+                else audit_.ebaySpecifics.push(entry);
+              }
+            } catch (_) {}
+          }
           // 1. Part-number truth check — mismatches ALWAYS go to review, with
           //    where the mistake sits (title / photo / part number).
           const pc = audit_.partNumberCheck;
