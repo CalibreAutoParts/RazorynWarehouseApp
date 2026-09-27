@@ -312,6 +312,10 @@
   }
   .card-head h3 { font-size: 15px; font-weight: 600; }
   .card-body { padding: 18px; }
+  /* Collapsible settings sections — headings only until opened. */
+  .card.s-collapsed > :not(.card-head) { display: none !important; }
+  .card.s-collapsed > .card-head { border-bottom: none; }
+  .s-chev { display: inline-block; width: 15px; color: var(--ink-soft); margin-right: 4px; font-size: 12px; }
 
   .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
   .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
@@ -20704,6 +20708,13 @@ function renderSettings() {
     <div class="page">
       <div class="page-head"><h1>Settings</h1></div>
 
+      <div class="card" id="set-finder" style="margin-bottom:14px">
+        <div class="card-body" style="padding:12px 14px">
+          <input id="set-find" placeholder="🔍 Find a setting… (e.g. eBay policies, couriers, VAT, AI, clock)" autocomplete="off" oninput="settingsFilter(this.value)">
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Sections are collapsed — click a heading to open it (it stays open next time). Type above to jump straight to a setting.</div>
+        </div>
+      </div>
+
       <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>Storefront integrations</h3></div>
         <div class="card-body">
@@ -20997,16 +21008,9 @@ function renderSettings() {
             <span id="ai-usage" style="font-size:12px;color:var(--ink-soft)"></span>
           </div>
           <div id="ai-learn-result" style="font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
-          <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px">
-            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
-              <div style="font-weight:600;font-size:14px">Suggestions waiting for review <span id="ai-pending-count" style="display:inline-block;min-width:20px;text-align:center;background:var(--blue-light);color:var(--blue);border-radius:10px;padding:1px 7px;font-size:12px">0</span></div>
-              <div style="display:flex;gap:8px">
-                <button class="btn btn-outline btn-sm" onclick="routeTo('ai')">Open the AI tab →</button>
-                <button class="btn btn-ghost btn-sm" onclick="loadAiSuggestions()">↻ Refresh</button>
-              </div>
-            </div>
-            <div id="ai-suggestions" style="font-size:13px;color:var(--ink-soft)">No pending suggestions.</div>
-            <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Every approve, correction and reject here teaches the AI — its future suggestions copy what you accept and avoid what you turn down.</div>
+          <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+            <div style="font-weight:600;font-size:14px">Suggestions waiting for review <span id="ai-pending-count" style="display:inline-block;min-width:20px;text-align:center;background:var(--blue-light);color:var(--blue);border-radius:10px;padding:1px 7px;font-size:12px">0</span></div>
+            <button class="btn btn-primary btn-sm" onclick="routeTo('ai')">Review them in the AI tab →</button>
           </div>
         </div>
       </div>
@@ -21633,6 +21637,7 @@ function renderSettings() {
   loadDropfleetConfig();
   loadThumbnailConfig();
   loadFitmentConfig();
+  settingsMakeCollapsible();
   if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); loadAiSettings(); }
   // Re-attach to a category audit that's running (or finished) in the background.
   Api.get('/api/listings/category-audit/status?slim=1').then(s => {
@@ -21647,6 +21652,55 @@ function renderSettings() {
       Api.get('/api/listings/category-audit/status').then(catAuditPaintResults).catch(() => {});
     }
   }).catch(() => {});
+}
+
+// ── Settings page: collapsible sections + finder ───────────────────────────
+// Every settings card renders headings-only; clicking a heading opens it and
+// the choice is remembered per browser. The finder filters cards live and
+// opens the matches, so any setting is two keystrokes away instead of a
+// scroll through the whole wall.
+function settingsMakeCollapsible() {
+  const page = document.querySelector('#content .page');
+  if (!page) return;
+  let opened = {};
+  try { opened = JSON.parse(localStorage.getItem('rzn_settings_open') || '{}'); } catch (_) {}
+  page.querySelectorAll('.card').forEach(card => {
+    if (card.id === 'set-finder' || card.dataset.sCollapsible) return;
+    if (card.parentElement && card.parentElement.closest('.card')) return;   // only top-level sections
+    const head = card.querySelector(':scope > .card-head');
+    const h3 = head && head.querySelector('h3');
+    if (!head || !h3) return;
+    card.dataset.sCollapsible = '1';
+    const key = (h3.textContent || '').trim();
+    const chev = document.createElement('span');
+    chev.className = 's-chev';
+    h3.prepend(chev);
+    const setOpen = (open) => { card.classList.toggle('s-collapsed', !open); chev.textContent = open ? '▾' : '▸'; };
+    setOpen(!!opened[key]);
+    head.style.cursor = 'pointer';
+    head.addEventListener('click', (e) => {
+      // Buttons/inputs inside a heading keep working without toggling.
+      if (e.target.closest('button, input, select, a, textarea, label')) return;
+      const open = card.classList.contains('s-collapsed');
+      setOpen(open);
+      opened[key] = open;
+      try { localStorage.setItem('rzn_settings_open', JSON.stringify(opened)); } catch (_) {}
+    });
+  });
+}
+function settingsFilter(q) {
+  const page = document.querySelector('#content .page');
+  if (!page) return;
+  q = (q || '').trim().toLowerCase();
+  page.querySelectorAll('.card[data-s-collapsible="1"]').forEach(card => {
+    if (!q) { card.style.display = ''; return; }   // cleared — back to remembered collapse states
+    const hit = card.textContent.toLowerCase().includes(q);
+    card.style.display = hit ? '' : 'none';
+    if (hit && q.length >= 3) {   // open real matches, not single-letter noise
+      card.classList.remove('s-collapsed');
+      const chev = card.querySelector('.s-chev'); if (chev) chev.textContent = '▾';
+    }
+  });
 }
 
 // ── Clock-in QR admin controls ──────────────────────────────────────────────
@@ -22390,8 +22444,8 @@ async function loadAiSettings() {
     const tok = rows => (rows || []).reduce((a, x) => a + (x.inputTokens || 0) + (x.outputTokens || 0), 0);
     if (el('ai-usage')) el('ai-usage').textContent =
       'Used today: ' + tok(r.usage?.today).toLocaleString() + ' tokens · last 30 days: ' + tok(r.usage?.last30d).toLocaleString();
-    const pc = el('ai-pending-count'); if (pc) pc.textContent = r.pendingSuggestions || 0;
-    if (r.pendingSuggestions) loadAiSuggestions();
+    aiSetPendingCount(r.pendingSuggestions || 0);
+    if (r.pendingSuggestions && el('ai-suggestions')) loadAiSuggestions();
   } catch (_) {}
 }
 async function saveAiConfig(btn) {
