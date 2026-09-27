@@ -357,6 +357,10 @@ TASKS — reply with ONLY this JSON (omit nothing, use nulls/empty arrays where 
    "verdict": "ok"|"mismatch"|"unsure",
    "faultIn": "title"|"photo"|"part_number"|null,   // where the mistake is when things disagree
    "correctPartNumber": "..."|null,                  // only when clearly derivable
+   "proposedFix": {                                  // the ready-to-apply correction, when one exists
+     "title": "..."|null,                            // corrected listing title (max 80 chars) — ONLY when the title is the fault
+     "specifics": [{"name":"...","value":"..."}]     // ONLY the specifics whose CURRENT value is wrong (wrong side, typo'd number…)
+   },
    "confidence": <0..1>, "reason": "<short>"
  },
  "altNumbers": {                                     // ONLY numbers you genuinely know — never invent
@@ -374,7 +378,10 @@ TASKS — reply with ONLY this JSON (omit nothing, use nulls/empty arrays where 
  "confidence": <0..1>, "reason": "<one short sentence>"
 }
 
-RULES for partNumberCheck: the part in the PHOTO must be the part TYPE the title says, and the part number must belong to that part and vehicle. If the photo shows a different part than the title → faultIn "photo" or "title" (whichever is more likely wrong given the part number). If title and photo agree but the number belongs to something else → faultIn "part_number". correctPartNumber MUST be null when the stored part number is already right (fault in title/photo) or when you can't derive the right one — NEVER echo back the same number as a "correction". A wrong number inside the eBay specifics (while the stored one is right) is faultIn "part_number" with the specifics named in the reason.
+RULES for partNumberCheck: the part in the PHOTO must be the part TYPE the title says, and the part number must belong to that part and vehicle. If the photo shows a different part than the title → faultIn "photo" or "title" (whichever is more likely wrong given the part number). If title and photo agree but the number belongs to something else → faultIn "part_number". correctPartNumber MUST be null when the stored part number is already right (fault in title/photo) or when you can't derive the right one — NEVER echo back the same number as a "correction". A wrong number inside the eBay specifics (while the stored one is right) is faultIn "part_number" with the specifics named in the reason, AND the corrected entry in proposedFix.specifics.
+RULES for proposedFix: give the correction ready to apply. Title fault → proposedFix.title: keep the existing title's shape (make, model, years, part name, part number) and change ONLY what's wrong (e.g. the side, or the part name). Wrong values in the current eBay specifics (side, position, a typo'd number) → the corrected entries in proposedFix.specifics. A photo fault has no auto-fix — leave proposedFix empty.
+
+NAMING RULE (titles + SEO everywhere): use what a CUSTOMER calls the part — the popular search term — not the technically pedantic name. A mirror mounted on the door is still a "Wing Mirror"; a bonnet is not an "engine hood panel". A title using a popular synonym for the same part is CORRECT, not a mismatch — only flag a title that names a genuinely different part, side or position.
 
 RULES for ebaySpecifics:
 - "Country/Region of Manufacture": "China" unless the data clearly says otherwise.
@@ -402,6 +409,13 @@ RULES for ebaySpecifics:
       verdict: ['ok', 'mismatch', 'unsure'].includes(pn.verdict) ? pn.verdict : 'unsure',
       faultIn: ['title', 'photo', 'part_number'].includes(pn.faultIn) ? pn.faultIn : null,
       correctPartNumber: pn.correctPartNumber ? String(pn.correctPartNumber).trim().slice(0, 60) : null,
+      fix: {
+        title: pn.proposedFix?.title ? String(pn.proposedFix.title).trim().slice(0, 80) : null,
+        specifics: (Array.isArray(pn.proposedFix?.specifics) ? pn.proposedFix.specifics : [])
+          .filter(x => x && x.name && x.value != null && String(x.value).trim() !== '')
+          .map(x => ({ name: String(x.name).slice(0, 65), value: String(x.value).slice(0, 65) }))
+          .slice(0, 10),
+      },
       confidence: clamp(pn.confidence), reason: String(pn.reason || '').slice(0, 300),
     },
     altNumbers: {
