@@ -176,16 +176,55 @@ async function applySuggestion(s, payloadOverride) {
   }
   if (s.kind === 'part_number') {
     const pn = String(payload.partNumber || '').trim();
-    // A mismatch flag with no proposed number is review-only: approving it just
-    // acknowledges the flag (recorded as feedback) without touching the product.
-    if (!pn) return { ok: true, acknowledged: true };
+    const fix = payload.fix || {};
+    const fixSpecifics = Array.isArray(fix.specifics) ? fix.specifics.filter(x => x && x.name && x.value) : [];
+    const hasWork = !!(pn || fix.title || fixSpecifics.length);
+    // A mismatch flag with nothing to apply is review-only: approving it just
+    // acknowledges the flag (recorded as feedback) without touching anything.
+    if (!hasWork) return { ok: true, acknowledged: true };
     if (!s.product_id) throw new Error('suggestion has no linked product');
-    // "Proposing" the number already stored (older suggestions where the fault
-    // was in the title/photo) is also an acknowledge, not a rewrite.
+    const out = { ok: true, actions: [] };
     const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-    const curPn = (await query(`SELECT part_number FROM products WHERE id = $1`, [s.product_id])).rows[0]?.part_number;
-    if (curPn && norm(curPn) === norm(pn)) return { ok: true, acknowledged: true };
-    return await applyPartNumber(s.product_id, pn);
+    // 1. Part-number change (skipped when it matches what's already stored).
+    if (pn) {
+      const curPn = (await query(`SELECT part_number FROM products WHERE id = $1`, [s.product_id])).rows[0]?.part_number;
+      if (!(curPn && norm(curPn) === norm(pn))) {
+        await applyPartNumber(s.product_id, pn);
+        out.actions.push('part number → ' + pn);
+      }
+    }
+    // 2. Corrected TITLE — warehouse master + Shopify + every linked eBay listing.
+    if (fix.title) {
+      await query(`UPDATE products SET title = $1, updated_at = now() WHERE id = $2`, [fix.title, s.product_id]);
+      try {
+        const shopify = require('../services/shopify');
+        const sid = (await query(`SELECT shopify_product_id FROM products WHERE id = $1`, [s.product_id])).rows[0]?.shopify_product_id;
+        if (sid && shopify.isConfigured()) await shopify.updateProduct(sid, { title: fix.title });
+      } catch (e) { out.shopifyTitleError = e.message; }
+      for (const l of await ebayLinksForProduct(s.product_id)) {
+        try { await ebay.reviseItem(l.ebay_item_id, { title: fix.title.slice(0, 80) }, l.store_code); }
+        catch (e) { out.actions.push('eBay title failed on ' + l.ebay_item_id + ': ' + e.message); }
+      }
+      out.actions.push('title corrected');
+    }
+    // 3. Corrected item SPECIFICS — merged into each live listing's full set
+    //    and persisted on the product for future edits.
+    if (fixSpecifics.length) {
+      for (const l of await ebayLinksForProduct(s.product_id)) {
+        try { await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, fixSpecifics); }
+        catch (e) { out.actions.push('specifics failed on ' + l.ebay_item_id + ': ' + e.message); }
+      }
+      try {
+        const pr = await query(`SELECT ebay_item_specifics FROM products WHERE id = $1`, [s.product_id]);
+        const cur = Array.isArray(pr.rows[0]?.ebay_item_specifics) ? pr.rows[0].ebay_item_specifics : [];
+        const byName = new Map(cur.filter(x => x && x.name).map(x => [x.name.toLowerCase(), x]));
+        for (const sp of fixSpecifics) byName.set(sp.name.toLowerCase(), { name: sp.name, value: sp.value });
+        await query(`UPDATE products SET ebay_item_specifics = $1::jsonb WHERE id = $2`, [JSON.stringify([...byName.values()]), s.product_id]);
+      } catch (_) {}
+      out.actions.push('specifics corrected (' + fixSpecifics.map(x => x.name).join(', ') + ')');
+    }
+    if (!out.actions.length) return { ok: true, acknowledged: true };
+    return out;
   }
   if (s.kind === 'pricing') {
     const price = parseFloat(payload.price);
@@ -603,9 +642,15 @@ async function runListingOptScan(trigger = 'manual', opts = {}) {
             // review flag, not "change to <the same number>".
             const normPn = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
             const proposedPn = (pc.correctPartNumber && normPn(pc.correctPartNumber) !== normPn(p.part_number)) ? pc.correctPartNumber : null;
+            // Ready-to-apply correction (corrected title / corrected specifics)
+            // rides along so approving the card fixes the listing in one click.
+            const fix = {
+              title: (pc.fix?.title && pc.fix.title.trim() !== String(p.title || '').trim()) ? pc.fix.title : null,
+              specifics: pc.fix?.specifics || [],
+            };
             await ai.queueSuggestion({
               kind: 'part_number', productId: p.id, title: p.title,
-              payload: { partNumber: proposedPn, sku: p.sku, currentPartNumber: p.part_number || null, issue: 'mismatch', faultIn: pc.faultIn },
+              payload: { partNumber: proposedPn, sku: p.sku, currentPartNumber: p.part_number || null, issue: 'mismatch', faultIn: pc.faultIn, fix: (fix.title || fix.specifics.length) ? fix : null },
               context: { sku: p.sku, title: p.title, partNumber: p.part_number || null, faultIn: pc.faultIn, source: 'listing_audit' },
               confidence: pc.confidence,
               reason: (pc.faultIn ? 'Mistake looks to be in the ' + pc.faultIn.replace('_', ' ') + ': ' : '') + pc.reason,
