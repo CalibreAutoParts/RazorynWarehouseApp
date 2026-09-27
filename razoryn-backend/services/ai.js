@@ -369,7 +369,7 @@ TASKS — reply with ONLY this JSON (omit nothing, use nulls/empty arrays where 
    "reference": ["..."],                             // other OE/OEM cross-reference numbers
    "confidence": <0..1>, "reason": "<short>"
  },
- "ebaySpecifics": [{"name":"...","value":"..."}],    // the full recommended set per the rules below
+ "ebaySpecifics": [{"name":"...","value":"..."} | {"name":"...","values":["...","..."]}],  // full recommended set; use "values" (array) for multi-value specifics like reference numbers
  "shopify": {
    "seoTitle": "<max 60 chars, keyword-led>",
    "seoDescription": "<max 155 chars, readable, includes part number + fitment>",
@@ -387,7 +387,8 @@ RULES for ebaySpecifics:
 - "Country/Region of Manufacture": "China" unless the data clearly says otherwise.
 - "Brand": "${ctx.brandName}".
 - "Placement on Vehicle": from position/title (e.g. "Front, Left").
-- "Manufacturer Part Number": the part number. "Superseded Part Number" and "Reference OE/OEM Number": from altNumbers + known alternates (comma-joined).
+- "Manufacturer Part Number": the part number in the MANUFACTURER'S OWN layout (Hyundai/Kia: 5-5 with a hyphen "86595-BE000"; Stellantis (Peugeot/Citroën/Vauxhall/Fiat): digits grouped with spaces "98 362 310 80"; follow each maker's convention).
+- "Reference OE/OEM Number": a "values" ARRAY carrying EVERY way buyers type the number — the hyphenated form, the compact no-separator form ("86595BE000"), the spaced form — plus the known alternates in their forms. Buyers search all of these; each form is its own value (never one long joined string). "Superseded Part Number": from altNumbers.superseded.
 - "Make": value MUST start with "Fit for " (e.g. "Fit for Hyundai"), and "Model": value MUST start with "Fit for " (e.g. "Fit for i20") — TWO separate specifics.
 - "Vehicle Model Code": the chassis/generation code when known (e.g. Hyundai i20 new shape = "BC3", MG HS new shape = "AS33") — key for telling similar parts apart.
 - "Trim": ONLY when the part number pins it to a specific trim level.
@@ -400,8 +401,18 @@ RULES for ebaySpecifics:
   const pn = v.partNumberCheck || {};
   const alt = v.altNumbers || {};
   const specifics = (Array.isArray(v.ebaySpecifics) ? v.ebaySpecifics : [])
-    .filter(s => s && s.name && s.value != null && String(s.value).trim() !== '')
-    .map(s => ({ name: String(s.name).slice(0, 65), value: String(s.value).slice(0, 65) }))
+    .map(s => {
+      if (!s || !s.name) return null;
+      // Multi-value specifics (e.g. every typed form of a part number) keep
+      // their values as an ARRAY — eBay caps each value at 65 chars.
+      if (Array.isArray(s.values)) {
+        const vals = s.values.map(x => String(x).trim().slice(0, 65)).filter(Boolean).slice(0, 25);
+        return vals.length ? (vals.length > 1 ? { name: String(s.name).slice(0, 65), values: vals } : { name: String(s.name).slice(0, 65), value: vals[0] }) : null;
+      }
+      if (s.value == null || String(s.value).trim() === '') return null;
+      return { name: String(s.name).slice(0, 65), value: String(s.value).slice(0, 65) };
+    })
+    .filter(Boolean)
     .slice(0, 30);
   const shop = v.shopify || {};
   return {
