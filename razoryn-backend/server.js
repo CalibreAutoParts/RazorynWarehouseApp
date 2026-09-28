@@ -98,6 +98,7 @@ app.use('/api/shipping',     require('./routes/shipping'));
 app.use('/api/supplier-import', require('./routes/supplier-import'));
 app.use('/api/rundown',      require('./routes/rundown'));
 app.use('/api/ai',           require('./routes/ai'));
+app.use('/api/pushes',       require('./routes/pushes'));
 app.use('/api/dropfleet',    require('./routes/dropfleet'));
 app.use('/api/thumbnail',    require('./routes/thumbnail'));
 app.use('/api/messages',     require('./routes/messages'));
@@ -492,6 +493,31 @@ cron.schedule('20 * * * *', async () => {
   } catch (e) { console.error('[cron ai-audit] failed:', e.message); }
 });
 console.log('[boot] nightly AI listing audit armed (fires only when enabled in Settings)');
+
+// Blocked-push retry — eBay refuses revisions while a listing has an open
+// best offer (sent or received); those pushes queue in pending_pushes and
+// this retries them every 12 hours until eBay accepts (or we give up).
+cron.schedule('35 */12 * * *', async () => {
+  try {
+    const pushQueue = require('./lib/push-queue');
+    const r = await pushQueue.retryPending();
+    if (r.tried) {
+      console.log('[cron push-retry]', JSON.stringify(r));
+      if (r.ok) {
+        try {
+          await require('./db').query(
+            `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
+             VALUES ('push_retry', $1, $2, 'info', NULL, NULL)`,
+            [`${r.ok} blocked eBay push${r.ok === 1 ? '' : 'es'} went through`,
+             `${r.ok} queued change(s) were accepted by eBay on retry.` +
+             (r.stillBlocked ? ` ${r.stillBlocked} still blocked (offer open) — retrying every 12h.` : '') +
+             (r.gaveUp ? ` ${r.gaveUp} given up (see the Push Queue page).` : '')]);
+        } catch (_) {}
+      }
+    }
+  } catch (e) { console.error('[cron push-retry] failed:', e.message); }
+});
+console.log('[boot] blocked-push retry scheduled every 12h');
 
 // Market analysis — periodically snapshot whole-eBay saturation + our ranking for
 // products that have competitor matches. Daily by default (heavier API use).
