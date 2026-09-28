@@ -2218,7 +2218,19 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
         const haveBaseline = liveOk || storedSpecifics.length > 0;
         const fullSpecifics = mergeSpecificsByName(liveSpecifics, storedSpecifics, derivedNow, formSpecifics);
         const specificsToSend = (haveBaseline && fullSpecifics.length) ? fullSpecifics : undefined;
-        await ebay.reviseItem(link.ebay_item_id, {
+        // Per-field change breakdown (before → after) for the push log.
+        const pushChanges = [];
+        if (sku && sku !== product.sku) pushChanges.push({ field: 'sku', before: product.sku, after: sku });
+        if (ebayTitle && ebayTitle !== product.title) pushChanges.push({ field: 'title', before: product.title, after: ebayTitle });
+        if (ebayPrice != null && (product.price_ebay == null || parseFloat(product.price_ebay) !== ebayPrice)) {
+          pushChanges.push({ field: 'price', before: product.price_ebay != null ? parseFloat(product.price_ebay) : null, after: ebayPrice });
+        }
+        if (sendCategory) pushChanges.push({ field: 'category', before: liveCategoryId, after: sendCategory });
+        if (specificsToSend) pushChanges.push({ field: 'specifics', after: { count: specificsToSend.length } });
+        if (ebayPictureUrls && ebayPictureUrls.length) pushChanges.push({ field: 'photos', after: { count: ebayPictureUrls.length } });
+        if (b.ebayDescription != null && String(b.ebayDescription).trim() !== '') pushChanges.push({ field: 'description', after: { updated: true } });
+        const pushQueue = require('../lib/push-queue');
+        const pr2 = await pushQueue.revisePush(link.ebay_item_id, {
           sku,
           title: ebayTitle ? ebayTitle.slice(0, 80) : undefined,
           price: ebayPrice != null ? ebayPrice : undefined,
@@ -2228,9 +2240,15 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
           categoryId: sendCategory,
           // ReviseFixedPriceItem is the call that applies category moves reliably.
           call: sendCategory ? 'ReviseFixedPriceItem' : undefined,
-        }, store.code);
+        }, store.code, { productId, source: 'edit', changes: pushChanges.length ? pushChanges : undefined });
         try { await ebay.setQuantityTradingAPI(link.ebay_item_id, qty, store.code); } catch (e) { /* qty push best-effort */ }
-        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true, specificsSent: fullSpecifics.length, categoryMoved: sendCategory || undefined });
+        if (pr2.queued) {
+          // eBay refused (open offer / transient) — the change is queued and
+          // retried every 12h; the Push Queue page shows it.
+          result.ebay.push({ itemId: link.ebay_item_id, store: store.code, queued: true, error: pr2.error });
+        } else {
+          result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true, specificsSent: fullSpecifics.length, categoryMoved: sendCategory || undefined });
+        }
       } catch (e) {
         result.ebay.push({ itemId: link.ebay_item_id, store: store.code, error: e.message });
       }
@@ -2661,7 +2679,10 @@ async function runCategoryAudit(trigger = 'manual') {
                   _catAudit.ai.keptCurrent++;   // AI says the suggester is wrong — current is fine
                 } else if (auto && verdict.confidence >= thr) {
                   try {
-                    await ebay.reviseItem(issue.itemId, { categoryId: verdict.categoryId, call: 'ReviseFixedPriceItem' }, issue.storeCode);
+                    await require('../lib/push-queue').revisePush(issue.itemId, { categoryId: verdict.categoryId, call: 'ReviseFixedPriceItem' }, issue.storeCode, {
+                      productId: issue.productId, source: 'ai-category-auto',
+                      changes: [{ field: 'category', before: { id: issue.currentCategoryId, name: issue.currentCategoryName }, after: { id: verdict.categoryId } }],
+                    });
                     if (issue.productId) { try { await query(`UPDATE products SET ebay_category_id = $1 WHERE id = $2`, [verdict.categoryId, issue.productId]); } catch (_) {} }
                     issue.applied = true; issue.autoApplied = true;
                     issue.suggestedCategoryId = verdict.categoryId;
@@ -2783,12 +2804,15 @@ router.post('/category-audit/apply', requireAdmin, async (req, res) => {
   for (const t of targets) {
     const issue = _catAudit.issues.find(i => i.itemId === t.itemId);
     try {
-      const r = await ebay.reviseItem(t.itemId, { categoryId: t.suggestedCategoryId, call: 'ReviseFixedPriceItem' }, t.storeCode);
+      const r = await require('../lib/push-queue').revisePush(t.itemId, { categoryId: t.suggestedCategoryId, call: 'ReviseFixedPriceItem' }, t.storeCode, {
+        productId: t.productId, source: 'category-audit',
+        changes: [{ field: 'category', before: { id: t.currentCategoryId || null, name: t.currentCategoryName || null }, after: { id: t.suggestedCategoryId, name: t.suggestedCategoryName || null } }],
+      });
       if (t.productId) {
         try { await query(`UPDATE products SET ebay_category_id = $1 WHERE id = $2`, [t.suggestedCategoryId, t.productId]); } catch (_) {}
       }
-      if (issue) { issue.applied = true; issue.applyError = null; }
-      results.push({ itemId: t.itemId, ok: true, warnings: r.warnings });
+      if (issue) { issue.applied = true; issue.applyError = r.queued ? 'Queued — eBay blocked the move (offer open), retrying every 12h' : null; }
+      results.push(r.queued ? { itemId: t.itemId, ok: true, queued: true } : { itemId: t.itemId, ok: true, warnings: r.warnings });
     } catch (e) {
       if (issue) issue.applyError = e.message;
       results.push({ itemId: t.itemId, ok: false, error: e.message });
@@ -3433,9 +3457,17 @@ router.post('/bulk-price', requireAdmin, async (req, res) => {
     }
     r.locked = locked;
 
-    // eBay (the anchor) — always updated when requested.
+    // eBay (the anchor) — always updated when requested. Offer-blocked pushes
+    // queue for the 12-hour retry instead of silently failing.
     if (pushEbay) {
-      try { await ebay.reviseItem(it.itemId, { price: newEbay }, it.store); r.ebay = 'ok'; }
+      try {
+        const pq = await require('../lib/push-queue').revisePush(it.itemId, { price: newEbay }, it.store, {
+          productId, source: 'bulk-price',
+          changes: [{ field: 'price', before: isNaN(cur) ? null : cur, after: newEbay }],
+        });
+        r.ebay = pq.queued ? 'queued' : 'ok';
+        if (pq.queued) r.error = 'eBay: queued (offer open) — retrying every 12h';
+      }
       catch (e) { r.ebay = 'error'; r.error = 'eBay: ' + e.message; }
     }
     // Shopify (derived) — skipped for locked products.

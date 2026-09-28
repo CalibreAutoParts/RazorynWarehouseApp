@@ -75,7 +75,9 @@ router.get('/suggestions', async (req, res) => {
 
 // Set a product's part number (warehouse master + the storefront metafield).
 async function applyPartNumber(productId, partNumber) {
+  const before = (await query(`SELECT part_number FROM products WHERE id = $1`, [productId])).rows[0]?.part_number || null;
   await query(`UPDATE products SET part_number = $1, updated_at = now() WHERE id = $2`, [partNumber, productId]);
+  try { await require('../lib/push-queue').logChange({ productId, source: 'ai', field: 'part_number', before, after: partNumber, ok: true }); } catch (_) {}
   try {
     const shopify = require('../services/shopify');
     const pr = await query(`SELECT shopify_product_id FROM products WHERE id = $1`, [productId]);
@@ -98,19 +100,31 @@ function specVals(sp) {
 // replaces specifics wholesale, so a partial send would wipe the rest).
 // Multi-value specifics (e.g. every typed form of a part number) are kept as
 // separate values — eBay caps each VALUE at 65 chars, so joining would break.
-async function mergeIntoLiveSpecifics(itemId, storeCode, addSpecifics) {
+// Logged with before → after; refusals with an open offer queue for retry.
+async function mergeIntoLiveSpecifics(itemId, storeCode, addSpecifics, meta = {}) {
+  const pushQueue = require('../lib/push-queue');
   const det = await ebay.getItemDetails(itemId, storeCode);
   const byName = new Map();
   for (const sp of (det.specifics || [])) {
     const vals = specVals(sp);
     if (sp.name && vals.length) byName.set(sp.name.toLowerCase(), { name: sp.name, values: vals });
   }
+  // before → after for exactly the specifics being changed (the breakdown view).
+  const before = {}, after = {};
   for (const sp of (addSpecifics || [])) {
     const vals = specVals(sp);
-    if (sp && sp.name && vals.length) byName.set(String(sp.name).toLowerCase(), { name: String(sp.name), values: vals.slice(0, 25) });
+    if (!sp || !sp.name || !vals.length) continue;
+    const key = String(sp.name).toLowerCase();
+    before[sp.name] = byName.has(key) ? byName.get(key).values.join(', ') : null;
+    after[sp.name] = vals.join(', ');
+    byName.set(key, { name: String(sp.name), values: vals.slice(0, 25) });
   }
   const full = [...byName.values()].map(e => e.values.length > 1 ? { name: e.name, values: e.values } : { name: e.name, value: e.values[0] });
-  const r = await ebay.reviseItem(itemId, { itemSpecifics: full }, storeCode);
+  const r = await pushQueue.revisePush(itemId, { itemSpecifics: full }, storeCode, {
+    productId: meta.productId, source: meta.source || 'ai',
+    changes: [{ field: 'specifics', before, after }],
+  });
+  if (r.queued) return { ok: false, queued: true, error: r.error };
   return { ok: true, sent: full.length, warnings: r.warnings };
 }
 
@@ -128,9 +142,11 @@ async function ebayLinksForProduct(productId) {
 // the configured % (skipped when the product's price is locked), warehouse
 // master updated last.
 async function applyPriceToProduct(productId, newEbay) {
-  const pr = await query(`SELECT id, shopify_product_id, price_locked FROM products WHERE id = $1`, [productId]);
+  const pushQueue = require('../lib/push-queue');
+  const pr = await query(`SELECT id, shopify_product_id, price_locked, price_ebay FROM products WHERE id = $1`, [productId]);
   const p = pr.rows[0];
   if (!p) throw new Error('product not found');
+  const beforePrice = p.price_ebay != null ? parseFloat(p.price_ebay) : null;
   const sr = await query(`SELECT price_link_pct, bank_transfer_pct FROM app_settings WHERE id = 1`);
   const s = sr.rows[0] || {};
   const pct = s.price_link_pct != null ? parseFloat(s.price_link_pct)
@@ -140,8 +156,13 @@ async function applyPriceToProduct(productId, newEbay) {
   if (p.shopify_product_id) {
     const links = await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [String(p.shopify_product_id)]);
     for (const l of links.rows) {
-      try { await ebay.reviseItem(l.ebay_item_id, { price: newEbay }, l.store_code); out.ebay.push({ itemId: l.ebay_item_id, ok: true }); }
-      catch (e) { out.ebay.push({ itemId: l.ebay_item_id, error: e.message }); }
+      try {
+        const r = await pushQueue.revisePush(l.ebay_item_id, { price: newEbay }, l.store_code, {
+          productId, source: 'ai-pricing',
+          changes: [{ field: 'price', before: beforePrice, after: newEbay }],
+        });
+        out.ebay.push(r.queued ? { itemId: l.ebay_item_id, queued: true, error: r.error } : { itemId: l.ebay_item_id, ok: true });
+      } catch (e) { out.ebay.push({ itemId: l.ebay_item_id, error: e.message }); }
     }
     try {
       const shopify = require('../services/shopify');
@@ -153,8 +174,9 @@ async function applyPriceToProduct(productId, newEbay) {
   }
   if (p.price_locked) await query(`UPDATE products SET price_ebay = $1, updated_at = now() WHERE id = $2`, [newEbay, productId]);
   else await query(`UPDATE products SET price_ebay = $1, price_shopify = $2, updated_at = now() WHERE id = $3`, [newEbay, newShopify, productId]);
-  const anyEbayErr = out.ebay.find(x => x.error);
-  if (anyEbayErr && !out.ebay.find(x => x.ok)) throw new Error('eBay price push failed: ' + anyEbayErr.error);
+  const anyEbayErr = out.ebay.find(x => x.error && !x.queued);
+  if (anyEbayErr && !out.ebay.find(x => x.ok || x.queued)) throw new Error('eBay price push failed: ' + anyEbayErr.error);
+  if (out.ebay.some(x => x.queued)) out.queued = true;   // offer open — retrying every 12h
   return out;
 }
 
@@ -166,25 +188,23 @@ async function applySuggestion(s, payloadOverride) {
   if (s.kind === 'category') {
     const categoryId = String(payload.categoryId || '');
     if (!categoryId) throw new Error('no categoryId in suggestion');
-    const r = await ebay.reviseItem(s.ebay_item_id, { categoryId, call: 'ReviseFixedPriceItem' }, s.store_code);
+    const pushQueue = require('../lib/push-queue');
+    const r = await pushQueue.revisePush(s.ebay_item_id, { categoryId, call: 'ReviseFixedPriceItem' }, s.store_code, {
+      productId: s.product_id, source: 'ai-category',
+      changes: [{ field: 'category', before: s.context?.current || null, after: { id: categoryId, name: payload.categoryName || null } }],
+    });
     if (s.product_id) {
       try { await query(`UPDATE products SET ebay_category_id = $1 WHERE id = $2`, [categoryId, s.product_id]); } catch (_) {}
     }
+    if (r.queued) return { ok: true, queued: true, categoryId, note: 'eBay blocked the revision (offer open) — queued, retrying every 12h' };
     return { ok: true, categoryId, warnings: r.warnings };
   }
   if (s.kind === 'specifics') {
     const proposed = Array.isArray(payload.specifics) ? payload.specifics.filter(x => x && x.name && specVals(x).length) : [];
     if (!proposed.length) throw new Error('no specifics in suggestion');
-    const det = await ebay.getItemDetails(s.ebay_item_id, s.store_code);
-    const byName = new Map();
-    for (const sp of (det.specifics || [])) {
-      const val = Array.isArray(sp.values) ? sp.values.join(', ') : (sp.value || '');
-      if (sp.name && val) byName.set(sp.name.toLowerCase(), { name: sp.name, value: val });
-    }
-    for (const sp of proposed) { const v = specVals(sp); byName.set(sp.name.toLowerCase(), v.length > 1 ? { name: sp.name, values: v } : { name: sp.name, value: v[0] }); }
-    const full = [...byName.values()];
-    const r = await ebay.reviseItem(s.ebay_item_id, { itemSpecifics: full }, s.store_code);
-    return { ok: true, sent: full.length, added: proposed.map(p => p.name), warnings: r.warnings };
+    const r = await mergeIntoLiveSpecifics(s.ebay_item_id, s.store_code, proposed, { productId: s.product_id, source: 'ai-specifics' });
+    if (r.queued) return { ok: true, queued: true, added: proposed.map(p => p.name), note: 'eBay blocked the revision (offer open) — queued, retrying every 12h' };
+    return { ok: true, sent: r.sent, added: proposed.map(p => p.name), warnings: r.warnings };
   }
   if (s.kind === 'part_number') {
     const pn = String(payload.partNumber || '').trim();
@@ -207,6 +227,8 @@ async function applySuggestion(s, payloadOverride) {
     }
     // 2. Corrected TITLE — warehouse master + Shopify + every linked eBay listing.
     if (fix.title) {
+      const pushQueue = require('../lib/push-queue');
+      const oldTitle = (await query(`SELECT title FROM products WHERE id = $1`, [s.product_id])).rows[0]?.title || null;
       await query(`UPDATE products SET title = $1, updated_at = now() WHERE id = $2`, [fix.title, s.product_id]);
       try {
         const shopify = require('../services/shopify');
@@ -214,8 +236,13 @@ async function applySuggestion(s, payloadOverride) {
         if (sid && shopify.isConfigured()) await shopify.updateProduct(sid, { title: fix.title });
       } catch (e) { out.shopifyTitleError = e.message; }
       for (const l of await ebayLinksForProduct(s.product_id)) {
-        try { await ebay.reviseItem(l.ebay_item_id, { title: fix.title.slice(0, 80) }, l.store_code); }
-        catch (e) { out.actions.push('eBay title failed on ' + l.ebay_item_id + ': ' + e.message); }
+        try {
+          const r = await pushQueue.revisePush(l.ebay_item_id, { title: fix.title.slice(0, 80) }, l.store_code, {
+            productId: s.product_id, source: 'ai-fix',
+            changes: [{ field: 'title', before: oldTitle, after: fix.title }],
+          });
+          if (r.queued) out.actions.push('eBay title queued on ' + l.ebay_item_id + ' (offer open — retrying every 12h)');
+        } catch (e) { out.actions.push('eBay title failed on ' + l.ebay_item_id + ': ' + e.message); }
       }
       out.actions.push('title corrected');
     }
@@ -223,7 +250,10 @@ async function applySuggestion(s, payloadOverride) {
     //    and persisted on the product for future edits.
     if (fixSpecifics.length) {
       for (const l of await ebayLinksForProduct(s.product_id)) {
-        try { await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, fixSpecifics); }
+        try {
+          const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, fixSpecifics, { productId: s.product_id, source: 'ai-fix' });
+          if (r.queued) out.actions.push('specifics queued on ' + l.ebay_item_id + ' (offer open — retrying every 12h)');
+        }
         catch (e) { out.actions.push('specifics failed on ' + l.ebay_item_id + ': ' + e.message); }
       }
       try {
@@ -281,7 +311,10 @@ async function applySuggestion(s, payloadOverride) {
     if (refs.length) specifics.push({ name: 'Reference OE/OEM Number', value: refs.join(', ').slice(0, 65) });
     if (specifics.length) {
       for (const l of await ebayLinksForProduct(s.product_id)) {
-        try { const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, specifics); out.ebay.push({ itemId: l.ebay_item_id, ok: true, sent: r.sent }); }
+        try {
+          const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, specifics, { productId: s.product_id, source: 'ai-' + s.kind });
+          out.ebay.push(r.queued ? { itemId: l.ebay_item_id, queued: true } : { itemId: l.ebay_item_id, ok: true, sent: r.sent });
+        }
         catch (e) { out.ebay.push({ itemId: l.ebay_item_id, error: e.message }); }
       }
     }
@@ -294,7 +327,10 @@ async function applySuggestion(s, payloadOverride) {
     const specifics = Array.isArray(payload.ebaySpecifics) ? payload.ebaySpecifics.filter(x => x && x.name && specVals(x).length) : [];
     if (specifics.length) {
       for (const l of await ebayLinksForProduct(s.product_id)) {
-        try { const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, specifics); out.ebay.push({ itemId: l.ebay_item_id, ok: true, sent: r.sent }); }
+        try {
+          const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, specifics, { productId: s.product_id, source: 'ai-' + s.kind });
+          out.ebay.push(r.queued ? { itemId: l.ebay_item_id, queued: true } : { itemId: l.ebay_item_id, ok: true, sent: r.sent });
+        }
         catch (e) { out.ebay.push({ itemId: l.ebay_item_id, error: e.message }); }
       }
       // Persist as the product's best-known specifics set for future edits.

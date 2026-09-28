@@ -1231,6 +1231,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>
           AI <span id="nav-ai-badge" style="display:none;margin-left:auto;background:var(--blue);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;line-height:18px"></span>
         </button>
+        <button class="nav-item admin-only" data-page="pushes">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Push queue
+        </button>
         <button class="nav-item admin-only" data-page="createlisting">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           Create listing
@@ -3364,6 +3368,7 @@ function hasPerm(page) {
     staff:        false,
     settings:     false,
     ai:           false,
+    pushes:       false,
   };
   const v = map[page];
   if (v === true) return true;
@@ -3416,7 +3421,8 @@ function routeTo(page) {
     drafts: renderDrafts, clonestore: renderCloneStore,
     vinsearch: renderVinSearch,
     qtycheck: renderQtyCheck, iteminfo: renderItemInfo,
-    ai: renderAiPage
+    ai: renderAiPage,
+    pushes: renderPushQueue
   };
   // The handheld's Home is the plain task workbench, not the money dashboard.
   if (State.appShell && page === 'dashboard') pages.dashboard = renderAppHome;
@@ -13551,6 +13557,7 @@ async function submitUnifiedUpdate(btn) {
   let ebErr = 0;
   for (const x of ebayEntries) {
     if (x.ok) bits.push(`${storeName(x.store)} ✓`);
+    else if (x.queued) bits.push(`${storeName(x.store)} ⏳ queued — eBay blocked it (offer open); auto-retrying every 12h (see Push queue)`);
     else if (x.error) { bits.push(`${storeName(x.store)} ✗`); ebErr++; }
     else if (x.skipped === 'no_ebay_link') bits.push('not linked to eBay');
     else if (x.skipped) bits.push(`${storeName(x.store)} – (${escapeHtml(x.skipped)})`);
@@ -22312,6 +22319,137 @@ async function fixPartNumbers(btn) {
   }
 }
 
+// ── eBay Push Queue — what's stuck behind an open offer + the change log ───
+// eBay refuses revisions while a listing has a best offer open (sent or
+// received). Those pushes queue instead of vanishing, auto-retry every 12
+// hours, and this page shows exactly what's waiting — plus the full
+// before → after breakdown of every change pushed to every listing.
+function renderPushQueue() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>eBay Push Queue</h1><div class="desc">Changes eBay refused (usually an open best offer) wait here and auto-retry every 12 hours. Below it: the full history of what changed on each listing — field by field, before → after.</div></div>
+        <div class="actions">
+          <button class="btn btn-primary" onclick="pqRetryAll(this)">↻ Retry all now</button>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>Waiting to push</h3><div class="card-desc">Stacked changes merge — one retry carries everything queued for the item.</div></div>
+        <div class="card-body"><div id="pq-list" style="font-size:13px;color:var(--ink-soft)">Loading…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Change history — breakdown per item</h3>
+          <input id="pq-search" placeholder="🔍 Filter by title, SKU or eBay item number…" style="max-width:320px" autocomplete="off" oninput="pqSearchDebounce(this.value)">
+        </div>
+        <div class="card-body"><div id="pq-changes" style="font-size:13px;color:var(--ink-soft)">Loading…</div></div>
+      </div>
+    </div>`;
+  pqLoadPending();
+  pqLoadChanges('');
+}
+function pqPayloadSummary(p) {
+  p = p || {};
+  const bits = [];
+  if (p.price != null) bits.push('💷 price → £' + (+p.price).toFixed(2));
+  if (p.title) bits.push('title → “' + escapeHtml(String(p.title).slice(0, 60)) + '”');
+  if (p.sku) bits.push('SKU → ' + escapeHtml(p.sku));
+  if (p.categoryId) bits.push('category → ' + escapeHtml(String(p.categoryId)));
+  if (Array.isArray(p.itemSpecifics)) bits.push('specifics (' + p.itemSpecifics.length + ')');
+  if (Array.isArray(p.pictureUrls)) bits.push('photos (' + p.pictureUrls.length + ')');
+  if (p.description) bits.push('description');
+  return bits.join(' · ') || 'listing update';
+}
+async function pqLoadPending() {
+  const box = el('pq-list');
+  if (!box) return;
+  try {
+    const r = await Api.get('/api/pushes/pending');
+    const rows = r.pushes || [];
+    if (!rows.length) { box.innerHTML = '✓ Nothing stuck — every push has gone through.'; return; }
+    box.innerHTML = rows.map(p => {
+      const badge = p.status === 'pending'
+        ? '<span class="pill" style="background:var(--blue-light);color:var(--blue);font-size:10px">⏳ waiting — retrying every 12h</span>'
+        : (p.status === 'done'
+          ? '<span class="pill green" style="font-size:10px">✓ went through</span>'
+          : '<span class="pill red" style="font-size:10px">✗ given up</span>');
+      const when = p.last_attempt_at ? new Date(p.last_attempt_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+      return `<div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px" id="pq-row-${p.id}">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center">
+          <div style="font-weight:600;color:var(--ink)">${escapeHtml(p.product_title || p.ebay_item_id)} <span style="font-weight:400;color:var(--ink-soft);font-size:11px">· ${escapeHtml(p.product_sku || '')} · item ${escapeHtml(p.ebay_item_id)}</span></div>
+          ${badge}
+        </div>
+        <div style="margin:5px 0;font-size:12.5px;color:var(--ink)">${pqPayloadSummary(p.payload)}</div>
+        <div style="font-size:11px;color:var(--ink-soft)">Why: ${escapeHtml(p.reason || p.last_error || '—')} · ${p.attempts} attempt${p.attempts === 1 ? '' : 's'} · last try ${when}</div>
+        ${p.status === 'pending' ? `<div style="display:flex;gap:6px;margin-top:8px">
+          <button class="btn btn-outline btn-sm" onclick="pqRetryOne(${p.id}, this)">↻ Retry now</button>
+          <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="pqDiscard(${p.id}, this)">🗑 Discard change</button>
+        </div>` : ''}
+      </div>`;
+    }).join('');
+  } catch (e) { box.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
+}
+async function pqRetryAll(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Retrying…'; }
+  try {
+    const r = await Api.post('/api/pushes/retry', {});
+    toast(r.tried ? `${r.ok} went through, ${r.stillBlocked} still blocked${r.gaveUp ? ', ' + r.gaveUp + ' given up' : ''}` : 'Nothing to retry', r.stillBlocked ? 'warn' : 'success', 7000);
+  } catch (e) { toast('Retry failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) { btn.disabled = false; btn.textContent = '↻ Retry all now'; }
+  pqLoadPending(); pqLoadChanges(el('pq-search')?.value || '');
+}
+async function pqRetryOne(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Retrying…'; }
+  try {
+    const r = await Api.post('/api/pushes/retry', { id });
+    toast(r.ok ? 'Pushed through ✓' : 'Still blocked — eBay refused again (kept in the queue)', r.ok ? 'success' : 'warn', 6000);
+  } catch (e) { toast('Retry failed: ' + (e.data?.message || e.message), 'error'); }
+  pqLoadPending();
+}
+async function pqDiscard(id, btn) {
+  if (!confirm('Discard this queued change? It will NOT be pushed to eBay.')) return;
+  if (btn) btn.disabled = true;
+  try { await Api.delete('/api/pushes/' + id); const row = el('pq-row-' + id); if (row) row.remove(); toast('Discarded', 'info'); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
+}
+let _pqSearchTimer = null;
+function pqSearchDebounce(q) { clearTimeout(_pqSearchTimer); _pqSearchTimer = setTimeout(() => pqLoadChanges(q), 350); }
+function pqVal(v) {
+  if (v == null || v === '') return '<span style="color:var(--ink-soft)">—</span>';
+  if (typeof v === 'object') {
+    if (v.count != null) return v.count + ' item(s)';
+    if (v.updated) return 'updated';
+    if (v.id) return escapeHtml((v.name ? v.name + ' ' : '') + '(' + v.id + ')');
+    const entries = Object.entries(v).map(([k, x]) => escapeHtml(k) + ': ' + escapeHtml(x == null ? '—' : String(x)));
+    return entries.slice(0, 6).join('<br>') + (entries.length > 6 ? '<br>+' + (entries.length - 6) + ' more' : '');
+  }
+  return escapeHtml(String(v));
+}
+async function pqLoadChanges(q) {
+  const box = el('pq-changes');
+  if (!box) return;
+  try {
+    const r = await Api.get('/api/pushes/changes' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    const rows = r.changes || [];
+    if (!rows.length) { box.innerHTML = q ? 'No changes recorded for that search.' : 'No changes recorded yet — they log from now on, every time something is pushed to a listing.'; return; }
+    box.innerHTML = `<div style="overflow-x:auto"><table class="table" style="font-size:12px">
+      <thead><tr><th>When</th><th>Item</th><th>What</th><th>Before</th><th>After</th><th>Result</th><th>By</th></tr></thead>
+      <tbody>` + rows.map(c => {
+        const when = new Date(c.created_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+        const result = c.ok
+          ? '<span style="color:var(--green)">✓</span>'
+          : (/queued for retry/.test(c.error || '') ? '<span style="color:var(--blue)">⏳ queued</span>' : '<span style="color:var(--red)" title="' + escapeAttr(c.error || '') + '">✗ failed</span>');
+        return `<tr>
+          <td style="white-space:nowrap;color:var(--ink-soft)">${when}</td>
+          <td style="max-width:240px"><div style="font-weight:500">${escapeHtml(c.product_title || c.ebay_item_id || '')}</div><div style="color:var(--ink-soft);font-size:10.5px">${escapeHtml(c.product_sku || '')}${c.ebay_item_id ? ' · ' + escapeHtml(c.ebay_item_id) : ''}</div></td>
+          <td style="font-weight:600">${escapeHtml(c.field || '')}</td>
+          <td style="max-width:220px">${pqVal(c.before)}</td>
+          <td style="max-width:220px">${pqVal(c.after)}</td>
+          <td>${result}</td>
+          <td style="color:var(--ink-soft)">${escapeHtml(c.source || '')}</td>
+        </tr>`;
+      }).join('') + '</tbody></table></div>';
+  } catch (e) { box.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
+}
 // ── eBay category audit — scan every live listing for a wrong category (vs
 // eBay's own suggestion for the title) and missing required specifics, then
 // move flagged listings to the right category (per-row or all at once). ──
