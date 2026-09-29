@@ -412,6 +412,64 @@ router.post('/learn', async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.code || 'api_error', message: e.message }); }
 });
 
+// ──────────────────────────────────────────────────────────────────────────
+// Manual alternate-number check — replaces the "google it and hope" step.
+// POST /check-part-number { productId, code } → Claude verdict: same part
+// (superseded / regional / alternative) or NOT, with why (wrong side, trim,
+// generation, vehicle). POST /add-alt-number then pushes a confirmed (or
+// human-overridden) number to the warehouse alternates, Shopify metafield
+// and eBay specifics — the same apply path as an alt_numbers suggestion.
+// ──────────────────────────────────────────────────────────────────────────
+router.post('/check-part-number', async (req, res) => {
+  if (!ai.isConfigured()) return res.status(400).json({ error: 'not_configured', message: 'Set ANTHROPIC_API_KEY in Railway variables first.' });
+  const productId = parseInt(req.body?.productId);
+  const code = String(req.body?.code || '').trim();
+  if (!productId || !code) return res.status(400).json({ error: 'productId_and_code_required' });
+  const pr = await query(`SELECT id, sku, title, part_number, image_url FROM products WHERE id = $1`, [productId]);
+  const p = pr.rows[0];
+  if (!p) return res.status(404).json({ error: 'product_not_found' });
+  let alternates = [];
+  try { alternates = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [productId])).rows.map(r => r.code); } catch (_) {}
+  // Already on file? Say so without burning a call.
+  const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if ([p.part_number, ...alternates].some(c => c && norm(c) === norm(code))) {
+    return res.json({ ok: true, alreadyKnown: true, verdict: { same: true, relationship: 'same_number', confidence: 1, reason: 'This number (or another typed form of it) is already on the product.', differences: null } });
+  }
+  try {
+    const verdict = await ai.verifyAltNumber({
+      title: p.title, sku: p.sku, partNumber: p.part_number,
+      altNumbers: alternates, candidate: code,
+      imageUrls: p.image_url ? [p.image_url] : [],
+    });
+    if (!verdict) return res.status(502).json({ error: 'no_verdict', message: 'The model returned nothing usable — try again.' });
+    await audit(req, 'ai_pn_check', 'product', productId, { code, same: verdict.same, relationship: verdict.relationship });
+    res.json({ ok: true, verdict, product: { id: p.id, title: p.title, sku: p.sku, partNumber: p.part_number } });
+  } catch (e) { res.status(502).json({ error: e.code || 'api_error', message: e.message }); }
+});
+
+router.post('/add-alt-number', async (req, res) => {
+  const productId = parseInt(req.body?.productId);
+  const code = String(req.body?.code || '').trim();
+  const relationship = String(req.body?.relationship || 'alternative');
+  const override = !!req.body?.override;   // human pushed despite a "not the same" verdict
+  if (!productId || !code) return res.status(400).json({ error: 'productId_and_code_required' });
+  const payload = { superseded: [], regional: [], reference: [] };
+  if (relationship === 'superseded') payload.superseded = [code];
+  else if (relationship === 'regional') payload.regional = [code];
+  else payload.reference = [code];
+  try {
+    const result = await applySuggestion({ kind: 'alt_numbers', product_id: productId, payload }, null);
+    // Feed the learning loop: an override teaches the model its verdict was wrong.
+    await ai.recordFeedback('alt_check',
+      { productId, code, relationship, verdict: req.body?.verdict || null },
+      req.body?.verdict || { candidate: code },
+      override ? 'edited' : 'accepted',
+      { pushed: true, relationship });
+    await audit(req, 'ai_pn_add', 'product', productId, { code, relationship, override });
+    res.json({ ok: true, result });
+  } catch (e) { res.status(500).json({ error: 'apply_failed', message: e.message }); }
+});
+
 async function aiScanNotify(title, body, severity) {
   try {
     await query(`INSERT INTO notifications (type, title, body, severity, related_type, related_id)

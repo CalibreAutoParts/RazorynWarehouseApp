@@ -22450,6 +22450,106 @@ async function pqLoadChanges(q) {
       }).join('') + '</tbody></table></div>';
   } catch (e) { box.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
 }
+// ── Manual part-number check (the "google it" replacement) ────────────────
+let _pnck = { product: null, verdict: null, code: '' };
+function pnckSearch(q) {
+  const wrap = el('pnck-suggest');
+  if (!wrap) return;
+  q = (q || '').trim().toLowerCase();
+  if (q.length < 2) { wrap.innerHTML = ''; return; }
+  const matches = (State.products || []).filter(p =>
+    matchesKeywords(q, p.sku, p.title, p.partNumber, p.barcode, ...(p.partNumbers || []).map(a => a.code))
+  ).slice(0, 10);
+  wrap.innerHTML = matches.length
+    ? `<div style="position:absolute;top:4px;left:0;right:0;background:var(--white);border:1px solid var(--line);border-radius:6px;max-height:260px;overflow-y:auto;z-index:30;box-shadow:var(--shadow)">
+        ${matches.map(p => `<div onclick="pnckPick(${p.id})" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line-2)">
+          <div style="font-size:12px;font-weight:500">${escapeHtml(p.title)}</div>
+          <div style="font-size:10.5px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku)} · PN ${escapeHtml(p.partNumber || '—')}</div>
+        </div>`).join('')}
+      </div>`
+    : '<div style="position:absolute;top:4px;left:0;right:0;background:var(--white);border:1px solid var(--line);border-radius:6px;padding:8px;font-size:12px;color:var(--ink-soft);z-index:30">No matches</div>';
+}
+function pnckPick(id) {
+  const p = (State.products || []).find(x => x.id === id);
+  if (!p) return;
+  _pnck.product = p; _pnck.verdict = null;
+  if (el('pnck-search')) el('pnck-search').value = p.sku;
+  if (el('pnck-suggest')) el('pnck-suggest').innerHTML = '';
+  if (el('pnck-picked')) el('pnck-picked').innerHTML = '✓ <strong>' + escapeHtml(p.title) + '</strong> — current PN <strong>' + escapeHtml(p.partNumber || '—') + '</strong>' + ((p.partNumbers || []).length ? ' · alternates: ' + escapeHtml(p.partNumbers.map(a => a.code).join(', ')) : '');
+  if (el('pnck-result')) el('pnck-result').innerHTML = '';
+  el('pnck-code')?.focus();
+}
+async function pnckCheck(btn) {
+  const p = _pnck.product;
+  const code = (el('pnck-code')?.value || '').trim();
+  const out = el('pnck-result');
+  if (!p) { toast('Pick one of our listings first', 'warn'); return; }
+  if (!code) { toast('Enter the part number to verify', 'warn'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  if (out) out.innerHTML = '<div style="font-size:12px;color:var(--ink-soft)">🤖 Verifying ' + escapeHtml(code) + ' against ' + escapeHtml(p.partNumber || p.sku) + ' (and the photo)…</div>';
+  try {
+    const r = await Api.post('/api/ai/check-part-number', { productId: p.id, code });
+    _pnck.verdict = r.verdict; _pnck.code = code;
+    pnckPaintVerdict(r);
+  } catch (e) {
+    if (out) out.innerHTML = '<div style="color:var(--red);font-size:13px">' + escapeHtml(e.data?.message || e.message) + '</div>';
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '🤖 Check with AI'; }
+}
+function pnckPaintVerdict(r) {
+  const out = el('pnck-result');
+  if (!out) return;
+  const v = r.verdict || {};
+  const conf = Math.round((v.confidence || 0) * 100) + '%';
+  const relLabel = { superseded: 'superseded / updated revision', regional: 'regional code — same part & fitment', alternative: 'alternative number for the same part', same_number: 'the same number (different layout)', unrelated: 'a different part' }[v.relationship] || v.relationship;
+  if (r.alreadyKnown) {
+    out.innerHTML = '<div style="padding:10px;border:1px solid var(--line);border-radius:8px;font-size:13px">ℹ️ ' + escapeHtml(v.reason) + '</div>';
+    return;
+  }
+  if (v.same) {
+    out.innerHTML = `<div style="padding:12px;border:1px solid var(--green);border-radius:8px;background:var(--green-light, rgba(0,128,0,.06))">
+      <div style="font-weight:700;color:var(--green);font-size:14px">✓ Same part — ${escapeHtml(relLabel)} <span style="font-weight:400;color:var(--ink-soft);font-size:12px">(${conf} sure)</span></div>
+      <div style="font-size:12.5px;margin-top:4px">${escapeHtml(v.reason)}</div>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" onclick="pnckPush(false, this)">✓ Add &amp; push everywhere</button>
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Pushes to the warehouse alternates (scanning/search finds it), the Shopify alternate-numbers field, and the eBay ${v.relationship === 'superseded' ? 'Superseded Part Number' : 'Reference OE/OEM'} specifics on every linked listing.</div>
+    </div>`;
+  } else {
+    out.innerHTML = `<div style="padding:12px;border:1px solid var(--red);border-radius:8px;background:rgba(200,32,45,.05)">
+      <div style="font-weight:700;color:var(--red);font-size:14px">${v.unsure ? '❓ Not sure it matches' : '✗ Not the same part'} <span style="font-weight:400;color:var(--ink-soft);font-size:12px">(${conf} sure)</span></div>
+      ${v.differences ? '<div style="font-size:13px;margin-top:4px;font-weight:600">What differs: ' + escapeHtml(v.differences) + '</div>' : ''}
+      <div style="font-size:12.5px;margin-top:4px">${escapeHtml(v.reason)}</div>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-outline btn-sm" onclick="pnckPush(true, this)">⚠ Push anyway (I'm sure)</button>
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Overriding is recorded — the AI learns from it for future checks.</div>
+    </div>`;
+  }
+}
+async function pnckPush(override, btn) {
+  const p = _pnck.product, v = _pnck.verdict, code = _pnck.code;
+  if (!p || !code) return;
+  if (override && !confirm('The AI says this is NOT the same part. Push "' + code + '" onto ' + (p.sku || 'this listing') + ' anyway?')) return;
+  if (btn) { btn.disabled = true; btn.textContent = 'Pushing…'; }
+  try {
+    const r = await Api.post('/api/ai/add-alt-number', {
+      productId: p.id, code,
+      relationship: v?.relationship === 'superseded' ? 'superseded' : (v?.relationship === 'regional' ? 'regional' : 'alternative'),
+      override, verdict: v || null,
+    });
+    const eb = (r.result?.ebay || []);
+    const ebBits = eb.length ? ' · eBay: ' + eb.map(x => x.ok ? '✓' : (x.queued ? '⏳ queued' : '✗')).join(' ') : '';
+    toast('Added ' + code + ' — warehouse ✓' + (r.result?.shopify === 'ok' ? ' · Shopify ✓' : '') + ebBits, 'success', 7000);
+    if (el('pnck-result')) el('pnck-result').innerHTML = '<div style="font-size:13px;color:var(--green);font-weight:600">✓ ' + escapeHtml(code) + ' is now on the listing everywhere.</div>';
+    if (el('pnck-code')) el('pnck-code').value = '';
+    Store.refresh('products').catch(() => {});
+  } catch (e) {
+    toast('Push failed: ' + (e.data?.message || e.message), 'error', 8000);
+    if (btn) { btn.disabled = false; btn.textContent = override ? '⚠ Push anyway (I’m sure)' : '✓ Add & push everywhere'; }
+  }
+}
+
 // ── eBay category audit — scan every live listing for a wrong category (vs
 // eBay's own suggestion for the title) and missing required specifics, then
 // move flagged listings to the right category (per-row or all at once). ──
@@ -22838,6 +22938,26 @@ function renderAiPage() {
           </div>
         </div>
       </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>🔎 Check a part number</h3><div class="card-desc">Found another number for a part (supplier sheet, Google, a box label)? Paste it here instead — Claude verifies it's genuinely the same part &amp; fitment (superseded revision, regional code) or tells you why not (wrong side, trim, generation, vehicle). Confirmed numbers push to the warehouse, eBay and Shopify in one click.</div></div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
+            <div class="field" style="margin:0;position:relative">
+              <label>Our listing</label>
+              <input id="pnck-search" placeholder="Search by SKU, title or part number…" autocomplete="off" oninput="pnckSearch(this.value)">
+              <div id="pnck-suggest" style="position:relative"></div>
+              <div id="pnck-picked" style="font-size:12px;margin-top:6px;color:var(--ink-soft)"></div>
+            </div>
+            <div class="field" style="margin:0">
+              <label>Part number to verify</label>
+              <input id="pnck-code" placeholder="e.g. 623106PA0B" autocomplete="off" style="font-family:ui-monospace,monospace">
+              <div style="margin-top:8px"><button class="btn btn-primary btn-sm" id="pnck-btn" onclick="pnckCheck(this)">🤖 Check with AI</button></div>
+            </div>
+          </div>
+          <div id="pnck-result" style="margin-top:12px"></div>
+        </div>
+      </div>
+
       <div class="card" style="margin-bottom:16px">
         <div class="card-head">
           <h3>To review <span id="ai-pending-count" style="display:inline-block;min-width:20px;text-align:center;background:var(--blue-light);color:var(--blue);border-radius:10px;padding:1px 7px;font-size:12px">0</span></h3>
