@@ -443,6 +443,39 @@ RULES for ebaySpecifics:
   };
 }
 
+// ── Manual alternate-number verification ───────────────────────────────────
+// The team finds candidate numbers themselves (supplier sheets, Google) —
+// this is the "623106PA0B same as 62310-6PA0A?" check, in-house: given our
+// listing and a candidate number, is it genuinely the SAME part + fitment?
+// Uses the SMART model (one interactive call, quality matters) and the photo.
+async function verifyAltNumber(ctx) {
+  const cfg = await getAiConfig();
+  const system = baseSystem(cfg.guidance) + await fewShotBlock('alt_check', 5);
+  const user = `A team member wants to add an extra part number to one of our car-part listings. Verify it before it goes live.
+
+Our listing: ${JSON.stringify({ title: ctx.title, sku: ctx.sku, partNumber: ctx.partNumber, knownAlternates: ctx.altNumbers || [] })}
+Candidate number to verify: "${ctx.candidate}"
+
+Is the candidate genuinely the SAME part and fitment as our part number for this vehicle? Consider:
+- superseded / updated revisions (often a letter or digit change at the end, e.g. 62310-6PA0A → 62310-6PA0B)
+- regional codes for the same part (different market, identical part + fitment)
+- compact vs hyphenated vs spaced forms of the SAME number (that counts as the same)
+- and the ways it can be WRONG: the other side (LH vs RH), a different trim level, a different generation/facelift, or a different vehicle entirely.
+Reply with ONLY this JSON:
+{"same": true|false, "unsure": true|false, "relationship": "superseded"|"regional"|"alternative"|"same_number"|"unrelated", "confidence": <0..1>, "reason": "<one or two short sentences>", "differences": "<ONLY when not the same: what differs — wrong side / trim / generation / vehicle>"|null}`;
+  const out = await callClaude({ kind: 'alt_check', system, user, model: cfg.smartModel, maxTokens: 350, images: ctx.imageUrls });
+  const v = out.json;
+  if (!v) return null;
+  return {
+    same: v.same === true && v.unsure !== true,
+    unsure: v.unsure === true,
+    relationship: ['superseded', 'regional', 'alternative', 'same_number', 'unrelated'].includes(v.relationship) ? v.relationship : (v.same ? 'alternative' : 'unrelated'),
+    confidence: Math.max(0, Math.min(1, +v.confidence || 0)),
+    reason: String(v.reason || '').slice(0, 400),
+    differences: v.differences ? String(v.differences).slice(0, 300) : null,
+  };
+}
+
 // ── Learning: distil recent feedback into standing rules ──────────────────
 // Reads the recent feedback log and asks the smart model to write/refresh the
 // auto-learned section of the guidance (the hand-written part is untouched).
@@ -509,6 +542,7 @@ module.exports = {
   partNumberBatch,
   pricingVerdict,
   listingAudit,
+  verifyAltNumber,
   learnFromFeedback,
   recordFeedback,
   queueSuggestion,
