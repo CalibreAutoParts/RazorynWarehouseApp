@@ -7139,6 +7139,7 @@ function renderReturns() {
         <div class="actions">
           <button class="btn btn-outline app-hide" onclick="relinkReturns()" title="Fix wrong product matches, re-link unmatched returns, and re-sync open/closed statuses">🔧 Repair</button>
           <button class="btn btn-outline app-hide" onclick="syncEbayReturns()" title="Pull return cases from eBay right now">↩️ Pull from eBay</button>
+          <button class="btn btn-outline app-hide" onclick="openBulkCloseReturns()" title="Close old returns that were dealt with long ago (e.g. on a disconnected eBay account) — marks them closed here, never touches stock">🧹 Close old returns…</button>
           <button class="btn btn-primary" onclick="openReturnModal()">+ Log return</button>
         </div>
       </div>
@@ -7230,6 +7231,7 @@ function filterReturns(f) {
           </div>
           <div style="display:flex;flex-direction:column;gap:5px;flex-shrink:0">
             ${['open', 'received'].includes(r.status) ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openGuidedReturn(${r.id})" title="Guided check: condition, photos, notes → admins emailed → restock / refurb / scrap">▶ Process</button>` : ''}
+            ${r.status !== 'closed' ? `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();quickCloseReturn(${r.id})" title="Already dealt with (e.g. handled on eBay ages ago)? Mark it closed warehouse-side — stock is NOT touched and the eBay sync won't reopen it.">✓ Dealt with</button>` : ''}
             ${r.externalReturnId ? `<a class="btn btn-ghost btn-sm" href="https://www.ebay.co.uk/sh/ord/details?mode=RT&srn=${r.externalReturnId}" target="_blank" onclick="event.stopPropagation()" style="text-decoration:none;font-size:11px">Open on eBay →</a>` : ''}
           </div>
         </div>
@@ -7363,6 +7365,75 @@ async function closeReturnAs(id, method) {
     closeModal();
     await Store.refresh('returns');
     Store.refresh('products').catch(() => {});
+    if (State.page === 'returns') {
+      const active = document.querySelector('[data-rfilter].active')?.dataset.rfilter || 'open';
+      filterReturns(active);
+    }
+    refreshNavCounts();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// ── Stale-return cleanup ────────────────────────────────────────────────────
+// "Dealt with" = the case was handled long ago (often on an eBay account that
+// has since been disconnected, so the sync can never close it). Closes it
+// warehouse-side only: stock is NEVER touched (skipRestock) and closed_locally
+// stops the sync reopening it. The admin email/eBay side is unaffected.
+async function quickCloseReturn(id) {
+  const r = (State.returns || []).find(x => x.id === id);
+  if (!confirm(`Mark this return as dealt with?\n\n${r ? (r.title || r.sku || '') + '\n\n' : ''}It closes warehouse-side only — stock is NOT changed, and the eBay sync won't reopen it.`)) return;
+  try {
+    await Api.patch('/api/returns/' + id, { status: 'closed', skipRestock: true, refundMethod: r?.refundMethod || 'none' });
+    toast('Closed warehouse-side — stock untouched ✓', 'success');
+    await Store.refresh('returns');
+    if (State.page === 'returns') {
+      const active = document.querySelector('[data-rfilter].active')?.dataset.rfilter || 'open';
+      filterReturns(active);
+    }
+    refreshNavCounts();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+function openBulkCloseReturns() {
+  const open = (State.returns || []).filter(x => x.status !== 'closed');
+  const channels = [...new Set(open.map(x => x.channel).filter(Boolean))];
+  const countOlder = (days, channel) => open.filter(x =>
+    (!channel || x.channel === channel) && new Date(x.date) < new Date(Date.now() - days * 86400000)).length;
+  modal({
+    title: '🧹 Close old returns',
+    body: `
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">For returns that were dealt with long ago but still show open here — e.g. cases on an eBay account that has since been <strong>disconnected</strong>, so the sync can never close them. This marks them closed <strong>warehouse-side only</strong>: stock is <strong>never touched</strong> (no accidental double restock), and the eBay sync won't reopen them.</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="field"><label>Older than (days)</label><input id="bcr-days" type="number" min="0" value="30" oninput="bcrCount()"></div>
+        <div class="field"><label>Channel</label>
+          <select id="bcr-channel" onchange="bcrCount()">
+            <option value="">All channels</option>
+            ${channels.map(c => `<option value="${escapeAttr(c)}">${escapeHtml(c)}</option>`).join('')}
+          </select></div>
+      </div>
+      <div id="bcr-count" style="font-size:13px;font-weight:600;margin-top:4px">${countOlder(30, '')} return(s) would be closed.</div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '🧹 Close them', primary: true, onClick: bulkCloseReturns },
+    ],
+  });
+}
+function bcrCount() {
+  const days = Math.max(0, parseInt(el('bcr-days')?.value) || 0);
+  const channel = el('bcr-channel')?.value || '';
+  const n = (State.returns || []).filter(x => x.status !== 'closed'
+    && (!channel || x.channel === channel)
+    && new Date(x.date) < new Date(Date.now() - days * 86400000)).length;
+  const out = el('bcr-count');
+  if (out) out.textContent = n + ' return(s) would be closed.';
+}
+async function bulkCloseReturns() {
+  const days = Math.max(0, parseInt(el('bcr-days')?.value) || 0);
+  const channel = el('bcr-channel')?.value || '';
+  try {
+    const r = await Api.post('/api/returns/bulk-close', { olderThanDays: days, channel: channel || undefined });
+    toast(`Closed ${r.closed} old return(s) warehouse-side — stock untouched`, 'success', 7000);
+    closeModal();
+    await Store.refresh('returns');
     if (State.page === 'returns') {
       const active = document.querySelector('[data-rfilter].active')?.dataset.rfilter || 'open';
       filterReturns(active);

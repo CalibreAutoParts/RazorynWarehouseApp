@@ -348,6 +348,7 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
     // - replacement → no stock change; we shipped another
     let restocked = null;
     if ((b.status === 'processed' || b.status === 'closed')
+        && !b.skipRestock
         && r.rows[0].resolution === 'restock' && r.rows[0].product_id && !r.rows[0].restocked_at) {
       const up = await c.query(
         `UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2 RETURNING qty_on_hand`,
@@ -614,6 +615,41 @@ router.post('/relink-unmatched', requirePermission('returns'), async (req, res) 
   }
   await audit(req, 'relink_returns', null, null, { scanned: unlinked.rows.length, linked });
   res.json({ scanned: unlinked.rows.length, linked });
+});
+
+// POST /api/returns/bulk-close { olderThanDays?, channel?, ids? }
+// Clear out STALE returns in one go — cases handled ages ago (often on an
+// eBay account that has since been disconnected, so the sync can never close
+// them) that still sit "open" here. Marks them closed warehouse-side:
+//   • closed_locally = true → the eBay sync will NOT reopen them
+//   • stock is NEVER touched (these were dealt with long ago — restocking
+//     now would double-count), and restocked_at stays as-is
+//   • refund_method keeps whatever it had, else 'none'
+router.post('/bulk-close', requirePermission('returns'), async (req, res) => {
+  const b = req.body || {};
+  const where = [`status IN ('open','received','processed')`];
+  const params = [];
+  if (Array.isArray(b.ids) && b.ids.length) {
+    params.push(b.ids.map(x => parseInt(x)).filter(Boolean));
+    where.push(`id = ANY($${params.length})`);
+  } else {
+    const days = Math.max(0, parseInt(b.olderThanDays));
+    if (!isFinite(days)) return res.status(400).json({ error: 'olderThanDays_or_ids_required' });
+    params.push(`${days} days`);
+    where.push(`created_at < now() - $${params.length}::interval`);
+    if (b.channel) { params.push(b.channel); where.push(`channel = $${params.length}`); }
+  }
+  const { rows } = await query(
+    `UPDATE returns
+        SET status = 'closed', closed_at = now(), closed_locally = true,
+            refund_method = COALESCE(refund_method, 'none')
+      WHERE ${where.join(' AND ')}
+      RETURNING id, sale_id`, params);
+  // Refold refunds per touched sale (best-effort, deduped).
+  const saleIds = [...new Set(rows.map(r => r.sale_id).filter(Boolean))];
+  for (const sid of saleIds) { try { await reconcileSaleRefund(sid); } catch (_) {} }
+  await audit(req, 'bulk_close_returns', null, null, { closed: rows.length, olderThanDays: b.olderThanDays || null, channel: b.channel || null, byIds: !!(b.ids && b.ids.length) });
+  res.json({ ok: true, closed: rows.length });
 });
 
 // POST /api/returns/sync-ebay
