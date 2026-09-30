@@ -19,6 +19,9 @@ router.use(requireAuth);
   try {
     await query(`ALTER TABLE returns ADD COLUMN IF NOT EXISTS closed_locally BOOLEAN`);
     await query(`ALTER TABLE returns ADD COLUMN IF NOT EXISTS refund_method TEXT`);
+    // Set once when the returned qty is actually added back to stock — the UI's
+    // "added back to stock" indicator, and the guard against double-restocking.
+    await query(`ALTER TABLE returns ADD COLUMN IF NOT EXISTS restocked_at TIMESTAMPTZ`);
   } catch (e) { console.warn('[returns] migration warning:', e.message); }
 })();
 
@@ -186,6 +189,7 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
            VALUES ($1,$2,'return_restock',$3,$4)`,
           [it.productId, qty, r.rows[0].id, req.user.id]
         );
+        await c.query(`UPDATE returns SET restocked_at = now() WHERE id = $1`, [r.rows[0].id]);
         restocked += qty;
       }
     }
@@ -216,7 +220,16 @@ router.post('/from-sale', requirePermission('returns'), async (req, res) => {
 // Reverse a return's effect on a sale + stock, then refold refunds and reopen the
 // invoice if it's no longer fully refunded. Shared by DELETE /:id and undo-for-sale.
 async function reverseReturnRow(c, ret, userId) {
+  // Only take stock back OUT if this return actually put it in — the
+  // return_restock movement is the source of truth (covers rows restocked
+  // before restocked_at existed). A restock-resolution return that was closed
+  // without ever restocking must not decrement stock on delete.
+  let wasRestocked = false;
   if (ret.resolution === 'restock' && ret.product_id && ret.qty) {
+    const mv = await c.query(`SELECT 1 FROM stock_movements WHERE reason = 'return_restock' AND reference_id = $1 LIMIT 1`, [ret.id]);
+    wasRestocked = !!mv.rows[0];
+  }
+  if (wasRestocked) {
     await c.query(`UPDATE products SET qty_on_hand = qty_on_hand - $1 WHERE id = $2`, [ret.qty, ret.product_id]);
     await c.query(`INSERT INTO stock_movements (product_id, delta, reason, reference_id, performed_by) VALUES ($1,$2,'return_reversed',$3,$4)`, [ret.product_id, -ret.qty, ret.id, userId]);
   }
@@ -324,15 +337,20 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
     );
     if (!r.rows[0]) return null;
 
-    // Stock outcomes by resolution. Only fire when this PATCH actually moves to 'processed'.
+    // Stock outcomes by resolution. Fires when the return is PROCESSED — or
+    // when it's CLOSED straight from open/received with restock selected (the
+    // quick cash/bank/eBay close buttons skip 'processed'). restocked_at
+    // guards against restocking twice across those paths.
     // - restock     → add qty back to inventory (item came back in good condition)
     // - relist_used → no stock change; user creates a new "used/damaged" listing manually
     // - dispose     → no stock change; item scrapped
     // - refund      → no stock change; buyer kept item
     // - replacement → no stock change; we shipped another
-    if (b.status === 'processed' && r.rows[0].resolution === 'restock' && r.rows[0].product_id) {
-      await c.query(
-        `UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2`,
+    let restocked = null;
+    if ((b.status === 'processed' || b.status === 'closed')
+        && r.rows[0].resolution === 'restock' && r.rows[0].product_id && !r.rows[0].restocked_at) {
+      const up = await c.query(
+        `UPDATE products SET qty_on_hand = qty_on_hand + $1 WHERE id = $2 RETURNING qty_on_hand`,
         [r.rows[0].qty, r.rows[0].product_id]
       );
       await c.query(
@@ -340,6 +358,9 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
          VALUES ($1,$2,'return_restock',$3,$4)`,
         [r.rows[0].product_id, r.rows[0].qty, r.rows[0].id, req.user.id]
       );
+      await c.query(`UPDATE returns SET restocked_at = now() WHERE id = $1`, [r.rows[0].id]);
+      r.rows[0].restocked_at = new Date().toISOString();
+      restocked = { productId: r.rows[0].product_id, qty: r.rows[0].qty, newQty: up.rows[0] ? parseInt(up.rows[0].qty_on_hand) : null };
     }
     if (b.status === 'processed' && r.rows[0].resolution === 'relist_used' && r.rows[0].product_id) {
       // Log a movement of zero so it appears in the audit trail without changing on-hand qty
@@ -356,32 +377,33 @@ router.patch('/:id', requirePermission('returns'), async (req, res) => {
         [r.rows[0].product_id, r.rows[0].id, req.user.id]
       );
     }
-    return r.rows[0];
+    return { row: r.rows[0], restocked };
   });
   if (!result) return res.status(404).json({ error: 'not_found' });
-  await audit(req, 'update_return', 'return', result.id, b);
+  const updated = result.row;
+  await audit(req, 'update_return', 'return', updated.id, b);
   // A status/refund-amount change alters how much of the sale is refunded — refold
   // it onto the sale so revenue/dispatch stay correct. Best-effort.
-  if (result.sale_id && (b.status !== undefined || b.refundAmount !== undefined)) {
-    try { await reconcileSaleRefund(result.sale_id); } catch (e) { console.warn('[returns] reconcile:', e.message); }
+  if (updated.sale_id && (b.status !== undefined || b.refundAmount !== undefined)) {
+    try { await reconcileSaleRefund(updated.sale_id); } catch (e) { console.warn('[returns] reconcile:', e.message); }
   }
   // Staff marked the return RECEIVED (item back + checked) → tell the admins it's
   // ready to process (in-app + push). Best-effort.
   if (b.status === 'received') {
     try {
-      const itemName = (result.item_title || 'Return #' + result.id).slice(0, 60);
+      const itemName = (updated.item_title || 'Return #' + updated.id).slice(0, 60);
       await query(
         `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
          VALUES ('return_checked', $1, $2, 'info', 'return', $3)`,
         [`Return received & checked: ${itemName}`,
-         `Marked received${b.notes ? ' · ' + String(b.notes).slice(0, 120) : ''}. Ready to process.`, result.id]);
+         `Marked received${b.notes ? ' · ' + String(b.notes).slice(0, 120) : ''}. Ready to process.`, updated.id]);
       require('../services/push').sendToAll({
         title: 'Return received — ready to process', body: itemName,
-        url: '/', tag: 'return-checked-' + result.id, category: 'return',
+        url: '/', tag: 'return-checked-' + updated.id, category: 'return',
       }).catch(() => {});
     } catch (e) { console.warn('[returns] received-notify failed:', e.message); }
   }
-  res.json({ return: result });
+  res.json({ return: updated, restocked: result.restocked });
 });
 
 // POST /api/returns/:id/process-notify — the guided handheld return check
