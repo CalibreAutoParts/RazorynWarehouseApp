@@ -448,26 +448,36 @@ router.post('/check-part-number', async (req, res) => {
 });
 
 router.post('/add-alt-number', async (req, res) => {
-  const productId = parseInt(req.body?.productId);
+  // Shared parts: listings with the same part number are the SAME physical
+  // item, so the checker sends the whole group (productIds) — the number goes
+  // on every selected member, not just the one that was picked.
+  const ids = Array.isArray(req.body?.productIds) && req.body.productIds.length
+    ? [...new Set(req.body.productIds.map(x => parseInt(x)).filter(Boolean))]
+    : [parseInt(req.body?.productId)].filter(Boolean);
   const code = String(req.body?.code || '').trim();
   const relationship = String(req.body?.relationship || 'alternative');
   const override = !!req.body?.override;   // human pushed despite a "not the same" verdict
-  if (!productId || !code) return res.status(400).json({ error: 'productId_and_code_required' });
+  if (!ids.length || !code) return res.status(400).json({ error: 'productIds_and_code_required' });
   const payload = { superseded: [], regional: [], reference: [] };
   if (relationship === 'superseded') payload.superseded = [code];
   else if (relationship === 'regional') payload.regional = [code];
   else payload.reference = [code];
-  try {
-    const result = await applySuggestion({ kind: 'alt_numbers', product_id: productId, payload }, null);
-    // Feed the learning loop: an override teaches the model its verdict was wrong.
-    await ai.recordFeedback('alt_check',
-      { productId, code, relationship, verdict: req.body?.verdict || null },
-      req.body?.verdict || { candidate: code },
-      override ? 'edited' : 'accepted',
-      { pushed: true, relationship });
-    await audit(req, 'ai_pn_add', 'product', productId, { code, relationship, override });
-    res.json({ ok: true, result });
-  } catch (e) { res.status(500).json({ error: 'apply_failed', message: e.message }); }
+  const results = [];
+  for (const pid of ids) {
+    try {
+      const r = await applySuggestion({ kind: 'alt_numbers', product_id: pid, payload }, null);
+      results.push({ productId: pid, ok: true, shopify: r.shopify, ebay: r.ebay });
+    } catch (e) { results.push({ productId: pid, ok: false, error: e.message }); }
+  }
+  // Feed the learning loop once for the group: an override teaches the model
+  // its verdict was wrong.
+  await ai.recordFeedback('alt_check',
+    { productIds: ids, code, relationship, verdict: req.body?.verdict || null },
+    req.body?.verdict || { candidate: code },
+    override ? 'edited' : 'accepted',
+    { pushed: true, relationship, listings: ids.length });
+  await audit(req, 'ai_pn_add', 'product', ids[0], { code, relationship, override, listings: ids.length });
+  res.json({ ok: true, results, summary: { total: ids.length, ok: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length } });
 });
 
 async function aiScanNotify(title, body, severity) {

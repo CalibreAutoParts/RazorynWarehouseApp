@@ -22552,22 +22552,43 @@ function pnckSearch(q) {
   const matches = (State.products || []).filter(p =>
     matchesKeywords(q, p.sku, p.title, p.partNumber, p.barcode, ...(p.partNumbers || []).map(a => a.code))
   ).slice(0, 10);
+  const _n = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const groupSize = (p) => (State.products || []).filter(x =>
+    (_n(p.partNumber) && _n(x.partNumber) === _n(p.partNumber)) || (p.stockGroupId && x.stockGroupId === p.stockGroupId)).length;
   wrap.innerHTML = matches.length
     ? `<div style="position:absolute;top:4px;left:0;right:0;background:var(--white);border:1px solid var(--line);border-radius:6px;max-height:260px;overflow-y:auto;z-index:30;box-shadow:var(--shadow)">
-        ${matches.map(p => `<div onclick="pnckPick(${p.id})" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line-2)">
-          <div style="font-size:12px;font-weight:500">${escapeHtml(p.title)}</div>
+        ${matches.map(p => { const gs = groupSize(p); return `<div onclick="pnckPick(${p.id})" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line-2)">
+          <div style="font-size:12px;font-weight:500">${escapeHtml(p.title)}${gs > 1 ? ` <span class="pill" style="font-size:9px;background:var(--bg-soft)">🔗 shared × ${gs}</span>` : ''}</div>
           <div style="font-size:10.5px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku)} · PN ${escapeHtml(p.partNumber || '—')}</div>
-        </div>`).join('')}
+        </div>`; }).join('')}
       </div>`
     : '<div style="position:absolute;top:4px;left:0;right:0;background:var(--white);border:1px solid var(--line);border-radius:6px;padding:8px;font-size:12px;color:var(--ink-soft);z-index:30">No matches</div>';
 }
 function pnckPick(id) {
   const p = (State.products || []).find(x => x.id === id);
   if (!p) return;
-  _pnck.product = p; _pnck.verdict = null;
+  // Shared parts: every listing carrying the same part number (or in the same
+  // stock pool) is the SAME physical item — the new number belongs on all of
+  // them, so the whole group is selected by default (untick to exclude one).
+  const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const key = norm(p.partNumber);
+  let group = (State.products || []).filter(x =>
+    x.id === p.id
+    || (key && norm(x.partNumber) === key)
+    || (p.stockGroupId && x.stockGroupId === p.stockGroupId));
+  if (!group.length) group = [p];
+  _pnck.product = p; _pnck.group = group; _pnck.verdict = null;
   if (el('pnck-search')) el('pnck-search').value = p.sku;
   if (el('pnck-suggest')) el('pnck-suggest').innerHTML = '';
-  if (el('pnck-picked')) el('pnck-picked').innerHTML = '✓ <strong>' + escapeHtml(p.title) + '</strong> — current PN <strong>' + escapeHtml(p.partNumber || '—') + '</strong>' + ((p.partNumbers || []).length ? ' · alternates: ' + escapeHtml(p.partNumbers.map(a => a.code).join(', ')) : '');
+  if (el('pnck-picked')) {
+    el('pnck-picked').innerHTML = group.length > 1
+      ? `<div style="color:var(--ink)">🔗 <strong>Shared part</strong> — ${group.length} listings carry PN <strong>${escapeHtml(p.partNumber || '—')}</strong> (same physical item). The number will be added to every ticked listing:</div>`
+        + group.map(g => `<label style="display:flex;align-items:flex-start;gap:6px;margin-top:5px;font-size:12px;cursor:pointer">
+            <input type="checkbox" class="pnck-member" value="${g.id}" checked style="margin-top:2px">
+            <span><strong>${escapeHtml(g.title)}</strong> <span style="color:var(--ink-soft);font-family:ui-monospace,monospace;font-size:10.5px">· ${escapeHtml(g.sku)}</span></span>
+          </label>`).join('')
+      : '✓ <strong>' + escapeHtml(p.title) + '</strong> — current PN <strong>' + escapeHtml(p.partNumber || '—') + '</strong>' + ((p.partNumbers || []).length ? ' · alternates: ' + escapeHtml(p.partNumbers.map(a => a.code).join(', ')) : '');
+  }
   if (el('pnck-result')) el('pnck-result').innerHTML = '';
   el('pnck-code')?.focus();
 }
@@ -22599,13 +22620,14 @@ function pnckPaintVerdict(r) {
     return;
   }
   if (v.same) {
+    const nGroup = (_pnck.group || []).length;
     out.innerHTML = `<div style="padding:12px;border:1px solid var(--green);border-radius:8px;background:var(--green-light, rgba(0,128,0,.06))">
       <div style="font-weight:700;color:var(--green);font-size:14px">✓ Same part — ${escapeHtml(relLabel)} <span style="font-weight:400;color:var(--ink-soft);font-size:12px">(${conf} sure)</span></div>
       <div style="font-size:12.5px;margin-top:4px">${escapeHtml(v.reason)}</div>
       <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-primary btn-sm" onclick="pnckPush(false, this)">✓ Add &amp; push everywhere</button>
+        <button class="btn btn-primary btn-sm" onclick="pnckPush(false, this)">✓ Add &amp; push${nGroup > 1 ? ' to the shared group' : ' everywhere'}</button>
       </div>
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Pushes to the warehouse alternates (scanning/search finds it), the Shopify alternate-numbers field, and the eBay ${v.relationship === 'superseded' ? 'Superseded Part Number' : 'Reference OE/OEM'} specifics on every linked listing.</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">${nGroup > 1 ? 'Applies to every ticked listing above (' + nGroup + ' share this part number — same physical item). ' : ''}Pushes to the warehouse alternates (scanning/search finds it), the Shopify alternate-numbers field, and the eBay ${v.relationship === 'superseded' ? 'Superseded Part Number' : 'Reference OE/OEM'} specifics on every linked listing.</div>
     </div>`;
   } else {
     out.innerHTML = `<div style="padding:12px;border:1px solid var(--red);border-radius:8px;background:rgba(200,32,45,.05)">
@@ -22622,18 +22644,24 @@ function pnckPaintVerdict(r) {
 async function pnckPush(override, btn) {
   const p = _pnck.product, v = _pnck.verdict, code = _pnck.code;
   if (!p || !code) return;
-  if (override && !confirm('The AI says this is NOT the same part. Push "' + code + '" onto ' + (p.sku || 'this listing') + ' anyway?')) return;
+  // Shared group: push to every ticked member (defaults to all — same item).
+  const ticked = [...document.querySelectorAll('.pnck-member:checked')].map(c => parseInt(c.value)).filter(Boolean);
+  const ids = ticked.length ? ticked : [p.id];
+  if (override && !confirm('The AI says this is NOT the same part. Push "' + code + '" onto ' + ids.length + ' listing(s) anyway?')) return;
   if (btn) { btn.disabled = true; btn.textContent = 'Pushing…'; }
   try {
     const r = await Api.post('/api/ai/add-alt-number', {
-      productId: p.id, code,
+      productIds: ids, code,
       relationship: v?.relationship === 'superseded' ? 'superseded' : (v?.relationship === 'regional' ? 'regional' : 'alternative'),
       override, verdict: v || null,
     });
-    const eb = (r.result?.ebay || []);
-    const ebBits = eb.length ? ' · eBay: ' + eb.map(x => x.ok ? '✓' : (x.queued ? '⏳ queued' : '✗')).join(' ') : '';
-    toast('Added ' + code + ' — warehouse ✓' + (r.result?.shopify === 'ok' ? ' · Shopify ✓' : '') + ebBits, 'success', 7000);
-    if (el('pnck-result')) el('pnck-result').innerHTML = '<div style="font-size:13px;color:var(--green);font-weight:600">✓ ' + escapeHtml(code) + ' is now on the listing everywhere.</div>';
+    const s = r.summary || {};
+    const queued = (r.results || []).some(x => (x.ebay || []).some(e => e.queued));
+    toast(`Added ${code} to ${s.ok}/${s.total} listing(s)` + (queued ? ' · some eBay pushes queued (offer open)' : '') + (s.failed ? ' · ' + s.failed + ' failed' : ''), s.failed ? 'warn' : 'success', 8000);
+    if (el('pnck-result')) {
+      el('pnck-result').innerHTML = '<div style="font-size:13px;color:var(--green);font-weight:600">✓ ' + escapeHtml(code) + ' is now on ' + s.ok + ' listing(s) — warehouse, Shopify & eBay.</div>'
+        + ((r.results || []).filter(x => !x.ok).map(x => '<div style="font-size:12px;color:var(--red)">Product #' + x.productId + ': ' + escapeHtml(x.error || '') + '</div>').join(''));
+    }
     if (el('pnck-code')) el('pnck-code').value = '';
     Store.refresh('products').catch(() => {});
   } catch (e) {
