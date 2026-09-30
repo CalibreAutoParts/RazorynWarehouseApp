@@ -1570,6 +1570,7 @@ function adaptReturn(r) {
     refundAmount: parseFloat(r.refund_amount || 0),
     refundMethod: r.refund_method || null,
     closedLocally: !!r.closed_locally,
+    restockedAt: r.restocked_at || null,
     status: r.status,
     notes: r.notes,
     photoCount: r.photo_count || 0,
@@ -7214,6 +7215,8 @@ function filterReturns(f) {
               <span class="pill ${statusPill(r.status)}">${statusLabel(r.status)}</span>
               ${deadlineBadge(r.respondBy)}
               ${r.photoCount ? `<span class="pill" style="background:var(--bg-soft);color:var(--ink-soft)">📷 ${r.photoCount}</span>` : ''}
+              ${r.restockedAt ? `<span class="pill green" title="The returned quantity has been added back to on-hand stock">📦 +${r.qty || 1} back in stock</span>` : ''}
+              ${r.status === 'closed' && r.refundMethod ? `<span class="pill" style="background:var(--bg-soft);color:var(--ink-soft)">${r.refundMethod === 'ebay' ? '🌐 eBay refund' : r.refundMethod === 'cash' ? '💷 cash' : r.refundMethod === 'bank' ? '🏦 bank' : 'no refund'}</span>` : ''}
               <span style="font-size:11px;color:var(--ink-soft);margin-left:auto">${fmtDate(r.date)}</span>
             </div>
             <div style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(itemLabel)}</div>
@@ -7309,16 +7312,18 @@ async function openReturnDetail(id) {
         <div id="rd-resolution-hint" style="font-size:11px;color:var(--ink-soft);margin-top:6px;line-height:1.5"></div>
       </div>
 
+      ${r.restockedAt ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(0,140,60,.08);border:1px solid var(--green);border-radius:8px;padding:8px 12px;margin-bottom:14px;font-size:13px;font-weight:600;color:var(--green)">📦 Stock added back — +${r.qty || 1} to on-hand${r.sku ? ' for ' + escapeHtml(r.sku) : ''}</div>` : ''}
       ${r.status !== 'closed' ? `
       <div style="border-top:1px solid var(--line);padding-top:12px;margin-bottom:6px">
         <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:600;margin-bottom:6px">Close this return</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-outline btn-sm" onclick="closeReturnAs(${r.id}, 'ebay')">🌐 Closed — refunded on EBAY</button>
           <button class="btn btn-outline btn-sm" onclick="closeReturnAs(${r.id}, 'cash')">💷 Closed — refunded CASH</button>
           <button class="btn btn-outline btn-sm" onclick="closeReturnAs(${r.id}, 'bank')">🏦 Closed — refunded BANK</button>
           <button class="btn btn-outline btn-sm" onclick="closeReturnAs(${r.id}, 'none')">✖ Closed — no refund</button>
         </div>
-        <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Closes it here right away — even for an eBay case that hasn't updated on eBay yet (the sync won't reopen it; if eBay closes it later the states just line up).</div>
-      </div>` : `${r.refundMethod ? `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:6px">Closed${r.closedLocally ? ' on the warehouse app' : ''} — refund via <strong>${escapeHtml(r.refundMethod === 'none' ? 'no refund' : r.refundMethod)}</strong></div>` : ''}`}
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Closes it here right away — even for an eBay case that hasn't updated on eBay yet (the sync won't reopen it; if eBay closes it later the states just line up). If the resolution above is set to <strong>restock</strong>, closing adds the stock back and shows it here.</div>
+      </div>` : `${r.refundMethod ? `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:6px">Closed${r.closedLocally ? ' on the warehouse app' : ''} — refund via <strong>${escapeHtml(returnMethodLabel(r.refundMethod))}</strong></div>` : ''}`}
     `,
     actions: [
       { label: 'Close', onClick: closeModal },
@@ -7333,21 +7338,31 @@ async function openReturnDetail(id) {
 }
 
 // Close a return from the warehouse app, recording how the money went back.
-// Works for direct (cash/bank) sales AND for eBay cases that haven't flipped
-// to closed on eBay yet — closed_locally stops the 15-min sync reopening it.
+// Works for direct (cash/bank) sales AND for eBay orders refunded through
+// eBay itself — closed_locally stops the 15-min sync reopening it.
+function returnMethodLabel(m) {
+  return m === 'cash' ? 'CASH' : m === 'bank' ? 'BANK transfer' : m === 'ebay' ? 'eBay (refunded on eBay)' : 'no refund';
+}
 async function closeReturnAs(id, method) {
-  const label = method === 'cash' ? 'refunded by CASH' : method === 'bank' ? 'refunded by BANK transfer' : 'no refund';
+  const label = method === 'none' ? 'no refund' : 'refunded via ' + returnMethodLabel(method);
   if (!confirm(`Close this return (${label})?`)) return;
   try {
-    await Api.patch('/api/returns/' + id, {
+    const r = await Api.patch('/api/returns/' + id, {
       status: 'closed',
       refundMethod: method,
       notes: el('rd-notes')?.value ?? undefined,
       resolution: el('rd-resolution')?.value || undefined,
     });
-    toast('Return closed — ' + label, 'success');
+    // Make the stock outcome unmissable: closing a restock-resolution return
+    // adds the qty back — say so with the new on-hand count.
+    if (r.restocked) {
+      toast(`Return closed — ${label} · 📦 stock +${r.restocked.qty} added back${r.restocked.newQty != null ? ' (now ' + r.restocked.newQty + ' on hand)' : ''}`, 'success', 8000);
+    } else {
+      toast('Return closed — ' + label + ((el('rd-resolution')?.value || r.return?.resolution) === 'restock' ? '' : ' · no stock change'), 'success', 6000);
+    }
     closeModal();
     await Store.refresh('returns');
+    Store.refresh('products').catch(() => {});
     if (State.page === 'returns') {
       const active = document.querySelector('[data-rfilter].active')?.dataset.rfilter || 'open';
       filterReturns(active);
@@ -7388,14 +7403,20 @@ function updateResolutionHint() {
 
 async function advanceReturn(id, status, saveFirst) {
   try {
+    let r;
     if (saveFirst) {
       const notes = el('rd-notes')?.value;
       const resolution = el('rd-resolution')?.value;
-      await Api.patch('/api/returns/' + id, { status, notes, resolution });
+      r = await Api.patch('/api/returns/' + id, { status, notes, resolution });
     } else {
-      await Api.patch('/api/returns/' + id, { status });
+      r = await Api.patch('/api/returns/' + id, { status });
     }
-    toast(`Marked ${status}`, 'success');
+    if (r.restocked) {
+      toast(`Marked ${status} · 📦 stock +${r.restocked.qty} added back${r.restocked.newQty != null ? ' (now ' + r.restocked.newQty + ' on hand)' : ''}`, 'success', 8000);
+      Store.refresh('products').catch(() => {});
+    } else {
+      toast(`Marked ${status}`, 'success');
+    }
     closeModal();
     await Store.refresh('returns');
     if (State.page === 'returns') {
