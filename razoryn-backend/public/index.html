@@ -22475,7 +22475,7 @@ function renderBooks() {
         </div>
       </div>
       <div class="card" style="margin-bottom:14px">
-        <div class="card-head"><h3>🏦 Statements</h3><div class="card-desc">Multiple accounts &amp; banks supported — add each business account once, then upload its statements.</div>
+        <div class="card-head"><h3>🏦 Statements</h3><div class="card-desc">Several accounts supported, same or different banks — add each account once, then upload its statements. (Each business runs its own warehouse app, so everything here is this business's.)</div>
           <button class="btn btn-ghost btn-sm" onclick="bkAddAccount()">+ Add bank account</button></div>
         <div class="card-body"><div id="bk-statements" style="font-size:13px;color:var(--ink-soft)">Loading…</div></div>
       </div>
@@ -22507,14 +22507,15 @@ async function bkLoadAccounts() {
     BK.accounts = r.accounts || [];
     const sel = el('bk-account');
     if (sel) sel.innerHTML = '<option value="">All accounts</option>' + BK.accounts.map(a =>
-      `<option value="${a.id}" ${String(BK.accountId) === String(a.id) ? 'selected' : ''}>${escapeHtml((a.business ? a.business + ' · ' : '') + a.name + (a.bank ? ' (' + a.bank + ')' : ''))}</option>`).join('');
+      `<option value="${a.id}" ${String(BK.accountId) === String(a.id) ? 'selected' : ''}>${escapeHtml(a.name + (a.bank ? ' (' + a.bank + ')' : ''))}</option>`).join('');
   } catch (_) {}
 }
 async function bkAddAccount() {
+  // One warehouse app per business, so accounts here are all THIS business's —
+  // just the account name + bank (several accounts, same or different banks).
   const name = prompt('Account name (e.g. "Main current account"):'); if (!name) return;
   const bank = prompt('Bank (Monzo, Wise, Mettle, Barclays…):') || '';
-  const business = prompt('Business this account belongs to (blank = this one):') || '';
-  try { await Api.post('/api/books/accounts', { name, bank, business }); toast('Account added', 'success'); bkLoadAccounts(); }
+  try { await Api.post('/api/books/accounts', { name, bank }); toast('Account added', 'success'); bkLoadAccounts(); }
   catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function bkLoad() {
@@ -22654,7 +22655,7 @@ function bkOpenUpload() {
     title: '⬆ Upload a bank statement (PDF)',
     body: `
       <div style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">Claude reads the PDF — it works out the bank (Monzo, Wise, Mettle, Barclays…), pulls every transaction, auto-links invoice payments and payouts, and pre-categorises the spending. Text PDFs work best (download from the bank, not a photo).</div>
-      <div class="field"><label>Bank account</label><select id="bku-account"><option value="">— not set —</option>${BK.accounts.map(a => `<option value="${a.id}">${escapeHtml((a.business ? a.business + ' · ' : '') + a.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Bank account</label><select id="bku-account"><option value="">— not set —</option>${BK.accounts.map(a => `<option value="${a.id}">${escapeHtml(a.name + (a.bank ? ' (' + a.bank + ')' : ''))}</option>`).join('')}</select></div>
       <div class="field"><label>Statement PDF</label><input type="file" id="bku-file" accept="application/pdf"></div>
       <div class="field"><label>Anything Claude should know? <span style="color:var(--ink-soft);font-weight:400">(optional)</span></label><input id="bku-hint" placeholder="e.g. this is the Wise EUR account, ignore the FX summary page"></div>
     `,
