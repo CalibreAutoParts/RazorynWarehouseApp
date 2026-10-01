@@ -1231,6 +1231,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>
           AI <span id="nav-ai-badge" style="display:none;margin-left:auto;background:var(--blue);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;line-height:18px"></span>
         </button>
+        <button class="nav-item admin-only" data-page="books">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Books &amp; VAT
+        </button>
         <button class="nav-item admin-only" data-page="pushes">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
           Push queue
@@ -3370,6 +3374,7 @@ function hasPerm(page) {
     settings:     false,
     ai:           false,
     pushes:       false,
+    books:        false,
   };
   const v = map[page];
   if (v === true) return true;
@@ -3423,7 +3428,8 @@ function routeTo(page) {
     vinsearch: renderVinSearch,
     qtycheck: renderQtyCheck, iteminfo: renderItemInfo,
     ai: renderAiPage,
-    pushes: renderPushQueue
+    pushes: renderPushQueue,
+    books: renderBooks
   };
   // The handheld's Home is the plain task workbench, not the money dashboard.
   if (State.appShell && page === 'dashboard') pages.dashboard = renderAppHome;
@@ -22409,6 +22415,311 @@ async function fixPartNumbers(btn) {
     toast('Failed to start: ' + (e.data?.message || e.message), 'error');
     if (btn) btn.disabled = false;
   }
+}
+
+// ── Books & VAT workspace (admin, desktop only) ────────────────────────────
+// Statement in → Claude reads it → reconcile → export / share with the
+// accountant. All business flows through the bank, so this is the whole
+// VAT-return picture in one screen.
+const BOOKS_CATEGORIES = ['sale_receipt', 'payout', 'supplier', 'shipping', 'rent', 'utilities', 'software', 'food', 'office', 'fuel', 'bank_fees', 'wages', 'tax_hmrc', 'transfer', 'refund', 'sundry', 'other'];
+let BK = { from: null, to: null, accountId: '', accounts: [], txs: [], period: 'thismonth' };
+function bkPeriodDates(p) {
+  const now = new Date();
+  const d = (y, m, day) => new Date(Date.UTC(y, m, day)).toISOString().slice(0, 10);
+  const y = now.getFullYear(), m = now.getMonth();
+  const q = Math.floor(m / 3);
+  if (p === 'thismonth') return [d(y, m, 1), d(y, m + 1, 0)];
+  if (p === 'lastmonth') return [d(y, m - 1, 1), d(y, m, 0)];
+  if (p === 'thisq') return [d(y, q * 3, 1), d(y, q * 3 + 3, 0)];
+  if (p === 'lastq') return [d(y, q * 3 - 3, 1), d(y, q * 3, 0)];
+  if (p === 'thisyear') return [d(y, 0, 1), d(y, 12, 0)];
+  if (p === 'lastyear') return [d(y - 1, 0, 1), d(y - 1, 12, 0)];
+  return [BK.from || d(y, m, 1), BK.to || d(y, m + 1, 0)];
+}
+function renderBooks() {
+  if (State.appShell) { toast('Books & VAT is a desktop-only workspace', 'warn'); routeTo('dashboard'); return; }
+  [BK.from, BK.to] = bkPeriodDates(BK.period);
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Books &amp; VAT</h1><div class="desc">Upload the month's bank statement — Claude reads it (knows Monzo, Wise, Mettle, Barclays…), links payments to invoices &amp; payouts, captures expenditure VAT, and chases missing VAT receipts. Export or share the lot with your accountant.</div></div>
+        <div class="actions">
+          <select id="bk-period" onchange="bkSetPeriod(this.value)">
+            <option value="thismonth">This month</option>
+            <option value="lastmonth">Last month</option>
+            <option value="thisq">This quarter (VAT)</option>
+            <option value="lastq">Last quarter (VAT)</option>
+            <option value="thisyear">This year</option>
+            <option value="lastyear">Last year</option>
+            <option value="custom">Custom…</option>
+          </select>
+          <select id="bk-account" onchange="BK.accountId=this.value;bkLoad()"><option value="">All accounts</option></select>
+          <button class="btn btn-primary" onclick="bkOpenUpload()">⬆ Upload statement</button>
+        </div>
+      </div>
+      <div id="bk-custom" style="display:none;margin-bottom:12px;gap:8px" class="actions">
+        <input type="date" id="bk-from"> <input type="date" id="bk-to">
+        <button class="btn btn-outline btn-sm" onclick="BK.from=el('bk-from').value;BK.to=el('bk-to').value;bkLoad()">Apply</button>
+      </div>
+      <div id="bk-summary" class="grid-4" style="margin-bottom:14px"></div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>📤 Export &amp; share with the accountant</h3></div>
+        <div class="card-body">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-outline" onclick="bkOpenPack('paid')" title="One print-ready document: the FULL invoice for every order PAID in the period, one per page — Save as PDF for the pack.">📄 Invoice pack — paid in period</button>
+            <button class="btn btn-outline" onclick="bkOpenPack('issued')">📄 Invoice pack — issued in period</button>
+            <button class="btn btn-outline" onclick="bkCsv()">⬇ Transactions CSV</button>
+            <button class="btn btn-primary" onclick="bkCreateShare()" title="Creates a private read-only link for the accountant: summary, every transaction, linked invoices, receipts and the statement PDFs — downloadable singly or as a pack.">🔗 Create accountant link</button>
+          </div>
+          <div id="bk-shares" style="margin-top:10px;font-size:12px;color:var(--ink-soft)"></div>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>🏦 Statements</h3><div class="card-desc">Multiple accounts &amp; banks supported — add each business account once, then upload its statements.</div>
+          <button class="btn btn-ghost btn-sm" onclick="bkAddAccount()">+ Add bank account</button></div>
+        <div class="card-body"><div id="bk-statements" style="font-size:13px;color:var(--ink-soft)">Loading…</div></div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>Transactions</h3><div class="card-desc">Link each line to an invoice or payout, set the VAT, attach receipts. Claude pre-fills most of it from the statement.</div></div>
+        <div class="card-body" style="padding:0"><div id="bk-txs" style="font-size:12.5px">Loading…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>⚠ VAT receipts to chase</h3><div class="card-desc">Suppliers/businesses that haven't provided a VAT receipt for these payments.</div></div>
+        <div class="card-body"><div id="bk-followups" style="font-size:13px;color:var(--ink-soft)">—</div></div>
+      </div>
+    </div>`;
+  if (el('bk-period')) el('bk-period').value = BK.period;
+  bkLoadAccounts();
+  bkLoad();
+  bkLoadShares();
+}
+function bkSetPeriod(p) {
+  BK.period = p;
+  const custom = el('bk-custom');
+  if (p === 'custom') { if (custom) custom.style.display = 'flex'; return; }
+  if (custom) custom.style.display = 'none';
+  [BK.from, BK.to] = bkPeriodDates(p);
+  bkLoad();
+}
+async function bkLoadAccounts() {
+  try {
+    const r = await Api.get('/api/books/accounts');
+    BK.accounts = r.accounts || [];
+    const sel = el('bk-account');
+    if (sel) sel.innerHTML = '<option value="">All accounts</option>' + BK.accounts.map(a =>
+      `<option value="${a.id}" ${String(BK.accountId) === String(a.id) ? 'selected' : ''}>${escapeHtml((a.business ? a.business + ' · ' : '') + a.name + (a.bank ? ' (' + a.bank + ')' : ''))}</option>`).join('');
+  } catch (_) {}
+}
+async function bkAddAccount() {
+  const name = prompt('Account name (e.g. "Main current account"):'); if (!name) return;
+  const bank = prompt('Bank (Monzo, Wise, Mettle, Barclays…):') || '';
+  const business = prompt('Business this account belongs to (blank = this one):') || '';
+  try { await Api.post('/api/books/accounts', { name, bank, business }); toast('Account added', 'success'); bkLoadAccounts(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function bkLoad() {
+  try {
+    const qstr = `from=${BK.from}&to=${BK.to}` + (BK.accountId ? '&accountId=' + BK.accountId : '');
+    const [sum, tx, st] = await Promise.all([
+      Api.get('/api/books/summary?' + qstr),
+      Api.get('/api/books/transactions?' + qstr),
+      Api.get('/api/books/statements' + (BK.accountId ? '?accountId=' + BK.accountId : '')),
+    ]);
+    BK.txs = tx.transactions || [];
+    bkPaintSummary(sum);
+    bkPaintStatements(st.statements || []);
+    bkPaintTxs();
+    bkPaintFollowups();
+  } catch (e) { toast('Books load failed: ' + (e.data?.message || e.message), 'error'); }
+}
+function bkPaintSummary(s) {
+  const box = el('bk-summary'); if (!box) return;
+  const stat = (label, val, color) => `<div class="card"><div class="card-body" style="padding:12px 14px"><div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft)">${label}</div><div style="font-size:19px;font-weight:700;margin-top:2px${color ? ';color:' + color : ''}">${val}</div></div></div>`;
+  box.innerHTML = stat('Money in', gbp(s.moneyIn)) + stat('Money out', gbp(s.moneyOut))
+    + stat('VAT captured on costs', gbp(s.vatCaptured))
+    + stat('Receipts missing', s.receiptsMissing, s.receiptsMissing ? 'var(--red)' : 'var(--green)');
+}
+function bkPaintStatements(list) {
+  const box = el('bk-statements'); if (!box) return;
+  if (!list.length) { box.innerHTML = 'No statements uploaded yet — hit ⬆ Upload statement.'; return; }
+  box.innerHTML = list.map(s => `<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:6px;flex-wrap:wrap">
+    <div><strong>${escapeHtml(s.bank_detected || s.account_bank || 'Statement')}</strong>
+      <span style="color:var(--ink-soft)">${escapeHtml(s.account_name || s.account_detected || '')}${s.business ? ' · ' + escapeHtml(s.business) : ''} · ${s.period_start ? String(s.period_start).slice(0, 10) + ' → ' + String(s.period_end || '').slice(0, 10) : escapeHtml(s.label || '')} · ${s.tx_count} transactions${s.ai_confidence != null ? ' · read at ' + Math.round(s.ai_confidence * 100) + '%' : ''}</span>
+      ${s.ai_notes ? `<div style="font-size:11px;color:var(--amber,orange)">⚠ ${escapeHtml(s.ai_notes)}</div>` : ''}</div>
+    <div style="display:flex;gap:6px">
+      <a class="btn btn-ghost btn-sm" href="/api/books/statements/${s.id}/file" target="_blank">PDF</a>
+      <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="bkDeleteStatement(${s.id})">🗑</button>
+    </div></div>`).join('');
+}
+function bkChip(t) {
+  if (t.sale_id) return `<span class="pill green" style="font-size:10px">🧾 ${escapeHtml(t.invoice_number || ('#' + t.sale_id))}</span>`;
+  if (t.match_type === 'payout' || t.payout_platform) return `<span class="pill blue" style="font-size:10px">${escapeHtml((t.payout_platform || 'payout').toUpperCase())}${t.payout_ref ? ' ' + escapeHtml(t.payout_ref) : ''}</span>`;
+  if (t.match_type === 'transfer') return '<span class="pill" style="font-size:10px">↔ transfer</span>';
+  if (t.match_type === 'expense') return '<span class="pill" style="font-size:10px">expense</span>';
+  return '<span class="pill amber" style="font-size:10px">unmatched</span>';
+}
+function bkPaintTxs() {
+  const box = el('bk-txs'); if (!box) return;
+  if (!BK.txs.length) { box.innerHTML = '<div style="padding:16px;color:var(--ink-soft)">No transactions in this period — upload a statement.</div>'; return; }
+  box.innerHTML = `<div style="overflow-x:auto"><table class="table" style="font-size:12px">
+    <thead><tr><th>Date</th><th style="min-width:220px">Description</th><th class="num">In</th><th class="num">Out</th><th>Category</th><th>Linked to</th><th class="num">VAT £</th><th>Receipt</th><th></th></tr></thead><tbody>
+    ${BK.txs.map(t => `<tr id="bk-tx-${t.id}">
+      <td style="white-space:nowrap;color:var(--ink-soft)">${String(t.tx_date).slice(0, 10)}</td>
+      <td><div>${escapeHtml(t.description || '')}</div>${t.counterparty ? `<div style="font-size:10.5px;color:var(--ink-soft)">${escapeHtml(t.counterparty)}</div>` : ''}${t.notes ? `<div style="font-size:10.5px;color:var(--blue)">✎ ${escapeHtml(t.notes)}</div>` : ''}</td>
+      <td class="num" style="color:var(--green);font-weight:600">${t.money_in > 0 ? gbp(t.money_in) : ''}</td>
+      <td class="num" style="font-weight:600">${t.money_out > 0 ? gbp(t.money_out) : ''}</td>
+      <td><select onchange="bkPatch(${t.id},{category:this.value})" style="font-size:11px;max-width:110px">
+        ${BOOKS_CATEGORIES.map(c => `<option value="${c}" ${t.category === c ? 'selected' : ''}>${c.replace(/_/g, ' ')}</option>`).join('')}
+        <option value="" ${!t.category ? 'selected' : ''}>—</option></select></td>
+      <td>${bkChip(t)}<div style="display:flex;gap:3px;margin-top:3px">
+        ${t.money_in > 0 ? `<button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px" onclick="bkLinkInvoice(${t.id})" title="Link to a warehouse invoice">🧾</button>
+        <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px" onclick="bkSetPayout(${t.id})" title="Mark as a marketplace payout + enter the payout id">💳</button>` : ''}
+        <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px" onclick="bkNote(${t.id})" title="Note">✎</button></div></td>
+      <td class="num"><input type="number" step="0.01" min="0" value="${t.vat_amount != null ? (+t.vat_amount).toFixed(2) : ''}" placeholder="—" style="width:70px;text-align:right;font-size:11px" onchange="bkPatch(${t.id},{vatAmount:this.value})"></td>
+      <td>${t.receipt_path
+        ? `<a href="/api/books/transactions/${t.id}/receipt" target="_blank" style="font-size:11px">view</a>`
+        : `<label class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px;cursor:pointer">📎<input type="file" style="display:none" onchange="bkUploadReceipt(${t.id}, this.files[0])"></label>
+           ${t.needs_vat_receipt ? '<span class="pill red" style="font-size:9px" title="VAT receipt still needed">⚠</span>' : `<button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px;color:var(--ink-soft)" onclick="bkPatch(${t.id},{needsVatReceipt:true})" title="Flag: VAT receipt needed — appears in the chase list">flag</button>`}`}</td>
+      <td></td>
+    </tr>`).join('')}
+    </tbody></table></div>`;
+}
+function bkPaintFollowups() {
+  const box = el('bk-followups'); if (!box) return;
+  const missing = BK.txs.filter(t => t.needs_vat_receipt && !t.receipt_path);
+  if (!missing.length) { box.innerHTML = '<span style="color:var(--green);font-weight:600">✓ No VAT receipts outstanding for this period.</span>'; return; }
+  const byWho = {};
+  for (const t of missing) {
+    const k = t.counterparty || (t.description || '').slice(0, 40) || 'Unknown';
+    (byWho[k] = byWho[k] || { total: 0, n: 0 }); byWho[k].total += parseFloat(t.money_out) || 0; byWho[k].n++;
+  }
+  box.innerHTML = Object.entries(byWho).sort((a, b) => b[1].total - a[1].total).map(([who, v]) =>
+    `<div style="display:flex;justify-content:space-between;border-bottom:1px solid var(--line-2);padding:6px 0"><div><strong>${escapeHtml(who)}</strong> <span style="color:var(--ink-soft)">· ${v.n} payment${v.n === 1 ? '' : 's'}</span></div><div style="font-weight:600">${gbp(v.total)}</div></div>`).join('')
+    + '<div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Chase these for VAT invoices — attach each one with 📎 on its transaction and it drops off this list.</div>';
+}
+async function bkPatch(id, patch) {
+  try {
+    const r = await Api.patch('/api/books/transactions/' + id, patch);
+    const i = BK.txs.findIndex(x => x.id === id);
+    if (i >= 0) BK.txs[i] = { ...BK.txs[i], ...r.transaction };
+    bkPaintTxs(); bkPaintFollowups();
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+}
+function bkNote(id) {
+  const t = BK.txs.find(x => x.id === id);
+  const v = prompt('Note for this transaction:', t?.notes || '');
+  if (v === null) return;
+  bkPatch(id, { notes: v });
+}
+function bkSetPayout(id) {
+  const platform = prompt('Platform (ebay / shopify / paypal / stripe):', 'ebay');
+  if (!platform) return;
+  const ref = prompt('Payout ID from the platform (so it matches their report):') || '';
+  bkPatch(id, { matchType: 'payout', payoutPlatform: platform.toLowerCase().trim(), payoutRef: ref.trim(), category: 'payout' });
+}
+async function bkLinkInvoice(id) {
+  const q = prompt('Search the invoice (number, customer, reference):');
+  if (!q) return;
+  try {
+    const r = await Api.get('/api/sales?q=' + encodeURIComponent(q));
+    const sales = (r.sales || []).slice(0, 8);
+    if (!sales.length) { toast('No invoices matched — try the invoice number', 'warn'); return; }
+    modal({
+      title: 'Link to invoice',
+      body: sales.map(s => `<div onclick="bkPickInvoice(${id}, ${s.id}, '${escapeAttr(s.invoice_number || '#' + s.id)}')" style="padding:9px 10px;border:1px solid var(--line);border-radius:7px;margin-bottom:6px;cursor:pointer">
+        <strong>${escapeHtml(s.invoice_number || '#' + s.id)}</strong> · ${gbp(s.total)} · ${escapeHtml(s.customer_name || s.buyer_username || '')} <span style="color:var(--ink-soft);font-size:11px">${s.occurred_at ? new Date(s.occurred_at).toLocaleDateString('en-GB') : ''}</span></div>`).join(''),
+      actions: [{ label: 'Cancel', onClick: closeModal }],
+    });
+  } catch (e) { toast('Search failed: ' + (e.data?.message || e.message), 'error'); }
+}
+function bkPickInvoice(txId, saleId, label) {
+  closeModal();
+  bkPatch(txId, { matchType: 'sale', saleId, category: 'sale_receipt' });
+  toast('Linked to ' + label, 'success');
+}
+async function bkUploadReceipt(id, file) {
+  if (!file) return;
+  const fd = new FormData();
+  fd.append('receipt', file);
+  try {
+    await Api.postForm('/api/books/transactions/' + id + '/receipt', fd);
+    toast('Receipt attached ✓', 'success');
+    const t = BK.txs.find(x => x.id === id);
+    if (t) { t.receipt_path = 'yes'; t.needs_vat_receipt = false; }
+    bkPaintTxs(); bkPaintFollowups();
+  } catch (e) { toast('Upload failed: ' + (e.data?.message || e.message), 'error'); }
+}
+function bkOpenUpload() {
+  modal({
+    title: '⬆ Upload a bank statement (PDF)',
+    body: `
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">Claude reads the PDF — it works out the bank (Monzo, Wise, Mettle, Barclays…), pulls every transaction, auto-links invoice payments and payouts, and pre-categorises the spending. Text PDFs work best (download from the bank, not a photo).</div>
+      <div class="field"><label>Bank account</label><select id="bku-account"><option value="">— not set —</option>${BK.accounts.map(a => `<option value="${a.id}">${escapeHtml((a.business ? a.business + ' · ' : '') + a.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Statement PDF</label><input type="file" id="bku-file" accept="application/pdf"></div>
+      <div class="field"><label>Anything Claude should know? <span style="color:var(--ink-soft);font-weight:400">(optional)</span></label><input id="bku-hint" placeholder="e.g. this is the Wise EUR account, ignore the FX summary page"></div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '🤖 Upload & read', primary: true, onClick: bkDoUpload },
+    ],
+  });
+}
+async function bkDoUpload() {
+  const file = el('bku-file')?.files?.[0];
+  if (!file) { toast('Pick the statement PDF first', 'warn'); return; }
+  const fd = new FormData();
+  fd.append('statement', file);
+  if (el('bku-account')?.value) fd.append('accountId', el('bku-account').value);
+  if (el('bku-hint')?.value) fd.append('hint', el('bku-hint').value);
+  closeModal();
+  const taskId = Task.start('Claude is reading the statement…');
+  try {
+    const r = await Api.postForm('/api/books/statements', fd);
+    Task.done(taskId, 'Statement read');
+    toast(`✓ ${r.parsed.bank} statement read — ${r.summary.transactions} transactions, ${r.summary.autoLinkedInvoices} invoice(s) auto-linked, ${r.summary.payouts} payout(s)${r.summary.receiptsNeeded ? ', ' + r.summary.receiptsNeeded + ' need VAT receipts' : ''}`, 'success', 9000);
+    bkLoad();
+  } catch (e) {
+    Task.fail(taskId, 'Read failed');
+    toast('Statement read failed: ' + (e.data?.message || e.message), 'error', 9000);
+  }
+}
+async function bkDeleteStatement(id) {
+  if (!confirm('Delete this statement AND all its transactions from Books? (The bank still has the original.)')) return;
+  try { await Api.delete('/api/books/statements/' + id); toast('Deleted', 'info'); bkLoad(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+function bkOpenPack(basis) {
+  window.open(`/api/books/export/invoice-pack?from=${BK.from}&to=${BK.to}&basis=${basis}`, '_blank');
+}
+function bkCsv() {
+  window.open(`/api/books/export/csv?from=${BK.from}&to=${BK.to}` + (BK.accountId ? '&accountId=' + BK.accountId : ''), '_blank');
+}
+async function bkCreateShare() {
+  const label = prompt('Label for this accountant link (e.g. "Q3 VAT return"):') || '';
+  try {
+    const r = await Api.post('/api/books/share', { from: BK.from, to: BK.to, accountId: BK.accountId || undefined, label });
+    const url = window.location.origin + r.url;
+    try { await navigator.clipboard.writeText(url); } catch (_) {}
+    toast('Accountant link created & copied — anyone with the link can view (revoke below)', 'success', 8000);
+    prompt('Send this link to your accountant:', url);
+    bkLoadShares();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function bkLoadShares() {
+  const box = el('bk-shares'); if (!box) return;
+  try {
+    const r = await Api.get('/api/books/shares');
+    const list = r.shares || [];
+    if (!list.length) { box.innerHTML = ''; return; }
+    box.innerHTML = '<strong style="font-size:12px">Active accountant links:</strong> ' + list.map(s =>
+      `<span style="display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:12px;padding:2px 8px;margin:2px">
+        <a href="/api/books-shared/${escapeAttr(s.token)}" target="_blank">${escapeHtml(s.label || (String(s.from_date).slice(0, 10) + ' → ' + String(s.to_date).slice(0, 10)))}</a>
+        <button class="btn btn-ghost btn-sm" style="padding:0 4px;color:var(--red)" title="Revoke — the link stops working" onclick="bkRevokeShare(${s.id})">×</button></span>`).join('');
+  } catch (_) {}
+}
+async function bkRevokeShare(id) {
+  if (!confirm('Revoke this link? The accountant will no longer be able to open it.')) return;
+  try { await Api.delete('/api/books/shares/' + id); bkLoadShares(); toast('Link revoked', 'info'); } catch (e) { toast('Failed', 'error'); }
 }
 
 // ── eBay Push Queue — what's stuck behind an open offer + the change log ───
