@@ -2553,3 +2553,7 @@ async function runPaymentFollowups() {
 
 module.exports = router;
 module.exports.runPaymentFollowups = runPaymentFollowups;
+// Reused by the Books / VAT workspace (invoice packs + accountant share view).
+module.exports.renderInvoiceHtml = renderInvoiceHtml;
+module.exports.enrichSaleCustomer = enrichSaleCustomer;
+module.exports.getCompanySettings = getCompanySettings;

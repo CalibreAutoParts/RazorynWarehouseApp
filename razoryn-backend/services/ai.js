@@ -144,7 +144,7 @@ function extractJson(text) {
   return null;
 }
 
-async function callClaude({ kind, system, user, model, maxTokens = 700, images }) {
+async function callClaude({ kind, system, user, model, maxTokens = 700, images, documents }) {
   if (!isConfigured()) { const e = new Error('ai_not_configured'); e.code = 'not_configured'; throw e; }
   await ensureTables();
   const cfg = await getAiConfig();
@@ -155,11 +155,14 @@ async function callClaude({ kind, system, user, model, maxTokens = 700, images }
   const useModel = model || cfg.bulkModel || DEFAULT_BULK_MODEL;
   // Vision: image URLs become image content blocks ahead of the text (the
   // listing-audit scan sends the product photo so the model can check the
-  // part in the picture against the part number and title).
+  // part in the picture against the part number and title). PDFs (bank
+  // statements) go in as base64 document blocks the same way.
   let content = user;
   const imgs = (images || []).filter(u => /^https:\/\//.test(String(u))).slice(0, 3);
-  if (imgs.length) {
+  const docs = (documents || []).filter(d => d && d.base64).slice(0, 2);
+  if (imgs.length || docs.length) {
     content = [
+      ...docs.map(d => ({ type: 'document', source: { type: 'base64', media_type: d.mediaType || 'application/pdf', data: d.base64 } })),
       ...imgs.map(u => ({ type: 'image', source: { type: 'url', url: u } })),
       { type: 'text', text: user },
     ];
@@ -476,6 +479,58 @@ Reply with ONLY this JSON:
   };
 }
 
+// ── Bank statement parsing (the Books / VAT workspace) ─────────────────────
+// Takes the uploaded statement PDF and returns the bank, account, period and
+// every transaction — plus a first-pass category guess per line so the
+// reconciliation screen starts 80% done. Smart model: accuracy over pennies.
+async function parseBankStatement(pdfBase64, ctx = {}) {
+  const cfg = await getAiConfig();
+  const user = `Read this UK business bank statement PDF carefully and extract EVERYTHING.
+
+${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}Identify the BANK (Monzo, Wise, Mettle, Barclays, Starling, Tide, HSBC, Lloyds, NatWest, Santander, Revolut…), the account holder / business name, the statement period, and EVERY transaction in order. Money in and money out must be separate positive numbers. Dates in YYYY-MM-DD.
+
+For each transaction also give your best first guess:
+- type: "sale_receipt" (a customer paying us), "payout" (a marketplace paying out — eBay, Shopify, PayPal, Stripe...), "supplier" (stock purchase), "shipping" (couriers: DPD, Evri, Royal Mail, UPS, FedEx, DHL…), "rent", "utilities", "software" (subscriptions/SaaS/eBay+Shopify fees), "food", "office" (office supplies), "fuel", "bank_fees", "wages", "tax_hmrc", "transfer" (between own accounts/pots), "refund" (money we refunded out), "sundry", "other"
+- payoutPlatform: "ebay"|"shopify"|"paypal"|"stripe"|null (only for type "payout")
+- vatLikely: true if this outgoing almost certainly carries reclaimable UK VAT (standard-rated supplier/shipping/software/office), false otherwise (wages, HMRC, transfers, bank fees, most food…).
+
+Reply with ONLY this JSON:
+{"bank":"...","accountName":"...","sortCodeOrIban":"...or null","periodStart":"YYYY-MM-DD","periodEnd":"YYYY-MM-DD","currency":"GBP",
+ "transactions":[{"date":"YYYY-MM-DD","description":"...","moneyIn":<number|0>,"moneyOut":<number|0>,"balance":<number|null>,"type":"...","payoutPlatform":null,"vatLikely":false,"counterparty":"<who, cleaned up>"}],
+ "confidence":<0..1>,"notes":"<anything odd: pages unreadable, truncated, totals not matching>"}
+Do not invent transactions; if part of the statement is unreadable say so in notes.`;
+  const out = await callClaude({
+    kind: 'bank_statement', system: 'You are a meticulous UK bookkeeper. You extract bank statements exactly as printed — every line, correct amounts, no inventions. Reply with ONLY JSON.',
+    user, model: cfg.smartModel, maxTokens: 16000,
+    documents: [{ base64: pdfBase64, mediaType: 'application/pdf' }],
+  });
+  const v = out.json;
+  if (!v || !Array.isArray(v.transactions)) return null;
+  const num = (x) => { const n = parseFloat(x); return isFinite(n) ? +n.toFixed(2) : 0; };
+  return {
+    bank: String(v.bank || 'Unknown').slice(0, 60),
+    accountName: v.accountName ? String(v.accountName).slice(0, 120) : null,
+    sortCodeOrIban: v.sortCodeOrIban ? String(v.sortCodeOrIban).slice(0, 60) : null,
+    periodStart: v.periodStart || null, periodEnd: v.periodEnd || null,
+    currency: String(v.currency || 'GBP').slice(0, 6),
+    confidence: Math.max(0, Math.min(1, +v.confidence || 0)),
+    notes: v.notes ? String(v.notes).slice(0, 500) : null,
+    transactions: v.transactions
+      .filter(t => t && t.date && (num(t.moneyIn) > 0 || num(t.moneyOut) > 0))
+      .map(t => ({
+        date: String(t.date).slice(0, 10),
+        description: String(t.description || '').slice(0, 300),
+        moneyIn: num(t.moneyIn), moneyOut: num(t.moneyOut),
+        balance: t.balance != null && isFinite(parseFloat(t.balance)) ? +parseFloat(t.balance).toFixed(2) : null,
+        type: String(t.type || 'other').slice(0, 30),
+        payoutPlatform: t.payoutPlatform ? String(t.payoutPlatform).slice(0, 20) : null,
+        vatLikely: !!t.vatLikely,
+        counterparty: t.counterparty ? String(t.counterparty).slice(0, 120) : null,
+      }))
+      .slice(0, 2000),
+  };
+}
+
 // ── Learning: distil recent feedback into standing rules ──────────────────
 // Reads the recent feedback log and asks the smart model to write/refresh the
 // auto-learned section of the guidance (the hand-written part is untouched).
@@ -543,6 +598,7 @@ module.exports = {
   pricingVerdict,
   listingAudit,
   verifyAltNumber,
+  parseBankStatement,
   learnFromFeedback,
   recordFeedback,
   queueSuggestion,
