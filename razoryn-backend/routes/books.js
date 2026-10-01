@@ -54,6 +54,9 @@ async function ensureTables() {
       business TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
+    // Accounts with statements behind them archive instead of deleting, so
+    // the uploaded history keeps its account label.
+    await query(`ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT false`);
     await query(`CREATE TABLE IF NOT EXISTS bank_statements (
       id SERIAL PRIMARY KEY,
       account_id INTEGER REFERENCES bank_accounts(id) ON DELETE SET NULL,
@@ -128,9 +131,32 @@ router.post('/accounts', async (req, res) => {
 });
 router.delete('/accounts/:id', async (req, res) => {
   await ensureTables();
+  // An account with statements uploaded keeps its history — archive it
+  // (hidden from pickers, restorable). Only empty accounts hard-delete.
+  const st = await query(`SELECT COUNT(*)::int AS n FROM bank_statements WHERE account_id = $1`, [req.params.id]);
+  if (st.rows[0].n > 0) {
+    await query(`UPDATE bank_accounts SET archived = true WHERE id = $1`, [req.params.id]);
+    await audit(req, 'books_account_archive', 'bank_account', req.params.id, { statements: st.rows[0].n });
+    return res.json({ ok: true, mode: 'archived', statements: st.rows[0].n });
+  }
   await query(`DELETE FROM bank_accounts WHERE id = $1`, [req.params.id]);
   await audit(req, 'books_account_delete', 'bank_account', req.params.id);
-  res.json({ ok: true });
+  res.json({ ok: true, mode: 'deleted' });
+});
+// PATCH /accounts/:id — rename, change bank, or restore an archived account.
+router.patch('/accounts/:id', async (req, res) => {
+  await ensureTables();
+  const b = req.body || {};
+  const sets = [], params = [];
+  if (b.name !== undefined) { params.push(String(b.name).slice(0, 120)); sets.push(`name = $${params.length}`); }
+  if (b.bank !== undefined) { params.push(b.bank ? String(b.bank).slice(0, 60) : null); sets.push(`bank = $${params.length}`); }
+  if (b.archived !== undefined) { params.push(!!b.archived); sets.push(`archived = $${params.length}`); }
+  if (!sets.length) return res.status(400).json({ error: 'no_fields' });
+  params.push(req.params.id);
+  const r = await query(`UPDATE bank_accounts SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`, params);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  await audit(req, 'books_account_update', 'bank_account', req.params.id, b);
+  res.json({ account: r.rows[0] });
 });
 
 // ── Statement upload + AI parse + auto-match ──────────────────────────────
