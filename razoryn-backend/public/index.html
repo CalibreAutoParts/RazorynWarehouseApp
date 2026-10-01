@@ -22476,7 +22476,10 @@ function renderBooks() {
       </div>
       <div class="card" style="margin-bottom:14px">
         <div class="card-head"><h3>🏦 Statements</h3><div class="card-desc">Several accounts supported, same or different banks — add each account once, then upload its statements. (Each business runs its own warehouse app, so everything here is this business's.)</div>
-          <button class="btn btn-ghost btn-sm" onclick="bkAddAccount()">+ Add bank account</button></div>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-ghost btn-sm" onclick="bkAddAccount()">+ Add bank account</button>
+            <button class="btn btn-ghost btn-sm" onclick="bkManageAccounts()">⚙ Manage accounts</button>
+          </div></div>
         <div class="card-body"><div id="bk-statements" style="font-size:13px;color:var(--ink-soft)">Loading…</div></div>
       </div>
       <div class="card" style="margin-bottom:14px">
@@ -22505,8 +22508,9 @@ async function bkLoadAccounts() {
   try {
     const r = await Api.get('/api/books/accounts');
     BK.accounts = r.accounts || [];
+    const active = BK.accounts.filter(a => !a.archived);
     const sel = el('bk-account');
-    if (sel) sel.innerHTML = '<option value="">All accounts</option>' + BK.accounts.map(a =>
+    if (sel) sel.innerHTML = '<option value="">All accounts</option>' + active.map(a =>
       `<option value="${a.id}" ${String(BK.accountId) === String(a.id) ? 'selected' : ''}>${escapeHtml(a.name + (a.bank ? ' (' + a.bank + ')' : ''))}</option>`).join('');
   } catch (_) {}
 }
@@ -22516,6 +22520,53 @@ async function bkAddAccount() {
   const name = prompt('Account name (e.g. "Main current account"):'); if (!name) return;
   const bank = prompt('Bank (Monzo, Wise, Mettle, Barclays…):') || '';
   try { await Api.post('/api/books/accounts', { name, bank }); toast('Account added', 'success'); bkLoadAccounts(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+// Manage the accounts list — rename, delete duplicates, archive/restore.
+// Accounts with statements behind them ARCHIVE on delete (history keeps its
+// label and the account can be restored); empty ones delete outright.
+async function bkManageAccounts() {
+  await bkLoadAccounts();
+  const active = BK.accounts.filter(a => !a.archived);
+  const archived = BK.accounts.filter(a => a.archived);
+  const row = (a) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid var(--line);border-radius:7px;padding:8px 10px;margin-bottom:6px;flex-wrap:wrap">
+    <div><strong>${escapeHtml(a.name)}</strong> <span style="color:var(--ink-soft)">${a.bank ? '(' + escapeHtml(a.bank) + ')' : ''} · ${a.statements || 0} statement${(a.statements || 0) === 1 ? '' : 's'}${a.archived ? ' · <em>archived</em>' : ''}</span></div>
+    <div style="display:flex;gap:4px">
+      ${a.archived
+        ? `<button class="btn btn-outline btn-sm" onclick="bkRestoreAccount(${a.id})">↩ Restore</button>`
+        : `<button class="btn btn-ghost btn-sm" onclick="bkRenameAccount(${a.id})">✎ Rename</button>
+           <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="bkDeleteAccount(${a.id}, ${(a.statements || 0) > 0})">${(a.statements || 0) > 0 ? '📦 Archive' : '🗑 Delete'}</button>`}
+    </div></div>`;
+  modal({
+    title: '⚙ Manage bank accounts',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Delete duplicates freely — an account with statements uploaded is <strong>archived</strong> instead (its history keeps the label, and it can be restored); empty accounts are removed for good.</div>
+      ${active.length ? active.map(row).join('') : '<div style="color:var(--ink-soft);font-size:13px">No active accounts.</div>'}
+      ${archived.length ? '<div style="font-weight:600;font-size:12px;margin:12px 0 6px;color:var(--ink-soft)">Archived</div>' + archived.map(row).join('') : ''}
+    `,
+    actions: [{ label: 'Done', primary: true, onClick: () => { closeModal(); bkLoadAccounts(); } }],
+  });
+}
+async function bkRenameAccount(id) {
+  const a = BK.accounts.find(x => x.id === id);
+  const name = prompt('Account name:', a?.name || ''); if (!name) return;
+  const bank = prompt('Bank:', a?.bank || ''); if (bank === null) return;
+  try { await Api.patch('/api/books/accounts/' + id, { name, bank }); toast('Saved', 'success'); await bkLoadAccounts(); bkManageAccounts(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function bkDeleteAccount(id, hasStatements) {
+  const a = BK.accounts.find(x => x.id === id);
+  if (!confirm(hasStatements
+    ? `Archive "${a?.name || 'this account'}"? Its statements stay (with the account label) and it can be restored — it just disappears from the pickers.`
+    : `Delete "${a?.name || 'this account'}"? It has no statements, so it's removed for good.`)) return;
+  try {
+    const r = await Api.delete('/api/books/accounts/' + id);
+    toast(r.mode === 'archived' ? 'Archived — statements kept, restorable below' : 'Deleted', 'success');
+    await bkLoadAccounts(); bkManageAccounts();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function bkRestoreAccount(id) {
+  try { await Api.patch('/api/books/accounts/' + id, { archived: false }); toast('Restored', 'success'); await bkLoadAccounts(); bkManageAccounts(); }
   catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function bkLoad() {
@@ -22655,7 +22706,7 @@ function bkOpenUpload() {
     title: '⬆ Upload a bank statement (PDF)',
     body: `
       <div style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">Claude reads the PDF — it works out the bank (Monzo, Wise, Mettle, Barclays…), pulls every transaction, auto-links invoice payments and payouts, and pre-categorises the spending. Text PDFs work best (download from the bank, not a photo).</div>
-      <div class="field"><label>Bank account</label><select id="bku-account"><option value="">— not set —</option>${BK.accounts.map(a => `<option value="${a.id}">${escapeHtml(a.name + (a.bank ? ' (' + a.bank + ')' : ''))}</option>`).join('')}</select></div>
+      <div class="field"><label>Bank account</label><select id="bku-account"><option value="">— not set —</option>${BK.accounts.filter(a => !a.archived).map(a => `<option value="${a.id}">${escapeHtml(a.name + (a.bank ? ' (' + a.bank + ')' : ''))}</option>`).join('')}</select></div>
       <div class="field"><label>Statement PDF</label><input type="file" id="bku-file" accept="application/pdf"></div>
       <div class="field"><label>Anything Claude should know? <span style="color:var(--ink-soft);font-weight:400">(optional)</span></label><input id="bku-hint" placeholder="e.g. this is the Wise EUR account, ignore the FX summary page"></div>
     `,
