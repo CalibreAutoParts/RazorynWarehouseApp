@@ -567,17 +567,73 @@ async function ensurePackageMetafieldDefinitions() {
 // metafields are the standard place; shipping apps and the theme can read them).
 async function setPackageDimensionMetafields(shopifyProductId, { lengthCm, widthCm, heightCm } = {}) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
-  await ensurePackageMetafieldDefinitions();
-  const mfs = [];
   const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) && n > 0 ? String(n) : null; };
   const L = num(lengthCm), W = num(widthCm), H = num(heightCm);
-  if (L) mfs.push({ namespace: 'custom', key: 'package_length_cm', type: 'number_decimal', value: L });
-  if (W) mfs.push({ namespace: 'custom', key: 'package_width_cm',  type: 'number_decimal', value: W });
-  if (H) mfs.push({ namespace: 'custom', key: 'package_height_cm', type: 'number_decimal', value: H });
-  if (!mfs.length) return { ok: false, skipped: 'no_dimensions' };
-  const results = await applyMetafields(shopifyProductId, mfs);
+  if (!L && !W && !H) return { ok: false, skipped: 'no_dimensions' };
+  // Write into the STORE'S OWN definitions when they exist (resolved by the
+  // definition NAME, e.g. "Package length (cm)") — writing to our custom.*
+  // keys when the shop defined different ones left the admin fields blank
+  // while the value sat in a hidden parallel metafield. Fall back to creating
+  // our custom.* definitions only when no name match exists.
+  const resolved = await setNamedProductMetafields(shopifyProductId, [
+    L ? { names: ['package length (cm)', 'package length'], value: L, fallback: { namespace: 'custom', key: 'package_length_cm', type: 'number_decimal' } } : null,
+    W ? { names: ['package width (cm)', 'package width'], value: W, fallback: { namespace: 'custom', key: 'package_width_cm', type: 'number_decimal' } } : null,
+    H ? { names: ['package height (cm)', 'package height'], value: H, fallback: { namespace: 'custom', key: 'package_height_cm', type: 'number_decimal' } } : null,
+  ].filter(Boolean), { ensureFallbackDefs: ensurePackageMetafieldDefinitions });
+  return resolved;
+}
+
+// Write product metafields addressed by the DEFINITION NAME as it appears in
+// the Shopify admin ("Part Number", "Position", "Finish", "Package height
+// (cm)"…) — the store's own namespace/key/type win, whatever they are.
+// entries: [{ names:[lower-case names to match], value, fallback?:{namespace,key,type} }]
+async function setNamedProductMetafields(productId, entries, { ensureFallbackDefs } = {}) {
+  if (!isConfigured() || !productId) return { ok: false, skipped: 'not_configured' };
+  const defs = await getMetafieldDefinitions();
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  const mfs = [];
+  let needFallbackDefs = false;
+  for (const e of entries) {
+    if (!e || e.value == null || e.value === '') continue;
+    const def = defs.find(d => e.names.includes(norm(d.name)));
+    if (def) mfs.push({ namespace: def.namespace, key: def.key, type: def.type, value: String(e.value) });
+    else if (e.fallback) { mfs.push({ ...e.fallback, value: String(e.value) }); needFallbackDefs = true; }
+  }
+  if (!mfs.length) return { ok: false, skipped: 'no_matching_definitions' };
+  if (needFallbackDefs && ensureFallbackDefs) { try { await ensureFallbackDefs(); } catch (_) {} }
+  const results = await applyMetafields(productId, mfs);
   const failed = results.filter(x => !x.ok);
-  return failed.length ? { ok: false, error: failed.map(f => f.error).join('; ') } : { ok: true, count: mfs.length };
+  return failed.length ? { ok: false, error: failed.map(f => f.error).join('; '), count: mfs.length - failed.length } : { ok: true, count: mfs.length };
+}
+
+// The product-info metafields the storefront filters/pages read — pushed
+// whenever the warehouse knows them (create, edit, package update): part
+// number, position + secondary position, finish, package dimensions.
+async function pushProductInfoMetafields(productId, info = {}) {
+  const entries = [
+    info.partNumber ? { names: ['part number', 'part no', 'part number (mpn)'], value: info.partNumber, fallback: { namespace: 'custom', key: 'part_number', type: 'single_line_text_field' } } : null,
+    info.position ? { names: ['position'], value: info.position } : null,
+    info.secondaryPosition ? { names: ['secondary position'], value: info.secondaryPosition } : null,
+    info.finish ? { names: ['finish', 'surface finish'], value: info.finish } : null,
+    info.packageLengthCm ? { names: ['package length (cm)', 'package length'], value: info.packageLengthCm } : null,
+    info.packageWidthCm ? { names: ['package width (cm)', 'package width'], value: info.packageWidthCm } : null,
+    info.packageHeightCm ? { names: ['package height (cm)', 'package height'], value: info.packageHeightCm } : null,
+  ].filter(Boolean);
+  if (!entries.length) return { ok: false, skipped: 'nothing_to_push' };
+  return setNamedProductMetafields(productId, entries);
+}
+
+// Split a warehouse position ("Front RH", "Front, Left", "Rear Left") into the
+// storefront's two metafields: Position (Front/Rear/…) + Secondary Position
+// (Left/Right/Upper/Lower). eBay "Placement on Vehicle" values work too.
+function splitPosition(position) {
+  const t = String(position || '');
+  if (!t.trim()) return { position: null, secondaryPosition: null };
+  const primary = /\bfront\b/i.test(t) ? 'Front' : /\brear\b/i.test(t) ? 'Rear' : null;
+  const side = /\b(rh|right|o\/?s|off\s?side|driver)/i.test(t) ? 'Right'
+             : /\b(lh|left|n\/?s|near\s?side|passenger)/i.test(t) ? 'Left'
+             : /\bupper\b/i.test(t) ? 'Upper' : /\blower\b/i.test(t) ? 'Lower' : null;
+  return { position: primary || (side ? null : t.trim().slice(0, 40)), secondaryPosition: side };
 }
 
 // List delivery (shipping) profiles. Returns [{id, name}].
@@ -784,7 +840,7 @@ async function getMetafieldDefinitions() {
   if (cachedMetafieldDefs) return cachedMetafieldDefs;
   try {
     const query = `query {
-      metafieldDefinitions(first: 50, ownerType: PRODUCT) {
+      metafieldDefinitions(first: 250, ownerType: PRODUCT) {
         edges { node { id namespace key name description type { name } } }
       }
     }`;
@@ -1297,6 +1353,9 @@ module.exports = {
   setVariantPrice,
   setVariantWeight,
   setPackageDimensionMetafields,
+  setNamedProductMetafields,
+  pushProductInfoMetafields,
+  splitPosition,
   setProductVendor,
   setVariantSku,
   setPartNumberMetafield,
