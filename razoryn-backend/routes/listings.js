@@ -1920,6 +1920,20 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
      (b.packagingCost != null && b.packagingCost !== '') ? parseFloat(b.packagingCost) : null]);
   const productId = ins.rows[0].id;
 
+  // Storefront info metafields on the fresh Shopify product: part number +
+  // carton dims (+ position when the form carried one). Resolved against the
+  // store's OWN metafield definitions so the admin fields actually fill in.
+  if (shopifyProduct?.id) {
+    try {
+      const pos = shopify.splitPosition(b.position || '');
+      await shopify.pushProductInfoMetafields(shopifyProduct.id, {
+        partNumber,
+        position: pos.position, secondaryPosition: pos.secondaryPosition,
+        packageLengthCm: pkgL, packageWidthCm: pkgW, packageHeightCm: pkgH,
+      });
+    } catch (e) { result.infoMetafieldsError = e.message; }
+  }
+
   // Store the alternate / sub part numbers against the new product (searchable).
   for (const code of subPartNumbers) {
     try { await query(`INSERT INTO product_part_numbers (product_id, code) VALUES ($1, $2)`, [productId, code]); }
@@ -2180,6 +2194,27 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
        (b.ebayDescription != null && String(b.ebayDescription).trim() !== '') ? String(b.ebayDescription) : null,
        productId]);
   } catch (_) {}
+
+  // Storefront info metafields — the same facts the eBay side already carries
+  // (Placement → Position/Secondary Position, Surface Finish → Finish, part
+  // number, carton dims) land on the Shopify product's OWN metafield
+  // definitions, so the admin fields and storefront filters actually fill in.
+  if (product.shopify_product_id && shopify.isConfigured()) {
+    try {
+      const specVal = (name) => {
+        const sp = persistSpecifics.find(x => x.name && x.name.toLowerCase() === name);
+        return sp ? (Array.isArray(sp.values) ? sp.values.join(', ') : sp.value) : null;
+      };
+      const pos = shopify.splitPosition(specVal('placement on vehicle') || product.position);
+      await shopify.pushProductInfoMetafields(product.shopify_product_id, {
+        partNumber,
+        position: pos.position, secondaryPosition: pos.secondaryPosition,
+        finish: specVal('surface finish') || specVal('finish'),
+        packageLengthCm: product.pkg_length_cm, packageWidthCm: product.pkg_width_cm, packageHeightCm: product.pkg_height_cm,
+      });
+      result.infoMetafields = 'ok';
+    } catch (e) { result.infoMetafields = e.message; }
+  }
 
   // eBay category change (from the edit form's category picker / the audit) —
   // persisted on the product so future edits & copies start from the right one.
@@ -3935,6 +3970,31 @@ async function doCreateEbay(b, { req } = {}) {
       [String(categoryId), b.conditionId || 1000, JSON.stringify(mergedSpecifics),
        description || null, product.id]);
   } catch (e) { console.warn('[create-ebay] persist listing config:', e.message); }
+
+  // The eBay form already carries the storefront facts — mirror them onto the
+  // Shopify product's metafields (Position + Secondary Position from Placement,
+  // Finish from Surface Finish, Part Number), resolved by the store's own
+  // definitions. Best-effort; also stamps the warehouse position when empty.
+  if (product.shopify_product_id && shopify.isConfigured()) {
+    try {
+      const specVal = (name) => {
+        const sp = (mergedSpecifics || []).find(x => x && x.name && String(x.name).toLowerCase() === name);
+        if (!sp) return null;
+        const v2 = Array.isArray(sp.values) ? sp.values.join(', ') : (Array.isArray(sp.value) ? sp.value.join(', ') : sp.value);
+        return v2 ? String(v2) : null;
+      };
+      const placement = specVal('placement on vehicle') || product.position;
+      const pos = shopify.splitPosition(placement);
+      await shopify.pushProductInfoMetafields(product.shopify_product_id, {
+        partNumber: product.part_number || product.sku,
+        position: pos.position, secondaryPosition: pos.secondaryPosition,
+        finish: specVal('surface finish') || specVal('finish'),
+      });
+      if (placement && !product.position) {
+        await query(`UPDATE products SET position = $1 WHERE id = $2`, [String(placement).slice(0, 60), product.id]).catch(() => {});
+      }
+    } catch (e) { console.warn('[create-ebay] info metafields push:', e.message); }
+  }
 
   if (req) {
     await audit(req, 'create_ebay_listing', 'product', product.id, {

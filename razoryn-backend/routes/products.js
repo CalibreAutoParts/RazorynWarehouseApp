@@ -731,6 +731,15 @@ async function pushPackageToChannels(row) {
           packagePush.shopifyDims = r.ok ? 'ok' : (r.skipped || r.error || 'skipped');
         } catch (e) { packagePush.shopifyDims = e.message; console.warn('[products] shopify dims push failed:', e.message); }
       }
+      // Keep the storefront's info metafields in step too (Part Number,
+      // Position + Secondary Position) — same write path as the carton dims.
+      try {
+        const pos = shopify.splitPosition(row.position);
+        const r = await shopify.pushProductInfoMetafields(row.shopify_product_id, {
+          partNumber: row.part_number || null, position: pos.position, secondaryPosition: pos.secondaryPosition,
+        });
+        packagePush.shopifyInfo = r.ok ? 'ok' : (r.skipped || r.error || 'skipped');
+      } catch (e) { packagePush.shopifyInfo = e.message; }
     }
   }
   if (row.shopify_product_id && (row.pkg_length_cm || row.pkg_width_cm || row.pkg_height_cm || row.pkg_weight_g)) {
@@ -857,6 +866,19 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   }
   let packagePush = null;
   if (pkgTouched) packagePush = await pushPackageToChannels(rows[0]);
+  // Position / part-number edits → storefront info metafields (Position,
+  // Secondary Position, Part Number), resolved by the store's own definitions.
+  if (!pkgTouched && ['position', 'partNumber', 'part_number'].some(k => k in (req.body || {})) && rows[0].shopify_product_id) {
+    try {
+      const shopify = require('../services/shopify');
+      if (shopify.isConfigured()) {
+        const pos = shopify.splitPosition(rows[0].position);
+        await shopify.pushProductInfoMetafields(rows[0].shopify_product_id, {
+          partNumber: rows[0].part_number || null, position: pos.position, secondaryPosition: pos.secondaryPosition,
+        });
+      }
+    } catch (e) { console.warn('[products] shopify info metafields push failed:', e.message); }
+  }
   // Audit without the huge base64 blobs
   const auditBody = { ...req.body };
   for (const f of ['itemPhotoDataUrl', 'locationPhotoDataUrl', 'locationPhotoDataUrl2']) {
