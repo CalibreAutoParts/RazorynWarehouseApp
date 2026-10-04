@@ -107,6 +107,21 @@ async function ensureTables() {
       revoked BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
+    await query(`CREATE TABLE IF NOT EXISTS platform_statements (
+      id SERIAL PRIMARY KEY,
+      platform TEXT,
+      label TEXT,
+      file_path TEXT NOT NULL,
+      period_start DATE, period_end DATE,
+      currency TEXT,
+      summary JSONB,
+      payouts JSONB,
+      reconciliation JSONB,
+      ai_confidence NUMERIC(4,3),
+      ai_notes TEXT,
+      uploaded_by INTEGER,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
     _ready = true;
   } catch (e) { console.warn('[books] migration:', e.message); }
 }
@@ -343,6 +358,129 @@ router.get('/summary', async (req, res) => {
   await ensureTables();
   if (!req.query.from || !req.query.to) return res.status(400).json({ error: 'from_to_required' });
   res.json(await periodSummary({ from: req.query.from, to: req.query.to, accountId: req.query.accountId }));
+});
+
+// ── Platform statements (eBay / Shopify monthly) + payout reconciliation ──
+// eBay pays out daily but reports monthly — and deducts fees, postage
+// labels, advertising and refunds BEFORE paying, so the banked number is
+// smaller than sales. Upload the monthly statement: Claude pulls the payout
+// list + the deduction breakdown, then every payout is checked against the
+// bank transactions — matched ones get the payout id stamped on the bank
+// line (the physical link), and anything missing or extra is flagged with
+// the total difference.
+const normPayoutId = (x) => String(x || '').replace(/[^0-9]/g, '');
+
+async function reconcilePlatformStatement(parsed) {
+  const from = parsed.periodStart, to = parsed.periodEnd;
+  const rec = { matched: [], missingFromBank: [], extraInBank: [], totals: {} };
+  if (!parsed.payouts.length) return rec;
+  // Bank candidates: money-in lines around the period that look like this platform.
+  const pat = parsed.platform === 'ebay' ? '(ebay|managed payments)'
+    : parsed.platform === 'shopify' ? '(shopify|shopi)'
+    : parsed.platform;
+  const { rows: bank } = await query(`
+    SELECT id, tx_date, description, money_in, payout_ref FROM bank_transactions
+     WHERE money_in > 0
+       AND tx_date BETWEEN COALESCE($1::date, '1970-01-01') - interval '7 days' AND COALESCE($2::date, now()::date) + interval '7 days'
+       AND (payout_platform = $3 OR description ~* $4)`,
+    [from, to, parsed.platform, pat]);
+  const used = new Set();
+  for (const p of parsed.payouts) {
+    const pid = normPayoutId(p.payoutId);
+    // 1. payout id printed in the bank description; 2. unique amount ±4 days.
+    let hit = pid ? bank.find(b => !used.has(b.id) && normPayoutId(b.description).includes(pid) && pid.length >= 6) : null;
+    if (!hit) {
+      const cands = bank.filter(b => !used.has(b.id) && Math.abs(parseFloat(b.money_in) - p.amount) < 0.01
+        && Math.abs((new Date(b.tx_date) - new Date(p.date)) / 86400000) <= 4);
+      if (cands.length === 1) hit = cands[0];
+    }
+    if (hit) {
+      used.add(hit.id);
+      rec.matched.push({ payoutId: p.payoutId, date: p.date, amount: p.amount, bankTxId: hit.id, bankDate: String(hit.tx_date).slice(0, 10) });
+      // Stamp the physical link on the bank line.
+      try {
+        await query(`UPDATE bank_transactions SET payout_ref = COALESCE(payout_ref, $2), payout_platform = $3, match_type = 'payout', category = COALESCE(category, 'payout'), updated_at = now() WHERE id = $1`,
+          [hit.id, p.payoutId || null, parsed.platform]);
+      } catch (_) {}
+    } else {
+      rec.missingFromBank.push({ payoutId: p.payoutId, date: p.date, amount: p.amount });
+    }
+  }
+  // Bank payouts in the period that the statement doesn't list.
+  for (const b of bank) {
+    if (!used.has(b.id) && from && to && String(b.tx_date).slice(0, 10) >= from && String(b.tx_date).slice(0, 10) <= to) {
+      rec.extraInBank.push({ bankTxId: b.id, date: String(b.tx_date).slice(0, 10), amount: +parseFloat(b.money_in).toFixed(2), description: b.description });
+    }
+  }
+  const sum = (a) => +a.reduce((x, y) => x + (y.amount || 0), 0).toFixed(2);
+  rec.totals = {
+    statementPayouts: sum(parsed.payouts),
+    statementNet: parsed.summary.netPayouts || sum(parsed.payouts),
+    matchedInBank: sum(rec.matched),
+    missingFromBank: sum(rec.missingFromBank),
+    extraInBank: sum(rec.extraInBank),
+    difference: +(sum(parsed.payouts) - sum(rec.matched)).toFixed(2),
+  };
+  return rec;
+}
+
+router.post('/platform-statements', upload.single('statement'), async (req, res) => {
+  await ensureTables();
+  if (!req.file) return res.status(400).json({ error: 'statement_pdf_required' });
+  const ai = require('../services/ai');
+  if (!ai.isConfigured()) return res.status(400).json({ error: 'ai_not_configured' });
+  let parsed;
+  try {
+    const pdfBase64 = fs.readFileSync(req.file.path).toString('base64');
+    parsed = await ai.parsePlatformStatement(pdfBase64, { hint: req.body.hint || (req.body.platform ? 'This is a ' + req.body.platform + ' statement.' : null) });
+  } catch (e) { return res.status(502).json({ error: e.code || 'parse_failed', message: e.message }); }
+  if (!parsed) return res.status(422).json({ error: 'unreadable', message: 'Claude couldn’t read that PDF — is it a text PDF (not a scan)?' });
+  const reconciliation = await reconcilePlatformStatement(parsed);
+  const relPath = path.relative(UPLOAD_DIR, req.file.path);
+  const st = await query(
+    `INSERT INTO platform_statements (platform, label, file_path, period_start, period_end, currency, summary, payouts, reconciliation, ai_confidence, ai_notes, uploaded_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,$12) RETURNING *`,
+    [parsed.platform, req.body.label || null, relPath, parsed.periodStart, parsed.periodEnd, parsed.currency,
+     JSON.stringify(parsed.summary), JSON.stringify(parsed.payouts), JSON.stringify(reconciliation),
+     parsed.confidence, parsed.notes, req.user.id]);
+  await audit(req, 'books_platform_statement', 'platform_statement', st.rows[0].id, {
+    platform: parsed.platform, payouts: parsed.payouts.length, matched: reconciliation.matched.length, missing: reconciliation.missingFromBank.length,
+  });
+  res.status(201).json({ ok: true, statement: st.rows[0], parsed: { platform: parsed.platform, period: [parsed.periodStart, parsed.periodEnd], confidence: parsed.confidence, notes: parsed.notes }, reconciliation });
+});
+router.get('/platform-statements', async (req, res) => {
+  await ensureTables();
+  const { rows } = await query(`SELECT * FROM platform_statements ORDER BY period_start DESC NULLS LAST, created_at DESC LIMIT 100`);
+  res.json({ statements: rows });
+});
+router.delete('/platform-statements/:id', async (req, res) => {
+  await ensureTables();
+  const r = await query(`DELETE FROM platform_statements WHERE id = $1 RETURNING file_path`, [req.params.id]);
+  if (r.rows[0]?.file_path) { try { fs.unlinkSync(path.join(UPLOAD_DIR, r.rows[0].file_path)); } catch (_) {} }
+  await audit(req, 'books_platform_statement_delete', 'platform_statement', req.params.id);
+  res.json({ ok: true });
+});
+router.get('/platform-statements/:id/file', async (req, res) => {
+  await ensureTables();
+  const r = await query(`SELECT file_path FROM platform_statements WHERE id = $1`, [req.params.id]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  res.sendFile(path.join(UPLOAD_DIR, r.rows[0].file_path));
+});
+// Re-run the bank match (e.g. after uploading the bank statement that holds
+// the missing payouts).
+router.post('/platform-statements/:id/rematch', async (req, res) => {
+  await ensureTables();
+  const r = await query(`SELECT * FROM platform_statements WHERE id = $1`, [req.params.id]);
+  const st = r.rows[0];
+  if (!st) return res.status(404).json({ error: 'not_found' });
+  const parsed = {
+    platform: st.platform, periodStart: st.period_start ? String(st.period_start).slice(0, 10) : null,
+    periodEnd: st.period_end ? String(st.period_end).slice(0, 10) : null,
+    summary: st.summary || {}, payouts: st.payouts || [],
+  };
+  const reconciliation = await reconcilePlatformStatement(parsed);
+  await query(`UPDATE platform_statements SET reconciliation = $1::jsonb WHERE id = $2`, [JSON.stringify(reconciliation), st.id]);
+  res.json({ ok: true, reconciliation });
 });
 
 // ── Exports ────────────────────────────────────────────────────────────────

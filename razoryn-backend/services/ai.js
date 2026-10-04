@@ -531,6 +531,54 @@ Do not invent transactions; if part of the statement is unreadable say so in not
   };
 }
 
+// ── Marketplace statement parsing (eBay / Shopify monthly statements) ──────
+// eBay pays out daily but reports monthly: gross sales minus fees, postage
+// labels, advertising, refunds… = the (smaller) net that actually hits the
+// bank. This pulls the payout list + the deduction breakdown so Books can
+// check every payout landed and explain the difference.
+async function parsePlatformStatement(pdfBase64, ctx = {}) {
+  const cfg = await getAiConfig();
+  const user = `Read this marketplace/payments statement PDF (eBay monthly financial statement, Shopify payouts statement, or similar) carefully.
+
+${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}Extract:
+1. The platform (ebay, shopify, paypal, stripe…), the statement period, currency.
+2. The SUMMARY money flow: gross sales/orders total, refunds given, selling fees (FVF + fixed), postage/shipping labels bought, advertising/promoted-listings charges, any other deductions or charges, and the NET total paid out. Each as a positive number.
+3. EVERY individual payout listed, with its date, payout id/reference (e.g. "P*7693951408" — keep it exactly as printed) and amount.
+
+Reply with ONLY this JSON:
+{"platform":"ebay"|"shopify"|"paypal"|"stripe"|"other","periodStart":"YYYY-MM-DD","periodEnd":"YYYY-MM-DD","currency":"GBP",
+ "summary":{"grossSales":<n>,"refunds":<n>,"fees":<n>,"postageLabels":<n>,"advertising":<n>,"otherDeductions":<n>,"netPayouts":<n>},
+ "payouts":[{"date":"YYYY-MM-DD","payoutId":"...","amount":<n>}],
+ "confidence":<0..1>,"notes":"<anything odd: unreadable pages, totals not adding up>"}
+Do not invent numbers; if a summary line isn't on the statement use 0 and say so in notes.`;
+  const out = await callClaude({
+    kind: 'platform_statement',
+    system: 'You are a meticulous UK bookkeeper. You extract marketplace statements exactly as printed — every payout, correct amounts, no inventions. Reply with ONLY JSON.',
+    user, model: cfg.smartModel, maxTokens: 16000,
+    documents: [{ base64: pdfBase64, mediaType: 'application/pdf' }],
+  });
+  const v = out.json;
+  if (!v) return null;
+  const num = (x) => { const n = parseFloat(x); return isFinite(n) ? +Math.abs(n).toFixed(2) : 0; };
+  const s = v.summary || {};
+  return {
+    platform: ['ebay', 'shopify', 'paypal', 'stripe'].includes(v.platform) ? v.platform : 'other',
+    periodStart: v.periodStart || null, periodEnd: v.periodEnd || null,
+    currency: String(v.currency || 'GBP').slice(0, 6),
+    summary: {
+      grossSales: num(s.grossSales), refunds: num(s.refunds), fees: num(s.fees),
+      postageLabels: num(s.postageLabels), advertising: num(s.advertising),
+      otherDeductions: num(s.otherDeductions), netPayouts: num(s.netPayouts),
+    },
+    payouts: (Array.isArray(v.payouts) ? v.payouts : [])
+      .filter(p => p && p.date && isFinite(parseFloat(p.amount)))
+      .map(p => ({ date: String(p.date).slice(0, 10), payoutId: p.payoutId ? String(p.payoutId).slice(0, 60) : null, amount: num(p.amount) }))
+      .slice(0, 500),
+    confidence: Math.max(0, Math.min(1, +v.confidence || 0)),
+    notes: v.notes ? String(v.notes).slice(0, 500) : null,
+  };
+}
+
 // ── Learning: distil recent feedback into standing rules ──────────────────
 // Reads the recent feedback log and asks the smart model to write/refresh the
 // auto-learned section of the guidance (the hand-written part is untouched).
@@ -599,6 +647,7 @@ module.exports = {
   listingAudit,
   verifyAltNumber,
   parseBankStatement,
+  parsePlatformStatement,
   learnFromFeedback,
   recordFeedback,
   queueSuggestion,
