@@ -22484,6 +22484,11 @@ function renderBooks() {
         </div>
       </div>
       <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>📑 Marketplace statements</h3><div class="card-desc">eBay pays daily but reports monthly — and deducts fees, postage labels, adverts &amp; refunds before paying, so the banked number is smaller than sales. Upload the monthly statement: Claude pulls the payout list + the deductions, checks every payout landed in the bank, and shows any difference.</div>
+          <button class="btn btn-ghost btn-sm" onclick="bkUploadPlatform()">⬆ Upload eBay / Shopify statement</button></div>
+        <div class="card-body"><div id="bk-platform" style="font-size:13px;color:var(--ink-soft)">Loading…</div></div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
         <div class="card-head"><h3>Transactions</h3><div class="card-desc">Link each line to an invoice or payout, set the VAT, attach receipts. Claude pre-fills most of it from the statement.</div></div>
         <div class="card-body" style="padding:0"><div id="bk-txs" style="font-size:12.5px">Loading…</div></div>
       </div>
@@ -22496,6 +22501,7 @@ function renderBooks() {
   bkLoadAccounts();
   bkLoad();
   bkLoadShares();
+  bkLoadPlatform();
 }
 function bkSetPeriod(p) {
   BK.period = p;
@@ -22771,6 +22777,121 @@ async function bkLoadShares() {
 async function bkRevokeShare(id) {
   if (!confirm('Revoke this link? The accountant will no longer be able to open it.')) return;
   try { await Api.delete('/api/books/shares/' + id); bkLoadShares(); toast('Link revoked', 'info'); } catch (e) { toast('Failed', 'error'); }
+}
+
+// ── Marketplace (eBay/Shopify) monthly statements + payout reconciliation ──
+let _bkPlatform = [];
+async function bkLoadPlatform() {
+  const box = el('bk-platform'); if (!box) return;
+  try {
+    const r = await Api.get('/api/books/platform-statements');
+    _bkPlatform = r.statements || [];
+    if (!_bkPlatform.length) { box.innerHTML = 'No marketplace statements yet — upload eBay’s monthly financial statement and every payout gets checked against the bank.'; return; }
+    box.innerHTML = _bkPlatform.map(s => {
+      const rec = s.reconciliation || {}; const t = rec.totals || {};
+      const nMatched = (rec.matched || []).length, nMissing = (rec.missingFromBank || []).length, nExtra = (rec.extraInBank || []).length;
+      const status = nMissing === 0
+        ? `<span class="pill green" style="font-size:10px">✓ all ${nMatched} payouts found in the bank</span>`
+        : `<span class="pill red" style="font-size:10px">⚠ ${nMissing} payout${nMissing === 1 ? '' : 's'} missing (£${(t.missingFromBank || 0).toFixed(2)})</span>`;
+      return `<div style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center">
+          <div><strong style="text-transform:uppercase">${escapeHtml(s.platform || '?')}</strong>
+            <span style="color:var(--ink-soft)">${s.period_start ? String(s.period_start).slice(0, 10) + ' → ' + String(s.period_end || '').slice(0, 10) : escapeHtml(s.label || '')}
+            · net paid out ${gbp((s.summary || {}).netPayouts || t.statementPayouts || 0)}</span></div>
+          <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
+            ${status}${nExtra ? `<span class="pill amber" style="font-size:10px">${nExtra} in bank not on statement</span>` : ''}
+            <button class="btn btn-outline btn-sm" onclick="bkPlatformDetail(${s.id})">Breakdown</button>
+            <button class="btn btn-ghost btn-sm" onclick="bkRematchPlatform(${s.id})" title="Re-check against the bank (after uploading more bank statements)">↻</button>
+            <a class="btn btn-ghost btn-sm" href="/api/books/platform-statements/${s.id}/file" target="_blank">PDF</a>
+            <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="bkDeletePlatform(${s.id})">🗑</button>
+          </div></div>
+        ${s.ai_notes ? `<div style="font-size:11px;color:var(--amber,orange);margin-top:4px">⚠ ${escapeHtml(s.ai_notes)}</div>` : ''}
+      </div>`;
+    }).join('');
+  } catch (e) { box.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
+}
+function bkUploadPlatform() {
+  modal({
+    title: '⬆ Upload a marketplace statement (PDF)',
+    body: `
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">Claude reads it, pulls the payout list and the deduction breakdown (fees, postage labels, advertising, refunds), then checks every payout against the bank transactions already uploaded — matches get the payout ID stamped on the bank line, and anything missing shows with the total difference.</div>
+      <div class="field"><label>Platform</label><select id="bkp-platform"><option value="ebay">eBay (monthly financial statement)</option><option value="shopify">Shopify (payouts)</option><option value="">Other / let Claude work it out</option></select></div>
+      <div class="field"><label>Statement PDF</label><input type="file" id="bkp-file" accept="application/pdf"></div>
+    `,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '🤖 Upload & reconcile', primary: true, onClick: bkDoUploadPlatform },
+    ],
+  });
+}
+async function bkDoUploadPlatform() {
+  const file = el('bkp-file')?.files?.[0];
+  if (!file) { toast('Pick the statement PDF first', 'warn'); return; }
+  const fd = new FormData();
+  fd.append('statement', file);
+  if (el('bkp-platform')?.value) fd.append('platform', el('bkp-platform').value);
+  closeModal();
+  const taskId = Task.start('Claude is reading the marketplace statement…');
+  try {
+    const r = await Api.postForm('/api/books/platform-statements', fd);
+    Task.done(taskId, 'Statement reconciled');
+    const t = r.reconciliation?.totals || {};
+    const nMissing = (r.reconciliation?.missingFromBank || []).length;
+    toast(nMissing === 0
+      ? `✓ ${r.parsed.platform.toUpperCase()} statement read — all ${(r.reconciliation?.matched || []).length} payouts found in the bank (${gbp(t.matchedInBank || 0)})`
+      : `${r.parsed.platform.toUpperCase()} statement read — ⚠ ${nMissing} payout(s) not found in the bank (${gbp(t.missingFromBank || 0)}). Open the breakdown.`,
+      nMissing === 0 ? 'success' : 'warn', 9000);
+    bkLoadPlatform(); bkLoad();
+  } catch (e) {
+    Task.fail(taskId, 'Read failed');
+    toast('Statement read failed: ' + (e.data?.message || e.message), 'error', 9000);
+  }
+}
+function bkPlatformDetail(id) {
+  const s = _bkPlatform.find(x => x.id === id);
+  if (!s) return;
+  const sum = s.summary || {}; const rec = s.reconciliation || {}; const t = rec.totals || {};
+  const dedTotal = +(sum.refunds + sum.fees + sum.postageLabels + sum.advertising + sum.otherDeductions || 0).toFixed(2);
+  const row = (l, v, strong) => `<div style="display:flex;justify-content:space-between;padding:4px 0;${strong ? 'font-weight:700;border-top:1px solid var(--line);margin-top:4px;padding-top:8px' : ''}"><span>${l}</span><span>${v}</span></div>`;
+  modal({
+    title: (s.platform || '').toUpperCase() + ' statement — ' + (s.period_start ? String(s.period_start).slice(0, 10) + ' → ' + String(s.period_end || '').slice(0, 10) : ''),
+    body: `
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">Where the money went (why the banked number is smaller than sales)</div>
+      <div style="font-size:13px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:12px">
+        ${row('Gross sales', gbp(sum.grossSales || 0))}
+        ${sum.refunds ? row('− Refunds', '−' + gbp(sum.refunds)) : ''}
+        ${sum.fees ? row('− Selling fees', '−' + gbp(sum.fees)) : ''}
+        ${sum.postageLabels ? row('− Postage labels', '−' + gbp(sum.postageLabels)) : ''}
+        ${sum.advertising ? row('− Advertising', '−' + gbp(sum.advertising)) : ''}
+        ${sum.otherDeductions ? row('− Other deductions', '−' + gbp(sum.otherDeductions)) : ''}
+        ${row('= Net paid out', gbp(sum.netPayouts || 0), true)}
+        ${dedTotal ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:6px">${gbp(dedTotal)} was deducted before payout — these are business costs for the VAT/expense side even though they never hit the bank as separate payments.</div>` : ''}
+      </div>
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">Payouts vs the bank — statement ${gbp(t.statementPayouts || 0)} · matched ${gbp(t.matchedInBank || 0)}${t.difference ? ` · <span style="color:var(--red)">difference ${gbp(t.difference)}</span>` : ' · <span style="color:var(--green)">no difference</span>'}</div>
+      <div style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px">
+        <table class="table" style="font-size:12px"><thead><tr><th>Date</th><th>Payout ID</th><th class="num">Amount</th><th>Bank</th></tr></thead><tbody>
+        ${(rec.matched || []).map(p => `<tr><td>${escapeHtml(p.date)}</td><td style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(p.payoutId || '—')}</td><td class="num">${gbp(p.amount)}</td><td><span style="color:var(--green)">✓ ${escapeHtml(p.bankDate || '')}</span></td></tr>`).join('')}
+        ${(rec.missingFromBank || []).map(p => `<tr><td>${escapeHtml(p.date)}</td><td style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(p.payoutId || '—')}</td><td class="num">${gbp(p.amount)}</td><td><span style="color:var(--red)">✗ not in bank</span></td></tr>`).join('')}
+        </tbody></table>
+      </div>
+      ${(rec.missingFromBank || []).length ? '<div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Missing payouts usually mean that month’s bank statement isn’t uploaded yet — upload it, then hit ↻ on this statement to re-check.</div>' : ''}
+      ${(rec.extraInBank || []).length ? `<div style="font-size:12px;margin-top:8px"><strong>In the bank but not on this statement:</strong> ${(rec.extraInBank || []).map(x => escapeHtml(x.date) + ' ' + gbp(x.amount)).join(' · ')}</div>` : ''}
+    `,
+    actions: [{ label: 'Close', primary: true, onClick: closeModal }],
+  });
+}
+async function bkRematchPlatform(id) {
+  try {
+    const r = await Api.post('/api/books/platform-statements/' + id + '/rematch', {});
+    const n = (r.reconciliation?.missingFromBank || []).length;
+    toast(n === 0 ? '✓ All payouts now matched' : '⚠ still ' + n + ' payout(s) missing from the bank', n === 0 ? 'success' : 'warn');
+    bkLoadPlatform();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function bkDeletePlatform(id) {
+  if (!confirm('Delete this marketplace statement from Books? (Bank transactions keep any payout IDs already stamped.)')) return;
+  try { await Api.delete('/api/books/platform-statements/' + id); bkLoadPlatform(); toast('Deleted', 'info'); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 // ── eBay Push Queue — what's stuck behind an open offer + the change log ───
