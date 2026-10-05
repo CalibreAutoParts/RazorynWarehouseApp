@@ -22775,20 +22775,50 @@ function bkSetPayout(id) {
   bkPatch(id, { matchType: 'payout', payoutPlatform: platform.toLowerCase().trim(), payoutRef: ref.trim(), category: 'payout' });
 }
 async function bkLinkInvoice(id) {
-  const q = prompt('Search the invoice (number, customer, reference):');
-  if (!q) return;
+  // Suggestions FIRST: same amount / outstanding balance, date proximity and
+  // remembered repeat payers (every link you confirm teaches the payer →
+  // customer mapping) — the search box is just the fallback.
+  modal({
+    title: 'Link to invoice',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Lump sum covering several invoices? Link them one after another — you’ll be asked how much of the line goes to each. Part-payment? Enter just the part; the rest links from the later bank line.</div>
+      <div id="bk-sug" style="font-size:12px;color:var(--ink-soft)">🔎 Finding likely invoices (amount, date, repeat payer)…</div>
+      <div class="field" style="margin-top:12px"><label>Not there? Search</label>
+        <input id="bk-sug-q" placeholder="invoice number, customer, reference, phone…" autocomplete="off" oninput="bkSugSearch(${id}, this.value)">
+        <div id="bk-sug-results"></div></div>
+    `,
+    actions: [{ label: 'Cancel', onClick: closeModal }],
+  });
   try {
-    const r = await Api.get('/api/sales?q=' + encodeURIComponent(q));
-    const sales = (r.sales || []).slice(0, 8);
-    if (!sales.length) { toast('No invoices matched — try the invoice number', 'warn'); return; }
-    modal({
-      title: 'Link to invoice',
-      body: '<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Lump sum covering several invoices? Link them one after another — you’ll be asked how much of the line goes to each. Part-payment? Enter just the part; the rest links from the later bank line.</div>'
-        + sales.map(s => `<div onclick="bkPickInvoice(${id}, ${s.id}, '${escapeAttr(s.invoice_number || '#' + s.id)}', ${parseFloat(s.total) || 0})" style="padding:9px 10px;border:1px solid var(--line);border-radius:7px;margin-bottom:6px;cursor:pointer">
-        <strong>${escapeHtml(s.invoice_number || '#' + s.id)}</strong> · ${gbp(s.total)} · ${escapeHtml(s.customer_name || s.buyer_username || '')} <span style="color:var(--ink-soft);font-size:11px">${s.occurred_at ? new Date(s.occurred_at).toLocaleDateString('en-GB') : ''}</span></div>`).join(''),
-      actions: [{ label: 'Cancel', onClick: closeModal }],
-    });
-  } catch (e) { toast('Search failed: ' + (e.data?.message || e.message), 'error'); }
+    const r = await Api.get('/api/books/transactions/' + id + '/suggest-invoices');
+    const box = el('bk-sug');
+    if (!box) return;
+    const list = r.suggestions || [];
+    if (!list.length) { box.innerHTML = 'No obvious match by amount/date/payer — use the search below.'; return; }
+    box.innerHTML = (r.payer ? `<div style="font-weight:600;color:var(--ink);margin-bottom:6px">Likely invoices for <strong>${escapeHtml(r.payer)}</strong> · ${gbp(r.amount)}:</div>` : '')
+      + list.map(s => `<div onclick="bkPickInvoice(${id}, ${s.saleId}, '${escapeAttr(s.invoiceNumber || '#' + s.saleId)}', ${s.total})" style="padding:9px 10px;border:1px solid ${s.score >= 90 ? 'var(--green)' : 'var(--line)'};border-radius:7px;margin-bottom:6px;cursor:pointer">
+          <div><strong>${escapeHtml(s.invoiceNumber || '#' + s.saleId)}</strong> · ${gbp(s.total)}${s.outstanding > 0 && s.outstanding < s.total ? ' <span style="color:var(--amber,orange)">(£' + s.outstanding.toFixed(2) + ' outstanding)</span>' : ''} · ${escapeHtml(s.customer || '')} <span style="color:var(--ink-soft);font-size:11px">${s.occurredAt ? new Date(s.occurredAt).toLocaleDateString('en-GB') : ''}${s.isPaid ? '' : ' · unpaid'}</span></div>
+          <div style="font-size:10.5px;color:var(--blue);margin-top:2px">${s.reasons.map(x => '✓ ' + escapeHtml(x)).join(' · ')}</div>
+        </div>`).join('');
+  } catch (e) { const box = el('bk-sug'); if (box) box.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
+}
+let _bkSugTimer = null;
+function bkSugSearch(txId, q) {
+  clearTimeout(_bkSugTimer);
+  _bkSugTimer = setTimeout(async () => {
+    const box = el('bk-sug-results');
+    if (!box) return;
+    q = (q || '').trim();
+    if (q.length < 2) { box.innerHTML = ''; return; }
+    try {
+      const r = await Api.get('/api/sales?q=' + encodeURIComponent(q));
+      const sales = (r.sales || []).slice(0, 8);
+      box.innerHTML = sales.length
+        ? sales.map(s => `<div onclick="bkPickInvoice(${txId}, ${s.id}, '${escapeAttr(s.invoice_number || '#' + s.id)}', ${parseFloat(s.total) || 0})" style="padding:8px 10px;border:1px solid var(--line);border-radius:7px;margin-top:6px;cursor:pointer">
+            <strong>${escapeHtml(s.invoice_number || '#' + s.id)}</strong> · ${gbp(s.total)} · ${escapeHtml(s.customer_name || s.buyer_username || '')} <span style="color:var(--ink-soft);font-size:11px">${s.occurred_at ? new Date(s.occurred_at).toLocaleDateString('en-GB') : ''}</span></div>`).join('')
+        : '<div style="font-size:12px;color:var(--ink-soft);margin-top:6px">No invoices matched.</div>';
+    } catch (e) { box.innerHTML = '<div style="color:var(--red);font-size:12px">' + escapeHtml(e.data?.message || e.message) + '</div>'; }
+  }, 350);
 }
 function bkPickInvoice(txId, saleId, label, saleTotal) {
   closeModal();
