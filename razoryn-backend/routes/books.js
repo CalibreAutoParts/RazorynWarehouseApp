@@ -37,7 +37,7 @@ fs.mkdirSync(RECEIPTS_DIR, { recursive: true });
 
 const upload = multer({
   storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, file.fieldname === 'receipt' ? RECEIPTS_DIR : BOOKS_DIR),
+    destination: (req, file, cb) => cb(null, String(file.fieldname || '').startsWith('receipt') ? RECEIPTS_DIR : BOOKS_DIR),
     filename: (req, file, cb) => cb(null, Date.now() + '-' + Math.random().toString(36).slice(2, 8) + path.extname(file.originalname || '.pdf').toLowerCase()),
   }),
   limits: { fileSize: 15 * 1024 * 1024 },
@@ -208,14 +208,28 @@ async function autoMatchTransaction(t) {
 
 router.post('/statements', upload.single('statement'), async (req, res) => {
   await ensureTables();
-  if (!req.file) return res.status(400).json({ error: 'statement_pdf_required' });
+  if (!req.file) return res.status(400).json({ error: 'statement_file_required' });
   const ai = require('../services/ai');
   if (!ai.isConfigured()) return res.status(400).json({ error: 'ai_not_configured', message: 'Set ANTHROPIC_API_KEY first — the statement reader runs on Claude.' });
   const accountId = req.body.accountId ? parseInt(req.body.accountId) : null;
+  // CSV / Excel exports are EXACT (no PDF reading) — preferred when the bank
+  // offers them (Mettle, Wise, Capital on Tap all do). PDFs still work.
+  const ext = path.extname(req.file.originalname || req.file.path).toLowerCase();
+  let source;
+  try {
+    if (ext === '.csv' || ext === '.txt') {
+      source = { csvText: fs.readFileSync(req.file.path, 'utf8'), filename: req.file.originalname };
+    } else if (ext === '.xlsx' || ext === '.xls') {
+      const XLSX = require('xlsx');
+      const wb = XLSX.readFile(req.file.path);
+      source = { csvText: XLSX.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]]), filename: req.file.originalname };
+    } else {
+      source = { pdfBase64: fs.readFileSync(req.file.path).toString('base64') };
+    }
+  } catch (e) { return res.status(422).json({ error: 'unreadable_file', message: e.message }); }
   let parsed;
   try {
-    const pdfBase64 = fs.readFileSync(req.file.path).toString('base64');
-    parsed = await ai.parseBankStatement(pdfBase64, { hint: req.body.hint || null });
+    parsed = await ai.parseBankStatement(source, { hint: req.body.hint || null });
   } catch (e) {
     return res.status(502).json({ error: e.code || 'parse_failed', message: e.message });
   }
@@ -348,6 +362,48 @@ router.get('/transactions/:id/receipt', async (req, res) => {
   const r = await query(`SELECT receipt_path FROM bank_transactions WHERE id = $1`, [req.params.id]);
   if (!r.rows[0]?.receipt_path) return res.status(404).json({ error: 'no_receipt' });
   res.sendFile(path.join(UPLOAD_DIR, r.rows[0].receipt_path));
+});
+
+// POST /api/books/receipts/bulk — attach a FOLDER of receipts in one go (the
+// Mettle export ships a receipts/ folder with files like
+// "Mettle-INV-133-2026-04-25.pdf"). Each file is matched by the DATE in its
+// filename to a money-out transaction that still lacks a receipt — exact date
+// first, then ±2 days — and attached only when the match is unambiguous.
+// Unmatched files are listed back (attach those few via the 📎 on the row).
+router.post('/receipts/bulk', upload.array('receipts', 200), async (req, res) => {
+  await ensureTables();
+  const files = req.files || [];
+  if (!files.length) return res.status(400).json({ error: 'no_files' });
+  const out = { attached: [], unmatched: [] };
+  for (const f of files) {
+    const name = f.originalname || path.basename(f.path);
+    const dm = name.match(/(\d{4})-(\d{2})-(\d{2})/);
+    let tx = null;
+    if (dm) {
+      const day = `${dm[1]}-${dm[2]}-${dm[3]}`;
+      const exact = await query(
+        `SELECT id, description, money_out FROM bank_transactions
+          WHERE money_out > 0 AND receipt_path IS NULL AND tx_date = $1::date`, [day]);
+      if (exact.rows.length === 1) tx = exact.rows[0];
+      else if (!exact.rows.length) {
+        const near = await query(
+          `SELECT id, description, money_out FROM bank_transactions
+            WHERE money_out > 0 AND receipt_path IS NULL
+              AND tx_date BETWEEN $1::date - interval '2 days' AND $1::date + interval '2 days'`, [day]);
+        if (near.rows.length === 1) tx = near.rows[0];
+      }
+    }
+    if (tx) {
+      const relPath = path.relative(UPLOAD_DIR, f.path);
+      await query(`UPDATE bank_transactions SET receipt_path = $1, needs_vat_receipt = false, updated_at = now() WHERE id = $2`, [relPath, tx.id]);
+      out.attached.push({ file: name, txId: tx.id, description: tx.description });
+    } else {
+      try { fs.unlinkSync(f.path); } catch (_) {}
+      out.unmatched.push(name);
+    }
+  }
+  await audit(req, 'books_receipts_bulk', null, null, { attached: out.attached.length, unmatched: out.unmatched.length });
+  res.json({ ok: true, ...out, summary: { attached: out.attached.length, unmatched: out.unmatched.length } });
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────

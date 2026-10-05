@@ -22489,7 +22489,8 @@ function renderBooks() {
         <div class="card-body"><div id="bk-platform" style="font-size:13px;color:var(--ink-soft)">Loading…</div></div>
       </div>
       <div class="card" style="margin-bottom:14px">
-        <div class="card-head"><h3>Transactions</h3><div class="card-desc">Link each line to an invoice or payout, set the VAT, attach receipts. Claude pre-fills most of it from the statement.</div></div>
+        <div class="card-head"><h3>Transactions</h3><div class="card-desc">Link each line to an invoice or payout, set the VAT, attach receipts. Claude pre-fills most of it from the statement.</div>
+          <label class="btn btn-ghost btn-sm" style="cursor:pointer" title="Got a folder of receipts (e.g. Mettle's export ships a receipts/ folder)? Select them all — each file is matched by the date in its filename to the right transaction.">📎 Bulk-attach receipts<input type="file" multiple accept=".pdf,image/*" style="display:none" onchange="bkBulkReceipts(this.files)"></label></div>
         <div class="card-body" style="padding:0"><div id="bk-txs" style="font-size:12.5px">Loading…</div></div>
       </div>
       <div class="card">
@@ -22706,14 +22707,37 @@ async function bkUploadReceipt(id, file) {
     bkPaintTxs(); bkPaintFollowups();
   } catch (e) { toast('Upload failed: ' + (e.data?.message || e.message), 'error'); }
 }
+// Bulk receipt attach — a whole export folder in one go. Each file matches
+// by the date in its filename (e.g. "Mettle-INV-133-2026-04-25.pdf") to the
+// unique receipt-less money-out transaction on that day (±2 days fallback).
+async function bkBulkReceipts(files) {
+  if (!files || !files.length) return;
+  const fd = new FormData();
+  for (const f of files) fd.append('receipts', f);
+  const taskId = Task.start('Attaching ' + files.length + ' receipt(s)…');
+  try {
+    const r = await Api.postForm('/api/books/receipts/bulk', fd);
+    Task.done(taskId, r.summary.attached + ' attached');
+    if (r.summary.unmatched) {
+      toast(`📎 ${r.summary.attached} attached · ${r.summary.unmatched} couldn't be matched by date — attach those via 📎 on the row: ${r.unmatched.slice(0, 4).join(', ')}${r.unmatched.length > 4 ? '…' : ''}`, 'warn', 12000);
+    } else {
+      toast(`📎 All ${r.summary.attached} receipts attached ✓`, 'success', 7000);
+    }
+    bkLoad();
+  } catch (e) {
+    Task.fail(taskId, 'Failed');
+    toast('Bulk attach failed: ' + (e.data?.message || e.message), 'error');
+  }
+}
 function bkOpenUpload() {
   modal({
-    title: '⬆ Upload a bank statement (PDF)',
+    title: '⬆ Upload a bank statement',
     body: `
-      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">Claude reads the PDF — it works out the bank (Monzo, Wise, Mettle, Barclays…), pulls every transaction, auto-links invoice payments and payouts, and pre-categorises the spending. Text PDFs work best (download from the bank, not a photo).</div>
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">Claude reads it — it works out the bank (Monzo, Wise, Mettle, Capital on Tap…), pulls every transaction, auto-links invoice payments and payouts, and pre-categorises the spending.</div>
+      <div style="font-size:12px;background:var(--blue-light);color:var(--blue);border-radius:7px;padding:8px 10px;margin-bottom:12px">💡 <strong>CSV or Excel export beats PDF</strong> — it's the bank's exact data, so nothing can be misread (Mettle: Export → CSV; same for Wise and Capital on Tap). PDFs still work fine.</div>
       <div class="field"><label>Bank account</label><select id="bku-account"><option value="">— not set —</option>${BK.accounts.filter(a => !a.archived).map(a => `<option value="${a.id}">${escapeHtml(a.name + (a.bank ? ' (' + a.bank + ')' : ''))}</option>`).join('')}</select></div>
-      <div class="field"><label>Statement PDF</label><input type="file" id="bku-file" accept="application/pdf"></div>
-      <div class="field"><label>Anything Claude should know? <span style="color:var(--ink-soft);font-weight:400">(optional)</span></label><input id="bku-hint" placeholder="e.g. this is the Wise EUR account, ignore the FX summary page"></div>
+      <div class="field"><label>Statement file (CSV, Excel or PDF)</label><input type="file" id="bku-file" accept=".csv,.xlsx,.xls,application/pdf"></div>
+      <div class="field"><label>Anything Claude should know? <span style="color:var(--ink-soft);font-weight:400">(optional)</span></label><input id="bku-hint" placeholder="e.g. this is the Capital on Tap card — team spending"></div>
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },

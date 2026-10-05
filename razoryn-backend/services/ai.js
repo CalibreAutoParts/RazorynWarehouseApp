@@ -480,19 +480,26 @@ Reply with ONLY this JSON:
 }
 
 // ── Bank statement parsing (the Books / VAT workspace) ─────────────────────
-// Takes the uploaded statement PDF and returns the bank, account, period and
-// every transaction — plus a first-pass category guess per line so the
-// reconciliation screen starts 80% done. Smart model: accuracy over pennies.
-async function parseBankStatement(pdfBase64, ctx = {}) {
+// Takes the uploaded statement (PDF, or the bank's CSV export — CSV is exact
+// and preferred) and returns the bank, account, period and every transaction
+// — plus a first-pass category guess per line so the reconciliation screen
+// starts 80% done. Smart model: accuracy over pennies.
+// source: legacy base64 string, or { pdfBase64 } or { csvText, filename? }.
+async function parseBankStatement(source, ctx = {}) {
   const cfg = await getAiConfig();
-  const user = `Read this UK business bank statement PDF carefully and extract EVERYTHING.
+  const src = typeof source === 'string' ? { pdfBase64: source } : (source || {});
+  const isCsv = !!src.csvText;
+  const user = `${isCsv
+    ? `Below is a UK business bank account's CSV/spreadsheet export${src.filename ? ' (file: ' + src.filename + ')' : ''}. Work out the column meanings from the headers and extract EVERYTHING exactly as given — a CSV is exact, so copy amounts and dates precisely.`
+    : 'Read this UK business bank statement PDF carefully and extract EVERYTHING.'}
 
-${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}FIRST check what this document actually is: if it is NOT a bank account statement but a MARKETPLACE or payment-processor statement (eBay managed payments, Shopify payouts, PayPal, Amazon, Stripe…), set "notABankStatement": true, say what it is in notes, and return an empty transactions list — it belongs in the marketplace uploader, not the bank one.
+${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}FIRST check what this document actually is: if it is NOT a bank account statement but a MARKETPLACE or payment-processor statement (eBay managed payments, Shopify payouts, PayPal, Amazon, Stripe…), set "notABankStatement": true, say what it is in notes, and return an empty transactions list — it belongs in the marketplace uploader, not the bank one. A business CREDIT CARD export (e.g. Capital on Tap) IS fine here — treat it like a bank account.
 
-Otherwise identify the BANK (Monzo, Wise, Mettle, Barclays, Starling, Tide, HSBC, Lloyds, NatWest, Santander, Revolut…), the account holder / business name, the statement period, and EVERY transaction in order. Money in and money out must be separate positive numbers. Dates in YYYY-MM-DD.
+Otherwise identify the BANK or card provider (Monzo, Wise, Mettle, Barclays, Starling, Tide, HSBC, Lloyds, NatWest, Santander, Revolut, Capital on Tap…), the account holder / business name, the statement period, and EVERY transaction in order. Money in and money out must be separate positive numbers. Dates in YYYY-MM-DD.
+${isCsv ? '\n===== CSV EXPORT START =====\n' + String(src.csvText).slice(0, 180000) + '\n===== CSV EXPORT END =====\n' : ''}
 
 For each transaction also give your best first guess:
-- type: "sale_receipt" (a customer paying us), "payout" (a marketplace paying out — eBay, Shopify, PayPal, Stripe...), "supplier" (stock purchase), "shipping" (couriers: DPD, Evri, Royal Mail, UPS, FedEx, DHL…), "rent", "utilities", "software" (subscriptions/SaaS/eBay+Shopify fees), "food", "office" (office supplies), "fuel", "bank_fees", "wages", "tax_hmrc", "transfer" (between own accounts/pots), "refund" (money we refunded out), "sundry", "other"
+- type: "sale_receipt" (a customer paying us), "payout" (a marketplace paying out — eBay, Shopify, PayPal, Stripe...), "supplier" (stock purchase), "shipping" (couriers: DPD, Evri, Royal Mail, UPS, FedEx, DHL…), "rent", "utilities", "software" (subscriptions/SaaS/eBay+Shopify fees), "food", "office" (office supplies), "fuel", "bank_fees", "wages", "tax_hmrc", "transfer" (between own accounts/pots — INCLUDING repayments to the business credit card, e.g. paying the Capital on Tap bill: the real expenses are the card's own lines, so the repayment must be "transfer" or they'd count twice), "refund" (money we refunded out), "sundry", "other"
 - payoutPlatform: "ebay"|"shopify"|"paypal"|"stripe"|null (only for type "payout")
 - vatLikely: true if this outgoing almost certainly carries reclaimable UK VAT (standard-rated supplier/shipping/software/office), false otherwise (wages, HMRC, transfers, bank fees, most food…).
 
@@ -504,7 +511,7 @@ Do not invent transactions; if part of the statement is unreadable say so in not
   const out = await callClaude({
     kind: 'bank_statement', system: 'You are a meticulous UK bookkeeper. You extract bank statements exactly as printed — every line, correct amounts, no inventions. Reply with ONLY JSON.',
     user, model: cfg.smartModel, maxTokens: 16000,
-    documents: [{ base64: pdfBase64, mediaType: 'application/pdf' }],
+    documents: src.pdfBase64 ? [{ base64: src.pdfBase64, mediaType: 'application/pdf' }] : undefined,
   });
   const v = out.json;
   if (!v || !Array.isArray(v.transactions)) return null;
