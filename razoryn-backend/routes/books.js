@@ -57,6 +57,10 @@ async function ensureTables() {
     // Accounts with statements behind them archive instead of deleting, so
     // the uploaded history keeps its account label.
     await query(`ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT false`);
+    // The INVOICES account — the bank whose details sit on our invoices
+    // (Settings → bank details), i.e. where customer payments are EXPECTED.
+    // Payments landing elsewhere still match, but get flagged as exceptions.
+    await query(`ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT false`);
     await query(`CREATE TABLE IF NOT EXISTS bank_statements (
       id SERIAL PRIMARY KEY,
       account_id INTEGER REFERENCES bank_accounts(id) ON DELETE SET NULL,
@@ -178,6 +182,10 @@ router.patch('/accounts/:id', async (req, res) => {
   if (b.name !== undefined) { params.push(String(b.name).slice(0, 120)); sets.push(`name = $${params.length}`); }
   if (b.bank !== undefined) { params.push(b.bank ? String(b.bank).slice(0, 60) : null); sets.push(`bank = $${params.length}`); }
   if (b.archived !== undefined) { params.push(!!b.archived); sets.push(`archived = $${params.length}`); }
+  if (b.isPrimary !== undefined) {
+    if (b.isPrimary) await query(`UPDATE bank_accounts SET is_primary = false`);
+    params.push(!!b.isPrimary); sets.push(`is_primary = $${params.length}`);
+  }
   if (!sets.length) return res.status(400).json({ error: 'no_fields' });
   params.push(req.params.id);
   const r = await query(`UPDATE bank_accounts SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`, params);
@@ -295,20 +303,46 @@ router.post('/statements', upload.single('statement'), async (req, res) => {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
     [accountId, req.body.label || null, relPath, parsed.bank, parsed.accountName,
      parsed.periodStart, parsed.periodEnd, parsed.transactions.length, parsed.confidence, parsed.notes, req.user.id]);
+  // Which account do invoices EXPECT to be paid into? The starred one — and
+  // when none is starred yet, auto-detect it from the Settings bank details
+  // (the account name / numbers printed on our invoices).
+  let primary = (await query(`SELECT id, name FROM bank_accounts WHERE is_primary = true LIMIT 1`)).rows[0] || null;
+  if (!primary && accountId) {
+    try {
+      const s = (await query(`SELECT bank_account_name, bank_sort_code, bank_account_number FROM app_settings WHERE id = 1`)).rows[0] || {};
+      const normName = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const digits = (x) => String(x || '').replace(/[^0-9]/g, '');
+      const setName = normName(s.bank_account_name);
+      const detected = normName(parsed.accountName);
+      const nameHit = setName.length >= 6 && detected && (detected.includes(setName) || setName.includes(detected));
+      const acctDigits = digits(s.bank_account_number);
+      const numHit = acctDigits.length >= 6 && digits(parsed.sortCodeOrIban).includes(acctDigits);
+      if (nameHit || numHit) {
+        await query(`UPDATE bank_accounts SET is_primary = true WHERE id = $1`, [accountId]);
+        primary = (await query(`SELECT id, name FROM bank_accounts WHERE id = $1`, [accountId])).rows[0];
+      }
+    } catch (_) {}
+  }
   let autoLinked = 0, payouts = 0, receiptsNeeded = 0;
   for (const t of parsed.transactions) {
     let m = { match_type: null, category: t.type || 'other' };
     try { m = await autoMatchTransaction(t); } catch (_) {}
+    // Invoice money landing OUTSIDE the invoices account is an exception worth
+    // seeing (e.g. a customer who couldn't reach the usual bank paid into
+    // Wise) — the match still happens, with a note explaining it.
+    const offPrimaryNote = (m.match_type === 'sale' && primary && accountId && accountId !== primary.id)
+      ? `⚠ Invoice payment received here — invoices are normally paid into the ${primary.name || 'invoices'} account (Settings bank details)`
+      : null;
     if (m.match_type === 'sale') autoLinked++;
     if (m.match_type === 'payout') payouts++;
     if (m.needs_vat_receipt) receiptsNeeded++;
     const ins = await query(
       `INSERT INTO bank_transactions (statement_id, account_id, tx_date, description, counterparty, money_in, money_out, balance,
-                                      category, match_type, sale_id, payout_platform, vat_likely, needs_vat_receipt)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+                                      category, match_type, sale_id, payout_platform, vat_likely, needs_vat_receipt, notes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
       [st.rows[0].id, accountId, t.date, t.description, t.counterparty, t.moneyIn, t.moneyOut, t.balance,
        m.category || null, m.match_type || null, m.sale_id || null, m.payout_platform || t.payoutPlatform || null,
-       !!t.vatLikely, !!m.needs_vat_receipt]);
+       !!t.vatLikely, !!m.needs_vat_receipt, offPrimaryNote]);
     // A warehouse-recorded part-payment match becomes a real allocation (the
     // exact recorded amount against that invoice).
     if (m.allocation && ins.rows[0]) {

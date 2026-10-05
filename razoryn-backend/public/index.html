@@ -22534,11 +22534,13 @@ function bkPaintAccounts() {
   const archived = BK.accounts.filter(a => a.archived);
   if (!BK.accounts.length) { box.innerHTML = 'No bank accounts yet — hit <strong>+ Add bank account</strong>.'; return; }
   const row = (a) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid var(--line);border-radius:7px;padding:7px 10px;margin-bottom:5px;flex-wrap:wrap${a.archived ? ';opacity:.65' : ''}">
-    <div><strong style="color:var(--ink)">${escapeHtml(a.name)}</strong> <span style="color:var(--ink-soft)">${a.bank ? '(' + escapeHtml(a.bank) + ')' : ''} · ${a.statements || 0} statement${(a.statements || 0) === 1 ? '' : 's'}${a.archived ? ' · <em>archived</em>' : ''}</span></div>
+    <div><strong style="color:var(--ink)">${escapeHtml(a.name)}</strong> <span style="color:var(--ink-soft)">${a.bank ? '(' + escapeHtml(a.bank) + ')' : ''} · ${a.statements || 0} statement${(a.statements || 0) === 1 ? '' : 's'}${a.archived ? ' · <em>archived</em>' : ''}</span>
+      ${a.is_primary ? ' <span class="pill green" style="font-size:10px" title="The account on your invoices (Settings bank details) — where customer payments are expected. Payments landing elsewhere still match, with a note.">⭐ invoices account</span>' : ''}</div>
     <div style="display:flex;gap:4px">
       ${a.archived
         ? `<button class="btn btn-outline btn-sm" onclick="bkRestoreAccount(${a.id})">↩ Restore</button>`
-        : `<button class="btn btn-ghost btn-sm" onclick="bkRenameAccount(${a.id})">✎ Rename</button>
+        : `${a.is_primary ? '' : `<button class="btn btn-ghost btn-sm" onclick="bkSetPrimary(${a.id})" title="Mark as the account invoices are paid into — payments landing in other accounts get flagged as exceptions.">⭐</button>`}
+           <button class="btn btn-ghost btn-sm" onclick="bkRenameAccount(${a.id})">✎ Rename</button>
            <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="bkDeleteAccount(${a.id}, ${(a.statements || 0) > 0})" title="${(a.statements || 0) > 0 ? 'Has statements — archives instead of deleting (restorable)' : 'No statements — deletes for good'}">${(a.statements || 0) > 0 ? '📦 Archive' : '🗑 Delete'}</button>`}
     </div></div>`;
   box.innerHTML = `<div style="font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);margin-bottom:6px">Your accounts</div>`
@@ -22573,6 +22575,12 @@ async function bkDeleteAccount(id, hasStatements) {
 }
 async function bkRestoreAccount(id) {
   try { await Api.patch('/api/books/accounts/' + id, { archived: false }); toast('Restored', 'success'); await bkLoadAccounts(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function bkSetPrimary(id) {
+  const a = BK.accounts.find(x => x.id === id);
+  if (!confirm(`Mark "${a?.name || 'this account'}" as the invoices account (the one on your invoices' bank details)? Invoice payments landing in OTHER accounts will still match, but get flagged as exceptions.`)) return;
+  try { await Api.patch('/api/books/accounts/' + id, { isPrimary: true }); toast('⭐ Invoices account set', 'success'); await bkLoadAccounts(); }
   catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function bkLoad() {
