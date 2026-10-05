@@ -112,6 +112,19 @@ async function ensureTables() {
     )`);
     await query(`CREATE INDEX IF NOT EXISTS bank_tx_alloc_tx_idx ON bank_tx_allocations (tx_id)`);
     await query(`CREATE INDEX IF NOT EXISTS bank_tx_alloc_sale_idx ON bank_tx_allocations (sale_id)`);
+    // Receipt FILE NAME referenced by the bank's own export (Mettle's column
+    // names the attached receipt per row) — bulk attach matches on it exactly.
+    await query(`ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS receipt_ref TEXT`);
+    // Several receipts/photos can back ONE payment (an invoice split over
+    // pages, or a photo of each till receipt).
+    await query(`CREATE TABLE IF NOT EXISTS bank_tx_receipts (
+      id SERIAL PRIMARY KEY,
+      tx_id INTEGER NOT NULL REFERENCES bank_transactions(id) ON DELETE CASCADE,
+      file_path TEXT NOT NULL,
+      original_name TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
+    await query(`CREATE INDEX IF NOT EXISTS bank_tx_receipts_tx_idx ON bank_tx_receipts (tx_id)`);
     await query(`CREATE TABLE IF NOT EXISTS books_shares (
       id SERIAL PRIMARY KEY,
       token TEXT UNIQUE NOT NULL,
@@ -339,11 +352,11 @@ router.post('/statements', upload.single('statement'), async (req, res) => {
     if (m.needs_vat_receipt) receiptsNeeded++;
     const ins = await query(
       `INSERT INTO bank_transactions (statement_id, account_id, tx_date, description, counterparty, money_in, money_out, balance,
-                                      category, match_type, sale_id, payout_platform, vat_likely, needs_vat_receipt, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+                                      category, match_type, sale_id, payout_platform, vat_likely, needs_vat_receipt, notes, receipt_ref)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
       [st.rows[0].id, accountId, t.date, t.description, t.counterparty, t.moneyIn, t.moneyOut, t.balance,
        m.category || null, m.match_type || null, m.sale_id || null, m.payout_platform || t.payoutPlatform || null,
-       !!t.vatLikely, !!m.needs_vat_receipt, offPrimaryNote]);
+       !!t.vatLikely, !!m.needs_vat_receipt, offPrimaryNote, t.receiptRef || null]);
     // A warehouse-recorded part-payment match becomes a real allocation (the
     // exact recorded amount against that invoice).
     if (m.allocation && ins.rows[0]) {
@@ -393,7 +406,7 @@ async function loadTransactions({ from, to, accountId }) {
   const { rows } = await query(`
     SELECT t.*, s.bank_detected, s.label AS statement_label, a.name AS account_name, a.bank AS account_bank, a.business,
            sl.invoice_number, sl.total AS sale_total, sl.customer_name,
-           alloc.allocations
+           alloc.allocations, rcpt.receipts
       FROM bank_transactions t
       LEFT JOIN bank_statements s ON s.id = t.statement_id
       LEFT JOIN bank_accounts a ON a.id = t.account_id
@@ -406,6 +419,10 @@ async function loadTransactions({ from, to, accountId }) {
           FROM bank_tx_allocations ba LEFT JOIN sales s2 ON s2.id = ba.sale_id
          WHERE ba.tx_id = t.id
       ) alloc ON true
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(json_agg(json_build_object('id', br.id, 'name', br.original_name) ORDER BY br.id), '[]'::json) AS receipts
+          FROM bank_tx_receipts br WHERE br.tx_id = t.id
+      ) rcpt ON true
      WHERE ${where}
      ORDER BY t.tx_date, t.id`, params);
   return rows;
@@ -500,10 +517,20 @@ router.delete('/transactions/:id/allocations/:allocId', async (req, res) => {
 router.post('/transactions/:id/receipt', upload.single('receipt'), async (req, res) => {  await ensureTables();
   if (!req.file) return res.status(400).json({ error: 'receipt_required' });
   const relPath = path.relative(UPLOAD_DIR, req.file.path);
-  const r = await query(`UPDATE bank_transactions SET receipt_path = $1, needs_vat_receipt = false, updated_at = now() WHERE id = $2 RETURNING *`, [relPath, req.params.id]);
+  // Multiple receipts/photos per payment: each upload APPENDS.
+  const r = await query(`UPDATE bank_transactions SET receipt_path = COALESCE(receipt_path, $1), needs_vat_receipt = false, updated_at = now() WHERE id = $2 RETURNING *`, [relPath, req.params.id]);
   if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  await query(`INSERT INTO bank_tx_receipts (tx_id, file_path, original_name) VALUES ($1,$2,$3)`,
+    [req.params.id, relPath, (req.file.originalname || '').slice(0, 200) || null]);
   await audit(req, 'books_receipt_upload', 'bank_transaction', req.params.id);
   res.status(201).json({ transaction: r.rows[0] });
+});
+// Serve one receipt file by its receipt-row id (a payment can hold several).
+router.get('/receipt-file/:rid', async (req, res) => {
+  await ensureTables();
+  const r = await query(`SELECT file_path FROM bank_tx_receipts WHERE id = $1`, [req.params.rid]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  res.sendFile(path.join(UPLOAD_DIR, r.rows[0].file_path));
 });
 router.get('/transactions/:id/receipt', async (req, res) => {
   await ensureTables();
@@ -523,8 +550,26 @@ router.post('/receipts/bulk', upload.array('receipts', 200), async (req, res) =>
   const files = req.files || [];
   if (!files.length) return res.status(400).json({ error: 'no_files' });
   const out = { attached: [], unmatched: [] };
+  const attach = async (txId, relPath2, name2) => {
+    await query(`UPDATE bank_transactions SET receipt_path = COALESCE(receipt_path, $1), needs_vat_receipt = false, updated_at = now() WHERE id = $2`, [relPath2, txId]);
+    await query(`INSERT INTO bank_tx_receipts (tx_id, file_path, original_name) VALUES ($1,$2,$3)`, [txId, relPath2, String(name2).slice(0, 200)]);
+  };
   for (const f of files) {
     const name = f.originalname || path.basename(f.path);
+    // 1. EXACT: the bank's own export names the receipt file per row
+    //    (Mettle's receipt column) — attach to EVERY row referencing it.
+    const base = name.replace(/\.[a-z0-9]+$/i, '');
+    const refHits = base.length >= 8 ? await query(
+      `SELECT id, description FROM bank_transactions
+        WHERE receipt_ref IS NOT NULL AND (receipt_ref ILIKE '%' || $1 || '%' OR $1 ILIKE '%' || receipt_ref || '%')`, [base]) : { rows: [] };
+    if (refHits.rows.length) {
+      const relPath2 = path.relative(UPLOAD_DIR, f.path);
+      for (const tx2 of refHits.rows) {
+        await attach(tx2.id, relPath2, name);
+        out.attached.push({ file: name, txId: tx2.id, description: tx2.description, via: 'export reference' });
+      }
+      continue;
+    }
     const dm = name.match(/(\d{4})-(\d{2})-(\d{2})/);
     let tx = null;
     if (dm) {
@@ -542,9 +587,8 @@ router.post('/receipts/bulk', upload.array('receipts', 200), async (req, res) =>
       }
     }
     if (tx) {
-      const relPath = path.relative(UPLOAD_DIR, f.path);
-      await query(`UPDATE bank_transactions SET receipt_path = $1, needs_vat_receipt = false, updated_at = now() WHERE id = $2`, [relPath, tx.id]);
-      out.attached.push({ file: name, txId: tx.id, description: tx.description });
+      await attach(tx.id, path.relative(UPLOAD_DIR, f.path), name);
+      out.attached.push({ file: name, txId: tx.id, description: tx.description, via: 'date' });
     } else {
       try { fs.unlinkSync(f.path); } catch (_) {}
       out.unmatched.push(name);
@@ -906,7 +950,9 @@ publicRouter.get('/:token', async (req, res) => {
       ? t.allocations.map(a => `<a href="${base}/invoice/${a.saleId}" target="_blank">Invoice ${esc(a.invoiceNumber || ('#' + a.saleId))}</a> ${gbp(a.amount)}${a.saleTotal != null && (parseFloat(a.amount) + 0.005) < parseFloat(a.saleTotal) ? ' <span style="color:#888">(part of ' + gbp(a.saleTotal) + ')</span>' : ''}`).join('<br>')
       : (t.sale_id ? `<a href="${base}/invoice/${t.sale_id}" target="_blank">Invoice ${esc(t.invoice_number || ('#' + t.sale_id))}</a>` : (t.payout_ref || t.payout_platform ? `<span class="pill b">${esc((t.payout_platform || 'payout').toUpperCase())}${t.payout_ref ? ' ' + esc(t.payout_ref) : ''}</span>` : '<span style="color:#aaa">—</span>'))}</td>
     <td class="num">${t.vat_amount != null ? gbp(t.vat_amount) : ''}</td>
-    <td>${t.receipt_path ? `<a href="${base}/receipt/${t.id}" target="_blank">view</a>` : (t.needs_vat_receipt ? '<span class="pill r">missing</span>' : '')}</td>
+    <td>${(Array.isArray(t.receipts) && t.receipts.length)
+      ? t.receipts.map((r2, i2) => `<a href="${base}/receipt-file/${r2.id}" target="_blank">file${t.receipts.length > 1 ? ' ' + (i2 + 1) : ''}</a>`).join(' · ')
+      : (t.receipt_path ? `<a href="${base}/receipt/${t.id}" target="_blank">view</a>` : (t.needs_vat_receipt ? '<span class="pill r">missing</span>' : ''))}</td>
   </tr>`).join('')}
   </tbody></table>
   <div style="color:#999;font-size:11px;margin:16px 0">Generated by the ${esc(brand.name || '')} warehouse system. Figures are working records, not filed returns.</div>
@@ -940,6 +986,13 @@ publicRouter.get('/:token/invoice/:saleId', async (req, res) => {
   const company = await salesMod.getCompanySettings();
   const mode = sale.payment_method === 'cash' ? 'receipt' : 'invoice';
   res.set('Content-Type', 'text/html').send(salesMod.renderInvoiceHtml({ sale, items, company, mode, baseUrl: '' }));
+});
+publicRouter.get('/:token/receipt-file/:rid', async (req, res) => {
+  const share = await shareFor(req.params.token);
+  if (!share) return res.status(404).send('Link revoked.');
+  const r = await query(`SELECT file_path FROM bank_tx_receipts WHERE id = $1`, [req.params.rid]);
+  if (!r.rows[0]) return res.status(404).send('No receipt');
+  res.sendFile(path.join(UPLOAD_DIR, r.rows[0].file_path));
 });
 publicRouter.get('/:token/receipt/:txId', async (req, res) => {
   const share = await shareFor(req.params.token);

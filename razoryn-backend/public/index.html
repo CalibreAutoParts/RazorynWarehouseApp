@@ -22713,10 +22713,15 @@ function bkPaintTxs() {
         <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px" onclick="bkSetPayout(${t.id})" title="Mark as a marketplace payout + enter the payout id">💳</button>` : ''}
         <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px" onclick="bkNote(${t.id})" title="Note">✎</button></div></td>
       <td class="num"><input type="number" step="0.01" min="0" value="${t.vat_amount != null ? (+t.vat_amount).toFixed(2) : ''}" placeholder="—" style="width:70px;text-align:right;font-size:11px" onchange="bkPatch(${t.id},{vatAmount:this.value})"></td>
-      <td>${t.receipt_path
-        ? `<a href="/api/books/transactions/${t.id}/receipt" target="_blank" style="font-size:11px">view</a>`
-        : `<label class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px;cursor:pointer">📎<input type="file" style="display:none" onchange="bkUploadReceipt(${t.id}, this.files[0])"></label>
-           ${t.needs_vat_receipt ? '<span class="pill red" style="font-size:9px" title="VAT receipt still needed">⚠</span>' : `<button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px;color:var(--ink-soft)" onclick="bkPatch(${t.id},{needsVatReceipt:true})" title="Flag: VAT receipt needed — appears in the chase list">flag</button>`}`}</td>
+      <td>${(() => {
+        const rs = Array.isArray(t.receipts) ? t.receipts : [];
+        const views = rs.length
+          ? rs.map((r2, i2) => `<a href="/api/books/receipt-file/${r2.id}" target="_blank" style="font-size:11px" title="${escapeAttr(r2.name || 'receipt')}">📄${rs.length > 1 ? i2 + 1 : ''}</a>`).join(' ')
+          : (t.receipt_path ? `<a href="/api/books/transactions/${t.id}/receipt" target="_blank" style="font-size:11px">view</a>` : '');
+        const add = `<label class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px;cursor:pointer" title="Attach a receipt/photo — several files can back one payment"><input type="file" multiple accept=".pdf,image/*" style="display:none" onchange="bkUploadReceipts(${t.id}, this.files)">📎</label>`;
+        const flagBit = (views || t.receipt_path) ? '' : (t.needs_vat_receipt ? '<span class="pill red" style="font-size:9px" title="VAT receipt still needed">⚠</span>' : `<button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px;color:var(--ink-soft)" onclick="bkPatch(${t.id},{needsVatReceipt:true})" title="Flag: VAT receipt needed — appears in the chase list">flag</button>`);
+        return views + ' ' + add + flagBit;
+      })()}</td>
       <td></td>
     </tr>`).join('')}
     </tbody></table></div>`;
@@ -22819,16 +22824,18 @@ async function bkRemoveAlloc(txId, allocId) {
     bkLoad();
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
-async function bkUploadReceipt(id, file) {
-  if (!file) return;
-  const fd = new FormData();
-  fd.append('receipt', file);
+async function bkUploadReceipts(id, files) {
+  // One payment can hold SEVERAL receipts/photos (multi-page invoices, a
+  // photo per till receipt) — each file appends.
+  if (!files || !files.length) return;
   try {
-    await Api.postForm('/api/books/transactions/' + id + '/receipt', fd);
-    toast('Receipt attached ✓', 'success');
-    const t = BK.txs.find(x => x.id === id);
-    if (t) { t.receipt_path = 'yes'; t.needs_vat_receipt = false; }
-    bkPaintTxs(); bkPaintFollowups();
+    for (const file of files) {
+      const fd = new FormData();
+      fd.append('receipt', file);
+      await Api.postForm('/api/books/transactions/' + id + '/receipt', fd);
+    }
+    toast(files.length + ' receipt' + (files.length === 1 ? '' : 's') + ' attached ✓', 'success');
+    bkLoad();
   } catch (e) { toast('Upload failed: ' + (e.data?.message || e.message), 'error'); }
 }
 // Bulk receipt attach — a whole export folder in one go. Each file matches

@@ -558,7 +558,7 @@ Sample data rows: ${JSON.stringify(sample)}
 
 If this is NOT a bank/credit-card export but a marketplace statement (eBay, Shopify payouts, PayPal…), set "notABankStatement": true.
 Otherwise identify the columns. amountMode "signed" = one amount column (positive in / negative out); "split" = separate money-in and money-out columns.
-Reply ONLY: {"notABankStatement":false,"bank":"Mettle|Wise|Capital on Tap|…","accountName":"...or null","dateCol":<i>,"dateFormat":"DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|D MMM YYYY","descriptionCols":[<i>,...],"amountMode":"signed"|"split","amountCol":<i|null>,"inCol":<i|null>,"outCol":<i|null>,"balanceCol":<i|null>,"counterpartyCol":<i|null>,"currency":"GBP","notes":"..."}`,
+Reply ONLY: {"notABankStatement":false,"bank":"Mettle|Wise|Capital on Tap|…","accountName":"...or null","dateCol":<i>,"dateFormat":"DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|D MMM YYYY","descriptionCols":[<i>,...],"amountMode":"signed"|"split","amountCol":<i|null>,"inCol":<i|null>,"outCol":<i|null>,"balanceCol":<i|null>,"counterpartyCol":<i|null>,"receiptFileCol":<i|null — the column holding attached receipt/invoice FILE NAMES like "Mettle-Receipt-2026-….pdf" or "Mettle-INV-148-2026-05-20.pdf">,"currency":"GBP","notes":"..."}`,
   });
   const map = mapOut.json;
   if (!map) return null;
