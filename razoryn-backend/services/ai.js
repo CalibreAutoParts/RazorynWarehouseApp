@@ -487,7 +487,9 @@ async function parseBankStatement(pdfBase64, ctx = {}) {
   const cfg = await getAiConfig();
   const user = `Read this UK business bank statement PDF carefully and extract EVERYTHING.
 
-${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}Identify the BANK (Monzo, Wise, Mettle, Barclays, Starling, Tide, HSBC, Lloyds, NatWest, Santander, Revolut…), the account holder / business name, the statement period, and EVERY transaction in order. Money in and money out must be separate positive numbers. Dates in YYYY-MM-DD.
+${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}FIRST check what this document actually is: if it is NOT a bank account statement but a MARKETPLACE or payment-processor statement (eBay managed payments, Shopify payouts, PayPal, Amazon, Stripe…), set "notABankStatement": true, say what it is in notes, and return an empty transactions list — it belongs in the marketplace uploader, not the bank one.
+
+Otherwise identify the BANK (Monzo, Wise, Mettle, Barclays, Starling, Tide, HSBC, Lloyds, NatWest, Santander, Revolut…), the account holder / business name, the statement period, and EVERY transaction in order. Money in and money out must be separate positive numbers. Dates in YYYY-MM-DD.
 
 For each transaction also give your best first guess:
 - type: "sale_receipt" (a customer paying us), "payout" (a marketplace paying out — eBay, Shopify, PayPal, Stripe...), "supplier" (stock purchase), "shipping" (couriers: DPD, Evri, Royal Mail, UPS, FedEx, DHL…), "rent", "utilities", "software" (subscriptions/SaaS/eBay+Shopify fees), "food", "office" (office supplies), "fuel", "bank_fees", "wages", "tax_hmrc", "transfer" (between own accounts/pots), "refund" (money we refunded out), "sundry", "other"
@@ -495,7 +497,7 @@ For each transaction also give your best first guess:
 - vatLikely: true if this outgoing almost certainly carries reclaimable UK VAT (standard-rated supplier/shipping/software/office), false otherwise (wages, HMRC, transfers, bank fees, most food…).
 
 Reply with ONLY this JSON:
-{"bank":"...","accountName":"...","sortCodeOrIban":"...or null","periodStart":"YYYY-MM-DD","periodEnd":"YYYY-MM-DD","currency":"GBP",
+{"notABankStatement":false,"bank":"...","accountName":"...","sortCodeOrIban":"...or null","periodStart":"YYYY-MM-DD","periodEnd":"YYYY-MM-DD","currency":"GBP",
  "transactions":[{"date":"YYYY-MM-DD","description":"...","moneyIn":<number|0>,"moneyOut":<number|0>,"balance":<number|null>,"type":"...","payoutPlatform":null,"vatLikely":false,"counterparty":"<who, cleaned up>"}],
  "confidence":<0..1>,"notes":"<anything odd: pages unreadable, truncated, totals not matching>"}
 Do not invent transactions; if part of the statement is unreadable say so in notes.`;
@@ -508,6 +510,7 @@ Do not invent transactions; if part of the statement is unreadable say so in not
   if (!v || !Array.isArray(v.transactions)) return null;
   const num = (x) => { const n = parseFloat(x); return isFinite(n) ? +n.toFixed(2) : 0; };
   return {
+    notABankStatement: v.notABankStatement === true,
     bank: String(v.bank || 'Unknown').slice(0, 60),
     accountName: v.accountName ? String(v.accountName).slice(0, 120) : null,
     sortCodeOrIban: v.sortCodeOrIban ? String(v.sortCodeOrIban).slice(0, 60) : null,
@@ -544,6 +547,7 @@ ${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}Extract:
 1. The platform (ebay, shopify, paypal, stripe…), the statement period (these are usually MONTHLY statements), currency.
 2. The SUMMARY money flow: the OPENING BALANCE (funds carried over from the previous month, not yet paid out at the start of the period), gross sales/orders total, refunds given, selling fees (FVF + fixed), postage/shipping labels bought, advertising/promoted-listings charges, any other deductions or charges, the total actually PAID OUT during the period, and the CLOSING BALANCE (funds still pending at the end, carried into next month). Opening + gross − deductions − paid out = closing; say in notes if the statement's own numbers don't add up.
 3. EVERY individual payout listed, with its date, payout id/reference (e.g. "P*7693951408" — keep it exactly as printed) and amount.
+NOTE: eBay issues TWO statement variants. The FULL statement lists every payout and itemised transactions; the SUMMARY-ONLY version has only aggregated category totals and NO payout list. If this is the summary-only version, return "payouts": [] and say "summary-only statement — no payout list" in notes (never invent payouts from totals).
 
 Reply with ONLY this JSON:
 {"platform":"ebay"|"shopify"|"paypal"|"stripe"|"other","periodStart":"YYYY-MM-DD","periodEnd":"YYYY-MM-DD","currency":"GBP",
