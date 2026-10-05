@@ -96,6 +96,18 @@ async function ensureTables() {
     )`);
     await query(`CREATE INDEX IF NOT EXISTS bank_tx_date_idx ON bank_transactions (tx_date)`);
     await query(`CREATE INDEX IF NOT EXISTS bank_tx_stmt_idx ON bank_transactions (statement_id)`);
+    // Lump sums & part-payments: ONE bank line can be split across several
+    // invoices, and one invoice can be paid across several bank lines. Each
+    // row allocates a portion of a transaction to a sale.
+    await query(`CREATE TABLE IF NOT EXISTS bank_tx_allocations (
+      id SERIAL PRIMARY KEY,
+      tx_id INTEGER NOT NULL REFERENCES bank_transactions(id) ON DELETE CASCADE,
+      sale_id INTEGER NOT NULL,
+      amount NUMERIC(12,2) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
+    await query(`CREATE INDEX IF NOT EXISTS bank_tx_alloc_tx_idx ON bank_tx_allocations (tx_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS bank_tx_alloc_sale_idx ON bank_tx_allocations (sale_id)`);
     await query(`CREATE TABLE IF NOT EXISTS books_shares (
       id SERIAL PRIMARY KEY,
       token TEXT UNIQUE NOT NULL,
@@ -312,11 +324,20 @@ async function loadTransactions({ from, to, accountId }) {
   if (accountId) { params.push(parseInt(accountId)); where += ` AND t.account_id = $${params.length}`; }
   const { rows } = await query(`
     SELECT t.*, s.bank_detected, s.label AS statement_label, a.name AS account_name, a.bank AS account_bank, a.business,
-           sl.invoice_number, sl.total AS sale_total, sl.customer_name
+           sl.invoice_number, sl.total AS sale_total, sl.customer_name,
+           alloc.allocations
       FROM bank_transactions t
       LEFT JOIN bank_statements s ON s.id = t.statement_id
       LEFT JOIN bank_accounts a ON a.id = t.account_id
       LEFT JOIN sales sl ON sl.id = t.sale_id
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(json_agg(json_build_object(
+                 'id', ba.id, 'saleId', ba.sale_id, 'amount', ba.amount,
+                 'invoiceNumber', s2.invoice_number, 'saleTotal', s2.total,
+                 'customer', s2.customer_name) ORDER BY ba.id), '[]'::json) AS allocations
+          FROM bank_tx_allocations ba LEFT JOIN sales s2 ON s2.id = ba.sale_id
+         WHERE ba.tx_id = t.id
+      ) alloc ON true
      WHERE ${where}
      ORDER BY t.tx_date, t.id`, params);
   return rows;
@@ -348,8 +369,47 @@ router.patch('/transactions/:id', async (req, res) => {
   await audit(req, 'books_tx_update', 'bank_transaction', req.params.id, b);
   res.json({ transaction: r.rows[0] });
 });
-router.post('/transactions/:id/receipt', upload.single('receipt'), async (req, res) => {
+// ── Allocations: lump sums & part-payments ────────────────────────────────
+// POST /transactions/:id/allocations { saleId, amount } — allocate a portion
+// of this bank line to an invoice. A lump sum gets several allocations (one
+// per invoice it covers); a part-payment allocates less than the invoice
+// total, with the rest arriving on later bank lines.
+router.post('/transactions/:id/allocations', async (req, res) => {
   await ensureTables();
+  const saleId = parseInt(req.body?.saleId);
+  const amount = parseFloat(req.body?.amount);
+  if (!saleId || !(amount > 0)) return res.status(400).json({ error: 'saleId_and_amount_required' });
+  const t = (await query(`SELECT * FROM bank_transactions WHERE id = $1`, [req.params.id])).rows[0];
+  if (!t) return res.status(404).json({ error: 'not_found' });
+  const allocated = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) AS s FROM bank_tx_allocations WHERE tx_id = $1`, [t.id])).rows[0].s);
+  const lineTotal = parseFloat(t.money_in) || parseFloat(t.money_out) || 0;
+  if (allocated + amount > lineTotal + 0.005) {
+    return res.status(400).json({ error: 'over_allocated', message: `Only £${(lineTotal - allocated).toFixed(2)} of this line is unallocated.` });
+  }
+  await query(`INSERT INTO bank_tx_allocations (tx_id, sale_id, amount) VALUES ($1,$2,$3)`, [t.id, saleId, +amount.toFixed(2)]);
+  // Keep the legacy single-link fields sensible: first allocation drives them.
+  await query(`UPDATE bank_transactions SET sale_id = COALESCE(sale_id, $2), match_type = 'sale', category = COALESCE(category, 'sale_receipt'), updated_at = now() WHERE id = $1`, [t.id, saleId]);
+  await audit(req, 'books_tx_allocate', 'bank_transaction', t.id, { saleId, amount });
+  const rows = await loadTransactions({ from: String(t.tx_date).slice(0, 10), to: String(t.tx_date).slice(0, 10) });
+  res.status(201).json({ ok: true, transaction: rows.find(x => x.id === t.id) || null });
+});
+router.delete('/transactions/:id/allocations/:allocId', async (req, res) => {
+  await ensureTables();
+  const r = await query(`DELETE FROM bank_tx_allocations WHERE id = $1 AND tx_id = $2 RETURNING sale_id`, [req.params.allocId, req.params.id]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  // If that was the last allocation for the sale the legacy field points at,
+  // clear the legacy link too.
+  const left = await query(`SELECT COUNT(*)::int AS n, MIN(sale_id) AS first_sale FROM bank_tx_allocations WHERE tx_id = $1`, [req.params.id]);
+  if (!left.rows[0].n) {
+    await query(`UPDATE bank_transactions SET sale_id = NULL, match_type = NULL, updated_at = now() WHERE id = $1 AND sale_id = $2`, [req.params.id, r.rows[0].sale_id]);
+  } else {
+    await query(`UPDATE bank_transactions SET sale_id = $2, updated_at = now() WHERE id = $1`, [req.params.id, left.rows[0].first_sale]);
+  }
+  await audit(req, 'books_tx_deallocate', 'bank_transaction', req.params.id, { allocId: req.params.allocId });
+  res.json({ ok: true });
+});
+
+router.post('/transactions/:id/receipt', upload.single('receipt'), async (req, res) => {  await ensureTables();
   if (!req.file) return res.status(400).json({ error: 'receipt_required' });
   const relPath = path.relative(UPLOAD_DIR, req.file.path);
   const r = await query(`UPDATE bank_transactions SET receipt_path = $1, needs_vat_receipt = false, updated_at = now() WHERE id = $2 RETURNING *`, [relPath, req.params.id]);
@@ -633,12 +693,16 @@ function buildCsv(rows) {
   const cell = (v) => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
   const lines = [cols.join(',')];
   for (const t of rows) {
+    const allocs = Array.isArray(t.allocations) ? t.allocations : [];
+    const invoiceCol = allocs.length
+      ? allocs.map(a => (a.invoiceNumber || ('#' + a.saleId)) + ' £' + (+a.amount).toFixed(2)).join(' | ')
+      : (t.invoice_number || '');
     lines.push([
       String(t.tx_date).slice(0, 10), t.account_name || '', t.account_bank || t.bank_detected || '', t.business || '',
       t.description || '', t.counterparty || '',
       t.money_in > 0 ? (+t.money_in).toFixed(2) : '', t.money_out > 0 ? (+t.money_out).toFixed(2) : '',
       t.category || '', t.match_type || '',
-      t.invoice_number || '', t.payout_ref || (t.payout_platform || ''),
+      invoiceCol, t.payout_ref || (t.payout_platform || ''),
       t.vat_amount != null ? (+t.vat_amount).toFixed(2) : '',
       t.receipt_path ? 'yes' : (t.needs_vat_receipt ? 'MISSING' : ''),
       t.notes || '',
@@ -749,7 +813,9 @@ publicRouter.get('/:token', async (req, res) => {
     <td class="num">${t.money_in > 0 ? gbp(t.money_in) : ''}</td>
     <td class="num">${t.money_out > 0 ? gbp(t.money_out) : ''}</td>
     <td><span class="pill">${esc(t.category || '—')}</span></td>
-    <td>${t.sale_id ? `<a href="${base}/invoice/${t.sale_id}" target="_blank">Invoice ${esc(t.invoice_number || ('#' + t.sale_id))}</a>` : (t.payout_ref || t.payout_platform ? `<span class="pill b">${esc((t.payout_platform || 'payout').toUpperCase())}${t.payout_ref ? ' ' + esc(t.payout_ref) : ''}</span>` : '<span style="color:#aaa">—</span>')}</td>
+    <td>${(Array.isArray(t.allocations) && t.allocations.length)
+      ? t.allocations.map(a => `<a href="${base}/invoice/${a.saleId}" target="_blank">Invoice ${esc(a.invoiceNumber || ('#' + a.saleId))}</a> ${gbp(a.amount)}${a.saleTotal != null && (parseFloat(a.amount) + 0.005) < parseFloat(a.saleTotal) ? ' <span style="color:#888">(part of ' + gbp(a.saleTotal) + ')</span>' : ''}`).join('<br>')
+      : (t.sale_id ? `<a href="${base}/invoice/${t.sale_id}" target="_blank">Invoice ${esc(t.invoice_number || ('#' + t.sale_id))}</a>` : (t.payout_ref || t.payout_platform ? `<span class="pill b">${esc((t.payout_platform || 'payout').toUpperCase())}${t.payout_ref ? ' ' + esc(t.payout_ref) : ''}</span>` : '<span style="color:#aaa">—</span>'))}</td>
     <td class="num">${t.vat_amount != null ? gbp(t.vat_amount) : ''}</td>
     <td>${t.receipt_path ? `<a href="${base}/receipt/${t.id}" target="_blank">view</a>` : (t.needs_vat_receipt ? '<span class="pill r">missing</span>' : '')}</td>
   </tr>`).join('')}

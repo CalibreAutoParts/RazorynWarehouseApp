@@ -144,7 +144,7 @@ function extractJson(text) {
   return null;
 }
 
-async function callClaude({ kind, system, user, model, maxTokens = 700, images, documents }) {
+async function callClaude({ kind, system, user, model, maxTokens = 700, images, documents, timeoutMs }) {
   if (!isConfigured()) { const e = new Error('ai_not_configured'); e.code = 'not_configured'; throw e; }
   await ensureTables();
   const cfg = await getAiConfig();
@@ -175,7 +175,7 @@ async function callClaude({ kind, system, user, model, maxTokens = 700, images, 
       messages: [{ role: 'user', content }],
     }, {
       headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': API_VERSION, 'content-type': 'application/json' },
-      timeout: 90000,
+      timeout: timeoutMs || 90000,
     });
     const usage = r.data?.usage || {};
     const text = (r.data?.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
@@ -510,7 +510,7 @@ Reply with ONLY this JSON:
 Do not invent transactions; if part of the statement is unreadable say so in notes.`;
   const out = await callClaude({
     kind: 'bank_statement', system: 'You are a meticulous UK bookkeeper. You extract bank statements exactly as printed — every line, correct amounts, no inventions. Reply with ONLY JSON.',
-    user, model: cfg.smartModel, maxTokens: 16000,
+    user, model: cfg.smartModel, maxTokens: 16000, timeoutMs: 540000,
     documents: src.pdfBase64 ? [{ base64: src.pdfBase64, mediaType: 'application/pdf' }] : undefined,
   });
   const v = out.json;
@@ -565,7 +565,7 @@ Do not invent numbers; if a summary line isn't on the statement use 0 and say so
   const out = await callClaude({
     kind: 'platform_statement',
     system: 'You are a meticulous UK bookkeeper. You extract marketplace statements exactly as printed — every payout, correct amounts, no inventions. Reply with ONLY JSON.',
-    user, model: cfg.smartModel, maxTokens: 16000,
+    user, model: cfg.smartModel, maxTokens: 16000, timeoutMs: 540000,
     documents: [{ base64: pdfBase64, mediaType: 'application/pdf' }],
   });
   const v = out.json;

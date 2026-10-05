@@ -22610,6 +22610,17 @@ function bkPaintStatements(list) {
     </div></div>`).join('');
 }
 function bkChip(t) {
+  // Allocations (lump sums / part-payments): one bank line split across
+  // invoices, each chip showing its share — plus the unallocated remainder.
+  const allocs = Array.isArray(t.allocations) ? t.allocations : [];
+  if (allocs.length) {
+    const lineTotal = parseFloat(t.money_in) || parseFloat(t.money_out) || 0;
+    const sum = allocs.reduce((a, x) => a + (parseFloat(x.amount) || 0), 0);
+    const rem = +(lineTotal - sum).toFixed(2);
+    return allocs.map(a =>
+      `<span class="pill green" style="font-size:10px">🧾 ${escapeHtml(a.invoiceNumber || ('#' + a.saleId))} ${gbp(a.amount)}${a.saleTotal != null && (parseFloat(a.amount) + 0.005) < parseFloat(a.saleTotal) ? ' <span style="opacity:.75">(part of ' + gbp(a.saleTotal) + ')</span>' : ''} <a href="#" onclick="event.preventDefault();bkRemoveAlloc(${t.id},${a.id})" style="color:var(--red);text-decoration:none" title="Remove this allocation">×</a></span>`
+    ).join(' ') + (rem > 0.005 ? ` <span class="pill amber" style="font-size:10px">${gbp(rem)} unallocated</span>` : '');
+  }
   if (t.sale_id) return `<span class="pill green" style="font-size:10px">🧾 ${escapeHtml(t.invoice_number || ('#' + t.sale_id))}</span>`;
   if (t.match_type === 'payout' || t.payout_platform) return `<span class="pill blue" style="font-size:10px">${escapeHtml((t.payout_platform || 'payout').toUpperCase())}${t.payout_ref ? ' ' + escapeHtml(t.payout_ref) : ''}</span>`;
   if (t.match_type === 'transfer') return '<span class="pill" style="font-size:10px">↔ transfer</span>';
@@ -22684,16 +22695,46 @@ async function bkLinkInvoice(id) {
     if (!sales.length) { toast('No invoices matched — try the invoice number', 'warn'); return; }
     modal({
       title: 'Link to invoice',
-      body: sales.map(s => `<div onclick="bkPickInvoice(${id}, ${s.id}, '${escapeAttr(s.invoice_number || '#' + s.id)}')" style="padding:9px 10px;border:1px solid var(--line);border-radius:7px;margin-bottom:6px;cursor:pointer">
+      body: '<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Lump sum covering several invoices? Link them one after another — you’ll be asked how much of the line goes to each. Part-payment? Enter just the part; the rest links from the later bank line.</div>'
+        + sales.map(s => `<div onclick="bkPickInvoice(${id}, ${s.id}, '${escapeAttr(s.invoice_number || '#' + s.id)}', ${parseFloat(s.total) || 0})" style="padding:9px 10px;border:1px solid var(--line);border-radius:7px;margin-bottom:6px;cursor:pointer">
         <strong>${escapeHtml(s.invoice_number || '#' + s.id)}</strong> · ${gbp(s.total)} · ${escapeHtml(s.customer_name || s.buyer_username || '')} <span style="color:var(--ink-soft);font-size:11px">${s.occurred_at ? new Date(s.occurred_at).toLocaleDateString('en-GB') : ''}</span></div>`).join(''),
       actions: [{ label: 'Cancel', onClick: closeModal }],
     });
   } catch (e) { toast('Search failed: ' + (e.data?.message || e.message), 'error'); }
 }
-function bkPickInvoice(txId, saleId, label) {
+function bkPickInvoice(txId, saleId, label, saleTotal) {
   closeModal();
-  bkPatch(txId, { matchType: 'sale', saleId, category: 'sale_receipt' });
-  toast('Linked to ' + label, 'success');
+  const t = BK.txs.find(x => x.id === txId);
+  const lineTotal = t ? (parseFloat(t.money_in) || parseFloat(t.money_out) || 0) : 0;
+  const allocated = (t && Array.isArray(t.allocations) ? t.allocations : []).reduce((a, x) => a + (parseFloat(x.amount) || 0), 0);
+  const remaining = +(lineTotal - allocated).toFixed(2);
+  const suggest = Math.min(remaining, saleTotal > 0 ? saleTotal : remaining);
+  const entered = prompt(
+    `How much of this bank line goes to ${label}?\n\nUnallocated on this line: £${remaining.toFixed(2)}` +
+    (saleTotal > 0 ? ` · invoice total: £${saleTotal.toFixed(2)}` : '') +
+    `\n\nPart-payment: enter just the part paid. Lump sum: accept, then hit 🧾 again for the next invoice.`,
+    suggest > 0 ? suggest.toFixed(2) : '');
+  if (entered === null) return;
+  const amount = parseFloat(entered);
+  if (!(amount > 0)) { toast('Enter the amount being applied to that invoice', 'warn'); return; }
+  Api.post('/api/books/transactions/' + txId + '/allocations', { saleId, amount })
+    .then(r => {
+      const i = BK.txs.findIndex(x => x.id === txId);
+      if (i >= 0 && r.transaction) BK.txs[i] = r.transaction;
+      bkPaintTxs(); bkPaintFollowups();
+      const t2 = r.transaction;
+      const rem2 = t2 ? +((parseFloat(t2.money_in) || 0) - (t2.allocations || []).reduce((a, x) => a + (parseFloat(x.amount) || 0), 0)).toFixed(2) : 0;
+      toast('Linked ' + gbp(amount) + ' to ' + label + (rem2 > 0.005 ? ' · ' + gbp(rem2) + ' of the line still unallocated — hit 🧾 to link the next invoice' : ' ✓ line fully allocated'), 'success', 7000);
+    })
+    .catch(e => toast('Link failed: ' + (e.data?.message || e.message), 'error', 7000));
+}
+async function bkRemoveAlloc(txId, allocId) {
+  if (!confirm('Remove this allocation? (The invoice and the bank line both stay — just the link between them goes.)')) return;
+  try {
+    await Api.delete('/api/books/transactions/' + txId + '/allocations/' + allocId);
+    toast('Allocation removed', 'info');
+    bkLoad();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function bkUploadReceipt(id, file) {
   if (!file) return;
