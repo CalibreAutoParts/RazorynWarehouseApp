@@ -22479,6 +22479,7 @@ function renderBooks() {
             <option value="lastyear">Last year</option>
             <option value="custom">Custom…</option>
           </select>
+          <span id="bk-period-range" style="font-size:12px;color:var(--ink-soft);align-self:center"></span>
           <select id="bk-vat-cycle" title="Your VAT quarter cycle — which months your quarters END in (from your HMRC VAT registration)." onchange="try{localStorage.setItem('rzn_vat_cycle', this.value)}catch(_){};bkSetPeriod(el('bk-period').value)">
             <option value="0">Qtrs end Mar/Jun/Sep/Dec</option>
             <option value="1">Qtrs end Apr/Jul/Oct/Jan</option>
@@ -22531,6 +22532,7 @@ function renderBooks() {
     </div>`;
   if (el('bk-period')) el('bk-period').value = BK.period;
   if (el('bk-vat-cycle')) el('bk-vat-cycle').value = String(bkVatCycle());
+  bkRefreshPeriodLabels();
   bkLoadAccounts();
   bkLoad();
   bkLoadShares();
@@ -22538,11 +22540,35 @@ function renderBooks() {
 }
 function bkSetPeriod(p) {
   BK.period = p;
+  bkRefreshPeriodLabels();
   const custom = el('bk-custom');
-  if (p === 'custom') { if (custom) custom.style.display = 'flex'; return; }
+  if (p === 'custom') {
+    if (custom) custom.style.display = 'flex';
+    // Prefill with the current range so Apply works straight away.
+    if (el('bk-from') && BK.from) el('bk-from').value = BK.from;
+    if (el('bk-to') && BK.to) el('bk-to').value = BK.to;
+    return;
+  }
   if (custom) custom.style.display = 'none';
   [BK.from, BK.to] = bkPeriodDates(p);
   bkLoad();
+}
+// Show the REAL date range on the VAT-quarter options (driven by the chosen
+// cycle), so picking the right stagger is self-evident — e.g.
+// "Last VAT quarter — 01/06/2026 → 31/08/2026".
+function bkRefreshPeriodLabels() {
+  const sel = el('bk-period');
+  if (sel) {
+    for (const opt of sel.options) {
+      if (['thisvq', 'lastvq', 'prevvq'].includes(opt.value)) {
+        const [f, t] = bkPeriodDates(opt.value);
+        const base = opt.value === 'thisvq' ? 'This VAT quarter' : opt.value === 'lastvq' ? 'Last VAT quarter' : 'VAT quarter before that';
+        opt.textContent = `${base} — ${bkUkDate(f)} → ${bkUkDate(t)}`;
+      }
+    }
+  }
+  const range = el('bk-period-range');
+  if (range) range.textContent = (BK.from && BK.to) ? bkUkDate(BK.from) + ' → ' + bkUkDate(BK.to) : '';
 }
 async function bkLoadAccounts() {
   try {
@@ -22616,6 +22642,8 @@ async function bkSetPrimary(id) {
   catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function bkLoad() {
+  if (!BK.from || !BK.to) return;   // custom period not applied yet
+  bkRefreshPeriodLabels();
   try {
     const qstr = `from=${BK.from}&to=${BK.to}` + (BK.accountId ? '&accountId=' + BK.accountId : '');
     const [sum, tx, st] = await Promise.all([
