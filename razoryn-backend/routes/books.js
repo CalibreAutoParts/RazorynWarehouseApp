@@ -125,6 +125,17 @@ async function ensureTables() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
     await query(`CREATE INDEX IF NOT EXISTS bank_tx_receipts_tx_idx ON bank_tx_receipts (tx_id)`);
+    // Repeat payers: "BA Cars MCR" on the bank line IS a known customer —
+    // every confirmed link teaches the mapping, so their next payment
+    // surfaces their invoices automatically.
+    await query(`CREATE TABLE IF NOT EXISTS books_payer_map (
+      id SERIAL PRIMARY KEY,
+      payer_norm TEXT UNIQUE NOT NULL,
+      payer_label TEXT,
+      customer_name TEXT,
+      last_sale_id INTEGER,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
     await query(`CREATE TABLE IF NOT EXISTS books_shares (
       id SERIAL PRIMARY KEY,
       token TEXT UNIQUE NOT NULL,
@@ -451,6 +462,7 @@ router.patch('/transactions/:id', async (req, res) => {
   params.push(req.params.id);
   const r = await query(`UPDATE bank_transactions SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`, params);
   if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  if (b.saleId) await rememberPayer(r.rows[0].id, parseInt(b.saleId));
   await audit(req, 'books_tx_update', 'bank_transaction', req.params.id, b);
   res.json({ transaction: r.rows[0] });
 });
@@ -475,6 +487,72 @@ router.post('/transactions/dismiss-receipts', async (req, res) => {
 });
 
 // ── Allocations: lump sums & part-payments ────────────────────────────────
+const normPayer = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+function payerKeyForTx(t) {
+  return normPayer(t.counterparty || String(t.description || '').split('·')[0].split(':')[0]);
+}
+// A confirmed link teaches the payer → customer mapping for next time.
+async function rememberPayer(txId, saleId) {
+  try {
+    const t = (await query(`SELECT counterparty, description FROM bank_transactions WHERE id = $1`, [txId])).rows[0];
+    const s = (await query(`SELECT customer_name FROM sales WHERE id = $1`, [saleId])).rows[0];
+    if (!t || !s || !s.customer_name) return;
+    const key = payerKeyForTx(t);
+    if (!key || key.length < 3) return;
+    await query(
+      `INSERT INTO books_payer_map (payer_norm, payer_label, customer_name, last_sale_id, updated_at)
+       VALUES ($1,$2,$3,$4, now())
+       ON CONFLICT (payer_norm) DO UPDATE SET customer_name = $3, last_sale_id = $4, updated_at = now()`,
+      [key, (t.counterparty || '').slice(0, 120) || null, s.customer_name, saleId]);
+  } catch (_) {}
+}
+
+// GET /transactions/:id/suggest-invoices — ranked candidates for the 🧾 link:
+// same amount (or the invoice's OUTSTANDING balance), paid-date proximity,
+// and remembered repeat payers — so a "BA Cars MCR £229.99 on 01/06" line
+// offers the right invoice instead of a blank search box.
+router.get('/transactions/:id/suggest-invoices', async (req, res) => {
+  await ensureTables();
+  const t = (await query(`SELECT * FROM bank_transactions WHERE id = $1`, [req.params.id])).rows[0];
+  if (!t) return res.status(404).json({ error: 'not_found' });
+  const amt = parseFloat(t.money_in) || parseFloat(t.money_out) || 0;
+  const payerKey = payerKeyForTx(t);
+  let mapped = null;
+  try { mapped = (await query(`SELECT customer_name FROM books_payer_map WHERE payer_norm = $1`, [payerKey])).rows[0] || null; } catch (_) {}
+  // Candidate pool: direct (non-marketplace) sales around the payment date,
+  // plus everything by the remembered customer.
+  const { rows: cands } = await query(`
+    SELECT id, invoice_number, payment_reference, customer_name, total, amount_paid, occurred_at, is_paid, channel, payment_method
+      FROM sales
+     WHERE is_estimate = false
+       AND channel NOT ILIKE 'ebay%' AND channel <> 'shopify'
+       AND (occurred_at BETWEEN $1::date - interval '45 days' AND $1::date + interval '45 days'
+            OR ($2::text IS NOT NULL AND customer_name ILIKE $2))
+     ORDER BY occurred_at DESC LIMIT 400`,
+    [t.tx_date, mapped ? mapped.customer_name : null]);
+  const payerTokens = payerKey.split(' ').filter(w => w.length >= 3);
+  const scored = [];
+  for (const s of cands) {
+    const total = parseFloat(s.total) || 0;
+    const outstanding = +(total - (parseFloat(s.amount_paid) || 0)).toFixed(2);
+    const custNorm = normPayer(s.customer_name);
+    let score = 0; const reasons = [];
+    if (amt > 0 && Math.abs(total - amt) < 0.01) { score += 50; reasons.push('same amount as the invoice total'); }
+    else if (amt > 0 && outstanding > 0 && Math.abs(outstanding - amt) < 0.01) { score += 48; reasons.push(`matches the outstanding £${outstanding.toFixed(2)}`); }
+    const days = Math.abs((new Date(s.occurred_at) - new Date(t.tx_date)) / 86400000);
+    if (days <= 14) { score += Math.max(0, Math.round(20 - days)); if (days <= 4) reasons.push(days < 1 ? 'same day' : `${Math.round(days)} day(s) apart`); }
+    if (mapped && custNorm === normPayer(mapped.customer_name)) { score += 60; reasons.push(`repeat payer — "${(t.counterparty || payerKey)}" previously paid this customer's invoices`); }
+    else if (payerTokens.length && custNorm) {
+      const hits = payerTokens.filter(w => custNorm.includes(w)).length;
+      if (hits >= Math.max(1, Math.ceil(payerTokens.length / 2))) { score += 40; reasons.push(`name matches "${t.counterparty || payerKey}"`); }
+      else if (hits >= 1) { score += 18; reasons.push('partial name match'); }
+    }
+    if (!s.is_paid) { score += 8; reasons.push('still awaiting payment'); }
+    if (score >= 25) scored.push({ saleId: s.id, invoiceNumber: s.invoice_number, customer: s.customer_name, total, outstanding, occurredAt: s.occurred_at, isPaid: s.is_paid, score, reasons });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  res.json({ suggestions: scored.slice(0, 8), payer: t.counterparty || null, amount: amt, mappedCustomer: mapped ? mapped.customer_name : null });
+});
 // POST /transactions/:id/allocations { saleId, amount } — allocate a portion
 // of this bank line to an invoice. A lump sum gets several allocations (one
 // per invoice it covers); a part-payment allocates less than the invoice
@@ -492,6 +570,7 @@ router.post('/transactions/:id/allocations', async (req, res) => {
     return res.status(400).json({ error: 'over_allocated', message: `Only £${(lineTotal - allocated).toFixed(2)} of this line is unallocated.` });
   }
   await query(`INSERT INTO bank_tx_allocations (tx_id, sale_id, amount) VALUES ($1,$2,$3)`, [t.id, saleId, +amount.toFixed(2)]);
+  await rememberPayer(t.id, saleId);
   // Keep the legacy single-link fields sensible: first allocation drives them.
   await query(`UPDATE bank_transactions SET sale_id = COALESCE(sale_id, $2), match_type = 'sale', category = COALESCE(category, 'sale_receipt'), updated_at = now() WHERE id = $1`, [t.id, saleId]);
   await audit(req, 'books_tx_allocate', 'bank_transaction', t.id, { saleId, amount });
