@@ -220,7 +220,23 @@ router.post('/statements', upload.single('statement'), async (req, res) => {
     return res.status(502).json({ error: e.code || 'parse_failed', message: e.message });
   }
   if (!parsed || !parsed.transactions.length) {
+    // A marketplace statement in the bank uploader would turn aggregated
+    // category totals into fake bank transactions — bounce it to the right place.
+    if (parsed && parsed.notABankStatement) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+      return res.status(422).json({
+        error: 'marketplace_statement',
+        message: 'That’s a marketplace statement (eBay/Shopify), not a bank statement — upload it under 📑 Marketplace statements instead, so the payouts get checked against the bank.' + (parsed.notes ? ' (' + parsed.notes + ')' : ''),
+      });
+    }
     return res.status(422).json({ error: 'no_transactions', message: 'Claude couldn’t read any transactions from that PDF' + (parsed && parsed.notes ? ' — ' + parsed.notes : '') + '. Is it a text PDF (not a photo scan)?' });
+  }
+  if (parsed.notABankStatement) {
+    try { fs.unlinkSync(req.file.path); } catch (_) {}
+    return res.status(422).json({
+      error: 'marketplace_statement',
+      message: 'That’s a marketplace statement (eBay/Shopify), not a bank statement — upload it under 📑 Marketplace statements instead, so the payouts get checked against the bank.',
+    });
   }
   const relPath = path.relative(UPLOAD_DIR, req.file.path);
   const st = await query(

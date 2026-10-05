@@ -22790,9 +22790,12 @@ async function bkLoadPlatform() {
     box.innerHTML = _bkPlatform.map(s => {
       const rec = s.reconciliation || {}; const t = rec.totals || {};
       const nMatched = (rec.matched || []).length, nMissing = (rec.missingFromBank || []).length, nExtra = (rec.extraInBank || []).length;
-      const status = nMissing === 0
-        ? `<span class="pill green" style="font-size:10px">✓ all ${nMatched} payouts found in the bank</span>`
-        : `<span class="pill red" style="font-size:10px">⚠ ${nMissing} payout${nMissing === 1 ? '' : 's'} missing (£${(t.missingFromBank || 0).toFixed(2)})</span>`;
+      const summaryOnly = !((s.payouts || []).length);
+      const status = summaryOnly
+        ? '<span class="pill amber" style="font-size:10px">summary-only — no payout list; upload the FULL statement (with transaction breakdown) for bank matching</span>'
+        : (nMissing === 0
+          ? `<span class="pill green" style="font-size:10px">✓ all ${nMatched} payouts found in the bank</span>`
+          : `<span class="pill red" style="font-size:10px">⚠ ${nMissing} payout${nMissing === 1 ? '' : 's'} missing (£${(t.missingFromBank || 0).toFixed(2)})</span>`);
       return `<div style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-bottom:6px">
         <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center">
           <div><strong style="text-transform:uppercase">${escapeHtml(s.platform || '?')}</strong>
@@ -22815,6 +22818,7 @@ function bkUploadPlatform() {
     title: '⬆ Upload a marketplace statement (PDF)',
     body: `
       <div style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">Claude reads it, pulls the payout list and the deduction breakdown (fees, postage labels, advertising, refunds), then checks every payout against the bank transactions already uploaded — matches get the payout ID stamped on the bank line, and anything missing shows with the total difference.</div>
+      <div style="font-size:12px;background:var(--blue-light);color:var(--blue);border-radius:7px;padding:8px 10px;margin-bottom:12px">💡 Use eBay's <strong>FULL monthly statement</strong> (the one with the transaction breakdown) — the summary-only PDF has no payout list, so there's nothing to match against the bank.</div>
       <div class="field"><label>Platform</label><select id="bkp-platform"><option value="ebay">eBay (monthly financial statement)</option><option value="shopify">Shopify (payouts)</option><option value="">Other / let Claude work it out</option></select></div>
       <div class="field"><label>Statement PDF</label><input type="file" id="bkp-file" accept="application/pdf"></div>
     `,
