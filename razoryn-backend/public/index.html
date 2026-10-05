@@ -22712,7 +22712,14 @@ function bkPaintTxs() {
         ${t.money_in > 0 ? `<button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px" onclick="bkLinkInvoice(${t.id})" title="Link to a warehouse invoice">🧾</button>
         <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px" onclick="bkSetPayout(${t.id})" title="Mark as a marketplace payout + enter the payout id">💳</button>` : ''}
         <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px" onclick="bkNote(${t.id})" title="Note">✎</button></div></td>
-      <td class="num"><input type="number" step="0.01" min="0" value="${t.vat_amount != null ? (+t.vat_amount).toFixed(2) : ''}" placeholder="—" style="width:70px;text-align:right;font-size:11px" onchange="bkPatch(${t.id},{vatAmount:this.value})"></td>
+      <td class="num" style="white-space:nowrap">
+        <input type="number" step="0.01" min="0" value="${t.vat_amount != null ? (+t.vat_amount).toFixed(2) : ''}" placeholder="—" style="width:64px;text-align:right;font-size:11px" onchange="bkPatch(${t.id},{vatAmount:this.value})">
+        <select onchange="bkSetVatRate(${t.id}, this.value)" style="width:58px;font-size:10px" title="VAT % included in this payment — the £ back-calculates from the gross, the receipt chase stops, and the choice is REMEMBERED for this payee (standing orders / DDs / couriers handle themselves next statement).">
+          <option value="" ${t.vat_rate == null ? 'selected' : ''}>%</option>
+          <option value="20" ${+t.vat_rate === 20 ? 'selected' : ''}>20%</option>
+          <option value="5" ${+t.vat_rate === 5 ? 'selected' : ''}>5%</option>
+          <option value="0" ${+t.vat_rate === 0 ? 'selected' : ''}>no VAT</option>
+        </select></td>
       <td>${(() => {
         const rs = Array.isArray(t.receipts) ? t.receipts : [];
         const views = rs.length
@@ -22740,9 +22747,41 @@ function bkPaintFollowups() {
     `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;border-bottom:1px solid var(--line-2);padding:6px 0">
       <div><strong>${escapeHtml(who)}</strong> <span style="color:var(--ink-soft)">· ${v.n} payment${v.n === 1 ? '' : 's'}</span></div>
       <div style="display:flex;align-items:center;gap:8px"><div style="font-weight:600">${gbp(v.total)}</div>
+        <button class="btn btn-ghost btn-sm" onclick="bkVatInclusiveFollowup('${escapeAttr(who).replace(/'/g, "\\'")}')" title="VAT IS included but no invoice is ever issued (Royal Mail tracked, FedEx domestic…): captures 20% VAT from each gross and remembers the rule.">✓ 20% VAT, no invoice</button>
         <button class="btn btn-ghost btn-sm" onclick="bkDismissFollowup('${escapeAttr(who).replace(/'/g, "\\'")}')" title="No UK VAT to reclaim here (e.g. an overseas supplier — China, USA…): no VAT receipt exists, so stop chasing it.">✗ no UK VAT</button></div>
     </div>`).join('')
     + '<div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Chase these for VAT invoices — attach each one with 📎 on its transaction and it drops off this list. Overseas purchases (no UK VAT) can be ✗ dismissed.</div>';
+}
+// VAT % picked on a line: back-calculate the VAT from the VAT-inclusive
+// gross (gross × r/(100+r)), stop the receipt chase (Royal Mail tracked /
+// FedEx domestic never issue one), and TEACH the payee rule so the next
+// statement applies it automatically (standing orders / direct debits too).
+async function bkSetVatRate(id, rate) {
+  const t = BK.txs.find(x => x.id === id);
+  if (!t) return;
+  const gross = parseFloat(t.money_out) || 0;
+  if (rate === '') { bkPatch(id, { vatRate: '', teachRule: false }); return; }
+  const r = parseFloat(rate);
+  const vat = r > 0 && gross > 0 ? +(gross * r / (100 + r)).toFixed(2) : 0;
+  try {
+    const resp = await Api.patch('/api/books/transactions/' + id, { vatRate: r, vatAmount: vat, needsVatReceipt: false, teachRule: true });
+    const i = BK.txs.findIndex(x => x.id === id);
+    if (i >= 0) BK.txs[i] = { ...BK.txs[i], ...resp.transaction };
+    bkPaintTxs(); bkPaintFollowups();
+    toast(r > 0
+      ? `VAT £${vat.toFixed(2)} @ ${r}% set — remembered for "${t.counterparty || 'this payee'}" (future lines auto-fill)`
+      : `Marked no-VAT — remembered for "${t.counterparty || 'this payee'}"`, 'success', 6000);
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function bkVatInclusiveFollowup(who) {
+  const ids = (State._bkFollowupIds || {})[who] || [];
+  if (!ids.length) return;
+  if (!confirm(`Mark ${who}'s ${ids.length} payment(s) as VAT-inclusive @ 20% with NO separate invoice (e.g. Royal Mail tracked / FedEx domestic)? The VAT back-calculates from each gross, and the rule is remembered for future statements.`)) return;
+  try {
+    const r = await Api.post('/api/books/transactions/mark-vat-inclusive', { ids, rate: 20 });
+    toast(`✓ ${r.updated} payment(s) marked VAT-inclusive @20% — VAT captured, off the chase list, rule remembered`, 'success', 7000);
+    bkLoad();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function bkDismissFollowup(who) {
   const ids = (State._bkFollowupIds || {})[who] || [];

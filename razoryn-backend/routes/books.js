@@ -115,6 +115,9 @@ async function ensureTables() {
     // Receipt FILE NAME referenced by the bank's own export (Mettle's column
     // names the attached receipt per row) — bulk attach matches on it exactly.
     await query(`ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS receipt_ref TEXT`);
+    // VAT % for receipt-less but clearly VAT-inclusive charges (Royal Mail
+    // tracked, FedEx domestic…) — the VAT amount back-calculates from gross.
+    await query(`ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS vat_rate NUMERIC(5,2)`);
     // Several receipts/photos can back ONE payment (an invoice split over
     // pages, or a photo of each till receipt).
     await query(`CREATE TABLE IF NOT EXISTS bank_tx_receipts (
@@ -128,6 +131,16 @@ async function ensureTables() {
     // Repeat payers: "BA Cars MCR" on the bank line IS a known customer —
     // every confirmed link teaches the mapping, so their next payment
     // surfaces their invoices automatically.
+    // Per-payee VAT treatment for recurring outgoings (standing orders,
+    // direct debits, card regulars): set once — every future statement line
+    // from that payee applies it automatically. vat_rate NULL = no VAT.
+    await query(`CREATE TABLE IF NOT EXISTS books_vat_rules (
+      id SERIAL PRIMARY KEY,
+      payer_norm TEXT UNIQUE NOT NULL,
+      payer_label TEXT,
+      vat_rate NUMERIC(5,2),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
     await query(`CREATE TABLE IF NOT EXISTS books_payer_map (
       id SERIAL PRIMARY KEY,
       payer_norm TEXT UNIQUE NOT NULL,
@@ -352,6 +365,23 @@ router.post('/statements', upload.single('statement'), async (req, res) => {
   for (const t of parsed.transactions) {
     let m = { match_type: null, category: t.type || 'other' };
     try { m = await autoMatchTransaction(t); } catch (_) {}
+    // Recurring payee with a saved VAT rule (standing orders, DDs, couriers)
+    // → apply it: rate + back-calculated VAT, or no-VAT, no receipt chase.
+    if (t.moneyOut > 0) {
+      try {
+        const rule = (await query(`SELECT vat_rate FROM books_vat_rules WHERE payer_norm = $1`, [payerKeyForTx(t)])).rows[0];
+        if (rule) {
+          if (rule.vat_rate != null && parseFloat(rule.vat_rate) > 0) {
+            const rr = parseFloat(rule.vat_rate);
+            m.vat_rate = rr;
+            m.vat_amount = +(t.moneyOut * rr / (100 + rr)).toFixed(2);
+            m.needs_vat_receipt = false;
+          } else {
+            m.vat_rate = null; m.vat_amount = 0; m.needs_vat_receipt = false;
+          }
+        }
+      } catch (_) {}
+    }
     // Invoice money landing OUTSIDE the invoices account is an exception worth
     // seeing (e.g. a customer who couldn't reach the usual bank paid into
     // Wise) — the match still happens, with a note explaining it.
@@ -363,11 +393,12 @@ router.post('/statements', upload.single('statement'), async (req, res) => {
     if (m.needs_vat_receipt) receiptsNeeded++;
     const ins = await query(
       `INSERT INTO bank_transactions (statement_id, account_id, tx_date, description, counterparty, money_in, money_out, balance,
-                                      category, match_type, sale_id, payout_platform, vat_likely, needs_vat_receipt, notes, receipt_ref)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
+                                      category, match_type, sale_id, payout_platform, vat_likely, needs_vat_receipt, notes, receipt_ref, vat_rate, vat_amount)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
       [st.rows[0].id, accountId, t.date, t.description, t.counterparty, t.moneyIn, t.moneyOut, t.balance,
        m.category || null, m.match_type || null, m.sale_id || null, m.payout_platform || t.payoutPlatform || null,
-       !!t.vatLikely, !!m.needs_vat_receipt, offPrimaryNote, t.receiptRef || null]);
+       !!t.vatLikely, !!m.needs_vat_receipt, offPrimaryNote, t.receiptRef || null,
+       m.vat_rate != null ? m.vat_rate : null, m.vat_amount != null ? m.vat_amount : null]);
     // A warehouse-recorded part-payment match becomes a real allocation (the
     // exact recorded amount against that invoice).
     if (m.allocation && ins.rows[0]) {
@@ -452,6 +483,7 @@ router.patch('/transactions/:id', async (req, res) => {
     category: b.category, match_type: b.matchType, sale_id: b.saleId === '' ? null : b.saleId,
     payout_ref: b.payoutRef, payout_platform: b.payoutPlatform,
     vat_amount: b.vatAmount === '' ? null : b.vatAmount,
+    vat_rate: b.vatRate === '' ? null : b.vatRate,
     needs_vat_receipt: b.needsVatReceipt, counterparty: b.counterparty, notes: b.notes,
   };
   for (const [k, v] of Object.entries(map)) {
@@ -463,6 +495,12 @@ router.patch('/transactions/:id', async (req, res) => {
   const r = await query(`UPDATE bank_transactions SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`, params);
   if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
   if (b.saleId) await rememberPayer(r.rows[0].id, parseInt(b.saleId));
+  // Setting a VAT % (or clearing it to no-VAT) on a payee's line IS the
+  // setup for that standing order / direct debit — remember it.
+  if (b.vatRate !== undefined && b.teachRule) {
+    await rememberVatRule(r.rows[0].counterparty, payerKeyForTx(r.rows[0]),
+      (b.vatRate === '' || b.vatRate == null) ? null : parseFloat(b.vatRate));
+  }
   await audit(req, 'books_tx_update', 'bank_transaction', req.params.id, b);
   res.json({ transaction: r.rows[0] });
 });
@@ -482,7 +520,39 @@ router.post('/transactions/dismiss-receipts', async (req, res) => {
             notes = CASE WHEN notes IS NULL OR notes = '' THEN $2 ELSE notes || ' · ' || $2 END,
             updated_at = now()
       WHERE id = ANY($1) RETURNING id`, [ids, reason]);
+  // Teach the no-VAT rule for these payees (overseas suppliers etc.).
+  try {
+    const payees = await query(`SELECT DISTINCT counterparty, description FROM bank_transactions WHERE id = ANY($1)`, [ids]);
+    for (const p of payees.rows) await rememberVatRule(p.counterparty, payerKeyForTx(p), null);
+  } catch (_) {}
   await audit(req, 'books_dismiss_receipts', null, null, { count: r.rows.length, reason });
+  res.json({ ok: true, updated: r.rows.length });
+});
+
+// POST /transactions/mark-vat-inclusive { ids, rate } — for charges that ARE
+// VAT-inclusive but never come with an invoice (Royal Mail tracked, FedEx
+// domestic shipping…): stamps the rate, back-calculates the VAT portion from
+// the gross (gross × r/(100+r)), and stops the receipt chase, noting why.
+router.post('/transactions/mark-vat-inclusive', async (req, res) => {
+  await ensureTables();
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(x => parseInt(x)).filter(Boolean) : [];
+  const rate = parseFloat(req.body?.rate);
+  if (!ids.length || !(rate > 0) || rate > 100) return res.status(400).json({ error: 'ids_and_rate_required' });
+  const note = `VAT @${rate}% included — domestic service, no separate invoice issued`;
+  const r = await query(
+    `UPDATE bank_transactions
+        SET vat_rate = $2,
+            vat_amount = ROUND(money_out * $2 / (100 + $2), 2),
+            needs_vat_receipt = false,
+            notes = CASE WHEN notes IS NULL OR notes = '' THEN $3 ELSE notes || ' · ' || $3 END,
+            updated_at = now()
+      WHERE id = ANY($1) AND money_out > 0 RETURNING id`, [ids, rate, note]);
+  // Teach the per-payee rule so future statements apply it automatically.
+  try {
+    const payees = await query(`SELECT DISTINCT counterparty, description FROM bank_transactions WHERE id = ANY($1)`, [ids]);
+    for (const p of payees.rows) await rememberVatRule(p.counterparty, payerKeyForTx(p), rate);
+  } catch (_) {}
+  await audit(req, 'books_vat_inclusive', null, null, { count: r.rows.length, rate });
   res.json({ ok: true, updated: r.rows.length });
 });
 
@@ -491,6 +561,18 @@ const normPayer = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' 
 function payerKeyForTx(t) {
   return normPayer(t.counterparty || String(t.description || '').split('·')[0].split(':')[0]);
 }
+// Remember a payee's VAT treatment (rate, or NULL = no VAT) so recurring
+// standing orders / direct debits handle themselves from then on.
+async function rememberVatRule(payerLabel, payerNorm, rate) {
+  if (!payerNorm || payerNorm.length < 3) return;
+  try {
+    await query(
+      `INSERT INTO books_vat_rules (payer_norm, payer_label, vat_rate, updated_at) VALUES ($1,$2,$3, now())
+       ON CONFLICT (payer_norm) DO UPDATE SET vat_rate = $3, payer_label = COALESCE($2, books_vat_rules.payer_label), updated_at = now()`,
+      [payerNorm, payerLabel ? String(payerLabel).slice(0, 120) : null, rate]);
+  } catch (_) {}
+}
+
 // A confirmed link teaches the payer → customer mapping for next time.
 async function rememberPayer(txId, saleId) {
   try {
