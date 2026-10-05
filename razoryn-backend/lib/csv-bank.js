@@ -116,6 +116,9 @@ function buildTransactions(rows, headerIdx, mapping) {
       moneyIn: +moneyIn.toFixed(2), moneyOut: +moneyOut.toFixed(2),
       balance: balance != null ? +balance.toFixed(2) : null,
       counterparty: mapping.counterpartyCol != null ? cell(r, mapping.counterpartyCol).slice(0, 120) || null : null,
+      // Some exports (Mettle) name the attached receipt/invoice FILES per row —
+      // the bulk receipt uploader matches on this, exactly.
+      receiptRef: mapping.receiptFileCol != null ? (cell(r, mapping.receiptFileCol).slice(0, 300) || null) : null,
     });
   }
   return out;
