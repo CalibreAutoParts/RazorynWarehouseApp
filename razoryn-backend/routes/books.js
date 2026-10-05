@@ -711,6 +711,13 @@ router.post('/receipts/bulk', upload.array('receipts', 200), async (req, res) =>
   const files = req.files || [];
   if (!files.length) return res.status(400).json({ error: 'no_files' });
   const out = { attached: [], unmatched: [] };
+  // How many transactions even CARRY a receipt reference? Zero means the
+  // bank statement was imported before reference capture existed — the fix
+  // is re-uploading the CSV, and the response says so instead of failing
+  // vaguely on dates.
+  const refCount = parseInt((await query(`SELECT COUNT(*)::int AS n FROM bank_transactions WHERE receipt_ref IS NOT NULL AND receipt_ref <> ''`)).rows[0].n) || 0;
+  out.refCount = refCount;
+  const normRef = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const attach = async (txId, relPath2, name2) => {
     await query(`UPDATE bank_transactions SET receipt_path = COALESCE(receipt_path, $1), needs_vat_receipt = false, updated_at = now() WHERE id = $2`, [relPath2, txId]);
     await query(`INSERT INTO bank_tx_receipts (tx_id, file_path, original_name) VALUES ($1,$2,$3)`, [txId, relPath2, String(name2).slice(0, 200)]);
@@ -719,10 +726,19 @@ router.post('/receipts/bulk', upload.array('receipts', 200), async (req, res) =>
     const name = f.originalname || path.basename(f.path);
     // 1. EXACT: the bank's own export names the receipt file per row
     //    (Mettle's receipt column) — attach to EVERY row referencing it.
+    //    Compared with punctuation stripped on BOTH sides, plus the long
+    //    numeric id from the filename as a secondary key, so truncated or
+    //    reformatted references still hit.
     const base = name.replace(/\.[a-z0-9]+$/i, '');
-    const refHits = base.length >= 8 ? await query(
+    const normBase = normRef(base);
+    const digits = (base.match(/\d{6,}/g) || []).pop() || null;
+    const refHits = (refCount && normBase.length >= 10) ? await query(
       `SELECT id, description FROM bank_transactions
-        WHERE receipt_ref IS NOT NULL AND (receipt_ref ILIKE '%' || $1 || '%' OR $1 ILIKE '%' || receipt_ref || '%')`, [base]) : { rows: [] };
+        WHERE receipt_ref IS NOT NULL AND (
+          regexp_replace(lower(receipt_ref), '[^a-z0-9]', '', 'g') LIKE '%' || $1 || '%'
+          OR regexp_replace(lower(receipt_ref), '[^a-z0-9]', '', 'g') <> ''
+             AND $1 LIKE '%' || regexp_replace(lower(receipt_ref), '[^a-z0-9]', '', 'g') || '%'
+          OR ($2::text IS NOT NULL AND receipt_ref LIKE '%' || $2 || '%'))`, [normBase, digits]) : { rows: [] };
     if (refHits.rows.length) {
       const relPath2 = path.relative(UPLOAD_DIR, f.path);
       for (const tx2 of refHits.rows) {
