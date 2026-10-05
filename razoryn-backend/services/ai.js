@@ -490,6 +490,11 @@ async function parseBankStatement(source, ctx = {}) {
   const cfg = await getAiConfig();
   const src = typeof source === 'string' ? { pdfBase64: source } : (source || {});
   if (src.csvText) return parseBankCsv(src, ctx, cfg);
+  // Big PDFs (a from-account-opening statement can run 60+ pages / 1000+
+  // rows) overflow a single model response — split into page chunks, parse
+  // each, and stitch the transactions back together.
+  const chunks = await splitPdfForParsing(src.pdfBase64);
+  if (chunks && chunks.length > 1) return parseBankPdfChunks(chunks, ctx, cfg);
   const user = `Read this UK business bank statement PDF carefully and extract EVERYTHING.
 
 ${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}FIRST check what this document actually is: if it is NOT a bank account statement but a MARKETPLACE or payment-processor statement (eBay managed payments, Shopify payouts, PayPal, Amazon, Stripe…), set "notABankStatement": true, say what it is in notes, and return an empty transactions list — it belongs in the marketplace uploader, not the bank one. A business CREDIT CARD export (e.g. Capital on Tap) IS fine here — treat it like a bank account.
@@ -603,6 +608,89 @@ Reply ONLY: {"items":[{"i":0,"type":"...","payoutPlatform":null,"vatLikely":fals
     confidence: 0.98,
     notes: 'CSV parsed exactly in code (' + txs.length + ' rows); Claude mapped the columns' + (map.notes ? ' — ' + String(map.notes).slice(0, 200) : ''),
     transactions: txs,
+  };
+}
+
+// Split a long statement PDF into page chunks (pdf-lib). Returns null for
+// PDFs small enough to parse in one go, or when pdf-lib isn't installed yet.
+async function splitPdfForParsing(pdfBase64, maxPages = 15, chunkPages = 12) {
+  let PDFDocument;
+  try { ({ PDFDocument } = require('pdf-lib')); } catch (_) { return null; }
+  try {
+    const srcDoc = await PDFDocument.load(Buffer.from(pdfBase64, 'base64'), { ignoreEncryption: true });
+    const n = srcDoc.getPageCount();
+    if (n <= maxPages) return null;
+    const chunks = [];
+    for (let start = 0; start < n; start += chunkPages) {
+      const end = Math.min(n, start + chunkPages);
+      const doc = await PDFDocument.create();
+      const pages = await doc.copyPages(srcDoc, Array.from({ length: end - start }, (_, i) => start + i));
+      for (const p of pages) doc.addPage(p);
+      chunks.push({ base64: Buffer.from(await doc.save()).toString('base64'), from: start + 1, to: end, total: n });
+    }
+    return chunks;
+  } catch (e) { console.warn('[ai] pdf split failed:', e.message); return null; }
+}
+
+// Chunked large-PDF statement parse: each page-range is extracted with the
+// same schema, two chunks in flight at a time, transactions stitched in
+// order. Bank/account identity comes from part 1.
+async function parseBankPdfChunks(chunks, ctx, cfg) {
+  const num = (x) => { const n = parseFloat(x); return isFinite(n) ? +n.toFixed(2) : 0; };
+  const oneChunk = async (i) => {
+    const c = chunks[i];
+    const user = `This is PART ${i + 1} of ${chunks.length} (pages ${c.from}–${c.to} of ${c.total}) of ONE long UK business bank statement.${ctx.hint ? ' Context: ' + ctx.hint : ''}
+${i === 0 ? 'FIRST check what this document is: a MARKETPLACE/payment-processor statement (eBay, Shopify, PayPal…) sets "notABankStatement": true with empty transactions. A business credit card (e.g. Capital on Tap) is fine. Identify the BANK, account holder and period.\n' : 'The bank and account were identified from part 1 — just extract this part’s rows.\n'}Extract EVERY transaction row visible on THESE pages exactly as printed (money in / money out as separate positive numbers, dates YYYY-MM-DD). Skip summary/carried-forward lines. For each row also guess: type ("sale_receipt","payout","supplier","shipping","rent","utilities","software","food","office","fuel","bank_fees","wages","tax_hmrc","transfer" — including repayments to a business credit card,"refund","sundry","other"), payoutPlatform ("ebay"|"shopify"|"paypal"|"stripe"|null), vatLikely (true only for UK-VAT-bearing outgoings), counterparty.
+Reply ONLY: {"notABankStatement":false,"bank":"...","accountName":"...","sortCodeOrIban":null,"periodStart":null,"periodEnd":null,"currency":"GBP","transactions":[{"date":"YYYY-MM-DD","description":"...","moneyIn":0,"moneyOut":0,"balance":null,"type":"other","payoutPlatform":null,"vatLikely":false,"counterparty":null}],"confidence":<0..1>,"notes":"..."}`;
+    const out = await callClaude({
+      kind: 'bank_statement', system: 'You are a meticulous UK bookkeeper. You extract bank statements exactly as printed — every line, correct amounts, no inventions. Reply with ONLY JSON.',
+      user, model: cfg.smartModel, maxTokens: 16000, timeoutMs: 420000,
+      documents: [{ base64: c.base64, mediaType: 'application/pdf' }],
+    });
+    return out.json;
+  };
+  const parts = new Array(chunks.length);
+  let next = 0;
+  const worker = async () => { while (next < chunks.length) { const i = next++; try { parts[i] = await oneChunk(i); } catch (e) { parts[i] = { __error: e.message }; } } };
+  await Promise.all([worker(), worker()]);   // two in flight
+  const first = parts[0];
+  if (!first) return null;
+  if (first.notABankStatement) {
+    return { notABankStatement: true, bank: 'Unknown', accountName: null, sortCodeOrIban: null, periodStart: null, periodEnd: null, currency: 'GBP', confidence: 0.9, notes: first.notes || 'marketplace statement', transactions: [] };
+  }
+  const txs = [];
+  const failedParts = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (!p || p.__error || !Array.isArray(p.transactions)) { failedParts.push(`part ${i + 1}${p && p.__error ? ' (' + p.__error + ')' : ''}`); continue; }
+    for (const t of p.transactions) {
+      if (!t || !t.date || (num(t.moneyIn) <= 0 && num(t.moneyOut) <= 0)) continue;
+      txs.push({
+        date: String(t.date).slice(0, 10),
+        description: String(t.description || '').slice(0, 300),
+        moneyIn: Math.max(0, num(t.moneyIn)), moneyOut: Math.max(0, num(t.moneyOut)),
+        balance: t.balance != null && isFinite(parseFloat(t.balance)) ? +parseFloat(t.balance).toFixed(2) : null,
+        type: String(t.type || 'other').slice(0, 30),
+        payoutPlatform: t.payoutPlatform ? String(t.payoutPlatform).slice(0, 20) : null,
+        vatLikely: !!t.vatLikely,
+        counterparty: t.counterparty ? String(t.counterparty).slice(0, 120) : null,
+      });
+    }
+  }
+  const dates = txs.map(t => t.date).sort();
+  const confs = parts.filter(p => p && !p.__error).map(p => Math.max(0, Math.min(1, +p.confidence || 0)));
+  return {
+    notABankStatement: false,
+    bank: String(first.bank || 'Unknown').slice(0, 60),
+    accountName: first.accountName ? String(first.accountName).slice(0, 120) : null,
+    sortCodeOrIban: first.sortCodeOrIban ? String(first.sortCodeOrIban).slice(0, 60) : null,
+    periodStart: dates[0] || null, periodEnd: dates[dates.length - 1] || null,
+    currency: String(first.currency || 'GBP').slice(0, 6),
+    confidence: confs.length ? Math.min(...confs) : 0,
+    notes: `Long statement parsed in ${chunks.length} parts (${chunks[0].total} pages)` +
+      (failedParts.length ? ` — ⚠ ${failedParts.join(', ')} FAILED: those pages' transactions are missing, re-upload to retry.` : '.') +
+      (first.notes ? ' ' + String(first.notes).slice(0, 200) : ''),
+    transactions: txs.slice(0, 10000),
   };
 }
 
