@@ -22858,14 +22858,17 @@ function bkPlatformDetail(id) {
     body: `
       <div style="font-weight:600;font-size:13px;margin-bottom:6px">Where the money went (why the banked number is smaller than sales)</div>
       <div style="font-size:13px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:12px">
-        ${row('Gross sales', gbp(sum.grossSales || 0))}
+        ${sum.openingBalance ? row('Opening balance — carried over from last month (not yet paid out)', gbp(sum.openingBalance)) : ''}
+        ${row((sum.openingBalance ? '+ ' : '') + 'Gross sales', gbp(sum.grossSales || 0))}
         ${sum.refunds ? row('− Refunds', '−' + gbp(sum.refunds)) : ''}
         ${sum.fees ? row('− Selling fees', '−' + gbp(sum.fees)) : ''}
         ${sum.postageLabels ? row('− Postage labels', '−' + gbp(sum.postageLabels)) : ''}
         ${sum.advertising ? row('− Advertising', '−' + gbp(sum.advertising)) : ''}
         ${sum.otherDeductions ? row('− Other deductions', '−' + gbp(sum.otherDeductions)) : ''}
-        ${row('= Net paid out', gbp(sum.netPayouts || 0), true)}
-        ${dedTotal ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:6px">${gbp(dedTotal)} was deducted before payout — these are business costs for the VAT/expense side even though they never hit the bank as separate payments.</div>` : ''}
+        ${row('− Paid out this month', '−' + gbp(sum.netPayouts || t.statementPayouts || 0))}
+        ${sum.closingBalance || sum.openingBalance ? row('= Closing balance — carries into next month’s statement', gbp(sum.closingBalance || 0), true) : ''}
+        ${t.carryCheckDiff != null && Math.abs(t.carryCheckDiff) > 0.05 ? `<div style="font-size:11px;color:var(--red);margin-top:6px">⚠ The carry-over doesn't quite add up (off by ${gbp(Math.abs(t.carryCheckDiff))}) — worth a quick look at the statement.</div>` : ''}
+        ${dedTotal ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:6px">${gbp(dedTotal)} was deducted before payout — these are business costs for the VAT/expense side even though they never hit the bank as separate payments. The closing balance isn't lost: it pays out early next month.</div>` : ''}
       </div>
       <div style="font-weight:600;font-size:13px;margin-bottom:6px">Payouts vs the bank — statement ${gbp(t.statementPayouts || 0)} · matched ${gbp(t.matchedInBank || 0)}${t.difference ? ` · <span style="color:var(--red)">difference ${gbp(t.difference)}</span>` : ' · <span style="color:var(--green)">no difference</span>'}</div>
       <div style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px">
