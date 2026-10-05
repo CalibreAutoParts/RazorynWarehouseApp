@@ -541,13 +541,13 @@ async function parsePlatformStatement(pdfBase64, ctx = {}) {
   const user = `Read this marketplace/payments statement PDF (eBay monthly financial statement, Shopify payouts statement, or similar) carefully.
 
 ${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}Extract:
-1. The platform (ebay, shopify, paypal, stripe…), the statement period, currency.
-2. The SUMMARY money flow: gross sales/orders total, refunds given, selling fees (FVF + fixed), postage/shipping labels bought, advertising/promoted-listings charges, any other deductions or charges, and the NET total paid out. Each as a positive number.
+1. The platform (ebay, shopify, paypal, stripe…), the statement period (these are usually MONTHLY statements), currency.
+2. The SUMMARY money flow: the OPENING BALANCE (funds carried over from the previous month, not yet paid out at the start of the period), gross sales/orders total, refunds given, selling fees (FVF + fixed), postage/shipping labels bought, advertising/promoted-listings charges, any other deductions or charges, the total actually PAID OUT during the period, and the CLOSING BALANCE (funds still pending at the end, carried into next month). Opening + gross − deductions − paid out = closing; say in notes if the statement's own numbers don't add up.
 3. EVERY individual payout listed, with its date, payout id/reference (e.g. "P*7693951408" — keep it exactly as printed) and amount.
 
 Reply with ONLY this JSON:
 {"platform":"ebay"|"shopify"|"paypal"|"stripe"|"other","periodStart":"YYYY-MM-DD","periodEnd":"YYYY-MM-DD","currency":"GBP",
- "summary":{"grossSales":<n>,"refunds":<n>,"fees":<n>,"postageLabels":<n>,"advertising":<n>,"otherDeductions":<n>,"netPayouts":<n>},
+ "summary":{"openingBalance":<n, signed>,"grossSales":<n>,"refunds":<n>,"fees":<n>,"postageLabels":<n>,"advertising":<n>,"otherDeductions":<n>,"netPayouts":<n>,"closingBalance":<n, signed>},
  "payouts":[{"date":"YYYY-MM-DD","payoutId":"...","amount":<n>}],
  "confidence":<0..1>,"notes":"<anything odd: unreadable pages, totals not adding up>"}
 Do not invent numbers; if a summary line isn't on the statement use 0 and say so in notes.`;
@@ -560,12 +560,14 @@ Do not invent numbers; if a summary line isn't on the statement use 0 and say so
   const v = out.json;
   if (!v) return null;
   const num = (x) => { const n = parseFloat(x); return isFinite(n) ? +Math.abs(n).toFixed(2) : 0; };
+  const signed = (x) => { const n = parseFloat(x); return isFinite(n) ? +n.toFixed(2) : 0; };
   const s = v.summary || {};
   return {
     platform: ['ebay', 'shopify', 'paypal', 'stripe'].includes(v.platform) ? v.platform : 'other',
     periodStart: v.periodStart || null, periodEnd: v.periodEnd || null,
     currency: String(v.currency || 'GBP').slice(0, 6),
     summary: {
+      openingBalance: signed(s.openingBalance), closingBalance: signed(s.closingBalance),
       grossSales: num(s.grossSales), refunds: num(s.refunds), fees: num(s.fees),
       postageLabels: num(s.postageLabels), advertising: num(s.advertising),
       otherDeductions: num(s.otherDeductions), netPayouts: num(s.netPayouts),

@@ -413,13 +413,25 @@ async function reconcilePlatformStatement(parsed) {
     }
   }
   const sum = (a) => +a.reduce((x, y) => x + (y.amount || 0), 0).toFixed(2);
+  const S = parsed.summary || {};
+  const n = (x) => +(parseFloat(x) || 0);
+  // Carry-over sanity check: opening balance (last month's unpaid funds) plus
+  // this month's activity, minus what was paid out, should equal the closing
+  // balance carried into next month. A gap means a misread (or an odd line on
+  // the statement) worth a human look.
+  const deductions = +(n(S.refunds) + n(S.fees) + n(S.postageLabels) + n(S.advertising) + n(S.otherDeductions)).toFixed(2);
+  const expectedClosing = +(n(S.openingBalance) + n(S.grossSales) - deductions - (n(S.netPayouts) || sum(parsed.payouts))).toFixed(2);
   rec.totals = {
     statementPayouts: sum(parsed.payouts),
-    statementNet: parsed.summary.netPayouts || sum(parsed.payouts),
+    statementNet: n(S.netPayouts) || sum(parsed.payouts),
     matchedInBank: sum(rec.matched),
     missingFromBank: sum(rec.missingFromBank),
     extraInBank: sum(rec.extraInBank),
     difference: +(sum(parsed.payouts) - sum(rec.matched)).toFixed(2),
+    openingBalance: n(S.openingBalance),
+    closingBalance: n(S.closingBalance),
+    deductions,
+    carryCheckDiff: S.closingBalance !== undefined ? +(expectedClosing - n(S.closingBalance)).toFixed(2) : null,
   };
   return rec;
 }
