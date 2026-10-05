@@ -480,23 +480,21 @@ Reply with ONLY this JSON:
 }
 
 // ── Bank statement parsing (the Books / VAT workspace) ─────────────────────
-// Takes the uploaded statement (PDF, or the bank's CSV export — CSV is exact
-// and preferred) and returns the bank, account, period and every transaction
-// — plus a first-pass category guess per line so the reconciliation screen
-// starts 80% done. Smart model: accuracy over pennies.
+// PDF: Claude reads the document. CSV/Excel export: the rows are parsed
+// DETERMINISTICALLY in code (exact, any size — a 3-month export with
+// hundreds of lines would overflow a model transcription), and Claude is
+// only asked two small questions: which column is which, and what category
+// each line is (batched).
 // source: legacy base64 string, or { pdfBase64 } or { csvText, filename? }.
 async function parseBankStatement(source, ctx = {}) {
   const cfg = await getAiConfig();
   const src = typeof source === 'string' ? { pdfBase64: source } : (source || {});
-  const isCsv = !!src.csvText;
-  const user = `${isCsv
-    ? `Below is a UK business bank account's CSV/spreadsheet export${src.filename ? ' (file: ' + src.filename + ')' : ''}. Work out the column meanings from the headers and extract EVERYTHING exactly as given — a CSV is exact, so copy amounts and dates precisely.`
-    : 'Read this UK business bank statement PDF carefully and extract EVERYTHING.'}
+  if (src.csvText) return parseBankCsv(src, ctx, cfg);
+  const user = `Read this UK business bank statement PDF carefully and extract EVERYTHING.
 
 ${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}FIRST check what this document actually is: if it is NOT a bank account statement but a MARKETPLACE or payment-processor statement (eBay managed payments, Shopify payouts, PayPal, Amazon, Stripe…), set "notABankStatement": true, say what it is in notes, and return an empty transactions list — it belongs in the marketplace uploader, not the bank one. A business CREDIT CARD export (e.g. Capital on Tap) IS fine here — treat it like a bank account.
 
 Otherwise identify the BANK or card provider (Monzo, Wise, Mettle, Barclays, Starling, Tide, HSBC, Lloyds, NatWest, Santander, Revolut, Capital on Tap…), the account holder / business name, the statement period, and EVERY transaction in order. Money in and money out must be separate positive numbers. Dates in YYYY-MM-DD.
-${isCsv ? '\n===== CSV EXPORT START =====\n' + String(src.csvText).slice(0, 180000) + '\n===== CSV EXPORT END =====\n' : ''}
 
 For each transaction also give your best first guess:
 - type: "sale_receipt" (a customer paying us), "payout" (a marketplace paying out — eBay, Shopify, PayPal, Stripe...), "supplier" (stock purchase), "shipping" (couriers: DPD, Evri, Royal Mail, UPS, FedEx, DHL…), "rent", "utilities", "software" (subscriptions/SaaS/eBay+Shopify fees), "food", "office" (office supplies), "fuel", "bank_fees", "wages", "tax_hmrc", "transfer" (between own accounts/pots — INCLUDING repayments to the business credit card, e.g. paying the Capital on Tap bill: the real expenses are the card's own lines, so the repayment must be "transfer" or they'd count twice), "refund" (money we refunded out), "sundry", "other"
@@ -538,6 +536,73 @@ Do not invent transactions; if part of the statement is unreadable say so in not
         counterparty: t.counterparty ? String(t.counterparty).slice(0, 120) : null,
       }))
       .slice(0, 2000),
+  };
+}
+
+// CSV/Excel export pipeline: deterministic row parsing + two small AI calls.
+async function parseBankCsv(src, ctx, cfg) {
+  const { parseCsv, findHeaderRow, buildTransactions } = require('../lib/csv-bank');
+  const rows = parseCsv(String(src.csvText));
+  if (rows.length < 2) return null;
+  const headerIdx = findHeaderRow(rows);
+  const header = rows[headerIdx];
+  const sample = rows.slice(headerIdx + 1, headerIdx + 13);
+  // Small question 1: which column is which? (headers + a sample, tiny call)
+  const mapOut = await callClaude({
+    kind: 'bank_csv_map',
+    system: 'You map bank-export CSV columns. Reply with ONLY JSON.',
+    model: cfg.smartModel, maxTokens: 500,
+    user: `This is a UK business bank/credit-card CSV export${src.filename ? ' (file: ' + src.filename + ')' : ''}.${ctx.hint ? ' Context: ' + ctx.hint : ''}
+Header row (0-based column indexes): ${JSON.stringify(header)}
+Sample data rows: ${JSON.stringify(sample)}
+
+If this is NOT a bank/credit-card export but a marketplace statement (eBay, Shopify payouts, PayPal…), set "notABankStatement": true.
+Otherwise identify the columns. amountMode "signed" = one amount column (positive in / negative out); "split" = separate money-in and money-out columns.
+Reply ONLY: {"notABankStatement":false,"bank":"Mettle|Wise|Capital on Tap|…","accountName":"...or null","dateCol":<i>,"dateFormat":"DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|D MMM YYYY","descriptionCols":[<i>,...],"amountMode":"signed"|"split","amountCol":<i|null>,"inCol":<i|null>,"outCol":<i|null>,"balanceCol":<i|null>,"counterpartyCol":<i|null>,"currency":"GBP","notes":"..."}`,
+  });
+  const map = mapOut.json;
+  if (!map) return null;
+  if (map.notABankStatement) {
+    return { notABankStatement: true, bank: 'Unknown', accountName: null, sortCodeOrIban: null, periodStart: null, periodEnd: null, currency: 'GBP', confidence: 0.9, notes: map.notes || 'marketplace statement', transactions: [] };
+  }
+  // Exact build from EVERY row — no model output limits involved.
+  const txs = buildTransactions(rows, headerIdx, map).slice(0, 5000);
+  if (!txs.length) return { notABankStatement: false, bank: map.bank || 'Unknown', accountName: map.accountName || null, sortCodeOrIban: null, periodStart: null, periodEnd: null, currency: map.currency || 'GBP', confidence: 0.3, notes: 'No parsable rows found with the detected columns (' + (map.notes || '') + ')', transactions: [] };
+  // Small question 2 (batched): categorise each line. Failures fall back to
+  // 'other' — the data itself is already exact.
+  for (let i = 0; i < txs.length; i += 80) {
+    const chunk = txs.slice(i, i + 80);
+    try {
+      const catOut = await callClaude({
+        kind: 'bank_csv_categorise',
+        system: 'You categorise UK business bank transactions. Reply with ONLY JSON.',
+        model: cfg.bulkModel, maxTokens: 4000,
+        user: `Categorise these bank lines. Types: "sale_receipt" (customer paying us), "payout" (marketplace payout — eBay/Shopify/PayPal/Stripe), "supplier" (stock purchase), "shipping" (couriers), "rent", "utilities", "software", "food", "office", "fuel", "bank_fees", "wages", "tax_hmrc", "transfer" (between own accounts — INCLUDING repayments to a business credit card like Capital on Tap), "refund", "sundry", "other".
+Also: payoutPlatform ("ebay"|"shopify"|"paypal"|"stripe"|null) for payouts, and vatLikely=true when the outgoing almost certainly carries reclaimable UK VAT (supplier/shipping/software/office), false otherwise (wages, HMRC, transfers, bank fees, overseas suppliers, most food).
+Lines: ${JSON.stringify(chunk.map((t, j) => ({ i: j, date: t.date, description: t.description, in: t.moneyIn, out: t.moneyOut })))}
+Reply ONLY: {"items":[{"i":0,"type":"...","payoutPlatform":null,"vatLikely":false}]}`,
+      });
+      for (const it of (catOut.json?.items || [])) {
+        const t = chunk[it.i];
+        if (!t) continue;
+        t.type = String(it.type || 'other').slice(0, 30);
+        t.payoutPlatform = it.payoutPlatform ? String(it.payoutPlatform).slice(0, 20) : null;
+        t.vatLikely = !!it.vatLikely;
+      }
+    } catch (_) { /* budget/API hiccup — lines keep defaults */ }
+    for (const t of chunk) { if (!t.type) { t.type = 'other'; t.payoutPlatform = null; t.vatLikely = false; } }
+  }
+  const dates = txs.map(t => t.date).sort();
+  return {
+    notABankStatement: false,
+    bank: String(map.bank || 'Unknown').slice(0, 60),
+    accountName: map.accountName ? String(map.accountName).slice(0, 120) : null,
+    sortCodeOrIban: null,
+    periodStart: dates[0] || null, periodEnd: dates[dates.length - 1] || null,
+    currency: String(map.currency || 'GBP').slice(0, 6),
+    confidence: 0.98,
+    notes: 'CSV parsed exactly in code (' + txs.length + ' rows); Claude mapped the columns' + (map.notes ? ' — ' + String(map.notes).slice(0, 200) : ''),
+    transactions: txs,
   };
 }
 
