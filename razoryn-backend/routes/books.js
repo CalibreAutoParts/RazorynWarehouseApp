@@ -208,6 +208,31 @@ async function autoMatchTransaction(t) {
       || (s.payment_reference && descNorm.includes(String(s.payment_reference).toUpperCase().replace(/[^A-Z0-9]/g, ''))));
     if (byRef) return { match_type: 'sale', sale_id: byRef.id, category: 'sale_receipt' };
     if (cands.rows.length === 1) return { match_type: 'sale', sale_id: cands.rows[0].id, category: 'sale_receipt' };
+    // PART-PAYMENTS recorded on the warehouse app: the sale_payments ledger
+    // holds each recorded payment's amount + date. A bank line matching a
+    // recorded (non-cash) payment's amount within ±4 days — with the invoice
+    // reference in the description, or as the only candidate — becomes a
+    // partial ALLOCATION to that invoice for exactly the recorded amount.
+    try {
+      const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const pays = await query(`
+        SELECT sp.sale_id, sp.amount, s.invoice_number, s.payment_reference, s.total
+          FROM sale_payments sp JOIN sales s ON s.id = sp.sale_id
+         WHERE COALESCE(sp.method, 'bank') <> 'cash'
+           AND ABS(sp.amount - $1) < 0.01
+           AND sp.paid_at BETWEEN $2::date - interval '4 days' AND $2::date + interval '4 days'`,
+        [t.money_in, t.date]);
+      const payRef = pays.rows.find(p =>
+        (p.invoice_number && descNorm.includes(norm(p.invoice_number)))
+        || (p.payment_reference && descNorm.includes(norm(p.payment_reference))));
+      const payHit = payRef || (pays.rows.length === 1 ? pays.rows[0] : null);
+      if (payHit) {
+        return {
+          match_type: 'sale', sale_id: payHit.sale_id, category: 'sale_receipt',
+          allocation: { saleId: payHit.sale_id, amount: +parseFloat(payHit.amount).toFixed(2) },
+        };
+      }
+    } catch (_) { /* sale_payments table not migrated yet — skip quietly */ }
     return { match_type: null, category: t.type || 'other' };
   }
   // Money out: trust the AI's first-pass category; flag likely-VAT lines for a receipt.
@@ -277,13 +302,21 @@ router.post('/statements', upload.single('statement'), async (req, res) => {
     if (m.match_type === 'sale') autoLinked++;
     if (m.match_type === 'payout') payouts++;
     if (m.needs_vat_receipt) receiptsNeeded++;
-    await query(
+    const ins = await query(
       `INSERT INTO bank_transactions (statement_id, account_id, tx_date, description, counterparty, money_in, money_out, balance,
                                       category, match_type, sale_id, payout_platform, vat_likely, needs_vat_receipt)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
       [st.rows[0].id, accountId, t.date, t.description, t.counterparty, t.moneyIn, t.moneyOut, t.balance,
        m.category || null, m.match_type || null, m.sale_id || null, m.payout_platform || t.payoutPlatform || null,
        !!t.vatLikely, !!m.needs_vat_receipt]);
+    // A warehouse-recorded part-payment match becomes a real allocation (the
+    // exact recorded amount against that invoice).
+    if (m.allocation && ins.rows[0]) {
+      try {
+        await query(`INSERT INTO bank_tx_allocations (tx_id, sale_id, amount) VALUES ($1,$2,$3)`,
+          [ins.rows[0].id, m.allocation.saleId, m.allocation.amount]);
+      } catch (_) {}
+    }
   }
   await audit(req, 'books_statement_upload', 'bank_statement', st.rows[0].id, { bank: parsed.bank, tx: parsed.transactions.length, autoLinked, payouts });
   res.status(201).json({
