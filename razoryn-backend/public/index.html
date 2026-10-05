@@ -22423,15 +22423,40 @@ async function fixPartNumbers(btn) {
 // VAT-return picture in one screen.
 const BOOKS_CATEGORIES = ['sale_receipt', 'payout', 'supplier', 'shipping', 'rent', 'utilities', 'software', 'food', 'office', 'fuel', 'bank_fees', 'wages', 'tax_hmrc', 'transfer', 'refund', 'sundry', 'other'];
 let BK = { from: null, to: null, accountId: '', accounts: [], txs: [], period: 'thismonth' };
+const bkUkDate = (d) => String(d || '').slice(0, 10).split('-').reverse().join('/');
+// VAT quarters don't follow calendar quarters — HMRC staggers them. The cycle
+// (which months your quarters END in) is picked once and remembered.
+function bkVatCycle() { try { return parseInt(localStorage.getItem('rzn_vat_cycle')) || 0; } catch (_) { return 0; } }
+const BK_VAT_CYCLES = [
+  { ends: [2, 5, 8, 11], label: 'Mar / Jun / Sep / Dec' },
+  { ends: [3, 6, 9, 0], label: 'Apr / Jul / Oct / Jan' },
+  { ends: [4, 7, 10, 1], label: 'Feb / May / Aug / Nov' },
+];
+function bkVatQuarter(offset) {   // offset 0 = current VAT quarter, -1 = last…
+  const cyc = BK_VAT_CYCLES[bkVatCycle()] || BK_VAT_CYCLES[0];
+  const now = new Date();
+  let y = now.getFullYear(), m = now.getMonth();
+  // Find the quarter END month (>= current month) in the cycle.
+  let end = null, endY = y;
+  for (let i = 0; i < 24; i++) {
+    const mm = (m + i) % 12;
+    if (cyc.ends.includes(mm)) { end = mm; endY = y + Math.floor((m + i) / 12); break; }
+  }
+  // Step back by whole quarters for the offset.
+  let endIdx = end + endY * 12 + (offset || 0) * 3;
+  endY = Math.floor(endIdx / 12); end = ((endIdx % 12) + 12) % 12;
+  const d = (yy, mm, day) => new Date(Date.UTC(yy, mm, day)).toISOString().slice(0, 10);
+  return [d(endY, end - 2, 1), d(endY, end + 1, 0)];
+}
 function bkPeriodDates(p) {
   const now = new Date();
   const d = (y, m, day) => new Date(Date.UTC(y, m, day)).toISOString().slice(0, 10);
   const y = now.getFullYear(), m = now.getMonth();
-  const q = Math.floor(m / 3);
   if (p === 'thismonth') return [d(y, m, 1), d(y, m + 1, 0)];
   if (p === 'lastmonth') return [d(y, m - 1, 1), d(y, m, 0)];
-  if (p === 'thisq') return [d(y, q * 3, 1), d(y, q * 3 + 3, 0)];
-  if (p === 'lastq') return [d(y, q * 3 - 3, 1), d(y, q * 3, 0)];
+  if (p === 'thisvq') return bkVatQuarter(0);
+  if (p === 'lastvq') return bkVatQuarter(-1);
+  if (p === 'prevvq') return bkVatQuarter(-2);
   if (p === 'thisyear') return [d(y, 0, 1), d(y, 12, 0)];
   if (p === 'lastyear') return [d(y - 1, 0, 1), d(y - 1, 12, 0)];
   return [BK.from || d(y, m, 1), BK.to || d(y, m + 1, 0)];
@@ -22447,11 +22472,17 @@ function renderBooks() {
           <select id="bk-period" onchange="bkSetPeriod(this.value)">
             <option value="thismonth">This month</option>
             <option value="lastmonth">Last month</option>
-            <option value="thisq">This quarter (VAT)</option>
-            <option value="lastq">Last quarter (VAT)</option>
+            <option value="thisvq">This VAT quarter</option>
+            <option value="lastvq">Last VAT quarter</option>
+            <option value="prevvq">VAT quarter before that</option>
             <option value="thisyear">This year</option>
             <option value="lastyear">Last year</option>
             <option value="custom">Custom…</option>
+          </select>
+          <select id="bk-vat-cycle" title="Your VAT quarter cycle — which months your quarters END in (from your HMRC VAT registration)." onchange="try{localStorage.setItem('rzn_vat_cycle', this.value)}catch(_){};bkSetPeriod(el('bk-period').value)">
+            <option value="0">Qtrs end Mar/Jun/Sep/Dec</option>
+            <option value="1">Qtrs end Apr/Jul/Oct/Jan</option>
+            <option value="2">Qtrs end Feb/May/Aug/Nov</option>
           </select>
           <select id="bk-account" onchange="BK.accountId=this.value;bkLoad()"><option value="">All accounts</option></select>
           <button class="btn btn-primary" onclick="bkOpenUpload()">⬆ Upload statement</button>
@@ -22499,6 +22530,7 @@ function renderBooks() {
       </div>
     </div>`;
   if (el('bk-period')) el('bk-period').value = BK.period;
+  if (el('bk-vat-cycle')) el('bk-vat-cycle').value = String(bkVatCycle());
   bkLoadAccounts();
   bkLoad();
   bkLoadShares();
@@ -22610,7 +22642,7 @@ function bkPaintStatements(list) {
   if (!list.length) { box.innerHTML = 'No statements uploaded yet — hit ⬆ Upload statement.'; return; }
   box.innerHTML = list.map(s => `<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:6px;flex-wrap:wrap">
     <div><strong>${escapeHtml(s.bank_detected || s.account_bank || 'Statement')}</strong>
-      <span style="color:var(--ink-soft)">${escapeHtml(s.account_name || s.account_detected || '')}${s.business ? ' · ' + escapeHtml(s.business) : ''} · ${s.period_start ? String(s.period_start).slice(0, 10) + ' → ' + String(s.period_end || '').slice(0, 10) : escapeHtml(s.label || '')} · ${s.tx_count} transactions${s.ai_confidence != null ? ' · read at ' + Math.round(s.ai_confidence * 100) + '%' : ''}</span>
+      <span style="color:var(--ink-soft)">${escapeHtml(s.account_name || s.account_detected || '')}${s.business ? ' · ' + escapeHtml(s.business) : ''} · ${s.period_start ? bkUkDate(s.period_start) + ' → ' + bkUkDate(s.period_end) : escapeHtml(s.label || '')} · ${s.tx_count} transactions${s.ai_confidence != null ? ' · read at ' + Math.round(s.ai_confidence * 100) + '%' : ''}</span>
       ${s.ai_notes ? `<div style="font-size:11px;color:var(--amber,orange)">⚠ ${escapeHtml(s.ai_notes)}</div>` : ''}</div>
     <div style="display:flex;gap:6px">
       <a class="btn btn-ghost btn-sm" href="/api/books/statements/${s.id}/file" target="_blank">PDF</a>
@@ -22641,7 +22673,7 @@ function bkPaintTxs() {
   box.innerHTML = `<div style="overflow-x:auto"><table class="table" style="font-size:12px">
     <thead><tr><th>Date</th><th style="min-width:220px">Description</th><th class="num">In</th><th class="num">Out</th><th>Category</th><th>Linked to</th><th class="num">VAT £</th><th>Receipt</th><th></th></tr></thead><tbody>
     ${BK.txs.map(t => `<tr id="bk-tx-${t.id}">
-      <td style="white-space:nowrap;color:var(--ink-soft)">${String(t.tx_date).slice(0, 10)}</td>
+      <td style="white-space:nowrap;color:var(--ink-soft)">${bkUkDate(t.tx_date)}</td>
       <td><div>${escapeHtml(t.description || '')}</div>${t.counterparty ? `<div style="font-size:10.5px;color:var(--ink-soft)">${escapeHtml(t.counterparty)}</div>` : ''}${t.notes ? `<div style="font-size:10.5px;color:var(--blue)">✎ ${escapeHtml(t.notes)}</div>` : ''}</td>
       <td class="num" style="color:var(--green);font-weight:600">${t.money_in > 0 ? gbp(t.money_in) : ''}</td>
       <td class="num" style="font-weight:600">${t.money_out > 0 ? gbp(t.money_out) : ''}</td>
@@ -22668,11 +22700,26 @@ function bkPaintFollowups() {
   const byWho = {};
   for (const t of missing) {
     const k = t.counterparty || (t.description || '').slice(0, 40) || 'Unknown';
-    (byWho[k] = byWho[k] || { total: 0, n: 0 }); byWho[k].total += parseFloat(t.money_out) || 0; byWho[k].n++;
+    (byWho[k] = byWho[k] || { total: 0, n: 0, ids: [] }); byWho[k].total += parseFloat(t.money_out) || 0; byWho[k].n++; byWho[k].ids.push(t.id);
   }
+  State._bkFollowupIds = Object.fromEntries(Object.entries(byWho).map(([k, v]) => [k, v.ids]));
   box.innerHTML = Object.entries(byWho).sort((a, b) => b[1].total - a[1].total).map(([who, v]) =>
-    `<div style="display:flex;justify-content:space-between;border-bottom:1px solid var(--line-2);padding:6px 0"><div><strong>${escapeHtml(who)}</strong> <span style="color:var(--ink-soft)">· ${v.n} payment${v.n === 1 ? '' : 's'}</span></div><div style="font-weight:600">${gbp(v.total)}</div></div>`).join('')
-    + '<div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Chase these for VAT invoices — attach each one with 📎 on its transaction and it drops off this list.</div>';
+    `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;border-bottom:1px solid var(--line-2);padding:6px 0">
+      <div><strong>${escapeHtml(who)}</strong> <span style="color:var(--ink-soft)">· ${v.n} payment${v.n === 1 ? '' : 's'}</span></div>
+      <div style="display:flex;align-items:center;gap:8px"><div style="font-weight:600">${gbp(v.total)}</div>
+        <button class="btn btn-ghost btn-sm" onclick="bkDismissFollowup('${escapeAttr(who).replace(/'/g, "\\'")}')" title="No UK VAT to reclaim here (e.g. an overseas supplier — China, USA…): no VAT receipt exists, so stop chasing it.">✗ no UK VAT</button></div>
+    </div>`).join('')
+    + '<div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Chase these for VAT invoices — attach each one with 📎 on its transaction and it drops off this list. Overseas purchases (no UK VAT) can be ✗ dismissed.</div>';
+}
+async function bkDismissFollowup(who) {
+  const ids = (State._bkFollowupIds || {})[who] || [];
+  if (!ids.length) return;
+  if (!confirm(`Mark ${who}'s ${ids.length} payment(s) as having NO UK VAT to reclaim (overseas purchase)? They stop appearing in the chase list.`)) return;
+  try {
+    const r = await Api.post('/api/books/transactions/dismiss-receipts', { ids, reason: 'No UK VAT — overseas purchase' });
+    toast(`✗ ${r.updated} payment(s) marked no-UK-VAT — off the chase list`, 'success');
+    bkLoad();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function bkPatch(id, patch) {
   try {
@@ -22872,7 +22919,7 @@ async function bkLoadPlatform() {
       return `<div style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-bottom:6px">
         <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center">
           <div><strong style="text-transform:uppercase">${escapeHtml(s.platform || '?')}</strong>
-            <span style="color:var(--ink-soft)">${s.period_start ? String(s.period_start).slice(0, 10) + ' → ' + String(s.period_end || '').slice(0, 10) : escapeHtml(s.label || '')}
+            <span style="color:var(--ink-soft)">${s.period_start ? bkUkDate(s.period_start) + ' → ' + bkUkDate(s.period_end) : escapeHtml(s.label || '')}
             · net paid out ${gbp((s.summary || {}).netPayouts || t.statementPayouts || 0)}</span></div>
           <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
             ${status}${nExtra ? `<span class="pill amber" style="font-size:10px">${nExtra} in bank not on statement</span>` : ''}
@@ -22931,7 +22978,7 @@ function bkPlatformDetail(id) {
   const dedTotal = +(sum.refunds + sum.fees + sum.postageLabels + sum.advertising + sum.otherDeductions || 0).toFixed(2);
   const row = (l, v, strong) => `<div style="display:flex;justify-content:space-between;padding:4px 0;${strong ? 'font-weight:700;border-top:1px solid var(--line);margin-top:4px;padding-top:8px' : ''}"><span>${l}</span><span>${v}</span></div>`;
   modal({
-    title: (s.platform || '').toUpperCase() + ' statement — ' + (s.period_start ? String(s.period_start).slice(0, 10) + ' → ' + String(s.period_end || '').slice(0, 10) : ''),
+    title: (s.platform || '').toUpperCase() + ' statement — ' + (s.period_start ? bkUkDate(s.period_start) + ' → ' + bkUkDate(s.period_end) : ''),
     body: `
       <div style="font-weight:600;font-size:13px;margin-bottom:6px">Where the money went (why the banked number is smaller than sales)</div>
       <div style="font-size:13px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:12px">

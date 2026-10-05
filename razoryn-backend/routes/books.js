@@ -143,6 +143,7 @@ async function ensureTables() {
 }
 
 const gbp = (n) => '£' + (parseFloat(n) || 0).toFixed(2);
+const ukDate = (d) => String(d || '').slice(0, 10).split('-').reverse().join('/');
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 // ── Accounts ───────────────────────────────────────────────────────────────
@@ -436,6 +437,26 @@ router.patch('/transactions/:id', async (req, res) => {
   await audit(req, 'books_tx_update', 'bank_transaction', req.params.id, b);
   res.json({ transaction: r.rows[0] });
 });
+// POST /transactions/dismiss-receipts { ids, reason? } — stop chasing VAT
+// receipts for these payments (overseas suppliers carry no reclaimable UK
+// VAT, so no receipt will ever exist). The reason lands in the notes so the
+// accountant sees why there's no receipt.
+router.post('/transactions/dismiss-receipts', async (req, res) => {
+  await ensureTables();
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(x => parseInt(x)).filter(Boolean) : [];
+  if (!ids.length) return res.status(400).json({ error: 'ids_required' });
+  const reason = String(req.body?.reason || 'No UK VAT to reclaim').slice(0, 120);
+  const r = await query(
+    `UPDATE bank_transactions
+        SET needs_vat_receipt = false,
+            vat_amount = COALESCE(vat_amount, 0),
+            notes = CASE WHEN notes IS NULL OR notes = '' THEN $2 ELSE notes || ' · ' || $2 END,
+            updated_at = now()
+      WHERE id = ANY($1) RETURNING id`, [ids, reason]);
+  await audit(req, 'books_dismiss_receipts', null, null, { count: r.rows.length, reason });
+  res.json({ ok: true, updated: r.rows.length });
+});
+
 // ── Allocations: lump sums & part-payments ────────────────────────────────
 // POST /transactions/:id/allocations { saleId, amount } — allocate a portion
 // of this bank line to an invoice. A lump sum gets several allocations (one
@@ -765,7 +786,7 @@ function buildCsv(rows) {
       ? allocs.map(a => (a.invoiceNumber || ('#' + a.saleId)) + ' £' + (+a.amount).toFixed(2)).join(' | ')
       : (t.invoice_number || '');
     lines.push([
-      String(t.tx_date).slice(0, 10), t.account_name || '', t.account_bank || t.bank_detected || '', t.business || '',
+      ukDate(t.tx_date), t.account_name || '', t.account_bank || t.bank_detected || '', t.business || '',
       t.description || '', t.counterparty || '',
       t.money_in > 0 ? (+t.money_in).toFixed(2) : '', t.money_out > 0 ? (+t.money_out).toFixed(2) : '',
       t.category || '', t.match_type || '',
@@ -823,6 +844,7 @@ publicRouter.get('/:token', async (req, res) => {
   if (!share) return res.status(404).send('This link has been revoked or does not exist.');
   const brand = require('../lib/brand');
   const from = String(share.from_date).slice(0, 10), to = String(share.to_date).slice(0, 10);
+  const fromUk = ukDate(from), toUk = ukDate(to);
   const txs = await loadTransactions({ from, to, accountId: share.account_id });
   const sum = await periodSummary({ from, to, accountId: share.account_id });
   const stmtIds = [...new Set(txs.map(t => t.statement_id).filter(Boolean))];
@@ -853,7 +875,7 @@ publicRouter.get('/:token', async (req, res) => {
   a{color:#1d4fa1} h2{font-size:15px;margin:22px 0 8px}
 </style></head><body><div class="wrap">
   <h1>${esc(brand.name || 'Accounts')} — transactions &amp; VAT records</h1>
-  <div class="sub">Period ${esc(from)} → ${esc(to)}${share.label ? ' · ' + esc(share.label) : ''} · prepared ${new Date().toLocaleDateString('en-GB')} · read-only link</div>
+  <div class="sub">Period ${esc(fromUk)} → ${esc(toUk)}${share.label ? ' · ' + esc(share.label) : ''} · prepared ${new Date().toLocaleDateString('en-GB')} · read-only link</div>
   <div class="cards">
     <div class="card"><div class="l">Money in</div><div class="v">${gbp(sum.moneyIn)}</div></div>
     <div class="card"><div class="l">Money out</div><div class="v">${gbp(sum.moneyOut)}</div></div>
@@ -874,7 +896,7 @@ publicRouter.get('/:token', async (req, res) => {
   <h2>Every transaction</h2>
   <table><thead><tr><th>Date</th><th>Account</th><th>Description</th><th class="num">In</th><th class="num">Out</th><th>Category</th><th>Linked to</th><th class="num">VAT</th><th>Receipt</th></tr></thead><tbody>
   ${txs.map(t => `<tr>
-    <td>${esc(String(t.tx_date).slice(0, 10))}</td>
+    <td>${esc(ukDate(t.tx_date))}</td>
     <td>${esc(t.account_name || t.bank_detected || '')}</td>
     <td>${esc(t.description || '')}${t.notes ? `<div style="color:#888;font-size:11px">${esc(t.notes)}</div>` : ''}</td>
     <td class="num">${t.money_in > 0 ? gbp(t.money_in) : ''}</td>
