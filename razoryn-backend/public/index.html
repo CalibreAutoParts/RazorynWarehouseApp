@@ -22918,8 +22918,12 @@ async function bkBulkReceipts(files) {
   try {
     const r = await Api.postForm('/api/books/receipts/bulk', fd);
     Task.done(taskId, r.summary.attached + ' attached');
-    if (r.summary.unmatched) {
-      toast(`📎 ${r.summary.attached} attached · ${r.summary.unmatched} couldn't be matched by date — attach those via 📎 on the row: ${r.unmatched.slice(0, 4).join(', ')}${r.unmatched.length > 4 ? '…' : ''}`, 'warn', 12000);
+    if (!r.refCount) {
+      // The statement rows carry NO receipt references — it was imported
+      // before reference capture. Name the actual fix.
+      toast(`📎 ${r.summary.attached} attached. ⚠ Your bank statement has no receipt references stored — it was imported before that was captured. Delete the Mettle statement (🗑) and re-upload the same CSV, then run Bulk-attach again: files will match by name exactly.`, 'warn', 15000);
+    } else if (r.summary.unmatched) {
+      toast(`📎 ${r.summary.attached} attached · ${r.summary.unmatched} not matched (no reference and no unique date) — attach those via 📎 on the row: ${r.unmatched.slice(0, 4).join(', ')}${r.unmatched.length > 4 ? '…' : ''}`, 'warn', 12000);
     } else {
       toast(`📎 All ${r.summary.attached} receipts attached ✓`, 'success', 7000);
     }
