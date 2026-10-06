@@ -181,7 +181,7 @@ async function callClaude({ kind, system, user, model, maxTokens = 700, images, 
     const text = (r.data?.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
     await query(`INSERT INTO ai_runs (kind, model, input_tokens, output_tokens, ok) VALUES ($1,$2,$3,$4,true)`,
       [kind || null, useModel, usage.input_tokens || 0, usage.output_tokens || 0]).catch(() => {});
-    return { text, json: extractJson(text), usage, model: useModel };
+    return { text, json: extractJson(text), usage, model: useModel, stopReason: r.data?.stop_reason || null };
   } catch (e) {
     const msg = e.response?.data?.error?.message || e.message;
     await query(`INSERT INTO ai_runs (kind, model, ok, error) VALUES ($1,$2,false,$3)`,
@@ -493,8 +493,8 @@ async function parseBankStatement(source, ctx = {}) {
   // Big PDFs (a from-account-opening statement can run 60+ pages / 1000+
   // rows) overflow a single model response — split into page chunks, parse
   // each, and stitch the transactions back together.
-  const chunks = await splitPdfForParsing(src.pdfBase64);
-  if (chunks && chunks.length > 1) return parseBankPdfChunks(chunks, ctx, cfg);
+  const pageCount = await pdfPageCount(src.pdfBase64);
+  if (pageCount && pageCount > 15) return parseBankPdfChunks(src.pdfBase64, pageCount, ctx, cfg);
   const user = `Read this UK business bank statement PDF carefully and extract EVERYTHING.
 
 ${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}FIRST check what this document actually is: if it is NOT a bank account statement but a MARKETPLACE or payment-processor statement (eBay managed payments, Shopify payouts, PayPal, Amazon, Stripe…), set "notABankStatement": true, say what it is in notes, and return an empty transactions list — it belongs in the marketplace uploader, not the bank one. A business CREDIT CARD export (e.g. Capital on Tap) IS fine here — treat it like a bank account.
@@ -611,61 +611,68 @@ Reply ONLY: {"items":[{"i":0,"type":"...","payoutPlatform":null,"vatLikely":fals
   };
 }
 
-// Split a long statement PDF into page chunks (pdf-lib). Returns null for
-// PDFs small enough to parse in one go, or when pdf-lib isn't installed yet.
-async function splitPdfForParsing(pdfBase64, maxPages = 15, chunkPages = 12) {
-  let PDFDocument;
-  try { ({ PDFDocument } = require('pdf-lib')); } catch (_) { return null; }
+// How many pages? (pdf-lib; null when the lib isn't available)
+async function pdfPageCount(pdfBase64) {
   try {
-    const srcDoc = await PDFDocument.load(Buffer.from(pdfBase64, 'base64'), { ignoreEncryption: true });
-    const n = srcDoc.getPageCount();
-    if (n <= maxPages) return null;
-    const chunks = [];
-    for (let start = 0; start < n; start += chunkPages) {
-      const end = Math.min(n, start + chunkPages);
-      const doc = await PDFDocument.create();
-      const pages = await doc.copyPages(srcDoc, Array.from({ length: end - start }, (_, i) => start + i));
-      for (const p of pages) doc.addPage(p);
-      chunks.push({ base64: Buffer.from(await doc.save()).toString('base64'), from: start + 1, to: end, total: n });
-    }
-    return chunks;
-  } catch (e) { console.warn('[ai] pdf split failed:', e.message); return null; }
+    const { PDFDocument } = require('pdf-lib');
+    const doc = await PDFDocument.load(Buffer.from(pdfBase64, 'base64'), { ignoreEncryption: true });
+    return doc.getPageCount();
+  } catch (_) { return null; }
 }
 
-// Chunked large-PDF statement parse: each page-range is extracted with the
-// same schema, two chunks in flight at a time, transactions stitched in
-// order. Bank/account identity comes from part 1.
-async function parseBankPdfChunks(chunks, ctx, cfg) {
-  const num = (x) => { const n = parseFloat(x); return isFinite(n) ? +n.toFixed(2) : 0; };
-  const oneChunk = async (i) => {
-    const c = chunks[i];
-    const user = `This is PART ${i + 1} of ${chunks.length} (pages ${c.from}–${c.to} of ${c.total}) of ONE long UK business bank statement.${ctx.hint ? ' Context: ' + ctx.hint : ''}
-${i === 0 ? 'FIRST check what this document is: a MARKETPLACE/payment-processor statement (eBay, Shopify, PayPal…) sets "notABankStatement": true with empty transactions. A business credit card (e.g. Capital on Tap) is fine. Identify the BANK, account holder and period.\n' : 'The bank and account were identified from part 1 — just extract this part’s rows.\n'}Extract EVERY transaction row visible on THESE pages exactly as printed (money in / money out as separate positive numbers, dates YYYY-MM-DD). Skip summary/carried-forward lines. For each row also guess: type ("sale_receipt","payout","supplier","shipping","rent","utilities","software","food","office","fuel","bank_fees","wages","tax_hmrc","transfer" — including repayments to a business credit card,"refund","sundry","other"), payoutPlatform ("ebay"|"shopify"|"paypal"|"stripe"|null), vatLikely (true only for UK-VAT-bearing outgoings), counterparty.
-Reply ONLY: {"notABankStatement":false,"bank":"...","accountName":"...","sortCodeOrIban":null,"periodStart":null,"periodEnd":null,"currency":"GBP","transactions":[{"date":"YYYY-MM-DD","description":"...","moneyIn":0,"moneyOut":0,"balance":null,"type":"other","payoutPlatform":null,"vatLikely":false,"counterparty":null}],"confidence":<0..1>,"notes":"..."}`;
-    const out = await callClaude({
-      kind: 'bank_statement', system: 'You are a meticulous UK bookkeeper. You extract bank statements exactly as printed — every line, correct amounts, no inventions. Reply with ONLY JSON.',
-      user, model: cfg.smartModel, maxTokens: 16000, timeoutMs: 420000,
-      documents: [{ base64: c.base64, mediaType: 'application/pdf' }],
-    });
-    return out.json;
+// Chunked large-PDF statement parse with ADAPTIVE sizing: dense statements
+// (ANNA packs dozens of rows per page) can overflow even a modest page
+// range's output — any chunk that comes back truncated or unparsable is
+// split in half and retried, down to single pages.
+async function parseBankPdfChunks(pdfBase64, totalPages, ctx, cfg) {
+  const { PDFDocument } = require('pdf-lib');
+  const srcDoc = await PDFDocument.load(Buffer.from(pdfBase64, 'base64'), { ignoreEncryption: true });
+  const chunkB64 = async (from, to) => {   // 1-based inclusive page range
+    const doc = await PDFDocument.create();
+    const pages = await doc.copyPages(srcDoc, Array.from({ length: to - from + 1 }, (_, i) => from - 1 + i));
+    for (const p of pages) doc.addPage(p);
+    return Buffer.from(await doc.save()).toString('base64');
   };
-  const parts = new Array(chunks.length);
-  let next = 0;
-  const worker = async () => { while (next < chunks.length) { const i = next++; try { parts[i] = await oneChunk(i); } catch (e) { parts[i] = { __error: e.message }; } } };
-  await Promise.all([worker(), worker()]);   // two in flight
-  const first = parts[0];
-  if (!first) return null;
-  if (first.notABankStatement) {
-    return { notABankStatement: true, bank: 'Unknown', accountName: null, sortCodeOrIban: null, periodStart: null, periodEnd: null, currency: 'GBP', confidence: 0.9, notes: first.notes || 'marketplace statement', transactions: [] };
-  }
-  const txs = [];
-  const failedParts = [];
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i];
-    if (!p || p.__error || !Array.isArray(p.transactions)) { failedParts.push(`part ${i + 1}${p && p.__error ? ' (' + p.__error + ')' : ''}`); continue; }
-    for (const t of p.transactions) {
-      if (!t || !t.date || (num(t.moneyIn) <= 0 && num(t.moneyOut) <= 0)) continue;
-      txs.push({
+  const num = (x) => { const n = parseFloat(x); return isFinite(n) ? +n.toFixed(2) : 0; };
+  const callRange = async (from, to, isFirst) => {
+    const user = `This is pages ${from}\u2013${to} of ${totalPages} of ONE long UK business bank statement.${ctx.hint ? ' Context: ' + ctx.hint : ''}
+${isFirst ? 'FIRST check what this document is: a MARKETPLACE/payment-processor statement (eBay, Shopify, PayPal\u2026) sets "notABankStatement": true with empty transactions. A business credit card (e.g. Capital on Tap) is fine. Identify the BANK (Monzo, Wise, Mettle, ANNA Money, Barclays\u2026), account holder and period.\n' : 'The bank and account were identified from the first pages \u2014 just extract this range\u2019s rows.\n'}Extract EVERY transaction row visible on THESE pages exactly as printed (money in / money out as separate positive numbers, dates YYYY-MM-DD). Skip summary/carried-forward lines. For each row also guess: type ("sale_receipt","payout","supplier","shipping","rent","utilities","software","food","office","fuel","bank_fees","wages","tax_hmrc","transfer" \u2014 including repayments to a business credit card,"refund","sundry","other"), payoutPlatform ("ebay"|"shopify"|"paypal"|"stripe"|null), vatLikely (true only for UK-VAT-bearing outgoings), counterparty.
+Reply ONLY: {"notABankStatement":false,"bank":"...","accountName":"...","sortCodeOrIban":null,"periodStart":null,"periodEnd":null,"currency":"GBP","transactions":[{"date":"YYYY-MM-DD","description":"...","moneyIn":0,"moneyOut":0,"balance":null,"type":"other","payoutPlatform":null,"vatLikely":false,"counterparty":null}],"confidence":<0..1>,"notes":"..."}`;
+    const doc = await chunkB64(from, to);
+    const call = (maxTok) => callClaude({
+      kind: 'bank_statement', system: 'You are a meticulous UK bookkeeper. You extract bank statements exactly as printed \u2014 every line, correct amounts, no inventions. Reply with ONLY JSON.',
+      user, model: cfg.smartModel, maxTokens: maxTok, timeoutMs: 540000,
+      documents: [{ base64: doc, mediaType: 'application/pdf' }],
+    });
+    try { return await call(60000); }
+    catch (e) {
+      // Model with a lower output ceiling → one retry at a safe cap.
+      if (/max_tokens|maximum.*tokens/i.test(e.message)) return call(16000);
+      throw e;
+    }
+  };
+  // Parse a range; truncated/unparsable output splits the range in half.
+  const parseRange = async (from, to, isFirst) => {
+    let out = null, err = null;
+    try { out = await callRange(from, to, isFirst); } catch (e) { err = e; }
+    const truncated = out && (out.stopReason === 'max_tokens' || !out.json);
+    if ((err && err.code !== 'budget') || truncated) {
+      if (to > from) {
+        const mid = Math.floor((from + to) / 2);
+        const a = await parseRange(from, mid, isFirst);
+        const b = await parseRange(mid + 1, to, false);
+        return { meta: a.meta || b.meta, txs: [...a.txs, ...b.txs], failed: [...a.failed, ...b.failed], marketplace: a.marketplace || b.marketplace };
+      }
+      return { meta: null, txs: [], failed: [`page ${from}${err ? ' (' + err.message + ')' : ' (output truncated)'}`], marketplace: false };
+    }
+    if (err) {   // budget exhausted \u2014 no point recursing
+      return { meta: null, txs: [], failed: [`pages ${from}\u2013${to} (${err.message})`], marketplace: false };
+    }
+    const j = out.json;
+    if (isFirst && j.notABankStatement) return { meta: j, txs: [], failed: [], marketplace: true };
+    const txs = (Array.isArray(j.transactions) ? j.transactions : [])
+      .filter(t => t && t.date && (num(t.moneyIn) > 0 || num(t.moneyOut) > 0))
+      .map(t => ({
         date: String(t.date).slice(0, 10),
         description: String(t.description || '').slice(0, 300),
         moneyIn: Math.max(0, num(t.moneyIn)), moneyOut: Math.max(0, num(t.moneyOut)),
@@ -674,23 +681,36 @@ Reply ONLY: {"notABankStatement":false,"bank":"...","accountName":"...","sortCod
         payoutPlatform: t.payoutPlatform ? String(t.payoutPlatform).slice(0, 20) : null,
         vatLikely: !!t.vatLikely,
         counterparty: t.counterparty ? String(t.counterparty).slice(0, 120) : null,
-      });
-    }
+      }));
+    return { meta: j, txs, failed: [], marketplace: false };
+  };
+  // Work the ranges with two in flight.
+  const ranges = [];
+  for (let s2 = 1; s2 <= totalPages; s2 += 8) ranges.push([s2, Math.min(totalPages, s2 + 7)]);
+  const results = new Array(ranges.length);
+  let next = 0;
+  const worker = async () => { while (next < ranges.length) { const i = next++; results[i] = await parseRange(ranges[i][0], ranges[i][1], i === 0); } };
+  await Promise.all([worker(), worker()]);
+  if (results[0] && results[0].marketplace) {
+    const m = results[0].meta || {};
+    return { notABankStatement: true, bank: 'Unknown', accountName: null, sortCodeOrIban: null, periodStart: null, periodEnd: null, currency: 'GBP', confidence: 0.9, notes: m.notes || 'marketplace statement', transactions: [] };
   }
+  const meta = (results.find(r => r && r.meta) || {}).meta || {};
+  const txs = results.flatMap(r => (r ? r.txs : []));
+  const failed = results.flatMap(r => (r ? r.failed : []));
   const dates = txs.map(t => t.date).sort();
-  const confs = parts.filter(p => p && !p.__error).map(p => Math.max(0, Math.min(1, +p.confidence || 0)));
   return {
     notABankStatement: false,
-    bank: String(first.bank || 'Unknown').slice(0, 60),
-    accountName: first.accountName ? String(first.accountName).slice(0, 120) : null,
-    sortCodeOrIban: first.sortCodeOrIban ? String(first.sortCodeOrIban).slice(0, 60) : null,
+    bank: String(meta.bank || 'Unknown').slice(0, 60),
+    accountName: meta.accountName ? String(meta.accountName).slice(0, 120) : null,
+    sortCodeOrIban: meta.sortCodeOrIban ? String(meta.sortCodeOrIban).slice(0, 60) : null,
     periodStart: dates[0] || null, periodEnd: dates[dates.length - 1] || null,
-    currency: String(first.currency || 'GBP').slice(0, 6),
-    confidence: confs.length ? Math.min(...confs) : 0,
-    notes: `Long statement parsed in ${chunks.length} parts (${chunks[0].total} pages)` +
-      (failedParts.length ? ` — ⚠ ${failedParts.join(', ')} FAILED: those pages' transactions are missing, re-upload to retry.` : '.') +
-      (first.notes ? ' ' + String(first.notes).slice(0, 200) : ''),
-    transactions: txs.slice(0, 10000),
+    currency: String(meta.currency || 'GBP').slice(0, 6),
+    confidence: failed.length ? 0.7 : 0.95,
+    notes: `Long statement parsed in page chunks (${totalPages} pages, adaptive)` +
+      (failed.length ? ` \u2014 \u26a0 FAILED: ${failed.join(', ')} \u2014 those pages' rows are missing; re-upload to retry.` : '.') +
+      (meta.notes ? ' ' + String(meta.notes).slice(0, 200) : ''),
+    transactions: txs.slice(0, 20000),
   };
 }
 
