@@ -23053,7 +23053,7 @@ async function bkLoadPlatform() {
           <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
             ${status}${nExtra ? `<span class="pill amber" style="font-size:10px">${nExtra} in bank not on statement</span>` : ''}
             <button class="btn btn-outline btn-sm" onclick="bkPlatformDetail(${s.id})">Breakdown</button>
-            <button class="btn btn-ghost btn-sm" onclick="bkRematchPlatform(${s.id})" title="Re-check against the bank (after uploading more bank statements)">↻</button>
+            <button class="btn btn-ghost btn-sm" onclick="bkRematchPlatform(${s.id}, this)" title="Re-check against the bank (after uploading more bank statements)">↻</button>
             <a class="btn btn-ghost btn-sm" href="/api/books/platform-statements/${s.id}/file" target="_blank">PDF</a>
             <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="bkDeletePlatform(${s.id})">🗑</button>
           </div></div>
@@ -23136,13 +23136,20 @@ function bkPlatformDetail(id) {
     actions: [{ label: 'Close', primary: true, onClick: closeModal }],
   });
 }
-async function bkRematchPlatform(id) {
+async function bkRematchPlatform(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  toast('↻ Re-checking payouts against the bank…', 'info', 2500);
   try {
     const r = await Api.post('/api/books/platform-statements/' + id + '/rematch', {});
-    const n = (r.reconciliation?.missingFromBank || []).length;
-    toast(n === 0 ? '✓ All payouts now matched' : '⚠ still ' + n + ' payout(s) missing from the bank', n === 0 ? 'success' : 'warn');
+    const rec = r.reconciliation || {};
+    const n = (rec.missingFromBank || []).length;
+    const matched = (rec.matched || []).length;
+    toast(n === 0
+      ? `✓ All ${matched} payouts now matched in the bank`
+      : `Re-checked: ${matched} matched · ⚠ ${n} still missing (£${(rec.totals?.missingFromBank || 0).toFixed(2)}) — usually that period's bank statement isn't uploaded`, n === 0 ? 'success' : 'warn', 8000);
     bkLoadPlatform();
-  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  } catch (e) { toast('Re-match failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) { btn.disabled = false; btn.textContent = '↻'; }
 }
 async function bkDeletePlatform(id) {
   if (!confirm('Delete this marketplace statement from Books? (Bank transactions keep any payout IDs already stamped.)')) return;
