@@ -730,13 +730,13 @@ async function parsePlatformStatement(pdfBase64, ctx = {}) {
   const user = `Read this marketplace/payments statement PDF (eBay monthly financial statement, Shopify payouts statement, or similar) carefully.
 
 ${ctx.hint ? 'Context from the user: ' + ctx.hint + '\n' : ''}Extract:
-1. The platform (ebay, shopify, paypal, stripe…), the statement period (these are usually MONTHLY statements), currency.
+1. The platform (ebay, shopify, paypal, stripe…), the statement period (these are usually MONTHLY statements), currency — and the ACCOUNT the statement belongs to: the eBay seller username / shop name (or Shopify store name) printed on it, e.g. "calibre_autoparts". Businesses run several marketplace accounts, so this name is how they tell statements apart. Prefer the seller username/shop name over the registered company name; null if truly not printed.
 2. The SUMMARY money flow: the OPENING BALANCE (funds carried over from the previous month, not yet paid out at the start of the period), gross sales/orders total, refunds given, selling fees (FVF + fixed), postage/shipping labels bought, advertising/promoted-listings charges, any other deductions or charges, the total actually PAID OUT during the period, and the CLOSING BALANCE (funds still pending at the end, carried into next month). Opening + gross − deductions − paid out = closing; say in notes if the statement's own numbers don't add up.
 3. EVERY individual payout listed, with its date, payout id/reference (e.g. "P*7693951408" — keep it exactly as printed) and amount.
 NOTE: eBay issues TWO statement variants. The FULL statement lists every payout and itemised transactions; the SUMMARY-ONLY version has only aggregated category totals and NO payout list. If this is the summary-only version, return "payouts": [] and say "summary-only statement — no payout list" in notes (never invent payouts from totals).
 
 Reply with ONLY this JSON:
-{"platform":"ebay"|"shopify"|"paypal"|"stripe"|"other","periodStart":"YYYY-MM-DD","periodEnd":"YYYY-MM-DD","currency":"GBP",
+{"platform":"ebay"|"shopify"|"paypal"|"stripe"|"other","accountName":"<seller username/shop name as printed, or null>","periodStart":"YYYY-MM-DD","periodEnd":"YYYY-MM-DD","currency":"GBP",
  "summary":{"openingBalance":<n, signed>,"grossSales":<n>,"refunds":<n>,"fees":<n>,"postageLabels":<n>,"advertising":<n>,"otherDeductions":<n>,"netPayouts":<n>,"closingBalance":<n, signed>},
  "payouts":[{"date":"YYYY-MM-DD","payoutId":"...","amount":<n>}],
  "confidence":<0..1>,"notes":"<anything odd: unreadable pages, totals not adding up>"}
@@ -754,6 +754,7 @@ Do not invent numbers; if a summary line isn't on the statement use 0 and say so
   const s = v.summary || {};
   return {
     platform: ['ebay', 'shopify', 'paypal', 'stripe'].includes(v.platform) ? v.platform : 'other',
+    accountName: v.accountName ? String(v.accountName).slice(0, 120) : null,
     periodStart: v.periodStart || null, periodEnd: v.periodEnd || null,
     currency: String(v.currency || 'GBP').slice(0, 6),
     summary: {

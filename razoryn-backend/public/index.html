@@ -23063,7 +23063,9 @@ async function bkLoadPlatform() {
       return `<div style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-bottom:6px">
         <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center">
           <div><strong style="text-transform:uppercase">${escapeHtml(s.platform || '?')}</strong>
-            <span style="color:var(--ink-soft)">${s.period_start ? bkUkDate(s.period_start) + ' → ' + bkUkDate(s.period_end) : escapeHtml(s.label || '')}
+            ${(s.label || s.account_name) ? `<span class="pill blue" style="font-size:10px" title="Marketplace account (read off the statement — ✎ to rename)">${escapeHtml(s.label || s.account_name)}</span>` : ''}
+            <button class="btn btn-ghost btn-sm" style="padding:0 4px" onclick="bkLabelPlatform(${s.id})" title="Name which marketplace account this statement belongs to">✎</button>
+            <span style="color:var(--ink-soft)">${s.period_start ? bkUkDate(s.period_start) + ' → ' + bkUkDate(s.period_end) : ''}
             · net paid out ${gbp((s.summary || {}).netPayouts || t.statementPayouts || 0)}</span></div>
           <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
             ${status}${nExtra ? `<span class="pill amber" style="font-size:10px">${nExtra} in bank not on statement</span>` : ''}
@@ -23084,6 +23086,7 @@ function bkUploadPlatform() {
       <div style="font-size:13px;color:var(--ink-soft);margin-bottom:12px">Claude reads it, pulls the payout list and the deduction breakdown (fees, postage labels, advertising, refunds), then checks every payout against the bank transactions already uploaded — matches get the payout ID stamped on the bank line, and anything missing shows with the total difference.</div>
       <div style="font-size:12px;background:var(--blue-light);color:var(--blue);border-radius:7px;padding:8px 10px;margin-bottom:12px">💡 Use eBay's <strong>FULL monthly statement</strong> (the one with the transaction breakdown) — the summary-only PDF has no payout list, so there's nothing to match against the bank.</div>
       <div class="field"><label>Platform</label><select id="bkp-platform"><option value="ebay">eBay (monthly financial statement)</option><option value="shopify">Shopify (payouts)</option><option value="">Other / let Claude work it out</option></select></div>
+      <div class="field"><label>Account name <span style="color:var(--ink-soft);font-weight:400">(optional — for telling multiple eBay accounts apart; Claude also reads the username off the statement)</span></label><input id="bkp-label" placeholder="e.g. calibre_autoparts / second eBay account"></div>
       <div class="field"><label>Statement PDF</label><input type="file" id="bkp-file" accept="application/pdf"></div>
     `,
     actions: [
@@ -23098,6 +23101,7 @@ async function bkDoUploadPlatform() {
   const fd = new FormData();
   fd.append('statement', file);
   if (el('bkp-platform')?.value) fd.append('platform', el('bkp-platform').value);
+  if (el('bkp-label')?.value?.trim()) fd.append('label', el('bkp-label').value.trim());
   closeModal();
   const taskId = Task.start('Claude is reading the marketplace statement…');
   try {
@@ -23122,7 +23126,7 @@ function bkPlatformDetail(id) {
   const dedTotal = +(sum.refunds + sum.fees + sum.postageLabels + sum.advertising + sum.otherDeductions || 0).toFixed(2);
   const row = (l, v, strong) => `<div style="display:flex;justify-content:space-between;padding:4px 0;${strong ? 'font-weight:700;border-top:1px solid var(--line);margin-top:4px;padding-top:8px' : ''}"><span>${l}</span><span>${v}</span></div>`;
   modal({
-    title: (s.platform || '').toUpperCase() + ' statement — ' + (s.period_start ? bkUkDate(s.period_start) + ' → ' + bkUkDate(s.period_end) : ''),
+    title: (s.platform || '').toUpperCase() + ((s.label || s.account_name) ? ' · ' + (s.label || s.account_name) : '') + ' — ' + (s.period_start ? bkUkDate(s.period_start) + ' → ' + bkUkDate(s.period_end) : ''),
     body: `
       <div style="font-weight:600;font-size:13px;margin-bottom:6px">Where the money went (why the banked number is smaller than sales)</div>
       <div style="font-size:13px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:12px">
@@ -23165,6 +23169,16 @@ async function bkRematchPlatform(id, btn) {
     bkLoadPlatform();
   } catch (e) { toast('Re-match failed: ' + (e.data?.message || e.message), 'error'); }
   if (btn) { btn.disabled = false; btn.textContent = '↻'; }
+}
+async function bkLabelPlatform(id) {
+  const s = _bkPlatform.find(x => x.id === id);
+  const raw = prompt('Which marketplace account is this statement for?\n(e.g. the eBay username or the name your team knows it by — blank clears a manual name)', s?.label || s?.account_name || '');
+  if (raw === null) return;
+  try {
+    await Api.patch('/api/books/platform-statements/' + id, { label: String(raw).trim() });
+    toast(String(raw).trim() ? '✓ Statement named “' + String(raw).trim() + '”' : 'Name cleared', 'success');
+    bkLoadPlatform();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function bkDeletePlatform(id) {
   if (!confirm('Delete this marketplace statement from Books? (Bank transactions keep any payout IDs already stamped.)')) return;
