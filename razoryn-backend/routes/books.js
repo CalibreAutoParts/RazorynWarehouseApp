@@ -879,13 +879,20 @@ async function reconcilePlatformStatement(parsed) {
       rec.missingFromBank.push({ payoutId: p.payoutId, date: p.date, amount: p.amount });
     }
   }
-  // Bank payouts in the period that the statement doesn't list.
+  // Bank payouts in the period that the statement doesn't list. With
+  // several eBay accounts paying into the SAME bank, the other account's
+  // payouts land here too — a line already stamped with a payout_ref that
+  // this statement didn't match was claimed by ANOTHER statement, so it
+  // isn't "extra", it's the sibling account's money.
+  let otherAccount = 0;
   for (const b of bank) {
     const d = isoDay(b.tx_date);
     if (!used.has(b.id) && from && to && d >= from && d <= to) {
+      if (b.payout_ref) { otherAccount++; continue; }
       rec.extraInBank.push({ bankTxId: b.id, date: d, amount: +parseFloat(b.money_in).toFixed(2), description: b.description });
     }
   }
+  rec.otherAccountInBank = otherAccount;
   const sum = (a) => +a.reduce((x, y) => x + (y.amount || 0), 0).toFixed(2);
   const S = parsed.summary || {};
   const n = (x) => +(parseFloat(x) || 0);
@@ -908,6 +915,26 @@ async function reconcilePlatformStatement(parsed) {
     carryCheckDiff: S.closingBalance !== undefined ? +(expectedClosing - n(S.closingBalance)).toFixed(2) : null,
   };
   return rec;
+}
+
+// After one statement matches (stamping payout_refs on bank lines), the
+// OTHER statements of the same platform re-check too — so with several
+// eBay accounts, each statement stops counting the siblings' payouts as
+// "in bank not on statement", whatever order they were uploaded in.
+async function rematchSiblingStatements(platform, excludeId) {
+  try {
+    const { rows } = await query(`SELECT * FROM platform_statements WHERE platform = $1 AND id <> $2 ORDER BY created_at DESC LIMIT 24`, [platform, excludeId]);
+    for (const st of rows) {
+      try {
+        const parsed = {
+          platform: st.platform, periodStart: isoDay(st.period_start), periodEnd: isoDay(st.period_end),
+          summary: st.summary || {}, payouts: Array.isArray(st.payouts) ? st.payouts : [],
+        };
+        const rec = await reconcilePlatformStatement(parsed);
+        await query(`UPDATE platform_statements SET reconciliation = $1::jsonb WHERE id = $2`, [JSON.stringify(rec), st.id]);
+      } catch (e) { console.warn('[books] sibling rematch', st.id, ':', e.message); }
+    }
+  } catch (e) { console.warn('[books] sibling rematch:', e.message); }
 }
 
 router.post('/platform-statements', upload.single('statement'), async (req, res) => {
@@ -934,6 +961,7 @@ router.post('/platform-statements', upload.single('statement'), async (req, res)
     [parsed.platform, req.body.label || null, parsed.accountName || null, relPath, parsed.periodStart, parsed.periodEnd, parsed.currency,
      JSON.stringify(parsed.summary), JSON.stringify(parsed.payouts), JSON.stringify(reconciliation),
      parsed.confidence, parsed.notes, req.user.id]);
+  await rematchSiblingStatements(parsed.platform, st.rows[0].id);
   await audit(req, 'books_platform_statement', 'platform_statement', st.rows[0].id, {
     platform: parsed.platform, payouts: parsed.payouts.length, matched: reconciliation.matched.length, missing: reconciliation.missingFromBank.length,
   });
@@ -983,6 +1011,7 @@ router.post('/platform-statements/:id/rematch', async (req, res) => {
     };
     const reconciliation = await reconcilePlatformStatement(parsed);
     await query(`UPDATE platform_statements SET reconciliation = $1::jsonb WHERE id = $2`, [JSON.stringify(reconciliation), st.id]);
+    await rematchSiblingStatements(st.platform, st.id);
     res.json({ ok: true, reconciliation });
   } catch (e) {
     console.error('[books] rematch failed:', (e && e.stack) || e);
