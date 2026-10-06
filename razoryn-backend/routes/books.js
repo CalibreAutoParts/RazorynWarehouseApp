@@ -182,6 +182,9 @@ async function ensureTables() {
       uploaded_by INTEGER,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
+    // Which marketplace ACCOUNT the statement belongs to (seller username /
+    // shop name read off the PDF) — businesses run several eBay accounts.
+    await query(`ALTER TABLE platform_statements ADD COLUMN IF NOT EXISTS account_name TEXT`);
     _ready = true;
   } catch (e) { console.warn('[books] migration:', e.message); }
 }
@@ -926,9 +929,9 @@ router.post('/platform-statements', upload.single('statement'), async (req, res)
   }
   const relPath = path.relative(UPLOAD_DIR, req.file.path);
   const st = await query(
-    `INSERT INTO platform_statements (platform, label, file_path, period_start, period_end, currency, summary, payouts, reconciliation, ai_confidence, ai_notes, uploaded_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,$12) RETURNING *`,
-    [parsed.platform, req.body.label || null, relPath, parsed.periodStart, parsed.periodEnd, parsed.currency,
+    `INSERT INTO platform_statements (platform, label, account_name, file_path, period_start, period_end, currency, summary, payouts, reconciliation, ai_confidence, ai_notes, uploaded_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13) RETURNING *`,
+    [parsed.platform, req.body.label || null, parsed.accountName || null, relPath, parsed.periodStart, parsed.periodEnd, parsed.currency,
      JSON.stringify(parsed.summary), JSON.stringify(parsed.payouts), JSON.stringify(reconciliation),
      parsed.confidence, parsed.notes, req.user.id]);
   await audit(req, 'books_platform_statement', 'platform_statement', st.rows[0].id, {
@@ -940,6 +943,18 @@ router.get('/platform-statements', async (req, res) => {
   await ensureTables();
   const { rows } = await query(`SELECT * FROM platform_statements ORDER BY period_start DESC NULLS LAST, created_at DESC LIMIT 100`);
   res.json({ statements: rows });
+});
+// Name/rename a statement's account label — for statements uploaded before
+// account names were captured, or when the printed username isn't the name
+// the team knows the account by.
+router.patch('/platform-statements/:id', async (req, res) => {
+  await ensureTables();
+  const label = req.body && req.body.label !== undefined ? (String(req.body.label).trim().slice(0, 120) || null) : undefined;
+  if (label === undefined) return res.status(400).json({ error: 'no_fields' });
+  const r = await query(`UPDATE platform_statements SET label = $1 WHERE id = $2 RETURNING *`, [label, req.params.id]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  await audit(req, 'books_platform_statement_label', 'platform_statement', req.params.id, { label });
+  res.json({ ok: true, statement: r.rows[0] });
 });
 router.delete('/platform-statements/:id', async (req, res) => {
   await ensureTables();
