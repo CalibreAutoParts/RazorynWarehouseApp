@@ -821,17 +821,23 @@ async function reconcilePlatformStatement(parsed) {
   const pat = parsed.platform === 'ebay' ? '(ebay|managed payments)'
     : parsed.platform === 'shopify' ? '(shopify|shopi)'
     : parsed.platform;
+  // The payout reference can land in the description OR the counterparty
+  // (ANNA's parse put the P* codes there) — scan both everywhere.
   const { rows: bank } = await query(`
-    SELECT id, tx_date, description, money_in, payout_ref FROM bank_transactions
+    SELECT id, tx_date, description, counterparty, money_in, payout_ref FROM bank_transactions
      WHERE money_in > 0
        AND tx_date BETWEEN COALESCE($1::date, '1970-01-01') - interval '7 days' AND COALESCE($2::date, now()::date) + interval '7 days'
-       AND (payout_platform = $3 OR description ~* $4)`,
+       AND (payout_platform = $3 OR description ~* $4 OR counterparty ~* $4
+            OR description ~* 'P\\*[0-9]{6,}' OR counterparty ~* 'P\\*[0-9]{6,}')`,
     [from, to, parsed.platform, pat]);
   const used = new Set();
+  const bankText = (b) => (b.description || '') + ' ' + (b.counterparty || '') + ' ' + (b.payout_ref || '');
   for (const p of parsed.payouts) {
     const pid = normPayoutId(p.payoutId);
-    // 1. payout id printed in the bank description; 2. unique amount ±4 days.
-    let hit = pid ? bank.find(b => !used.has(b.id) && normPayoutId(b.description).includes(pid) && pid.length >= 6) : null;
+    // 1. payout id printed anywhere on the bank line; 2. unique amount ±4 days.
+    let hit = (pid && pid.length >= 6)
+      ? bank.find(b => !used.has(b.id) && (bankText(b).match(/\d{6,}/g) || []).some(run => run.includes(pid)))
+      : null;
     if (!hit) {
       const cands = bank.filter(b => !used.has(b.id) && Math.abs(parseFloat(b.money_in) - p.amount) < 0.01
         && Math.abs((new Date(b.tx_date) - new Date(p.date)) / 86400000) <= 4);
