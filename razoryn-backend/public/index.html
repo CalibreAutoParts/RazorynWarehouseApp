@@ -22495,6 +22495,10 @@ function renderBooks() {
       </div>
       <div id="bk-summary" class="grid-4" style="margin-bottom:14px"></div>
       <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>📋 Period readiness</h3><div class="card-desc">Is everything in for this period? Bank statements uploaded, marketplace statements per account per month, every payout explained, income linked, VAT receipts cleared.</div></div>
+        <div class="card-body"><div id="bk-readiness" style="font-size:13px;color:var(--ink-soft)">—</div></div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
         <div class="card-head"><h3>📤 Export &amp; share with the accountant</h3></div>
         <div class="card-body">
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -22522,6 +22526,7 @@ function renderBooks() {
       </div>
       <div class="card" style="margin-bottom:14px">
         <div class="card-head"><h3>Transactions</h3><div class="card-desc">Link each line to an invoice or payout, set the VAT, attach receipts. Claude pre-fills most of it from the statement.</div>
+          <input id="bk-search" placeholder="🔍 Filter — ebay, royal mail, INV-148, 450.00…" style="font-size:12px;min-width:220px" oninput="BK.q=this.value;bkPaintTxs()">
           <label class="btn btn-ghost btn-sm" style="cursor:pointer" title="Got a folder of receipts (e.g. Mettle's export ships a receipts/ folder)? Select them all — each file is matched by the date in its filename to the right transaction.">📎 Bulk-attach receipts<input type="file" multiple accept=".pdf,image/*" style="display:none" onchange="bkBulkReceipts(this.files)"></label></div>
         <div class="card-body" style="padding:0"><div id="bk-txs" style="font-size:12.5px">Loading…</div></div>
       </div>
@@ -22671,7 +22676,40 @@ async function bkLoad() {
     bkPaintStatements(st.statements || []);
     bkPaintTxs();
     bkPaintFollowups();
+    bkLoadReadiness();
   } catch (e) { toast('Books load failed: ' + (e.data?.message || e.message), 'error'); }
+}
+// ── Period readiness — one bar answering "is this quarter/month complete?" ─
+async function bkLoadReadiness() {
+  const box = el('bk-readiness'); if (!box || !BK.from || !BK.to) return;
+  try {
+    const r = await Api.get(`/api/books/readiness?from=${BK.from}&to=${BK.to}`);
+    const barColor = (p) => p >= 100 ? 'var(--green)' : p >= 70 ? 'var(--amber, orange)' : 'var(--red)';
+    const bar = (p, h) => `<div style="flex:1;min-width:120px;background:var(--line);border-radius:99px;height:${h}px;overflow:hidden"><div style="width:${Math.min(100, p)}%;height:100%;background:${barColor(p)};border-radius:99px"></div></div>`;
+    const mn = (m) => ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(m.slice(5, 7)) - 1] + ' ' + m.slice(2, 4);
+    const row = (label, pct, detail) => `<div style="display:flex;gap:10px;align-items:center;margin-top:9px;flex-wrap:wrap">
+      <div style="width:190px;font-weight:600;font-size:12px">${pct >= 100 ? '✅' : '⬜'} ${label}</div>${bar(pct, 8)}
+      <div style="width:42px;text-align:right;font-weight:700;font-size:12px;color:${barColor(pct)}">${pct}%</div>
+      <div style="flex-basis:100%;font-size:11.5px;color:var(--ink-soft);margin-left:190px;margin-top:-2px">${detail}</div></div>`;
+    const bankDetail = (r.bank.accounts || []).length
+      ? r.bank.accounts.map(a => a.pct >= 100
+          ? `<span style="color:var(--green)">✓ ${escapeHtml(a.name)}</span>`
+          : `⚠ ${escapeHtml(a.name)}: missing ${a.gaps.map(g => bkUkDate(g.from) + '→' + bkUkDate(g.to)).join(', ')}`).join(' · ')
+      : 'No bank statements uploaded for any account yet.';
+    const mkDetail = (r.marketplace.accounts || []).length
+      ? r.marketplace.accounts.map(a => `${escapeHtml((a.platform || '').toUpperCase())} ${escapeHtml(a.name)}: ` + a.months.map(m => `${mn(m.month)} ${m.covered ? '✓' : '<span style="color:var(--red)">✗</span>'}`).join(' ')).join(' · ')
+      : 'No marketplace statements uploaded yet (fine if this period has no eBay/Shopify payouts).';
+    box.innerHTML = `
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <div style="font-size:26px;font-weight:800;color:${barColor(r.overallPct)}">${r.overallPct}%</div>${bar(r.overallPct, 14)}
+        <div style="font-size:12px;color:var(--ink-soft)">${r.overallPct >= 100 ? 'Everything is in for this period — ready for the accountant.' : 'Still missing pieces — each line below says exactly what.'}</div>
+      </div>
+      ${row('Bank statements', r.bank.pct, bankDetail)}
+      ${row('Marketplace statements', r.marketplace.pct, mkDetail)}
+      ${row('Payouts explained', r.payouts.pct, r.payouts.total ? `${r.payouts.explained} of ${r.payouts.total} payout deposits claimed by a statement${r.payouts.pct < 100 ? ' — upload the missing account/month statement, then hit ↻ on it' : ''}` : 'No payout-looking deposits in this period.')}
+      ${row('Income linked', r.income.pct, r.income.total ? `${r.income.explained} of ${r.income.total} money-in lines linked to an invoice, payout or transfer${r.income.pct < 100 ? ' — use 🧾 on the unmatched lines (filter: unmatched)' : ''}` : 'No money-in lines in this period.')}
+      ${row('VAT receipts', r.vatReceipts.pct, r.vatReceipts.outstanding ? `${r.vatReceipts.outstanding} receipt${r.vatReceipts.outstanding === 1 ? '' : 's'} still outstanding — see the chase list below` : 'Chase list clear.')}`;
+  } catch (e) { box.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
 }
 function bkPaintSummary(s) {
   const box = el('bk-summary'); if (!box) return;
@@ -22713,9 +22751,25 @@ function bkChip(t) {
 function bkPaintTxs() {
   const box = el('bk-txs'); if (!box) return;
   if (!BK.txs.length) { box.innerHTML = '<div style="padding:16px;color:var(--ink-soft)">No transactions in this period — upload a statement.</div>'; return; }
-  box.innerHTML = `<div style="overflow-x:auto"><table class="table" style="font-size:12px">
+  // Free-text filter: "ebay" shows every eBay line (description, payee,
+  // category, payout platform/ref, invoice number, notes, amount, date).
+  // "unmatched" / "unlinked" shows money-in lines not yet explained.
+  const q = String(BK.q || '').trim().toLowerCase();
+  let txs = BK.txs;
+  if (q === 'unmatched' || q === 'unlinked') {
+    txs = BK.txs.filter(t => t.money_in > 0 && !t.sale_id && !t.payout_ref && !t.match_type && !(Array.isArray(t.allocations) && t.allocations.length));
+  } else if (q) {
+    txs = BK.txs.filter(t => [
+      t.description, t.counterparty, t.notes, t.category, t.payout_platform, t.payout_ref,
+      t.invoice_number, t.tx_date ? bkUkDate(t.tx_date) : null, t.money_in, t.money_out,
+      ...(Array.isArray(t.allocations) ? t.allocations.map(a => a.invoiceNumber) : []),
+    ].some(v => v != null && String(v).toLowerCase().includes(q)));
+  }
+  if (!txs.length) { box.innerHTML = `<div style="padding:16px;color:var(--ink-soft)">No transactions match “${escapeHtml(BK.q || '')}” in this period.</div>`; return; }
+  const countBar = q ? `<div style="padding:7px 12px;font-size:11.5px;color:var(--ink-soft);border-bottom:1px solid var(--line)">Showing ${txs.length} of ${BK.txs.length} transactions matching “${escapeHtml(BK.q)}” — in ${gbp(txs.reduce((a, t) => a + (parseFloat(t.money_in) || 0), 0))} · out ${gbp(txs.reduce((a, t) => a + (parseFloat(t.money_out) || 0), 0))}</div>` : '';
+  box.innerHTML = countBar + `<div style="overflow-x:auto"><table class="table" style="font-size:12px">
     <thead><tr><th>Date</th><th style="min-width:220px">Description</th><th class="num">In</th><th class="num">Out</th><th>Category</th><th>Linked to</th><th class="num">VAT £</th><th>Receipt</th><th></th></tr></thead><tbody>
-    ${BK.txs.map(t => `<tr id="bk-tx-${t.id}">
+    ${txs.map(t => `<tr id="bk-tx-${t.id}">
       <td style="white-space:nowrap;color:var(--ink-soft)">${bkUkDate(t.tx_date)}</td>
       <td><div>${escapeHtml(t.description || '')}</div>${t.counterparty ? `<div style="font-size:10.5px;color:var(--ink-soft)">${escapeHtml(t.counterparty)}</div>` : ''}${t.notes ? `<div style="font-size:10.5px;color:var(--blue)">✎ ${escapeHtml(t.notes)}</div>` : ''}</td>
       <td class="num" style="color:var(--green);font-weight:600">${t.money_in > 0 ? gbp(t.money_in) : ''}</td>
