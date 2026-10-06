@@ -115,6 +115,9 @@ async function ensureTables() {
     // Receipt FILE NAME referenced by the bank's own export (Mettle's column
     // names the attached receipt per row) — bulk attach matches on it exactly.
     await query(`ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS receipt_ref TEXT`);
+    // Statement reads run in the BACKGROUND (a 60-page PDF takes minutes —
+    // far longer than a proxy keeps an HTTP request alive).
+    await query(`ALTER TABLE bank_statements ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'done'`);
     // VAT % for receipt-less but clearly VAT-inclusive charges (Royal Mail
     // tracked, FedEx domestic…) — the VAT amount back-calculates from gross.
     await query(`ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS vat_rate NUMERIC(5,2)`);
@@ -289,61 +292,63 @@ async function autoMatchTransaction(t) {
   };
 }
 
+// Statement upload — returns IMMEDIATELY (202) and reads in the background:
+// a 60-page from-account-opening PDF takes minutes, far longer than the
+// hosting proxy keeps a request open (the http_502 failure). The frontend
+// polls the statements list until status flips to done/failed.
 router.post('/statements', upload.single('statement'), async (req, res) => {
   await ensureTables();
   if (!req.file) return res.status(400).json({ error: 'statement_file_required' });
   const ai = require('../services/ai');
   if (!ai.isConfigured()) return res.status(400).json({ error: 'ai_not_configured', message: 'Set ANTHROPIC_API_KEY first — the statement reader runs on Claude.' });
   const accountId = req.body.accountId ? parseInt(req.body.accountId) : null;
-  // CSV / Excel exports are EXACT (no PDF reading) — preferred when the bank
-  // offers them (Mettle, Wise, Capital on Tap all do). PDFs still work.
-  const ext = path.extname(req.file.originalname || req.file.path).toLowerCase();
+  const relPath = path.relative(UPLOAD_DIR, req.file.path);
+  const st = await query(
+    `INSERT INTO bank_statements (account_id, label, file_path, status, uploaded_by)
+     VALUES ($1,$2,$3,'processing',$4) RETURNING *`,
+    [accountId, req.body.label || req.file.originalname || null, relPath, req.user.id]);
+  await audit(req, 'books_statement_upload', 'bank_statement', st.rows[0].id, { file: req.file.originalname });
+  res.status(202).json({ ok: true, processing: true, statementId: st.rows[0].id });
+  setImmediate(() => processStatementFile({
+    statementId: st.rows[0].id, filePath: req.file.path,
+    originalName: req.file.originalname, accountId, hint: req.body.hint || null,
+  }).catch(e => {
+    console.error('[books] statement processing crashed:', e.message);
+    query(`UPDATE bank_statements SET status = 'failed', ai_notes = $2 WHERE id = $1`, [st.rows[0].id, String(e.message).slice(0, 500)]).catch(() => {});
+  }));
+});
+
+// The actual read + auto-match, off the request cycle.
+async function processStatementFile({ statementId, filePath, originalName, accountId, hint }) {
+  const ai = require('../services/ai');
+  const fail = async (msg) => {
+    await query(`UPDATE bank_statements SET status = 'failed', ai_notes = $2 WHERE id = $1`, [statementId, String(msg).slice(0, 500)]).catch(() => {});
+  };
+  // Build the source (CSV/Excel exact; PDF via Claude, chunked when long).
+  const ext = path.extname(originalName || filePath).toLowerCase();
   let source;
   try {
     if (ext === '.csv' || ext === '.txt') {
-      source = { csvText: fs.readFileSync(req.file.path, 'utf8'), filename: req.file.originalname };
+      source = { csvText: fs.readFileSync(filePath, 'utf8'), filename: originalName };
     } else if (ext === '.xlsx' || ext === '.xls') {
       const XLSX = require('xlsx');
-      const wb = XLSX.readFile(req.file.path);
-      source = { csvText: XLSX.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]]), filename: req.file.originalname };
+      const wb = XLSX.readFile(filePath);
+      source = { csvText: XLSX.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]]), filename: originalName };
     } else {
-      source = { pdfBase64: fs.readFileSync(req.file.path).toString('base64') };
+      source = { pdfBase64: fs.readFileSync(filePath).toString('base64') };
     }
-  } catch (e) { return res.status(422).json({ error: 'unreadable_file', message: e.message }); }
+  } catch (e) { return fail('Could not read the uploaded file: ' + e.message); }
   let parsed;
-  try {
-    parsed = await ai.parseBankStatement(source, { hint: req.body.hint || null });
-  } catch (e) {
-    return res.status(502).json({ error: e.code || 'parse_failed', message: e.message });
+  try { parsed = await ai.parseBankStatement(source, { hint }); }
+  catch (e) { return fail('Claude API: ' + e.message); }
+  if (parsed && parsed.notABankStatement) {
+    return fail('That\u2019s a marketplace statement (eBay/Shopify), not a bank statement — upload it under \ud83d\udcd1 Marketplace statements instead.' + (parsed.notes ? ' (' + parsed.notes + ')' : ''));
   }
   if (!parsed || !parsed.transactions.length) {
-    // A marketplace statement in the bank uploader would turn aggregated
-    // category totals into fake bank transactions — bounce it to the right place.
-    if (parsed && parsed.notABankStatement) {
-      try { fs.unlinkSync(req.file.path); } catch (_) {}
-      return res.status(422).json({
-        error: 'marketplace_statement',
-        message: 'That’s a marketplace statement (eBay/Shopify), not a bank statement — upload it under 📑 Marketplace statements instead, so the payouts get checked against the bank.' + (parsed.notes ? ' (' + parsed.notes + ')' : ''),
-      });
-    }
-    return res.status(422).json({ error: 'no_transactions', message: 'Claude couldn’t read any transactions from that PDF' + (parsed && parsed.notes ? ' — ' + parsed.notes : '') + '. Is it a text PDF (not a photo scan)?' });
+    return fail('Claude couldn\u2019t read any transactions' + (parsed && parsed.notes ? ' — ' + parsed.notes : '') + '. Is it a text PDF (not a photo scan)?');
   }
-  if (parsed.notABankStatement) {
-    try { fs.unlinkSync(req.file.path); } catch (_) {}
-    return res.status(422).json({
-      error: 'marketplace_statement',
-      message: 'That’s a marketplace statement (eBay/Shopify), not a bank statement — upload it under 📑 Marketplace statements instead, so the payouts get checked against the bank.',
-    });
-  }
-  const relPath = path.relative(UPLOAD_DIR, req.file.path);
-  const st = await query(
-    `INSERT INTO bank_statements (account_id, label, file_path, bank_detected, account_detected, period_start, period_end, tx_count, ai_confidence, ai_notes, uploaded_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-    [accountId, req.body.label || null, relPath, parsed.bank, parsed.accountName,
-     parsed.periodStart, parsed.periodEnd, parsed.transactions.length, parsed.confidence, parsed.notes, req.user.id]);
   // Which account do invoices EXPECT to be paid into? The starred one — and
-  // when none is starred yet, auto-detect it from the Settings bank details
-  // (the account name / numbers printed on our invoices).
+  // when none is starred yet, auto-detect it from the Settings bank details.
   let primary = (await query(`SELECT id, name FROM bank_accounts WHERE is_primary = true LIMIT 1`)).rows[0] || null;
   if (!primary && accountId) {
     try {
@@ -382,11 +387,8 @@ router.post('/statements', upload.single('statement'), async (req, res) => {
         }
       } catch (_) {}
     }
-    // Invoice money landing OUTSIDE the invoices account is an exception worth
-    // seeing (e.g. a customer who couldn't reach the usual bank paid into
-    // Wise) — the match still happens, with a note explaining it.
     const offPrimaryNote = (m.match_type === 'sale' && primary && accountId && accountId !== primary.id)
-      ? `⚠ Invoice payment received here — invoices are normally paid into the ${primary.name || 'invoices'} account (Settings bank details)`
+      ? `\u26a0 Invoice payment received here — invoices are normally paid into the ${primary.name || 'invoices'} account (Settings bank details)`
       : null;
     if (m.match_type === 'sale') autoLinked++;
     if (m.match_type === 'payout') payouts++;
@@ -395,12 +397,10 @@ router.post('/statements', upload.single('statement'), async (req, res) => {
       `INSERT INTO bank_transactions (statement_id, account_id, tx_date, description, counterparty, money_in, money_out, balance,
                                       category, match_type, sale_id, payout_platform, vat_likely, needs_vat_receipt, notes, receipt_ref, vat_rate, vat_amount)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
-      [st.rows[0].id, accountId, t.date, t.description, t.counterparty, t.moneyIn, t.moneyOut, t.balance,
+      [statementId, accountId, t.date, t.description, t.counterparty, t.moneyIn, t.moneyOut, t.balance,
        m.category || null, m.match_type || null, m.sale_id || null, m.payout_platform || t.payoutPlatform || null,
        !!t.vatLikely, !!m.needs_vat_receipt, offPrimaryNote, t.receiptRef || null,
        m.vat_rate != null ? m.vat_rate : null, m.vat_amount != null ? m.vat_amount : null]);
-    // A warehouse-recorded part-payment match becomes a real allocation (the
-    // exact recorded amount against that invoice).
     if (m.allocation && ins.rows[0]) {
       try {
         await query(`INSERT INTO bank_tx_allocations (tx_id, sale_id, amount) VALUES ($1,$2,$3)`,
@@ -408,13 +408,15 @@ router.post('/statements', upload.single('statement'), async (req, res) => {
       } catch (_) {}
     }
   }
-  await audit(req, 'books_statement_upload', 'bank_statement', st.rows[0].id, { bank: parsed.bank, tx: parsed.transactions.length, autoLinked, payouts });
-  res.status(201).json({
-    ok: true, statement: st.rows[0],
-    parsed: { bank: parsed.bank, accountName: parsed.accountName, period: [parsed.periodStart, parsed.periodEnd], confidence: parsed.confidence, notes: parsed.notes },
-    summary: { transactions: parsed.transactions.length, autoLinkedInvoices: autoLinked, payouts, receiptsNeeded },
-  });
-});
+  await query(
+    `UPDATE bank_statements SET status = 'done', bank_detected = $2, account_detected = $3,
+            period_start = $4, period_end = $5, tx_count = $6, ai_confidence = $7, ai_notes = $8
+      WHERE id = $1`,
+    [statementId, parsed.bank, parsed.accountName, parsed.periodStart, parsed.periodEnd,
+     parsed.transactions.length, parsed.confidence,
+     (parsed.notes || '') + ` | auto-linked ${autoLinked} invoice(s), ${payouts} payout(s), ${receiptsNeeded} need VAT receipts`]);
+  console.log('[books] statement', statementId, 'done:', parsed.transactions.length, 'tx');
+}
 
 router.get('/statements', async (req, res) => {
   await ensureTables();
