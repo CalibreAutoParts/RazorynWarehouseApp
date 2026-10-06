@@ -61,6 +61,10 @@ async function ensureTables() {
     // (Settings → bank details), i.e. where customer payments are EXPECTED.
     // Payments landing elsewhere still match, but get flagged as exceptions.
     await query(`ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT false`);
+    // When the invoices account CHANGED bank (e.g. ANNA → Mettle), older
+    // transactions were right at the time — only flag off-account payments
+    // dated on/after this.
+    await query(`ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS primary_since DATE`);
     await query(`CREATE TABLE IF NOT EXISTS bank_statements (
       id SERIAL PRIMARY KEY,
       account_id INTEGER REFERENCES bank_accounts(id) ON DELETE SET NULL,
@@ -226,11 +230,26 @@ router.patch('/accounts/:id', async (req, res) => {
   if (b.isPrimary !== undefined) {
     if (b.isPrimary) await query(`UPDATE bank_accounts SET is_primary = false`);
     params.push(!!b.isPrimary); sets.push(`is_primary = $${params.length}`);
+    // Effective date: off-account exception flags only apply from here on,
+    // so switching banks never back-flags history. Blank = from the start.
+    const since = b.isPrimary && b.primarySince && /^\d{4}-\d{2}-\d{2}$/.test(String(b.primarySince)) ? String(b.primarySince) : null;
+    params.push(b.isPrimary ? since : null); sets.push(`primary_since = $${params.length}`);
   }
   if (!sets.length) return res.status(400).json({ error: 'no_fields' });
   params.push(req.params.id);
   const r = await query(`UPDATE bank_accounts SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`, params);
   if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+  if (b.isPrimary) {
+    // Clear exception flags that the change makes wrong: notes on the new
+    // primary account itself, and notes on transactions dated before the
+    // effective date (they went where invoices pointed at the time).
+    try {
+      await query(`UPDATE bank_transactions SET notes = NULL, updated_at = now()
+                    WHERE notes LIKE '⚠ Invoice payment received here%'
+                      AND (account_id = $1 OR ($2::date IS NOT NULL AND tx_date < $2::date))`,
+        [req.params.id, r.rows[0].primary_since]);
+    } catch (_) {}
+  }
   await audit(req, 'books_account_update', 'bank_account', req.params.id, b);
   res.json({ account: r.rows[0] });
 });
@@ -347,31 +366,14 @@ async function processStatementFile({ statementId, filePath, originalName, accou
   if (!parsed || !parsed.transactions.length) {
     return fail('Claude couldn\u2019t read any transactions' + (parsed && parsed.notes ? ' — ' + parsed.notes : '') + '. Is it a text PDF (not a photo scan)?');
   }
-  // Which account do invoices EXPECT to be paid into? The starred one — and
-  // when none is starred yet, auto-detect it from the Settings bank details.
-  let primary = (await query(`SELECT id, name FROM bank_accounts WHERE is_primary = true LIMIT 1`)).rows[0] || null;
-  if (!primary && accountId) {
-    try {
-      const s = (await query(`SELECT bank_account_name, bank_sort_code, bank_account_number FROM app_settings WHERE id = 1`)).rows[0] || {};
-      const normName = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-      const digits = (x) => String(x || '').replace(/[^0-9]/g, '');
-      const setName = normName(s.bank_account_name);
-      const detected = normName(parsed.accountName);
-      const nameHit = setName.length >= 6 && detected && (detected.includes(setName) || setName.includes(detected));
-      const acctDigits = digits(s.bank_account_number);
-      const stmtDigits = digits(parsed.sortCodeOrIban);
-      const numHit = acctDigits.length >= 6 && stmtDigits.includes(acctDigits);
-      // The holder NAME is the same company on every account of this
-      // business, so a name-only hit may not star when the statement shows a
-      // DIFFERENT account number, or when several accounts could claim it.
-      const numContradicts = acctDigits.length >= 6 && stmtDigits.length >= 6 && !numHit;
-      const activeAccounts = parseInt((await query(`SELECT COUNT(*)::int AS n FROM bank_accounts WHERE archived = false`)).rows[0].n) || 0;
-      if (numHit || (nameHit && !numContradicts && activeAccounts <= 1)) {
-        await query(`UPDATE bank_accounts SET is_primary = true WHERE id = $1`, [accountId]);
-        primary = (await query(`SELECT id, name FROM bank_accounts WHERE id = $1`, [accountId])).rows[0];
-      }
-    } catch (_) {}
-  }
+  // Which account do invoices EXPECT to be paid into? The MANUALLY starred
+  // one only (⭐ in the accounts card) — auto-detection from Settings bank
+  // details is gone: every account of the business carries the same company
+  // holder name, so it starred the wrong bank. primary_since is the switch
+  // date: transactions before it went where invoices pointed at the time
+  // and are never flagged.
+  const primary = (await query(`SELECT id, name, primary_since FROM bank_accounts WHERE is_primary = true LIMIT 1`)).rows[0] || null;
+  const primarySince = primary ? isoDay(primary.primary_since) : null;
   let autoLinked = 0, payouts = 0, receiptsNeeded = 0;
   for (const t of parsed.transactions) {
     let m = { match_type: null, category: t.type || 'other' };
@@ -393,7 +395,8 @@ async function processStatementFile({ statementId, filePath, originalName, accou
         }
       } catch (_) {}
     }
-    const offPrimaryNote = (m.match_type === 'sale' && primary && accountId && accountId !== primary.id)
+    const offPrimaryNote = (m.match_type === 'sale' && primary && accountId && accountId !== primary.id
+        && (!primarySince || t.date >= primarySince))
       ? `\u26a0 Invoice payment received here — invoices are normally paid into the ${primary.name || 'invoices'} account (Settings bank details)`
       : null;
     if (m.match_type === 'sale') autoLinked++;
