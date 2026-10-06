@@ -815,6 +815,125 @@ router.get('/summary', async (req, res) => {
   res.json(await periodSummary({ from: req.query.from, to: req.query.to, accountId: req.query.accountId }));
 });
 
+// ── Period readiness — "have I provided everything for this VAT quarter?" ──
+// Five checks, each 0–100%, averaged into one bar:
+//   1. bank statement coverage (days of the period each active account's
+//      uploaded statements span),
+//   2. marketplace statements (one per account per month of the period),
+//   3. payout deposits explained (every eBay/Shopify-looking deposit claimed
+//      by an uploaded statement),
+//   4. money-in lines linked (invoice / payout / transfer — nothing unexplained),
+//   5. VAT receipts in (chase list cleared).
+const addDays = (iso, n) => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+router.get('/readiness', async (req, res) => {
+  try {
+    await ensureTables();
+    const from = isoDay(req.query.from), to = isoDay(req.query.to);
+    if (!from || !to) return res.status(400).json({ error: 'from_to_required' });
+    const dayMs = 86400000;
+    const totalDays = Math.max(1, Math.round((new Date(to) - new Date(from)) / dayMs) + 1);
+
+    // 1. Bank coverage per active account that has statements at all.
+    const accounts = [];
+    const accRows = (await query(`
+      SELECT a.id, a.name FROM bank_accounts a
+       WHERE a.archived = false
+         AND EXISTS (SELECT 1 FROM bank_statements s WHERE s.account_id = a.id AND COALESCE(s.status, 'done') = 'done')
+       ORDER BY a.name`)).rows;
+    for (const a of accRows) {
+      const sts = (await query(`
+        SELECT period_start, period_end FROM bank_statements
+         WHERE account_id = $1 AND COALESCE(status, 'done') = 'done'
+           AND period_start IS NOT NULL AND period_end IS NOT NULL
+           AND period_end >= $2::date AND period_start <= $3::date
+         ORDER BY period_start`, [a.id, from, to])).rows;
+      let covered = 0, cursor = from;
+      const gaps = [];
+      for (const s of sts) {
+        const s0r = isoDay(s.period_start), s1r = isoDay(s.period_end);
+        const s0 = s0r < from ? from : s0r, s1 = s1r > to ? to : s1r;
+        if (s1 < cursor) continue;
+        if (s0 > cursor) gaps.push({ from: cursor, to: addDays(s0, -1) });
+        const eff = s0 > cursor ? s0 : cursor;
+        covered += Math.round((new Date(s1) - new Date(eff)) / dayMs) + 1;
+        cursor = addDays(s1, 1);
+        if (cursor > to) break;
+      }
+      if (cursor <= to) gaps.push({ from: cursor, to });
+      accounts.push({ name: a.name, coveredDays: Math.min(covered, totalDays), totalDays, pct: Math.min(1, covered / totalDays), gaps: gaps.slice(0, 4) });
+    }
+    const bankPct = accounts.length ? accounts.reduce((x, y) => x + y.pct, 0) / accounts.length : 0;
+
+    // 2. Marketplace statements: for every marketplace account ever seen,
+    //    one statement per month of the period.
+    const months = [];
+    { const d = new Date(from.slice(0, 7) + '-01T00:00:00Z');
+      while (d.toISOString().slice(0, 10) <= to) { months.push(d.toISOString().slice(0, 7)); d.setUTCMonth(d.getUTCMonth() + 1); } }
+    const pss = (await query(`SELECT platform, label, account_name, period_start, period_end FROM platform_statements`)).rows;
+    const mkKeys = {};
+    for (const s of pss) {
+      const k = (s.platform || 'other') + '·' + (s.label || s.account_name || 'unnamed');
+      mkKeys[k] = mkKeys[k] || { platform: s.platform || 'other', name: s.label || s.account_name || 'unnamed', covered: new Set() };
+      const p0 = isoDay(s.period_start), p1 = isoDay(s.period_end);
+      if (!p0 || !p1) continue;
+      for (const m of months) {
+        const mStart = m + '-01';
+        const nd = new Date(mStart + 'T00:00:00Z'); nd.setUTCMonth(nd.getUTCMonth() + 1);
+        const mEnd = addDays(nd.toISOString().slice(0, 10), -1);
+        if (p0 <= mEnd && p1 >= mStart) mkKeys[k].covered.add(m);
+      }
+    }
+    const marketplace = Object.values(mkKeys).map(k => ({ platform: k.platform, name: k.name, months: months.map(m => ({ month: m, covered: k.covered.has(m) })) }));
+    const mkTotal = marketplace.length * months.length;
+    const mkCovered = marketplace.reduce((x, k) => x + k.months.filter(mm => mm.covered).length, 0);
+    const marketplacePct = mkTotal ? mkCovered / mkTotal : 1;
+
+    // 3. Payout-looking deposits explained by a statement.
+    const pay = (await query(`
+      SELECT COUNT(*)::int AS total, COUNT(payout_ref)::int AS explained
+        FROM bank_transactions
+       WHERE money_in > 0 AND tx_date BETWEEN $1::date AND $2::date
+         AND (payout_platform IS NOT NULL OR category = 'payout'
+              OR description ~* '(ebay|managed payments|shopify)' OR counterparty ~* '(ebay|managed payments|shopify)'
+              OR description ~* 'P\\*[0-9]{6,}' OR counterparty ~* 'P\\*[0-9]{6,}')`, [from, to])).rows[0];
+    const payoutPct = pay.total ? pay.explained / pay.total : 1;
+
+    // 4. Money-in lines explained (invoice link, payout, transfer, refund).
+    const inc = (await query(`
+      SELECT COUNT(*)::int AS total,
+             COUNT(*) FILTER (WHERE match_type IS NOT NULL OR payout_ref IS NOT NULL OR sale_id IS NOT NULL
+                              OR category IN ('transfer', 'refund', 'payout')
+                              OR EXISTS (SELECT 1 FROM bank_tx_allocations al WHERE al.tx_id = bank_transactions.id))::int AS explained
+        FROM bank_transactions
+       WHERE money_in > 0 AND tx_date BETWEEN $1::date AND $2::date`, [from, to])).rows[0];
+    const incomePct = inc.total ? inc.explained / inc.total : 1;
+
+    // 5. VAT receipts: chase list cleared (receipt attached, % set, or
+    //    dismissed) out of everything that was ever flagged/receipted.
+    const vr = (await query(`
+      SELECT COUNT(*) FILTER (WHERE needs_vat_receipt)::int AS outstanding,
+             COUNT(*) FILTER (WHERE needs_vat_receipt OR vat_amount > 0 OR vat_rate IS NOT NULL OR receipt_path IS NOT NULL
+                              OR EXISTS (SELECT 1 FROM bank_tx_receipts r WHERE r.tx_id = bank_transactions.id))::int AS pool
+        FROM bank_transactions
+       WHERE money_out > 0 AND tx_date BETWEEN $1::date AND $2::date`, [from, to])).rows[0];
+    const vatPct = vr.pool ? (vr.pool - vr.outstanding) / vr.pool : 1;
+
+    const parts = [bankPct, marketplacePct, payoutPct, incomePct, vatPct];
+    const overallPct = Math.round(parts.reduce((x, y) => x + y, 0) / parts.length * 100);
+    res.json({
+      overallPct,
+      bank: { pct: Math.round(bankPct * 100), accounts: accounts.map(a => ({ ...a, pct: Math.round(a.pct * 100) })) },
+      marketplace: { pct: Math.round(marketplacePct * 100), accounts: marketplace },
+      payouts: { pct: Math.round(payoutPct * 100), total: pay.total, explained: pay.explained },
+      income: { pct: Math.round(incomePct * 100), total: inc.total, explained: inc.explained },
+      vatReceipts: { pct: Math.round(vatPct * 100), outstanding: vr.outstanding, pool: vr.pool },
+    });
+  } catch (e) {
+    console.error('[books] readiness failed:', (e && e.stack) || e);
+    res.status(500).json({ error: 'readiness_failed', message: e.message });
+  }
+});
+
 // ── Platform statements (eBay / Shopify monthly) + payout reconciliation ──
 // eBay pays out daily but reports monthly — and deducts fees, postage
 // labels, advertising and refunds BEFORE paying, so the banked number is
