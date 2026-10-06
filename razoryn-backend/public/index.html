@@ -22668,8 +22668,8 @@ function bkPaintSummary(s) {
 function bkPaintStatements(list) {
   const box = el('bk-statements'); if (!box) return;
   if (!list.length) { box.innerHTML = 'No statements uploaded yet — hit ⬆ Upload statement.'; return; }
-  box.innerHTML = list.map(s => `<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:6px;flex-wrap:wrap">
-    <div><strong>${escapeHtml(s.bank_detected || s.account_bank || 'Statement')}</strong>
+  box.innerHTML = list.map(s => `<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;border:1px solid ${s.status === 'failed' ? 'var(--red)' : 'var(--line)'};border-radius:8px;padding:8px 12px;margin-bottom:6px;flex-wrap:wrap">
+    <div>${s.status === 'processing' ? '<span class="pill blue" style="font-size:10px">⏳ Claude is reading this…</span> ' : (s.status === 'failed' ? '<span class="pill red" style="font-size:10px">✗ read failed — delete & retry</span> ' : '')}<strong>${escapeHtml(s.bank_detected || s.account_bank || 'Statement')}</strong>
       <span style="color:var(--ink-soft)">${escapeHtml(s.account_name || s.account_detected || '')}${s.business ? ' · ' + escapeHtml(s.business) : ''} · ${s.period_start ? bkUkDate(s.period_start) + ' → ' + bkUkDate(s.period_end) : escapeHtml(s.label || '')} · ${s.tx_count} transactions${s.ai_confidence != null ? ' · read at ' + Math.round(s.ai_confidence * 100) + '%' : ''}</span>
       ${s.ai_notes ? `<div style="font-size:11px;color:var(--amber,orange)">⚠ ${escapeHtml(s.ai_notes)}</div>` : ''}</div>
     <div style="display:flex;gap:6px">
@@ -22958,15 +22958,36 @@ async function bkDoUpload() {
   if (el('bku-hint')?.value) fd.append('hint', el('bku-hint').value);
   closeModal();
   const taskId = Task.start('Claude is reading the statement…');
+  let statementId = null;
   try {
     const r = await Api.postForm('/api/books/statements', fd);
-    Task.done(taskId, 'Statement read');
-    toast(`✓ ${r.parsed.bank} statement read — ${r.summary.transactions} transactions, ${r.summary.autoLinkedInvoices} invoice(s) auto-linked, ${r.summary.payouts} payout(s)${r.summary.receiptsNeeded ? ', ' + r.summary.receiptsNeeded + ' need VAT receipts' : ''}`, 'success', 9000);
-    bkLoad();
+    statementId = r.statementId;
+    toast('⬆ Uploaded — reading in the background (a 60-page PDF can take ~10 minutes). It\u2019ll appear under Statements when done; you can leave this page.', 'info', 9000);
   } catch (e) {
-    Task.fail(taskId, 'Read failed');
-    toast('Statement read failed: ' + (e.data?.message || e.message), 'error', 9000);
+    Task.fail(taskId, 'Upload failed');
+    toast('Statement upload failed: ' + (e.data?.message || e.message), 'error', 9000);
+    return;
   }
+  // Poll until the background read finishes (survives navigating around the
+  // app — the job runs server-side either way).
+  const started = Date.now();
+  const poll = setInterval(async () => {
+    if (Date.now() - started > 40 * 60000) { clearInterval(poll); Task.fail(taskId, 'Timed out — check the Statements list'); return; }
+    try {
+      const r = await Api.get('/api/books/statements');
+      const st = (r.statements || []).find(x => x.id === statementId);
+      if (!st || st.status === 'processing') return;
+      clearInterval(poll);
+      if (st.status === 'failed') {
+        Task.fail(taskId, 'Read failed');
+        toast('Statement read failed: ' + (st.ai_notes || 'unknown error'), 'error', 12000);
+      } else {
+        Task.done(taskId, st.tx_count + ' transactions read');
+        toast(`✓ ${st.bank_detected || 'Statement'} read — ${st.tx_count} transactions${st.ai_confidence != null ? ' at ' + Math.round(st.ai_confidence * 100) + '%' : ''}. ${st.ai_notes && /auto-linked/.test(st.ai_notes) ? st.ai_notes.split('|').pop().trim() : ''}`, 'success', 10000);
+      }
+      if (State.page === 'books') bkLoad();
+    } catch (_) {}
+  }, 6000);
 }
 async function bkDeleteStatement(id) {
   if (!confirm('Delete this statement AND all its transactions from Books? (The bank still has the original.)')) return;
