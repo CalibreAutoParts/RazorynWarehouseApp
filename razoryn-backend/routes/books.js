@@ -148,6 +148,9 @@ async function ensureTables() {
       vat_rate NUMERIC(5,2),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
+    // A payee rule can also mean "this is an INTERNAL TRANSFER between our
+    // own accounts" — categorised as transfer, never chased for VAT.
+    await query(`ALTER TABLE books_vat_rules ADD COLUMN IF NOT EXISTS is_transfer BOOLEAN NOT NULL DEFAULT false`);
     await query(`CREATE TABLE IF NOT EXISTS books_payer_map (
       id SERIAL PRIMARY KEY,
       payer_norm TEXT UNIQUE NOT NULL,
@@ -377,26 +380,46 @@ async function processStatementFile({ statementId, filePath, originalName, accou
   // and are never flagged.
   const primary = (await query(`SELECT id, name, primary_since FROM bank_accounts WHERE is_primary = true LIMIT 1`)).rows[0] || null;
   const primarySince = primary ? isoDay(primary.primary_since) : null;
+  // Our OWN company name (Settings → invoice details): a line whose payee is
+  // ourselves is an internal transfer between our own accounts — never a
+  // supplier payment, never chased for a VAT receipt.
+  let ownNames = [];
+  try {
+    const s = (await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {};
+    ownNames = [s.company_name, s.bank_account_name]
+      .map(x => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, ''))
+      .filter(x => x.length >= 8);
+  } catch (_) {}
+  const looksLikeSelf = (t) => {
+    const txt = (String(t.counterparty || '') + ' ' + String(t.description || '')).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return ownNames.some(n => txt.includes(n));
+  };
   let autoLinked = 0, payouts = 0, receiptsNeeded = 0;
   for (const t of parsed.transactions) {
     let m = { match_type: null, category: t.type || 'other' };
     try { m = await autoMatchTransaction(t); } catch (_) {}
     // Recurring payee with a saved VAT rule (standing orders, DDs, couriers)
     // → apply it: rate + back-calculated VAT, or no-VAT, no receipt chase.
-    if (t.moneyOut > 0) {
-      try {
-        const rule = (await query(`SELECT vat_rate FROM books_vat_rules WHERE payer_norm = $1`, [payerKeyForTx(t)])).rows[0];
-        if (rule) {
-          if (rule.vat_rate != null && parseFloat(rule.vat_rate) > 0) {
-            const rr = parseFloat(rule.vat_rate);
-            m.vat_rate = rr;
-            m.vat_amount = +(t.moneyOut * rr / (100 + rr)).toFixed(2);
-            m.needs_vat_receipt = false;
-          } else {
-            m.vat_rate = null; m.vat_amount = 0; m.needs_vat_receipt = false;
-          }
+    // An is_transfer rule (either direction) overrides to internal transfer.
+    try {
+      const rule = (await query(`SELECT vat_rate, is_transfer FROM books_vat_rules WHERE payer_norm = $1`, [payerKeyForTx(t)])).rows[0];
+      if (rule && rule.is_transfer) {
+        m = { ...m, match_type: 'transfer', category: 'transfer', sale_id: null, allocation: null, vat_rate: null, vat_amount: null, needs_vat_receipt: false };
+      } else if (rule && t.moneyOut > 0) {
+        if (rule.vat_rate != null && parseFloat(rule.vat_rate) > 0) {
+          const rr = parseFloat(rule.vat_rate);
+          m.vat_rate = rr;
+          m.vat_amount = +(t.moneyOut * rr / (100 + rr)).toFixed(2);
+          m.needs_vat_receipt = false;
+        } else {
+          m.vat_rate = null; m.vat_amount = 0; m.needs_vat_receipt = false;
         }
-      } catch (_) {}
+      }
+    } catch (_) {}
+    // Own-name detection: money moving to/from ourselves is a transfer
+    // (unless it already matched a payout — eBay lines never carry our name).
+    if (m.match_type !== 'payout' && !m.sale_id && looksLikeSelf(t)) {
+      m = { ...m, match_type: 'transfer', category: 'transfer', allocation: null, vat_rate: null, vat_amount: null, needs_vat_receipt: false };
     }
     const offPrimaryNote = (m.match_type === 'sale' && primary && accountId && accountId !== primary.id
         && (!primarySince || t.date >= primarySince))
@@ -542,6 +565,29 @@ router.post('/transactions/dismiss-receipts', async (req, res) => {
   await audit(req, 'books_dismiss_receipts', null, null, { count: r.rows.length, reason });
   res.json({ ok: true, updated: r.rows.length });
 });
+// POST /transactions/mark-transfer { ids } — these lines are INTERNAL
+// TRANSFERS between our own accounts (e.g. ANNA sweeping takings to Mettle,
+// Capital on Tap repayments): categorised as transfer, VAT chase cleared,
+// and the payee is remembered so future statements handle it automatically.
+router.post('/transactions/mark-transfer', async (req, res) => {
+  await ensureTables();
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(x => parseInt(x)).filter(Boolean) : [];
+  if (!ids.length) return res.status(400).json({ error: 'ids_required' });
+  const note = '↔ Internal transfer between own accounts';
+  const r = await query(
+    `UPDATE bank_transactions
+        SET category = 'transfer', match_type = 'transfer', sale_id = NULL,
+            needs_vat_receipt = false, vat_amount = NULL, vat_rate = NULL,
+            notes = CASE WHEN notes IS NULL OR notes = '' THEN $2 ELSE notes || ' · ' || $2 END,
+            updated_at = now()
+      WHERE id = ANY($1) RETURNING id`, [ids, note]);
+  try {
+    const payees = await query(`SELECT DISTINCT counterparty, description FROM bank_transactions WHERE id = ANY($1)`, [ids]);
+    for (const p of payees.rows) await rememberVatRule(p.counterparty, payerKeyForTx(p), null, true);
+  } catch (_) {}
+  await audit(req, 'books_mark_transfer', null, null, { count: r.rows.length });
+  res.json({ ok: true, updated: r.rows.length });
+});
 
 // POST /transactions/mark-vat-inclusive { ids, rate } — for charges that ARE
 // VAT-inclusive but never come with an invoice (Royal Mail tracked, FedEx
@@ -577,13 +623,13 @@ function payerKeyForTx(t) {
 }
 // Remember a payee's VAT treatment (rate, or NULL = no VAT) so recurring
 // standing orders / direct debits handle themselves from then on.
-async function rememberVatRule(payerLabel, payerNorm, rate) {
+async function rememberVatRule(payerLabel, payerNorm, rate, isTransfer = false) {
   if (!payerNorm || payerNorm.length < 3) return;
   try {
     await query(
-      `INSERT INTO books_vat_rules (payer_norm, payer_label, vat_rate, updated_at) VALUES ($1,$2,$3, now())
-       ON CONFLICT (payer_norm) DO UPDATE SET vat_rate = $3, payer_label = COALESCE($2, books_vat_rules.payer_label), updated_at = now()`,
-      [payerNorm, payerLabel ? String(payerLabel).slice(0, 120) : null, rate]);
+      `INSERT INTO books_vat_rules (payer_norm, payer_label, vat_rate, is_transfer, updated_at) VALUES ($1,$2,$3,$4, now())
+       ON CONFLICT (payer_norm) DO UPDATE SET vat_rate = $3, is_transfer = $4, payer_label = COALESCE($2, books_vat_rules.payer_label), updated_at = now()`,
+      [payerNorm, payerLabel ? String(payerLabel).slice(0, 120) : null, rate, !!isTransfer]);
   } catch (_) {}
 }
 

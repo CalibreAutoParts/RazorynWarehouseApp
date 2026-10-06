@@ -22817,7 +22817,8 @@ function bkPaintFollowups() {
       <div><strong>${escapeHtml(who)}</strong> <span style="color:var(--ink-soft)">· ${v.n} payment${v.n === 1 ? '' : 's'}</span></div>
       <div style="display:flex;align-items:center;gap:8px"><div style="font-weight:600">${gbp(v.total)}</div>
         <button class="btn btn-ghost btn-sm" onclick="bkVatInclusiveFollowup('${escapeAttr(who).replace(/'/g, "\\'")}')" title="VAT IS included but no invoice is ever issued (Royal Mail tracked, FedEx domestic…): captures 20% VAT from each gross and remembers the rule.">✓ 20% VAT, no invoice</button>
-        <button class="btn btn-ghost btn-sm" onclick="bkDismissFollowup('${escapeAttr(who).replace(/'/g, "\\'")}')" title="No UK VAT to reclaim here (e.g. an overseas supplier — China, USA…): no VAT receipt exists, so stop chasing it.">✗ no UK VAT</button></div>
+        <button class="btn btn-ghost btn-sm" onclick="bkDismissFollowup('${escapeAttr(who).replace(/'/g, "\\'")}')" title="No UK VAT to reclaim here (e.g. an overseas supplier — China, USA…): no VAT receipt exists, so stop chasing it.">✗ no UK VAT</button>
+        <button class="btn btn-ghost btn-sm" onclick="bkTransferFollowup('${escapeAttr(who).replace(/'/g, "\\'")}')" title="Money moved between YOUR OWN accounts (e.g. sweeping takings to the main bank, credit-card repayment): it's not a purchase, carries no VAT, and the payee is remembered as a transfer.">↔ transfer</button></div>
     </div>`).join('')
     + '<div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Chase these for VAT invoices — attach each one with 📎 on its transaction and it drops off this list. Overseas purchases (no UK VAT) can be ✗ dismissed.</div>';
 }
@@ -22849,6 +22850,16 @@ async function bkVatInclusiveFollowup(who) {
   try {
     const r = await Api.post('/api/books/transactions/mark-vat-inclusive', { ids, rate: 20 });
     toast(`✓ ${r.updated} payment(s) marked VAT-inclusive @20% — VAT captured, off the chase list, rule remembered`, 'success', 7000);
+    bkLoad();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function bkTransferFollowup(who) {
+  const ids = (State._bkFollowupIds || {})[who] || [];
+  if (!ids.length) return;
+  if (!confirm(`Mark ${who}'s ${ids.length} payment(s) as INTERNAL TRANSFERS between your own accounts? They're recategorised as transfers (no VAT, off the chase list) and "${who}" is remembered — future statement lines handle themselves.`)) return;
+  try {
+    const r = await Api.post('/api/books/transactions/mark-transfer', { ids });
+    toast(`↔ ${r.updated} payment(s) marked as internal transfers — off the chase list, payee remembered`, 'success', 6000);
     bkLoad();
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
