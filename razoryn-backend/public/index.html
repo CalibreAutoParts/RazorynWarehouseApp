@@ -23054,6 +23054,7 @@ async function bkLoadPlatform() {
     box.innerHTML = _bkPlatform.map(s => {
       const rec = s.reconciliation || {}; const t = rec.totals || {};
       const nMatched = (rec.matched || []).length, nMissing = (rec.missingFromBank || []).length, nExtra = (rec.extraInBank || []).length;
+      const nOther = rec.otherAccountInBank || 0;
       const summaryOnly = !((s.payouts || []).length);
       const status = summaryOnly
         ? '<span class="pill amber" style="font-size:10px">summary-only — no payout list; upload the FULL statement (with transaction breakdown) for bank matching</span>'
@@ -23068,7 +23069,7 @@ async function bkLoadPlatform() {
             <span style="color:var(--ink-soft)">${s.period_start ? bkUkDate(s.period_start) + ' → ' + bkUkDate(s.period_end) : ''}
             · net paid out ${gbp((s.summary || {}).netPayouts || t.statementPayouts || 0)}</span></div>
           <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
-            ${status}${nExtra ? `<span class="pill amber" style="font-size:10px">${nExtra} in bank not on statement</span>` : ''}
+            ${status}${nExtra ? `<span class="pill amber" style="font-size:10px" title="Deposits in this period that look like ${escapeAttr((s.platform || 'platform').toUpperCase())} payouts but aren't on this statement and haven't been claimed by any other uploaded statement — usually another ${escapeAttr(s.platform || '')} account whose statement isn't uploaded yet. Hit ↻ after uploading it.">${nExtra} in bank not on this statement</span>` : ''}${nOther ? `<span class="pill blue" style="font-size:10px" title="Payouts in this period that belong to ANOTHER ${escapeAttr((s.platform || '').toUpperCase())} account — matched by its own statement, so nothing to chase.">${nOther} from other ${escapeHtml(s.platform || '')} account ✓</span>` : ''}
             <button class="btn btn-outline btn-sm" onclick="bkPlatformDetail(${s.id})">Breakdown</button>
             <button class="btn btn-ghost btn-sm" onclick="bkRematchPlatform(${s.id}, this)" title="Re-check against the bank (after uploading more bank statements)">↻</button>
             <a class="btn btn-ghost btn-sm" href="/api/books/platform-statements/${s.id}/file" target="_blank">PDF</a>
