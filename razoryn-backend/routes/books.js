@@ -359,8 +359,14 @@ async function processStatementFile({ statementId, filePath, originalName, accou
       const detected = normName(parsed.accountName);
       const nameHit = setName.length >= 6 && detected && (detected.includes(setName) || setName.includes(detected));
       const acctDigits = digits(s.bank_account_number);
-      const numHit = acctDigits.length >= 6 && digits(parsed.sortCodeOrIban).includes(acctDigits);
-      if (nameHit || numHit) {
+      const stmtDigits = digits(parsed.sortCodeOrIban);
+      const numHit = acctDigits.length >= 6 && stmtDigits.includes(acctDigits);
+      // The holder NAME is the same company on every account of this
+      // business, so a name-only hit may not star when the statement shows a
+      // DIFFERENT account number, or when several accounts could claim it.
+      const numContradicts = acctDigits.length >= 6 && stmtDigits.length >= 6 && !numHit;
+      const activeAccounts = parseInt((await query(`SELECT COUNT(*)::int AS n FROM bank_accounts WHERE archived = false`)).rows[0].n) || 0;
+      if (numHit || (nameHit && !numContradicts && activeAccounts <= 1)) {
         await query(`UPDATE bank_accounts SET is_primary = true WHERE id = $1`, [accountId]);
         primary = (await query(`SELECT id, name FROM bank_accounts WHERE id = $1`, [accountId])).rows[0];
       }
@@ -813,10 +819,22 @@ router.get('/summary', async (req, res) => {
 // the total difference.
 const normPayoutId = (x) => String(x || '').replace(/[^0-9]/g, '');
 
+// pg hands DATE columns back as JS Date objects — String() on those gives
+// "Wed Jun 01 …", which breaks ::date casts and string comparisons. Always
+// go through this.
+function isoDay(v) {
+  if (!v) return null;
+  if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+  const m = String(v).match(/^(\d{4}-\d{2}-\d{2})/);
+  if (m) return m[1];
+  const d = new Date(v);
+  return isNaN(d) ? null : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 async function reconcilePlatformStatement(parsed) {
-  const from = parsed.periodStart, to = parsed.periodEnd;
+  const from = isoDay(parsed.periodStart), to = isoDay(parsed.periodEnd);
   const rec = { matched: [], missingFromBank: [], extraInBank: [], totals: {} };
-  if (!parsed.payouts.length) return rec;
+  if (!Array.isArray(parsed.payouts) || !parsed.payouts.length) return rec;
   // Bank candidates: money-in lines around the period that look like this platform.
   const pat = parsed.platform === 'ebay' ? '(ebay|managed payments)'
     : parsed.platform === 'shopify' ? '(shopify|shopi)'
@@ -845,7 +863,7 @@ async function reconcilePlatformStatement(parsed) {
     }
     if (hit) {
       used.add(hit.id);
-      rec.matched.push({ payoutId: p.payoutId, date: p.date, amount: p.amount, bankTxId: hit.id, bankDate: String(hit.tx_date).slice(0, 10) });
+      rec.matched.push({ payoutId: p.payoutId, date: p.date, amount: p.amount, bankTxId: hit.id, bankDate: isoDay(hit.tx_date) });
       // Stamp the physical link on the bank line.
       try {
         await query(`UPDATE bank_transactions SET payout_ref = COALESCE(payout_ref, $2), payout_platform = $3, match_type = 'payout', category = COALESCE(category, 'payout'), updated_at = now() WHERE id = $1`,
@@ -857,8 +875,9 @@ async function reconcilePlatformStatement(parsed) {
   }
   // Bank payouts in the period that the statement doesn't list.
   for (const b of bank) {
-    if (!used.has(b.id) && from && to && String(b.tx_date).slice(0, 10) >= from && String(b.tx_date).slice(0, 10) <= to) {
-      rec.extraInBank.push({ bankTxId: b.id, date: String(b.tx_date).slice(0, 10), amount: +parseFloat(b.money_in).toFixed(2), description: b.description });
+    const d = isoDay(b.tx_date);
+    if (!used.has(b.id) && from && to && d >= from && d <= to) {
+      rec.extraInBank.push({ bankTxId: b.id, date: d, amount: +parseFloat(b.money_in).toFixed(2), description: b.description });
     }
   }
   const sum = (a) => +a.reduce((x, y) => x + (y.amount || 0), 0).toFixed(2);
@@ -896,7 +915,12 @@ router.post('/platform-statements', upload.single('statement'), async (req, res)
     parsed = await ai.parsePlatformStatement(pdfBase64, { hint: req.body.hint || (req.body.platform ? 'This is a ' + req.body.platform + ' statement.' : null) });
   } catch (e) { return res.status(502).json({ error: e.code || 'parse_failed', message: e.message }); }
   if (!parsed) return res.status(422).json({ error: 'unreadable', message: 'Claude couldn’t read that PDF — is it a text PDF (not a scan)?' });
-  const reconciliation = await reconcilePlatformStatement(parsed);
+  let reconciliation;
+  try { reconciliation = await reconcilePlatformStatement(parsed); }
+  catch (e) {
+    console.error('[books] reconcile failed:', (e && e.stack) || e);
+    reconciliation = { matched: [], missingFromBank: [], extraInBank: [], totals: {}, error: 'Bank match failed — hit ↻ to retry: ' + e.message };
+  }
   const relPath = path.relative(UPLOAD_DIR, req.file.path);
   const st = await query(
     `INSERT INTO platform_statements (platform, label, file_path, period_start, period_end, currency, summary, payouts, reconciliation, ai_confidence, ai_notes, uploaded_by)
@@ -930,18 +954,22 @@ router.get('/platform-statements/:id/file', async (req, res) => {
 // Re-run the bank match (e.g. after uploading the bank statement that holds
 // the missing payouts).
 router.post('/platform-statements/:id/rematch', async (req, res) => {
-  await ensureTables();
-  const r = await query(`SELECT * FROM platform_statements WHERE id = $1`, [req.params.id]);
-  const st = r.rows[0];
-  if (!st) return res.status(404).json({ error: 'not_found' });
-  const parsed = {
-    platform: st.platform, periodStart: st.period_start ? String(st.period_start).slice(0, 10) : null,
-    periodEnd: st.period_end ? String(st.period_end).slice(0, 10) : null,
-    summary: st.summary || {}, payouts: st.payouts || [],
-  };
-  const reconciliation = await reconcilePlatformStatement(parsed);
-  await query(`UPDATE platform_statements SET reconciliation = $1::jsonb WHERE id = $2`, [JSON.stringify(reconciliation), st.id]);
-  res.json({ ok: true, reconciliation });
+  try {
+    await ensureTables();
+    const r = await query(`SELECT * FROM platform_statements WHERE id = $1`, [req.params.id]);
+    const st = r.rows[0];
+    if (!st) return res.status(404).json({ error: 'not_found' });
+    const parsed = {
+      platform: st.platform, periodStart: isoDay(st.period_start), periodEnd: isoDay(st.period_end),
+      summary: st.summary || {}, payouts: Array.isArray(st.payouts) ? st.payouts : [],
+    };
+    const reconciliation = await reconcilePlatformStatement(parsed);
+    await query(`UPDATE platform_statements SET reconciliation = $1::jsonb WHERE id = $2`, [JSON.stringify(reconciliation), st.id]);
+    res.json({ ok: true, reconciliation });
+  } catch (e) {
+    console.error('[books] rematch failed:', (e && e.stack) || e);
+    res.status(500).json({ error: 'rematch_failed', message: e.message });
+  }
 });
 
 // ── Exports ────────────────────────────────────────────────────────────────
