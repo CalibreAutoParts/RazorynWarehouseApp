@@ -546,7 +546,7 @@ Do not invent transactions; if part of the statement is unreadable say so in not
 
 // CSV/Excel export pipeline: deterministic row parsing + two small AI calls.
 async function parseBankCsv(src, ctx, cfg) {
-  const { parseCsv, findHeaderRow, buildTransactions } = require('../lib/csv-bank');
+  const { parseCsv, findHeaderRow, findReceiptCols, buildTransactions } = require('../lib/csv-bank');
   const rows = parseCsv(String(src.csvText));
   if (rows.length < 2) return null;
   const headerIdx = findHeaderRow(rows);
@@ -563,13 +563,19 @@ Sample data rows: ${JSON.stringify(sample)}
 
 If this is NOT a bank/credit-card export but a marketplace statement (eBay, Shopify payouts, PayPal…), set "notABankStatement": true.
 Otherwise identify the columns. amountMode "signed" = one amount column (positive in / negative out); "split" = separate money-in and money-out columns.
-Reply ONLY: {"notABankStatement":false,"bank":"Mettle|Wise|ANNA Money|Capital on Tap|…","accountName":"...or null","dateCol":<i>,"dateFormat":"DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|D MMM YYYY","descriptionCols":[<i>,...],"amountMode":"signed"|"split","amountCol":<i|null>,"inCol":<i|null>,"outCol":<i|null>,"balanceCol":<i|null>,"counterpartyCol":<i|null>,"receiptFileCol":<i|null — the column holding attached receipt/invoice FILE NAMES like "Mettle-Receipt-2026-….pdf" or "Mettle-INV-148-2026-05-20.pdf">,"currency":"GBP","notes":"..."}`,
+Reply ONLY: {"notABankStatement":false,"bank":"Mettle|Wise|ANNA Money|Capital on Tap|…","accountName":"...or null","dateCol":<i>,"dateFormat":"DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|D MMM YYYY","descriptionCols":[<i>,...],"amountMode":"signed"|"split","amountCol":<i|null>,"inCol":<i|null>,"outCol":<i|null>,"balanceCol":<i|null>,"counterpartyCol":<i|null>,"receiptFileCol":<i|null — the column holding attached receipt/invoice FILE NAMES like "Mettle-Receipt-2026-….pdf" or "Mettle-INV-148-2026-05-20.pdf". Pick it by HEADER NAME (e.g. "Receipts", "Invoices", "Attachments") even if every sample cell is blank — files are attached to only some rows>,"currency":"GBP","notes":"..."}`,
   });
   const map = mapOut.json;
   if (!map) return null;
   if (map.notABankStatement) {
     return { notABankStatement: true, bank: 'Unknown', accountName: null, sortCodeOrIban: null, periodStart: null, periodEnd: null, currency: 'GBP', confidence: 0.9, notes: map.notes || 'marketplace statement', transactions: [] };
   }
+  // Receipt/invoice file columns: union the AI's pick with deterministic
+  // header-name detection — Mettle has BOTH an "Invoices" and a "Receipts"
+  // column and the sample rows the mapping sees are often blank there.
+  const receiptCols = new Set(findReceiptCols(header));
+  if (map.receiptFileCol != null && map.receiptFileCol >= 0) receiptCols.add(map.receiptFileCol);
+  map.receiptFileCols = [...receiptCols];
   // Exact build from EVERY row — no model output limits involved.
   const txs = buildTransactions(rows, headerIdx, map).slice(0, 5000);
   if (!txs.length) return { notABankStatement: false, bank: map.bank || 'Unknown', accountName: map.accountName || null, sortCodeOrIban: null, periodStart: null, periodEnd: null, currency: map.currency || 'GBP', confidence: 0.3, notes: 'No parsable rows found with the detected columns (' + (map.notes || '') + ')', transactions: [] };
@@ -606,7 +612,7 @@ Reply ONLY: {"items":[{"i":0,"type":"...","payoutPlatform":null,"vatLikely":fals
     periodStart: dates[0] || null, periodEnd: dates[dates.length - 1] || null,
     currency: String(map.currency || 'GBP').slice(0, 6),
     confidence: 0.98,
-    notes: 'CSV parsed exactly in code (' + txs.length + ' rows); Claude mapped the columns' + (map.notes ? ' — ' + String(map.notes).slice(0, 200) : ''),
+    notes: 'CSV parsed exactly in code (' + txs.length + ' rows, ' + txs.filter(t => t.receiptRef).length + ' with receipt/invoice file refs); Claude mapped the columns' + (map.notes ? ' — ' + String(map.notes).slice(0, 200) : ''),
     transactions: txs,
   };
 }

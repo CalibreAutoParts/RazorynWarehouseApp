@@ -47,6 +47,21 @@ function findHeaderRow(rows) {
   return 0;
 }
 
+// Receipt/invoice attachment columns found by HEADER NAME — Mettle exports
+// carry separate "Invoices" and "Receipts" columns naming the attached files
+// per row, and they're often blank in the first dozen rows, so the AI column
+// mapping (which only sees a sample) can miss them. The header never lies.
+function findReceiptCols(header) {
+  const good = /receipt|invoice|attach|document/i;
+  const bad = /number|no\.?\s*$|\bid\b|amount|date|total|value/i;
+  const out = [];
+  (header || []).forEach((h, i) => {
+    const s = String(h || '').trim();
+    if (s && good.test(s) && !bad.test(s)) out.push(i);
+  });
+  return out;
+}
+
 // "£1,234.56", "1.234,56", "(45.00)", "-45.00" → number. Returns null when
 // the cell isn't a money value.
 function parseMoney(raw) {
@@ -94,6 +109,11 @@ function toIsoDate(raw, formatHint) {
 function buildTransactions(rows, headerIdx, mapping) {
   const out = [];
   const cell = (r, i) => (i == null || i < 0 ? '' : String(r[i] == null ? '' : r[i]).trim());
+  // Receipt columns: an explicit list (receiptFileCols) wins; a single
+  // receiptFileCol still works. A row can reference several files.
+  const receiptCols = Array.isArray(mapping.receiptFileCols) && mapping.receiptFileCols.length
+    ? mapping.receiptFileCols
+    : (mapping.receiptFileCol != null ? [mapping.receiptFileCol] : []);
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r || !r.length) continue;
@@ -118,10 +138,10 @@ function buildTransactions(rows, headerIdx, mapping) {
       counterparty: mapping.counterpartyCol != null ? cell(r, mapping.counterpartyCol).slice(0, 120) || null : null,
       // Some exports (Mettle) name the attached receipt/invoice FILES per row —
       // the bulk receipt uploader matches on this, exactly.
-      receiptRef: mapping.receiptFileCol != null ? (cell(r, mapping.receiptFileCol).slice(0, 300) || null) : null,
+      receiptRef: receiptCols.map(c => cell(r, c)).filter(Boolean).join(' | ').slice(0, 300) || null,
     });
   }
   return out;
 }
 
-module.exports = { parseCsv, findHeaderRow, buildTransactions, toIsoDate, parseMoney };
+module.exports = { parseCsv, findHeaderRow, findReceiptCols, buildTransactions, toIsoDate, parseMoney };
