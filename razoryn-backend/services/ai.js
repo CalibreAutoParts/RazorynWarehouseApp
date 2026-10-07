@@ -158,12 +158,16 @@ async function callClaude({ kind, system, user, model, maxTokens = 700, images, 
   // part in the picture against the part number and title). PDFs (bank
   // statements) go in as base64 document blocks the same way.
   let content = user;
-  const imgs = (images || []).filter(u => /^https:\/\//.test(String(u))).slice(0, 3);
+  // An image can be an https URL string or {base64, mediaType} for local
+  // files (dispute evidence photos live on our disk, not at a URL).
+  const imgs = (images || []).filter(u => (typeof u === 'string' && /^https:\/\//.test(u)) || (u && u.base64)).slice(0, 6);
   const docs = (documents || []).filter(d => d && d.base64).slice(0, 2);
   if (imgs.length || docs.length) {
     content = [
       ...docs.map(d => ({ type: 'document', source: { type: 'base64', media_type: d.mediaType || 'application/pdf', data: d.base64 } })),
-      ...imgs.map(u => ({ type: 'image', source: { type: 'url', url: u } })),
+      ...imgs.map(u => typeof u === 'string'
+        ? { type: 'image', source: { type: 'url', url: u } }
+        : { type: 'image', source: { type: 'base64', media_type: u.mediaType || 'image/jpeg', data: u.base64 } }),
       { type: 'text', text: user },
     ];
   }
@@ -772,6 +776,78 @@ Do not invent numbers; if a summary line isn't on the statement use 0 and say so
   };
 }
 
+// ── Dispute / chargeback advisor ───────────────────────────────────────────
+// One case at a time: the customer's claim, our evidence (photos included),
+// our shop policy and the PLATFORM's rules → a realistic win %, whether the
+// fight is worth it, what fees UK law lets us charge, and ready-to-send
+// replies (a de-escalating one and a firm one).
+const PLATFORM_RULES = {
+  paypal: `PAYPAL DISPUTE (likely "Significantly Not As Described" / INAD). PayPal Seller Protection does NOT cover INAD claims. If escalated to a claim, PayPal usually sides with the buyer on INAD unless the seller shows the item matched the listing exactly; when the buyer wins they are typically told to return the item (tracked, often at their own cost unless Return Shipping on Us applies) before refund. KEY ANGLES: respond INSIDE the dispute quickly and keep it a dispute (not escalated) while negotiating; show listing photos/description match what was sent; a "wrong part ordered by buyer" case is NOT "not as described" — argue the item is exactly as described and the buyer chose not to use the seller's free fitment check; offer the standard returns route. If PayPal converts to a claim, upload the same evidence formally. Chargebacks via card through PayPal follow the card scheme's rules instead.`,
+  ebay: `EBAY MONEY BACK GUARANTEE. For "item not as described" eBay almost always makes the seller accept the return WITH seller-paid return label, and refund in full on receipt — fighting INAD head-on rarely wins unless photo evidence clearly shows the item matches the listing AND the listing stated compatibility requirements. eBay punishes ignored cases harshly (case closed without seller resolution = defect + full refund, item often not returned). BEST PLAY: accept the return through the case, send the label, refund on arrival; appeal only with strong proof (e.g. buyer's photos show a different/used item, or buyer admits ordering error in messages — an ordering error can be treated as a remorse return where the buyer pays return postage if the listing's return policy says so). Deduction from refund is only possible for sellers meeting eBay's top-rated/returns criteria and only up to 50% for diminished value.`,
+  chargeback: `CARD CHARGEBACK (via Shopify Payments / acquirer). Decided by the card scheme, not by the shop's policy. Seller submits ONE evidence pack by the deadline; there is no conversation. Win rates on "product not as described" chargebacks are modest but real with a tight pack: the order page + checkout showing the fitment warnings, proof the exact advertised item was sent (photos, weights, tracking with delivery confirmation), the returns policy shown at checkout, and any customer admission of ordering error. Refunding first, or agreeing a return outside the chargeback, usually beats losing the amount PLUS the chargeback fee. Note Shopify just passes evidence on — the issuing bank decides.`,
+  website: `DIRECT WEBSITE SALE (our own policy + UK law applies, no platform referee). The dispute is only with the customer, so policy + statute decide.`,
+  direct: `DIRECT SALE (in person / phone / invoice). UK law for business-to-consumer sales applies; if the buyer is a BUSINESS (trade account, parts reseller, garage), consumer regulations do NOT apply and our commercial terms govern.`,
+};
+const UK_LAW = `UK LAW BASELINE (England & Wales):
+- Consumer Rights Act 2015: if the item genuinely IS faulty or not as described, the consumer has 30 days to reject for a FULL refund and the seller bears return costs; no restocking fee may be charged on a statutory-rights return. BUT a part that is exactly as advertised and simply doesn't fit the customer's particular car because THEY ordered the wrong variant is NOT "not as described" — statutory fault rights don't apply to ordering errors, especially where the seller offered a free pre-purchase fitment check (VIN check) that the customer skipped.
+- Consumer Contracts Regulations 2013 (distance sales): consumer may cancel within 14 days of delivery for any reason. Seller may NOT charge a "restocking fee" on this statutory cancellation, but MAY (a) make the consumer pay return postage if the website said so pre-purchase, and (b) deduct for diminished value from handling beyond what a shop inspection would allow (fitted, scratched, marked parts).
+- OUTSIDE the 14-day statutory window, the shop's OWN returns policy governs goodwill returns (e.g. 30-day window with a restocking fee on non-faulty returns) — a restocking fee is lawful there if clearly disclosed pre-purchase.
+- Trade/business buyers: consumer law does not apply; the shop's terms do.
+Be precise about WHICH regime the case falls under before advising on fees.`;
+
+async function disputeAdvisor(payload, { images = [] } = {}) {
+  const cfg = await getAiConfig();
+  const { brand = '', platform = 'website', policy = {}, policyPageText = '', caseData = {}, events = [] } = payload;
+  const rules = PLATFORM_RULES[platform] || PLATFORM_RULES.website;
+  const evLog = events.slice(-25).map(e =>
+    `[${String(e.created_at).slice(0, 10)}] ${e.kind.toUpperCase()}${e.file_name ? ' (file: ' + e.file_name + ')' : ''}: ${String(e.body || '').slice(0, 600)}`
+  ).join('\n') || '(no events logged yet)';
+  const out = await callClaude({
+    kind: 'dispute_advisor',
+    model: cfg.smartModel,
+    maxTokens: 4000,
+    timeoutMs: 180000,
+    images,
+    system: 'You are a seasoned UK e-commerce dispute handler for a car-parts business. You know platform dispute mechanics and UK consumer law cold, you are realistic about win rates (never tell the seller what they want to hear), and you write replies that are firm, professional and de-escalating — never threatening, never admitting fault that doesn\'t exist. Reply with ONLY JSON.',
+    user: `Business: ${brand}. A customer dispute needs a battle plan. Any attached images are the EVIDENCE PHOTOS on file (customer's photos and/or ours) — read them carefully and say what they actually show.
+
+PLATFORM RULES:
+${rules}
+
+${UK_LAW}
+
+OUR SHOP POLICY (disclosed on site at product page AND checkout unless stated otherwise):
+- Return window: ${policy.return_window_days || 30} days
+- Restocking fee on non-faulty returns: ${policy.restocking_pct != null ? policy.restocking_pct + '%' : '10%'}
+- ${policy.policy_notes || ''}
+${policyPageText ? '\nRETURNS PAGE (live from the website):\n' + policyPageText.slice(0, 2500) : ''}
+
+THE CASE:
+${JSON.stringify(caseData, null, 1)}
+
+CASE TIMELINE (what each side has said/done so far):
+${evLog}
+
+Reply ONLY with this JSON:
+{"summary":"<2-3 sentences: what happened and where it stands>",
+ "whatPhotosShow":"<what the attached evidence photos actually show, or null if none>",
+ "regime":"<which rules decide this: platform process / CRA 2015 / CCRs 2013 / own policy / commercial terms — and why>",
+ "winChance":<0-100 realistic % if we contest>,
+ "worthIt":"fight"|"settle"|"accept_return"|"refund",
+ "worthItWhy":"<cost/benefit in 1-2 sentences incl. fees, time, feedback/defect risk>",
+ "canChargeRestocking":{"allowed":true|false,"why":"..."},
+ "canChargeReturnPostage":{"allowed":true|false,"why":"..."},
+ "strategy":["<step 1>","<step 2>",...],
+ "replyRecommended":"<the reply to send now, ready to paste, matching the platform's channel>",
+ "replyFirm":"<a firmer fallback if they push back>",
+ "deEscalation":"<cheapest clean exit if we'd rather not fight>",
+ "evidenceToGather":["..."],
+ "deadlineAdvice":"<what must happen before which date>",
+ "risks":["<what could go wrong>"]}`,
+  });
+  return out.json;
+}
+
 // ── Learning: distil recent feedback into standing rules ──────────────────
 // Reads the recent feedback log and asks the smart model to write/refresh the
 // auto-learned section of the guidance (the hand-written part is untouched).
@@ -841,6 +917,7 @@ module.exports = {
   verifyAltNumber,
   parseBankStatement,
   parsePlatformStatement,
+  disputeAdvisor,
   learnFromFeedback,
   recordFeedback,
   queueSuggestion,

@@ -1235,6 +1235,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
           Books &amp; VAT
         </button>
+        <button class="nav-item admin-only" data-page="disputes">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          Disputes
+        </button>
         <button class="nav-item admin-only" data-page="pushes">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
           Push queue
@@ -3375,6 +3379,7 @@ function hasPerm(page) {
     ai:           false,
     pushes:       false,
     books:        false,
+    disputes:     false,
   };
   const v = map[page];
   if (v === true) return true;
@@ -3429,7 +3434,8 @@ function routeTo(page) {
     qtycheck: renderQtyCheck, iteminfo: renderItemInfo,
     ai: renderAiPage,
     pushes: renderPushQueue,
-    books: renderBooks
+    books: renderBooks,
+    disputes: renderDisputes
   };
   // The handheld's Home is the plain task workbench, not the money dashboard.
   if (State.appShell && page === 'dashboard') pages.dashboard = renderAppHome;
@@ -23249,6 +23255,323 @@ async function bkLabelPlatform(id) {
 async function bkDeletePlatform(id) {
   if (!confirm('Delete this marketplace statement from Books? (Bank transactions keep any payout IDs already stamped.)')) return;
   try { await Api.delete('/api/books/platform-statements/' + id); bkLoadPlatform(); toast('Deleted', 'info'); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// ── Disputes & Chargebacks — every fight in one place ──────────────────────
+// PayPal disputes, eBay MBG cases, card chargebacks, direct claims. Each
+// case keeps its own timeline (customer messages, our replies, evidence
+// photos), its own deadlines, and an AI battle plan that knows the
+// platform's rules + UK consumer law and reads the evidence photos.
+const DS = { cases: [], filter: 'open', settings: {} };
+const DS_PLATFORMS = { paypal: ['PayPal', 'blue'], ebay: ['eBay', 'amber'], chargeback: ['Card chargeback', 'red'], website: ['Website', 'green'], direct: ['Direct', ''] };
+const DS_STATUS = {
+  active: ['⚡ active', 'blue'], needs_info: ['✋ needs info', 'amber'], awaiting_decision: ['⏳ awaiting decision', 'amber'],
+  won: ['🏆 won', 'green'], lost: ['✗ lost', 'red'], settled: ['🤝 settled', ''], closed: ['closed', ''],
+};
+const dsOpenStatuses = ['active', 'needs_info', 'awaiting_decision'];
+function renderDisputes() {
+  if (State.appShell) { toast('Disputes is a desktop-only workspace', 'warn'); routeTo('dashboard'); return; }
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Disputes &amp; Chargebacks</h1><div class="desc">PayPal disputes, eBay cases, card chargebacks and direct claims — each case tracked start to finish with its own evidence, deadlines and an AI battle plan (win %, is it worth fighting, what fees the law allows, and the exact reply to send).</div></div>
+        <div class="actions"><button class="btn btn-primary" onclick="dsNew()">+ New case</button></div>
+      </div>
+      <div id="ds-filters" style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap"></div>
+      <div class="card" style="margin-bottom:14px"><div class="card-body" style="padding:0"><div id="ds-list" style="font-size:13px;padding:12px">Loading…</div></div></div>
+      <div class="card">
+        <div class="card-head"><h3>⚙ Dispute policy — this business</h3><div class="card-desc">What the AI adviser treats as OUR policy. Each warehouse (Razoryn / Calibre) runs its own app, so each keeps its own restocking fee, window and rules.</div></div>
+        <div class="card-body" id="ds-settings" style="font-size:13px">Loading…</div>
+      </div>
+    </div>`;
+  dsLoad();
+}
+async function dsLoad() {
+  try {
+    const [cs, st] = await Promise.all([Api.get('/api/disputes'), Api.get('/api/disputes/settings')]);
+    DS.cases = cs.disputes || [];
+    DS.settings = st.settings || {};
+    dsPaintFilters(); dsPaintList(); dsPaintSettings();
+  } catch (e) { toast('Disputes load failed: ' + (e.data?.message || e.message), 'error'); }
+}
+function dsPaintFilters() {
+  const box = el('ds-filters'); if (!box) return;
+  const n = (f) => DS.cases.filter(c => f(c)).length;
+  const defs = [
+    ['open', 'Open', (c) => dsOpenStatuses.includes(c.status)],
+    ['needs_info', '✋ Needs info', (c) => c.status === 'needs_info'],
+    ['awaiting_decision', '⏳ Awaiting decision', (c) => c.status === 'awaiting_decision'],
+    ['closed', 'Closed', (c) => !dsOpenStatuses.includes(c.status)],
+    ['all', 'All', () => true],
+  ];
+  box.innerHTML = defs.map(([k, label, f]) =>
+    `<button class="btn ${DS.filter === k ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="DS.filter='${k}';dsPaintFilters();dsPaintList()">${label} (${n(f)})</button>`).join('');
+}
+function dsCaseMatchesFilter(c) {
+  if (DS.filter === 'open') return dsOpenStatuses.includes(c.status);
+  if (DS.filter === 'closed') return !dsOpenStatuses.includes(c.status);
+  if (DS.filter === 'all') return true;
+  return c.status === DS.filter;
+}
+function dsDeadline(d, label) {
+  if (!d) return '';
+  const iso = String(d).slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
+  const overdue = iso < today, soon = !overdue && iso <= new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
+  return `<span class="pill ${overdue ? 'red' : (soon ? 'amber' : '')}" style="font-size:10px" title="${label}">${label} ${bkUkDate(iso)}${overdue ? ' ⚠ OVERDUE' : ''}</span>`;
+}
+function dsPaintList() {
+  const box = el('ds-list'); if (!box) return;
+  const rows = DS.cases.filter(dsCaseMatchesFilter);
+  if (!rows.length) { box.innerHTML = '<div style="color:var(--ink-soft)">No cases here' + (DS.filter === 'open' ? ' — nothing open. 🎉' : '.') + '</div>'; return; }
+  box.innerHTML = rows.map(c => {
+    const [pl, pc] = DS_PLATFORMS[c.platform] || [c.platform, ''];
+    const [sl, sc] = DS_STATUS[c.status] || [c.status, ''];
+    const ai = c.ai_assessment;
+    return `<div onclick="dsOpen(${c.id})" style="display:flex;justify-content:space-between;gap:10px;align-items:center;border-bottom:1px solid var(--line-2);padding:9px 4px;cursor:pointer;flex-wrap:wrap">
+      <div style="min-width:280px;flex:1">
+        <span class="pill ${pc}" style="font-size:10px">${pl}</span>
+        <strong style="margin-left:4px">${escapeHtml(c.customer_name || c.case_ref || 'Case #' + c.id)}</strong>
+        <span style="color:var(--ink-soft)"> · ${escapeHtml(c.item_desc || c.reason || '').slice(0, 70)}</span>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">
+          ${c.invoice_number ? '🧾 ' + escapeHtml(c.invoice_number) + ' · ' : (c.order_ref ? '🧾 ' + escapeHtml(c.order_ref) + ' · ' : '')}
+          ${c.case_ref ? 'ref ' + escapeHtml(c.case_ref) + ' · ' : ''}opened ${c.opened_at ? bkUkDate(c.opened_at) : '—'} · ${c.event_count || 0} event${(c.event_count || 0) === 1 ? '' : 's'}
+          ${ai ? ` · 🤖 ${ai.winChance}% win` : ''}</div>
+      </div>
+      <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
+        ${c.disputed_amount != null ? `<strong>${gbp(c.disputed_amount)}</strong>` : (c.amount != null ? `<strong>${gbp(c.amount)}</strong>` : '')}
+        ${dsOpenStatuses.includes(c.status) ? dsDeadline(c.reply_by, 'reply by') + dsDeadline(c.decision_due, 'decision') : ''}
+        <span class="pill ${sc}" style="font-size:10px">${sl}</span>
+      </div></div>`;
+  }).join('');
+}
+function dsPaintSettings() {
+  const box = el('ds-settings'); if (!box) return;
+  const s = DS.settings;
+  box.innerHTML = `
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+      <div class="field" style="margin:0"><label>Restocking fee % (non-faulty returns)</label><input type="number" id="ds-set-restock" step="0.5" min="0" max="100" value="${s.restocking_pct != null ? +s.restocking_pct : 10}" style="width:90px"></div>
+      <div class="field" style="margin:0"><label>Return window (days)</label><input type="number" id="ds-set-window" min="14" value="${s.return_window_days || 30}" style="width:80px"></div>
+      <div class="field" style="margin:0;flex:1;min-width:260px"><label>Returns page URL (the AI reads the live policy)</label><input id="ds-set-url" value="${escapeAttr(s.returns_url || '')}" placeholder="https://www.razoryn.co.uk/pages/returns"></div>
+    </div>
+    <div class="field" style="margin-top:10px"><label>House rules the adviser should know (shown to the AI with every case)</label>
+      <textarea id="ds-set-notes" rows="3" placeholder="e.g. Fitment warning shown on every product page AND at checkout: customers are asked to send VIN/chassis by WhatsApp or email before buying. Return label available, cost deducted from refund. Trade-account buyers are business customers.">${escapeHtml(s.policy_notes || '')}</textarea></div>
+    <button class="btn btn-outline btn-sm" onclick="dsSaveSettings(this)">Save policy</button>`;
+}
+async function dsSaveSettings(btn) {
+  btn.disabled = true;
+  try {
+    await Api.patch('/api/disputes/settings', {
+      restockingPct: el('ds-set-restock').value, returnWindowDays: el('ds-set-window').value,
+      returnsUrl: el('ds-set-url').value.trim(), policyNotes: el('ds-set-notes').value.trim(),
+    });
+    toast('✓ Dispute policy saved — the AI adviser uses it from the next analysis', 'success');
+    dsLoad();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  btn.disabled = false;
+}
+// ── New case ───────────────────────────────────────────────────────────────
+function dsNew() {
+  modal({
+    title: '⚖ New dispute / chargeback case',
+    body: `
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <div class="field" style="flex:1;min-width:160px"><label>Platform</label><select id="ds-n-platform">
+          <option value="paypal">PayPal dispute</option><option value="ebay">eBay case</option>
+          <option value="chargeback">Card chargeback (Shopify)</option><option value="website">Website claim</option>
+          <option value="direct">Direct customer</option></select></div>
+        <div class="field" style="flex:1;min-width:160px"><label>Case ID / reference</label><input id="ds-n-ref" placeholder="PP-D-123…, eBay case id"></div>
+      </div>
+      <div class="field"><label>Link a warehouse order (search invoice # or customer)</label>
+        <div style="display:flex;gap:6px"><input id="ds-n-salesearch" placeholder="CAP-0778 or Andrew Groves" style="flex:1"><button class="btn btn-outline btn-sm" onclick="dsSaleSearch()">🔍</button></div>
+        <div id="ds-n-saleresults" style="font-size:12px;margin-top:4px"></div>
+        <input type="hidden" id="ds-n-saleid"></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <div class="field" style="flex:1;min-width:160px"><label>Customer name</label><input id="ds-n-customer"></div>
+        <div class="field" style="flex:1;min-width:160px"><label>Contact (email / phone)</label><input id="ds-n-contact"></div>
+      </div>
+      <div class="field"><label>Item in dispute</label><input id="ds-n-item" placeholder="Peugeot 208 2024-2026 front grille (black)"></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <div class="field" style="flex:1;min-width:120px"><label>Order amount £</label><input type="number" id="ds-n-amount" step="0.01"></div>
+        <div class="field" style="flex:1;min-width:120px"><label>Disputed £</label><input type="number" id="ds-n-disputed" step="0.01"></div>
+        <div class="field" style="flex:1;min-width:150px"><label>Customer wants</label><select id="ds-n-wants">
+          <option>Full refund</option><option>Partial refund</option><option>Replacement</option><option>Return &amp; refund</option><option>Unclear</option></select></div>
+      </div>
+      <div class="field"><label>What the customer claims (their words)</label><textarea id="ds-n-reason" rows="3" placeholder="Says the grille we sent is 'defective / not as described' — his old grille has sensor holes, ours doesn't."></textarea></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <div class="field" style="margin:0"><label>Opened</label><input type="date" id="ds-n-opened" value="${new Date().toISOString().slice(0, 10)}"></div>
+        <div class="field" style="margin:0"><label>Reply by</label><input type="date" id="ds-n-replyby"></div>
+        <div class="field" style="margin:0"><label>Decision due</label><input type="date" id="ds-n-decision"></div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:6px"><input type="checkbox" id="ds-n-vin"> Customer DID provide VIN for fitment check</label>
+      </div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Create case', primary: true, onClick: dsCreate },
+    ],
+  });
+}
+async function dsSaleSearch() {
+  const q = el('ds-n-salesearch')?.value?.trim(); if (!q) return;
+  const box = el('ds-n-saleresults');
+  try {
+    const r = await Api.get('/api/disputes/find-sale?q=' + encodeURIComponent(q));
+    box.innerHTML = (r.sales || []).length ? r.sales.map(s =>
+      `<a href="#" onclick="event.preventDefault();el('ds-n-saleid').value='${s.id}';if(!el('ds-n-customer').value)el('ds-n-customer').value='${escapeAttr(s.customer_name || '').replace(/'/g, "\\'")}';if(!el('ds-n-amount').value)el('ds-n-amount').value='${s.total}';this.parentElement.innerHTML='🧾 Linked to ${escapeAttr(s.invoice_number || ('#' + s.id)).replace(/'/g, "\\'")}';"
+         style="display:block;padding:3px 0">🧾 ${escapeHtml(s.invoice_number || ('#' + s.id))} · ${escapeHtml(s.customer_name || '')} · ${gbp(s.total)} · ${bkUkDate(String(s.occurred_at).slice(0, 10))}</a>`).join('')
+      : '<span style="color:var(--ink-soft)">No orders found — the case can stand alone.</span>';
+  } catch (e) { box.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.message) + '</span>'; }
+}
+async function dsCreate() {
+  try {
+    const r = await Api.post('/api/disputes', {
+      platform: el('ds-n-platform').value, caseRef: el('ds-n-ref').value.trim(),
+      saleId: el('ds-n-saleid').value || null, customerName: el('ds-n-customer').value.trim(),
+      customerContact: el('ds-n-contact').value.trim(), itemDesc: el('ds-n-item').value.trim(),
+      amount: el('ds-n-amount').value, disputedAmount: el('ds-n-disputed').value,
+      customerWants: el('ds-n-wants').value, reason: el('ds-n-reason').value.trim(),
+      openedAt: el('ds-n-opened').value || null, replyBy: el('ds-n-replyby').value || null,
+      decisionDue: el('ds-n-decision').value || null, vinProvided: el('ds-n-vin').checked,
+    });
+    closeModal();
+    toast('Case created — add the customer’s photos/messages, then hit 🤖 Analyse', 'success', 6000);
+    await dsLoad();
+    dsOpen(r.dispute.id);
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+// ── Case detail ────────────────────────────────────────────────────────────
+function dsEventIcon(k) { return { note: '✎', customer: '🗣', reply: '📤', evidence: '📎', status: '🚦', ai: '🤖' }[k] || '•'; }
+async function dsOpen(id) {
+  let d, events;
+  try { const r = await Api.get('/api/disputes/' + id); d = r.dispute; events = r.events || []; }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); return; }
+  const [pl, pc] = DS_PLATFORMS[d.platform] || [d.platform, ''];
+  const [sl, sc] = DS_STATUS[d.status] || [d.status, ''];
+  const ai = d.ai_assessment;
+  const isOpen = dsOpenStatuses.includes(d.status);
+  modal({
+    title: `${pl} case — ${escapeHtml(d.customer_name || d.case_ref || '#' + d.id)}`,
+    wide: true,
+    body: `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <span class="pill ${sc}">${sl}</span>
+        ${d.invoice_number ? `<span class="pill green" style="font-size:10px">🧾 ${escapeHtml(d.invoice_number)}</span>` : ''}
+        ${d.case_ref ? `<span class="pill" style="font-size:10px">ref ${escapeHtml(d.case_ref)}</span>` : ''}
+        ${d.disputed_amount != null ? `<strong>${gbp(d.disputed_amount)} disputed</strong>` : ''}
+        <span class="pill ${d.vin_provided ? 'green' : 'amber'}" style="font-size:10px">${d.vin_provided ? 'VIN was provided' : 'NO VIN provided for fitment check'}</span>
+        <span style="flex:1"></span>
+        <label style="font-size:11px">Reply by <input type="date" value="${d.reply_by ? String(d.reply_by).slice(0, 10) : ''}" onchange="dsPatch(${d.id},{replyBy:this.value})" style="font-size:11px"></label>
+        <label style="font-size:11px">Decision <input type="date" value="${d.decision_due ? String(d.decision_due).slice(0, 10) : ''}" onchange="dsPatch(${d.id},{decisionDue:this.value})" style="font-size:11px"></label>
+      </div>
+      ${d.item_desc ? `<div style="font-size:12.5px;margin-bottom:4px"><strong>Item:</strong> ${escapeHtml(d.item_desc)}</div>` : ''}
+      ${d.reason ? `<div style="font-size:12.5px;background:var(--line-2);border-radius:7px;padding:8px 10px;margin-bottom:10px"><strong>Customer claims:</strong> ${escapeHtml(d.reason)}${d.customer_wants ? ` — <strong>wants:</strong> ${escapeHtml(d.customer_wants)}` : ''}</div>` : ''}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+        <button class="btn btn-primary btn-sm" onclick="dsAnalyze(${d.id})">🤖 ${ai ? 'Re-analyse' : 'Analyse'} case</button>
+        ${isOpen ? `
+          <button class="btn btn-outline btn-sm" onclick="dsSetStatus(${d.id},'needs_info')">✋ Needs info</button>
+          <button class="btn btn-outline btn-sm" onclick="dsSetStatus(${d.id},'awaiting_decision')">⏳ Awaiting decision</button>
+          <button class="btn btn-outline btn-sm" style="color:var(--green)" onclick="dsResolve(${d.id},'won')">🏆 Won</button>
+          <button class="btn btn-outline btn-sm" style="color:var(--red)" onclick="dsResolve(${d.id},'lost')">✗ Lost</button>
+          <button class="btn btn-outline btn-sm" onclick="dsResolve(${d.id},'settled')">🤝 Settled</button>`
+        : `<button class="btn btn-outline btn-sm" onclick="dsSetStatus(${d.id},'active')">↩ Reopen</button>`}
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="dsDelete(${d.id})">🗑 Delete case</button>
+      </div>
+      ${d.resolution ? `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px"><strong>Resolution:</strong> ${escapeHtml(d.resolution)}</div>` : ''}
+      ${ai ? dsAssessmentHtml(ai) : '<div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">No AI assessment yet — upload the customer’s photos & messages below, then hit 🤖 Analyse for the battle plan.</div>'}
+      <div style="font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);margin:10px 0 6px">Timeline</div>
+      <div style="max-height:260px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin-bottom:10px">
+        ${events.length ? events.map(e => `
+          <div style="display:flex;gap:8px;border-bottom:1px solid var(--line-2);padding:5px 0;font-size:12px">
+            <div style="white-space:nowrap;color:var(--ink-soft)">${bkUkDate(String(e.created_at).slice(0, 10))}</div>
+            <div style="flex:1">${dsEventIcon(e.kind)} <strong style="text-transform:capitalize">${escapeHtml(e.kind)}</strong>
+              ${e.body ? ' — ' + escapeHtml(e.body) : ''}
+              ${e.file_path ? ` <a href="/api/disputes/events/${e.id}/file" target="_blank">📎 ${escapeHtml(e.file_name || 'file')}</a>` : ''}</div>
+            <a href="#" onclick="event.preventDefault();dsDeleteEvent(${e.id},${d.id})" style="color:var(--red);text-decoration:none" title="Remove">×</a>
+          </div>`).join('') : '<div style="font-size:12px;color:var(--ink-soft)">Nothing logged yet.</div>'}
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start">
+        <select id="ds-ev-kind" style="font-size:12px"><option value="customer">🗣 Customer said</option><option value="reply">📤 We replied</option><option value="evidence">📎 Evidence</option><option value="note">✎ Note</option></select>
+        <textarea id="ds-ev-body" rows="2" placeholder="Paste the message / describe the evidence…" style="flex:1;min-width:220px;font-size:12px"></textarea>
+        <label class="btn btn-ghost btn-sm" style="cursor:pointer">📎 Files<input type="file" id="ds-ev-files" multiple accept=".pdf,image/*" style="display:none"></label>
+        <button class="btn btn-outline btn-sm" onclick="dsAddEvent(${d.id}, this)">Add</button>
+      </div>`,
+    actions: [{ label: 'Close', onClick: closeModal }],
+  });
+}
+function dsAssessmentHtml(ai) {
+  const wc = Math.max(0, Math.min(100, parseInt(ai.winChance) || 0));
+  const wcColor = wc >= 65 ? 'var(--green)' : wc >= 40 ? 'var(--amber, orange)' : 'var(--red)';
+  const verdict = { fight: '⚔ Fight it', settle: '🤝 Settle', accept_return: '↩ Accept the return', refund: '💸 Refund' }[ai.worthIt] || ai.worthIt;
+  const feeLine = (f, label) => f ? `<div style="font-size:12px">${f.allowed ? '✅' : '🚫'} <strong>${label}:</strong> ${escapeHtml(f.why || '')}</div>` : '';
+  const replyBlock = (title, text) => text ? `
+    <details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px;font-weight:600">${title}</summary>
+      <textarea readonly rows="7" style="width:100%;font-size:12px;margin-top:4px">${escapeHtml(text)}</textarea>
+      <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText(this.previousElementSibling.value).then(()=>toast('Copied','success'))">📋 Copy</button></details>` : '';
+  return `<div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px;background:var(--line-2)">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <div style="font-size:22px;font-weight:800;color:${wcColor}">${wc}%</div>
+      <div style="flex:1;min-width:120px;background:var(--line);border-radius:99px;height:10px;overflow:hidden"><div style="width:${wc}%;height:100%;background:${wcColor}"></div></div>
+      <strong>${escapeHtml(verdict)}</strong></div>
+    <div style="font-size:12.5px;margin-top:6px">${escapeHtml(ai.summary || '')}</div>
+    ${ai.whatPhotosShow ? `<div style="font-size:12px;margin-top:4px"><strong>📷 Photos show:</strong> ${escapeHtml(ai.whatPhotosShow)}</div>` : ''}
+    ${ai.regime ? `<div style="font-size:12px;margin-top:4px"><strong>⚖ Which rules apply:</strong> ${escapeHtml(ai.regime)}</div>` : ''}
+    ${ai.worthItWhy ? `<div style="font-size:12px;margin-top:4px"><strong>Worth it?</strong> ${escapeHtml(ai.worthItWhy)}</div>` : ''}
+    <div style="margin-top:6px">${feeLine(ai.canChargeRestocking, 'Restocking fee')}${feeLine(ai.canChargeReturnPostage, 'Return postage')}</div>
+    ${Array.isArray(ai.strategy) && ai.strategy.length ? `<div style="font-size:12px;margin-top:6px"><strong>Plan:</strong><ol style="margin:4px 0 0 18px;padding:0">${ai.strategy.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol></div>` : ''}
+    ${ai.deadlineAdvice ? `<div style="font-size:12px;margin-top:4px"><strong>⏰ Deadlines:</strong> ${escapeHtml(ai.deadlineAdvice)}</div>` : ''}
+    ${replyBlock('📤 Recommended reply (send this)', ai.replyRecommended)}
+    ${replyBlock('🛡 Firmer fallback (if they push)', ai.replyFirm)}
+    ${replyBlock('🕊 De-escalation exit (cheapest clean way out)', ai.deEscalation)}
+    ${Array.isArray(ai.evidenceToGather) && ai.evidenceToGather.length ? `<div style="font-size:12px;margin-top:6px"><strong>📎 Still to gather:</strong> ${ai.evidenceToGather.map(escapeHtml).join(' · ')}</div>` : ''}
+    ${Array.isArray(ai.risks) && ai.risks.length ? `<div style="font-size:12px;margin-top:4px;color:var(--ink-soft)"><strong>Risks:</strong> ${ai.risks.map(escapeHtml).join(' · ')}</div>` : ''}
+  </div>`;
+}
+async function dsAddEvent(id, btn) {
+  const body = el('ds-ev-body')?.value?.trim();
+  const files = el('ds-ev-files')?.files;
+  if (!body && !(files && files.length)) { toast('Write something or attach a file first', 'warn'); return; }
+  btn.disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append('kind', el('ds-ev-kind').value);
+    if (body) fd.append('body', body);
+    for (const f of (files || [])) fd.append('files', f);
+    await Api.postForm('/api/disputes/' + id + '/events', fd);
+    toast('Added to the case', 'success');
+    dsOpen(id); dsLoad();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); btn.disabled = false; }
+}
+async function dsDeleteEvent(eventId, id) {
+  if (!confirm('Remove this timeline entry?')) return;
+  try { await Api.delete('/api/disputes/events/' + eventId); dsOpen(id); } catch (e) { toast('Failed', 'error'); }
+}
+async function dsAnalyze(id) {
+  const taskId = Task.start('Claude is building the battle plan — platform rules, UK law, the evidence photos…');
+  try {
+    const r = await Api.post('/api/disputes/' + id + '/analyze', {});
+    Task.done(taskId, `🤖 ${r.assessment.winChance}% win chance — advice: ${r.assessment.worthIt}`);
+    dsOpen(id); dsLoad();
+  } catch (e) { Task.fail(taskId, 'Analysis failed: ' + (e.data?.message || e.message)); }
+}
+async function dsPatch(id, patch) {
+  try { await Api.patch('/api/disputes/' + id, patch); dsLoad(); }
+  catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function dsSetStatus(id, status) {
+  try { await Api.patch('/api/disputes/' + id, { status }); dsOpen(id); dsLoad(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function dsResolve(id, status) {
+  const how = prompt(status === 'won' ? 'How was it won? (e.g. PayPal sided with us — evidence pack)' :
+    status === 'lost' ? 'How was it lost / what was refunded?' : 'What was the settlement? (e.g. 50% partial refund, customer keeps item)');
+  if (how === null) return;
+  try { await Api.patch('/api/disputes/' + id, { status, resolution: how }); toast('Case ' + status, 'success'); dsOpen(id); dsLoad(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function dsDelete(id) {
+  if (!confirm('Delete this case and all its evidence? This cannot be undone.')) return;
+  try { await Api.delete('/api/disputes/' + id); closeModal(); toast('Case deleted', 'info'); dsLoad(); }
   catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 

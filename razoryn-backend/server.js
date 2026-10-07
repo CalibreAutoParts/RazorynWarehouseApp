@@ -102,6 +102,7 @@ app.use('/api/pushes',       require('./routes/pushes'));
 // Books / VAT workspace: admin API + the accountant's tokened read-only view
 // (no login — the long random token IS the credential; links are revocable).
 app.use('/api/books',        require('./routes/books'));
+app.use('/api/disputes',     require('./routes/disputes'));
 app.use('/api/books-shared', require('./routes/books').publicRouter);
 app.use('/api/dropfleet',    require('./routes/dropfleet'));
 app.use('/api/thumbnail',    require('./routes/thumbnail'));
