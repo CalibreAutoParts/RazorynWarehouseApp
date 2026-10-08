@@ -37,9 +37,24 @@ const upload = multer({
   limits: { fileSize: 15 * 1024 * 1024, files: 10 },
 });
 
+// Express 4 does not catch async route errors — an un-awaited throw leaves
+// the request hanging until the proxy gives up ("Application failed to
+// respond"). Every handler goes through this, and the error handler at the
+// bottom turns failures into real JSON errors.
+const aw = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
 let _ready = false;
+let _migrating = null;
 async function ensureTables() {
   if (_ready) return;
+  // The page fires its first requests in PARALLEL — two concurrent
+  // CREATE TABLE IF NOT EXISTS runs can race in Postgres (duplicate pg_type
+  // key). One shared in-flight migration keeps it to a single run.
+  if (_migrating) return _migrating;
+  _migrating = doMigrate().finally(() => { _migrating = null; });
+  return _migrating;
+}
+async function doMigrate() {
   try {
     await query(`CREATE TABLE IF NOT EXISTS disputes (
       id SERIAL PRIMARY KEY,
@@ -93,12 +108,12 @@ const STATUSES = ['active', 'needs_info', 'awaiting_decision', 'won', 'lost', 's
 const PLATFORMS = ['paypal', 'ebay', 'chargeback', 'website', 'direct'];
 
 // ── Policy settings (per deployment = per business) ───────────────────────
-router.get('/settings', async (req, res) => {
+router.get('/settings', aw(async (req, res) => {
   await ensureTables();
   const r = await query(`SELECT * FROM dispute_settings WHERE id = 1`);
   res.json({ settings: r.rows[0] || {} });
-});
-router.patch('/settings', async (req, res) => {
+}));
+router.patch('/settings', aw(async (req, res) => {
   await ensureTables();
   const b = req.body || {};
   const sets = [], params = [];
@@ -111,10 +126,10 @@ router.patch('/settings', async (req, res) => {
   const r = await query(`UPDATE dispute_settings SET ${sets.join(', ')} WHERE id = 1 RETURNING *`);
   await audit(req, 'dispute_settings', null, null, b);
   res.json({ settings: r.rows[0] });
-});
+}));
 
 // ── Order lookup (to link a case to a warehouse sale) ─────────────────────
-router.get('/find-sale', async (req, res) => {
+router.get('/find-sale', aw(async (req, res) => {
   await ensureTables();
   const q = String(req.query.q || '').trim();
   if (q.length < 2) return res.json({ sales: [] });
@@ -125,10 +140,10 @@ router.get('/find-sale', async (req, res) => {
        AND (invoice_number ILIKE $1 OR customer_name ILIKE $1)
      ORDER BY occurred_at DESC LIMIT 10`, ['%' + q + '%']);
   res.json({ sales: rows });
-});
+}));
 
 // ── Cases ──────────────────────────────────────────────────────────────────
-router.get('/', async (req, res) => {
+router.get('/', aw(async (req, res) => {
   await ensureTables();
   const { rows } = await query(`
     SELECT d.*,
@@ -141,8 +156,8 @@ router.get('/', async (req, res) => {
               d.reply_by ASC NULLS LAST, d.created_at DESC
      LIMIT 300`);
   res.json({ disputes: rows });
-});
-router.post('/', async (req, res) => {
+}));
+router.post('/', aw(async (req, res) => {
   await ensureTables();
   const b = req.body || {};
   const platform = PLATFORMS.includes(b.platform) ? b.platform : 'paypal';
@@ -162,15 +177,15 @@ router.post('/', async (req, res) => {
      !!b.vinProvided, b.openedAt || null, b.replyBy || null, b.decisionDue || null, req.user.id]);
   await audit(req, 'dispute_create', 'dispute', r.rows[0].id, { platform, caseRef: b.caseRef });
   res.status(201).json({ dispute: r.rows[0] });
-});
-router.get('/:id(\\d+)', async (req, res) => {
+}));
+router.get('/:id(\\d+)', aw(async (req, res) => {
   await ensureTables();
   const d = (await query(`SELECT d.*, s.invoice_number FROM disputes d LEFT JOIN sales s ON s.id = d.sale_id WHERE d.id = $1`, [req.params.id])).rows[0];
   if (!d) return res.status(404).json({ error: 'not_found' });
   const ev = await query(`SELECT * FROM dispute_events WHERE dispute_id = $1 ORDER BY created_at`, [req.params.id]);
   res.json({ dispute: d, events: ev.rows });
-});
-router.patch('/:id(\\d+)', async (req, res) => {
+}));
+router.patch('/:id(\\d+)', aw(async (req, res) => {
   await ensureTables();
   const b = req.body || {};
   const sets = [], params = [];
@@ -202,18 +217,18 @@ router.patch('/:id(\\d+)', async (req, res) => {
   }
   await audit(req, 'dispute_update', 'dispute', req.params.id, b);
   res.json({ dispute: r.rows[0] });
-});
-router.delete('/:id(\\d+)', async (req, res) => {
+}));
+router.delete('/:id(\\d+)', aw(async (req, res) => {
   await ensureTables();
   const ev = await query(`SELECT file_path FROM dispute_events WHERE dispute_id = $1 AND file_path IS NOT NULL`, [req.params.id]);
   await query(`DELETE FROM disputes WHERE id = $1`, [req.params.id]);
   for (const e of ev.rows) { try { fs.unlinkSync(path.join(UPLOAD_DIR, e.file_path)); } catch (_) {} }
   await audit(req, 'dispute_delete', 'dispute', req.params.id);
   res.json({ ok: true });
-});
+}));
 
 // ── Timeline events: notes, customer messages, our replies, evidence ──────
-router.post('/:id(\\d+)/events', upload.array('files'), async (req, res) => {
+router.post('/:id(\\d+)/events', upload.array('files'), aw(async (req, res) => {
   await ensureTables();
   const d = (await query(`SELECT id FROM disputes WHERE id = $1`, [req.params.id])).rows[0];
   if (!d) return res.status(404).json({ error: 'not_found' });
@@ -237,23 +252,23 @@ router.post('/:id(\\d+)/events', upload.array('files'), async (req, res) => {
   await query(`UPDATE disputes SET updated_at = now() WHERE id = $1`, [req.params.id]);
   await audit(req, 'dispute_event', 'dispute', req.params.id, { kind, files: (req.files || []).length });
   res.status(201).json({ events: made });
-});
-router.delete('/events/:eventId(\\d+)', async (req, res) => {
+}));
+router.delete('/events/:eventId(\\d+)', aw(async (req, res) => {
   await ensureTables();
   const r = await query(`DELETE FROM dispute_events WHERE id = $1 RETURNING file_path`, [req.params.eventId]);
   if (r.rows[0]?.file_path) { try { fs.unlinkSync(path.join(UPLOAD_DIR, r.rows[0].file_path)); } catch (_) {} }
   res.json({ ok: true });
-});
-router.get('/events/:eventId(\\d+)/file', async (req, res) => {
+}));
+router.get('/events/:eventId(\\d+)/file', aw(async (req, res) => {
   await ensureTables();
   const r = await query(`SELECT file_path, file_name FROM dispute_events WHERE id = $1`, [req.params.eventId]);
   if (!r.rows[0] || !r.rows[0].file_path) return res.status(404).json({ error: 'not_found' });
   res.sendFile(path.join(UPLOAD_DIR, r.rows[0].file_path));
-});
+}));
 
 // ── AI battle plan ─────────────────────────────────────────────────────────
 const IMG_TYPES = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' };
-router.post('/:id(\\d+)/analyze', async (req, res) => {
+router.post('/:id(\\d+)/analyze', aw(async (req, res) => {
   try {
     await ensureTables();
     const ai = require('../services/ai');
@@ -306,6 +321,14 @@ router.post('/:id(\\d+)/analyze', async (req, res) => {
     console.error('[disputes] analyze failed:', (e && e.stack) || e);
     res.status(502).json({ error: e.code || 'analyze_failed', message: e.message });
   }
+}));
+
+// Any route error (including multer upload errors) lands here as a real
+// JSON response — never a hung request.
+router.use((err, req, res, next) => {
+  console.error('[disputes]', (err && err.stack) || err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'disputes_error', message: err.message || String(err) });
 });
 
 module.exports = router;
