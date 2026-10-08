@@ -102,7 +102,14 @@ jobs:
             fi
             echo "google-services.json + Gradle plugin added for ${{ matrix.brand }}"
           else
-            echo "No google-services.json secret for ${{ matrix.brand }} — building WITHOUT native push."
+            # No Firebase config → the push PLUGIN must come out of the build.
+            # With the plugin compiled in but no google-services.json, the
+            # app hard-crashes natively the moment the web app calls
+            # Push.register() after login ("Default FirebaseApp is not
+            # initialized" — a JS try/catch can't contain it). The next
+            # `cap sync` regenerates the native plugin list without it.
+            npm uninstall @capacitor/push-notifications
+            echo "No google-services.json secret for ${{ matrix.brand }} — push plugin removed, building WITHOUT native push."
           fi
 
       - name: Generate launcher icons from the brand logo
