@@ -44,8 +44,17 @@ const upload = multer({
 });
 
 let _ready = false;
+let _migrating = null;
 async function ensureTables() {
   if (_ready) return;
+  // First page load fires several requests in PARALLEL — concurrent
+  // CREATE TABLE IF NOT EXISTS runs can race in Postgres (duplicate
+  // pg_type key), hanging one request. Share a single in-flight migration.
+  if (_migrating) return _migrating;
+  _migrating = doMigrate().finally(() => { _migrating = null; });
+  return _migrating;
+}
+async function doMigrate() {
   try {
     await query(`CREATE TABLE IF NOT EXISTS bank_accounts (
       id SERIAL PRIMARY KEY,
