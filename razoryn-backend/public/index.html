@@ -17283,21 +17283,29 @@ async function loadCtOverstock() {
 // ---- Per-product cost editor (FX preview + history) ----
 async function ctOpenEditor(productId) {
   const p = CT.items.find(x => x.id === productId) || {};
+  // This listing may have no saved cost of ITS OWN while still showing one on
+  // the page — the list borrows the cost from another listing of the same
+  // part number (🔗 shared). Pre-fill that borrowed figure (in GBP) so Save
+  // works straight away instead of bouncing with "Enter the unit cost".
+  const noOwnEntry = p.lastUnitCostForeign == null && p.costPrice != null;
+  const defCur = noOwnEntry ? 'GBP' : (p.lastCurrency || 'CNY');
+  const defUnit = p.lastUnitCostForeign != null ? p.lastUnitCostForeign : (noOwnEntry ? (+p.costPrice).toFixed(2) : '');
   modal({
     title: 'Cost — ' + (p.title || ('#' + productId)),
     body: `
+      ${noOwnEntry && p.costShared ? `<div style="font-size:12px;background:var(--bg-soft);border:1px solid var(--amber,orange);border-radius:8px;padding:8px 10px;margin-bottom:10px">🔗 This listing has <strong>no saved cost of its own</strong> — the £${(+p.costPrice).toFixed(2)} on the page is borrowed from ${p.costSharedFrom ? '<strong>' + escapeHtml(p.costSharedFrom) + '</strong>' : 'another listing'} (same part number). It's pre-filled below: hit <strong>Save cost</strong> to make it this listing's own, or adjust it first.</div>` : ''}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field"><label>Supplier <span style="color:var(--ink-soft);font-weight:400">— pick a saved one or type a new</span></label>${supplierComboHtml('ct-supplier', p.lastSupplier || '', 'e.g. Guangzhou XYZ')}</div>
         <div class="field"><label>Purchase date</label><input id="ct-date" type="date" value="${ctToday()}"></div>
         <div class="field"><label>Currency</label>
-          <select id="ct-cur"><option value="CNY"${(p.lastCurrency || 'CNY') === 'CNY' ? ' selected' : ''}>CNY (RMB)</option><option value="GBP"${p.lastCurrency === 'GBP' ? ' selected' : ''}>GBP</option><option value="USD"${p.lastCurrency === 'USD' ? ' selected' : ''}>USD</option><option value="EUR"${p.lastCurrency === 'EUR' ? ' selected' : ''}>EUR</option></select></div>
+          <select id="ct-cur"><option value="CNY"${defCur === 'CNY' ? ' selected' : ''}>CNY (RMB)</option><option value="GBP"${defCur === 'GBP' ? ' selected' : ''}>GBP</option><option value="USD"${defCur === 'USD' ? ' selected' : ''}>USD</option><option value="EUR"${defCur === 'EUR' ? ' selected' : ''}>EUR</option></select></div>
         <div class="field"><label>Price basis <span style="color:var(--ink-soft);font-weight:400">— what the quote includes</span></label>
           <select id="ct-basis">
             <option value=""${!p.lastPriceBasis ? ' selected' : ''}>— not set —</option>
             <option value="FOB"${p.lastPriceBasis === 'FOB' ? ' selected' : ''}>FOB — to the ship, freight on top</option>
             <option value="EXW"${p.lastPriceBasis === 'EXW' ? ' selected' : ''}>EXW — ex-works, freight + haulage on top</option>
           </select></div>
-        <div class="field"><label>Unit cost (foreign)</label><input id="ct-foreign" type="number" step="0.01" min="0" value="${p.lastUnitCostForeign != null ? p.lastUnitCostForeign : ''}" placeholder="e.g. 80"></div>
+        <div class="field"><label>Unit cost <span style="color:var(--ink-soft);font-weight:400">(in the currency above)</span></label><input id="ct-foreign" type="number" step="0.01" min="0" value="${defUnit}" placeholder="e.g. 80"></div>
         <div class="field"><label>FX rate → GBP <span style="color:var(--ink-soft);font-weight:400">auto</span></label>
           <div style="display:flex;gap:6px"><input id="ct-rate" type="number" step="0.00001" min="0" placeholder="auto" style="flex:1"><button type="button" class="btn btn-outline btn-sm" onclick="ctFetchRate()">↻</button></div></div>
         <div class="field"><label>= GBP unit cost</label><input id="ct-gbp" disabled style="background:var(--bg-soft);font-weight:700"></div>
@@ -17590,7 +17598,9 @@ async function ctSaveCost(productId) {
   const cur = el('ct-cur')?.value || 'CNY';
   const foreign = el('ct-foreign')?.value;
   const rate = el('ct-rate')?.value;
-  if (!foreign && cur !== 'GBP') { toast('Enter the unit cost', 'warn'); return; }
+  // The unit cost is required whatever the currency — a GBP save with the
+  // field blank used to go through as null and save nothing.
+  if (!foreign || !(parseFloat(foreign) > 0)) { toast('Enter the unit cost (the amount box next to the currency)', 'warn'); return; }
   const payload = {
     supplier: el('ct-supplier')?.value || null,
     purchaseDate: el('ct-date')?.value || ctToday(),
