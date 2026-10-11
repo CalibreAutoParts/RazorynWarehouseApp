@@ -197,6 +197,9 @@ async function doMigrate() {
     // Which marketplace ACCOUNT the statement belongs to (seller username /
     // shop name read off the PDF) — businesses run several eBay accounts.
     await query(`ALTER TABLE platform_statements ADD COLUMN IF NOT EXISTS account_name TEXT`);
+    // One-off cleanup: Capital on Tap's "Has Receipts" Yes/No column was
+    // briefly captured as a receipt file reference — those aren't filenames.
+    await query(`UPDATE bank_transactions SET receipt_ref = NULL WHERE receipt_ref ~* '^(yes|no|true|false)$'`);
     _ready = true;
   } catch (e) { console.warn('[books] migration:', e.message); }
 }
@@ -904,6 +907,47 @@ router.post('/receipts/bulk', upload.array('receipts', 200), async (req, res) =>
         out.attached.push({ file: name, txId: tx2.id, description: tx2.description, via: 'export reference' });
       }
       continue;
+    }
+    // 2. Capital on Tap style: the CSV has no receipt-file column (only a
+    //    Yes/No "Has Receipts"), but the FILENAME carries everything —
+    //    "01-07-2026T062816 - Pepes - £7.92 - Card 8289.jpg": UK date,
+    //    merchant, exact amount. Date+amount is near-unique on a card;
+    //    the merchant name and closest date break any remaining tie.
+    const ukDm = base.match(/\b(\d{2})-(\d{2})-(\d{4})(?=\D|$)/);
+    const amtM = base.replace(/Â£/g, '£').match(/£\s*([\d,]+(?:\.\d{1,2})?)/);
+    if (ukDm && amtM) {
+      const day2 = `${ukDm[3]}-${ukDm[2]}-${ukDm[1]}`;
+      const amount = parseFloat(amtM[1].replace(/,/g, ''));
+      const parts = base.split(/\s+-\s+/);
+      const merchant = (parts.find(p => !/\d{2}-\d{2}-\d{4}/.test(p) && !/£|Â£/.test(p) && !/^card\b/i.test(p.trim())) || '').trim();
+      if (isFinite(amount) && amount > 0) {
+        const cands2 = await query(
+          `SELECT id, description, counterparty, tx_date, receipt_path FROM bank_transactions
+            WHERE money_out > 0 AND ABS(money_out - $1) < 0.01
+              AND tx_date BETWEEN $2::date - interval '3 days' AND $2::date + interval '3 days'`, [amount, day2]);
+        let list = cands2.rows;
+        if (list.length > 1 && merchant) {
+          const mn = normRef(merchant);
+          const narrowed = mn ? list.filter(t => normRef((t.counterparty || '') + (t.description || '')).includes(mn)) : [];
+          if (narrowed.length) list = narrowed;
+        }
+        if (list.length > 1) {
+          const un = list.filter(t => !t.receipt_path);
+          if (un.length) list = un;
+        }
+        if (list.length > 1) {
+          // Same merchant + amount days apart (recurring coffee runs) —
+          // the file belongs to the closest-dated one; exact twins on the
+          // SAME day stay ambiguous rather than guessing.
+          const scored2 = list.map(t => ({ t, dd: Math.abs(new Date(isoDay(t.tx_date)) - new Date(day2)) })).sort((a, b) => a.dd - b.dd);
+          if (scored2.length === 1 || scored2[0].dd < scored2[1].dd) list = [scored2[0].t];
+        }
+        if (list.length === 1) {
+          await attach(list[0].id, path.relative(UPLOAD_DIR, f.path), name);
+          out.attached.push({ file: name, txId: list[0].id, description: list[0].description, via: 'date + amount' + (merchant ? ' + merchant' : '') });
+          continue;
+        }
+      }
     }
     const dm = name.match(/(\d{4})-(\d{2})-(\d{2})/);
     let tx = null;

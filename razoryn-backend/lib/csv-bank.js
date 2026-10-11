@@ -53,7 +53,8 @@ function findHeaderRow(rows) {
 // mapping (which only sees a sample) can miss them. The header never lies.
 function findReceiptCols(header) {
   const good = /receipt|invoice|attach|document/i;
-  const bad = /number|no\.?\s*$|\bid\b|amount|date|total|value/i;
+  // "Has Receipts" (Capital on Tap) is a Yes/No flag, not a filename column.
+  const bad = /\bhas\b|\bcount\b|number|no\.?\s*$|\bid\b|amount|date|total|value/i;
   const out = [];
   (header || []).forEach((h, i) => {
     const s = String(h || '').trim();
@@ -137,8 +138,9 @@ function buildTransactions(rows, headerIdx, mapping) {
       balance: balance != null ? +balance.toFixed(2) : null,
       counterparty: mapping.counterpartyCol != null ? cell(r, mapping.counterpartyCol).slice(0, 120) || null : null,
       // Some exports (Mettle) name the attached receipt/invoice FILES per row —
-      // the bulk receipt uploader matches on this, exactly.
-      receiptRef: receiptCols.map(c => cell(r, c)).filter(Boolean).join(' | ').slice(0, 300) || null,
+      // the bulk receipt uploader matches on this, exactly. Boolean flags
+      // ("Yes"/"No" from a has-receipt column) are never file references.
+      receiptRef: receiptCols.map(c => cell(r, c)).filter(v => v && !/^(yes|no|true|false|y|n|0|1)$/i.test(v)).join(' | ').slice(0, 300) || null,
     });
   }
   return out;
