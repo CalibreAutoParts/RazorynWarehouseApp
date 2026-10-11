@@ -566,8 +566,9 @@ Header row (0-based column indexes): ${JSON.stringify(header)}
 Sample data rows: ${JSON.stringify(sample)}
 
 If this is NOT a bank/credit-card export but a marketplace statement (eBay, Shopify payouts, PayPal…), set "notABankStatement": true.
-Otherwise identify the columns. amountMode "signed" = one amount column (positive in / negative out); "split" = separate money-in and money-out columns.
-Reply ONLY: {"notABankStatement":false,"bank":"Mettle|Wise|ANNA Money|Capital on Tap|…","accountName":"...or null","dateCol":<i>,"dateFormat":"DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|D MMM YYYY","descriptionCols":[<i>,...],"amountMode":"signed"|"split","amountCol":<i|null>,"inCol":<i|null>,"outCol":<i|null>,"balanceCol":<i|null>,"counterpartyCol":<i|null>,"receiptFileCol":<i|null — the column holding attached receipt/invoice FILE NAMES like "Mettle-Receipt-2026-….pdf" or "Mettle-INV-148-2026-05-20.pdf". Pick it by HEADER NAME (e.g. "Receipts", "Invoices", "Attachments") even if every sample cell is blank — files are attached to only some rows>,"currency":"GBP","notes":"..."}`,
+Otherwise identify the columns. amountMode "signed" = one amount column; "split" = separate money-in and money-out columns.
+For "signed", also set "positiveMeans": "in" when positive amounts are money INTO the account (normal current account), or "out" when positive amounts are SPENDING (credit-card exports like Capital on Tap, where repayments are negative).
+Reply ONLY: {"notABankStatement":false,"bank":"Mettle|Wise|ANNA Money|Capital on Tap|…","accountName":"...or null","dateCol":<i>,"dateFormat":"DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|D MMM YYYY","descriptionCols":[<i>,...],"amountMode":"signed"|"split","amountCol":<i|null>,"inCol":<i|null>,"outCol":<i|null>,"balanceCol":<i|null>,"counterpartyCol":<i|null>,"positiveMeans":"in"|"out","receiptFileCol":<i|null — the column holding attached receipt/invoice FILE NAMES like "Mettle-Receipt-2026-….pdf" or "Mettle-INV-148-2026-05-20.pdf". Pick it by HEADER NAME (e.g. "Receipts", "Invoices", "Attachments") even if every sample cell is blank — files are attached to only some rows. A Yes/No "Has Receipts" flag is NOT this column>,"currency":"GBP","notes":"..."}`,
   });
   const map = mapOut.json;
   if (!map) return null;
@@ -580,6 +581,13 @@ Reply ONLY: {"notABankStatement":false,"bank":"Mettle|Wise|ANNA Money|Capital on
   const receiptCols = new Set(findReceiptCols(header));
   if (map.receiptFileCol != null && map.receiptFileCol >= 0) receiptCols.add(map.receiptFileCol);
   map.receiptFileCols = [...receiptCols];
+  // Credit-card backstop: headers like "Card Ending"/"Cardholder Name" mean
+  // a card export, where positive amounts are SPENDING — even if the
+  // mapping didn't say so.
+  if (map.amountMode !== 'split' && map.positiveMeans !== 'out' && /card ending|cardholder/i.test(header.join(' '))) {
+    map.positiveMeans = 'out';
+    map.notes = ((map.notes || '') + ' | credit-card export detected: positive amounts imported as spending').trim();
+  }
   // Exact build from EVERY row — no model output limits involved.
   const txs = buildTransactions(rows, headerIdx, map).slice(0, 5000);
   if (!txs.length) return { notABankStatement: false, bank: map.bank || 'Unknown', accountName: map.accountName || null, sortCodeOrIban: null, periodStart: null, periodEnd: null, currency: map.currency || 'GBP', confidence: 0.3, notes: 'No parsable rows found with the detected columns (' + (map.notes || '') + ')', transactions: [] };

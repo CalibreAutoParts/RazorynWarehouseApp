@@ -23024,6 +23024,8 @@ function bkSmartOne(file, idx, total) {
     try {
       const fd = new FormData();
       fd.append('receipt', file);
+      // Scope candidate payments to the page's selected bank account.
+      if (BK.accountId) fd.append('accountId', BK.accountId);
       r = await Api.postForm('/api/books/receipts/smart', fd);
       Task.done(taskId, 'Read ✓');
     } catch (e) {
@@ -23047,7 +23049,7 @@ function bkSmartOne(file, idx, total) {
           </div>
           ${ex.notes ? `<div style="color:var(--amber,orange);font-size:11px;margin-top:4px">⚠ ${escapeHtml(ex.notes)}</div>` : ''}
         </div>
-        <div style="font-weight:600;font-size:12px;margin-bottom:5px">${cands.length ? 'Which payment is this for? (best match pre-selected)' : 'No matching payment found — check the amount/date, or attach it manually with 📎 on the right row.'}</div>
+        <div style="font-weight:600;font-size:12px;margin-bottom:5px">${cands.length ? `Which payment is this for? (best match pre-selected${BK.accountId ? ' · searching ' + escapeHtml(BK.accounts.find(a => String(a.id) === String(BK.accountId))?.name || 'selected account') + ' only' : ''})` : 'No matching payment found' + (BK.accountId ? ' in ' + escapeHtml(BK.accounts.find(a => String(a.id) === String(BK.accountId))?.name || 'the selected account') : '') + ' — check the amount/date, or attach it manually with 📎 on the right row.'}</div>
         <div style="max-height:260px;overflow-y:auto">
         ${cands.map((c, i2) => `
           <label style="display:flex;gap:8px;align-items:flex-start;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:5px;cursor:pointer;font-size:12.5px">
@@ -23086,7 +23088,11 @@ async function bkBulkReceipts(files) {
   if (!files || !files.length) return;
   const fd = new FormData();
   for (const f of files) fd.append('receipts', f);
-  const taskId = Task.start('Attaching ' + files.length + ' receipt(s)…');
+  // The page's account selector scopes the matching: card receipts only
+  // ever land on the card account's lines.
+  if (BK.accountId) fd.append('accountId', BK.accountId);
+  const scopeName = BK.accountId ? (BK.accounts.find(a => String(a.id) === String(BK.accountId))?.name || 'the selected account') : null;
+  const taskId = Task.start('Attaching ' + files.length + ' receipt(s)' + (scopeName ? ' to ' + scopeName : '') + '…');
   try {
     const r = await Api.postForm('/api/books/receipts/bulk', fd);
     Task.done(taskId, r.summary.attached + ' attached');
@@ -23095,7 +23101,7 @@ async function bkBulkReceipts(files) {
       // before reference capture. Name the actual fix.
       toast(`📎 ${r.summary.attached} attached. ⚠ Your bank statement has no receipt references stored — it was imported before that was captured. Delete the Mettle statement (🗑) and re-upload the same CSV, then run Bulk-attach again: files will match by name exactly.`, 'warn', 15000);
     } else if (r.summary.unmatched) {
-      toast(`📎 ${r.summary.attached} attached · ${r.summary.unmatched} not matched (no reference and no unique date) — attach those via 📎 on the row: ${r.unmatched.slice(0, 4).join(', ')}${r.unmatched.length > 4 ? '…' : ''}`, 'warn', 12000);
+      toast(`📎 ${r.summary.attached} attached · ${r.summary.unmatched} not matched${scopeName ? ' in ' + scopeName : ' — tip: pick the bank in the account dropdown above first, so matching stays inside that account'} — attach the rest via 📎 on the row or 🤖 Smart-attach: ${r.unmatched.slice(0, 4).join(', ')}${r.unmatched.length > 4 ? '…' : ''}`, 'warn', 12000);
     } else {
       toast(`📎 All ${r.summary.attached} receipts attached ✓`, 'success', 7000);
     }

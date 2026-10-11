@@ -127,7 +127,10 @@ function buildTransactions(rows, headerIdx, mapping) {
     } else {
       const amt = parseMoney(cell(r, mapping.amountCol));
       if (amt == null) continue;
-      if (amt >= 0) moneyIn = amt; else moneyOut = -amt;
+      // Credit-card exports (Capital on Tap) run the sign the other way:
+      // positive = card SPENDING, negative = repayment into the card.
+      if (mapping.positiveMeans === 'out') { if (amt >= 0) moneyOut = amt; else moneyIn = -amt; }
+      else if (amt >= 0) moneyIn = amt; else moneyOut = -amt;
     }
     if (!moneyIn && !moneyOut) continue;
     const description = (mapping.descriptionCols || []).map(c => cell(r, c)).filter(Boolean).join(' · ').slice(0, 300);
