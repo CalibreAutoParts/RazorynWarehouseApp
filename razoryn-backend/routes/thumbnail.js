@@ -276,6 +276,17 @@ router.get('/products', async (req, res) => {
     const alts = (await query(
       `SELECT code, note FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [p.id]
     )).rows;
+    // Latest known supplier (from cost history) — the photo studio files sets
+    // under it for organisation. Best-effort: the table is created lazily.
+    let supplier = null;
+    try {
+      const sup = (await query(
+        `SELECT supplier FROM product_cost_history
+         WHERE product_id = $1 AND supplier IS NOT NULL AND supplier <> ''
+         ORDER BY created_at DESC LIMIT 1`, [p.id]
+      )).rows;
+      supplier = sup[0]?.supplier || null;
+    } catch { /* no cost history table yet */ }
     let siblings = [];
     if (p.stock_group_id) {
       siblings = (await query(
@@ -299,6 +310,7 @@ router.get('/products', async (req, res) => {
       // Selling prices — the thumbnail app prints the Shopify price on ads.
       price_shopify: p.price_shopify != null ? Number(p.price_shopify) : null,
       price_ebay: p.price_ebay != null ? Number(p.price_ebay) : null,
+      supplier,
       partNumbers: alts,
       stockGroupSiblings: siblings,
     });
