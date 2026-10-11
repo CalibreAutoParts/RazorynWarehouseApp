@@ -778,8 +778,11 @@ router.post('/receipts/smart', upload.single('receipt'), async (req, res) => {
       return res.status(422).json({ error: 'unreadable', message: 'Claude couldn’t read a total off that document' + (extracted?.notes ? ' — ' + extracted.notes : '') + '. Attach it manually with 📎 on the right transaction.' });
     }
     // Candidate payments: same amount first, then nearby dates, then payee
-    // name — scored so the best match sits pre-selected.
+    // name — scored so the best match sits pre-selected. Scoped to one bank
+    // account when the page's account filter is set (receipts are usually
+    // uploaded per bank).
     const d = extracted.invoiceDate;
+    const accId = req.body && req.body.accountId ? parseInt(req.body.accountId) || null : null;
     const { rows: cands } = await query(`
       SELECT t.id, t.tx_date, t.description, t.counterparty, t.money_out, t.vat_amount, t.needs_vat_receipt, t.category,
              a.name AS account_name,
@@ -787,9 +790,10 @@ router.post('/receipts/smart', upload.single('receipt'), async (req, res) => {
         FROM bank_transactions t
         LEFT JOIN bank_accounts a ON a.id = t.account_id
        WHERE t.money_out > 0
+         AND ($3::int IS NULL OR t.account_id = $3)
          AND (ABS(t.money_out - $1) < 0.02
               OR ($2::date IS NOT NULL AND t.tx_date BETWEEN $2::date - interval '21 days' AND $2::date + interval '21 days'))
-       ORDER BY t.tx_date DESC LIMIT 400`, [extracted.totalGross, d]);
+       ORDER BY t.tx_date DESC LIMIT 400`, [extracted.totalGross, d, accId]);
     const supTokens = String(extracted.supplier || '').toUpperCase().split(/[^A-Z0-9]+/).filter(w => w.length >= 3 && !['LTD', 'LIMITED', 'THE', 'AND', 'PLC', 'GMBH', 'INC', 'LLC', 'COMPANY'].includes(w));
     const scored = cands.map(t => {
       let score = 0; const why = [];
@@ -871,7 +875,11 @@ router.post('/receipts/bulk', upload.array('receipts', 200), async (req, res) =>
   await ensureTables();
   const files = req.files || [];
   if (!files.length) return res.status(400).json({ error: 'no_files' });
-  const out = { attached: [], unmatched: [] };
+  // Receipts are usually uploaded per bank (card receipts with the card
+  // account selected) — scoping to the chosen account stops a £6.60 Co-op
+  // card receipt landing on a £6.60 line in another bank.
+  const accId = req.body && req.body.accountId ? parseInt(req.body.accountId) || null : null;
+  const out = { attached: [], unmatched: [], accountScoped: !!accId };
   // How many transactions even CARRY a receipt reference? Zero means the
   // bank statement was imported before reference capture existed — the fix
   // is re-uploading the CSV, and the response says so instead of failing
@@ -895,11 +903,11 @@ router.post('/receipts/bulk', upload.array('receipts', 200), async (req, res) =>
     const digits = (base.match(/\d{6,}/g) || []).pop() || null;
     const refHits = (refCount && normBase.length >= 10) ? await query(
       `SELECT id, description FROM bank_transactions
-        WHERE receipt_ref IS NOT NULL AND (
+        WHERE receipt_ref IS NOT NULL AND ($3::int IS NULL OR account_id = $3) AND (
           regexp_replace(lower(receipt_ref), '[^a-z0-9]', '', 'g') LIKE '%' || $1 || '%'
           OR regexp_replace(lower(receipt_ref), '[^a-z0-9]', '', 'g') <> ''
              AND $1 LIKE '%' || regexp_replace(lower(receipt_ref), '[^a-z0-9]', '', 'g') || '%'
-          OR ($2::text IS NOT NULL AND receipt_ref LIKE '%' || $2 || '%'))`, [normBase, digits]) : { rows: [] };
+          OR ($2::text IS NOT NULL AND receipt_ref LIKE '%' || $2 || '%'))`, [normBase, digits, accId]) : { rows: [] };
     if (refHits.rows.length) {
       const relPath2 = path.relative(UPLOAD_DIR, f.path);
       for (const tx2 of refHits.rows) {
@@ -924,7 +932,8 @@ router.post('/receipts/bulk', upload.array('receipts', 200), async (req, res) =>
         const cands2 = await query(
           `SELECT id, description, counterparty, tx_date, receipt_path FROM bank_transactions
             WHERE money_out > 0 AND ABS(money_out - $1) < 0.01
-              AND tx_date BETWEEN $2::date - interval '3 days' AND $2::date + interval '3 days'`, [amount, day2]);
+              AND ($3::int IS NULL OR account_id = $3)
+              AND tx_date BETWEEN $2::date - interval '3 days' AND $2::date + interval '3 days'`, [amount, day2, accId]);
         let list = cands2.rows;
         if (list.length > 1 && merchant) {
           const mn = normRef(merchant);
@@ -955,13 +964,13 @@ router.post('/receipts/bulk', upload.array('receipts', 200), async (req, res) =>
       const day = `${dm[1]}-${dm[2]}-${dm[3]}`;
       const exact = await query(
         `SELECT id, description, money_out FROM bank_transactions
-          WHERE money_out > 0 AND receipt_path IS NULL AND tx_date = $1::date`, [day]);
+          WHERE money_out > 0 AND receipt_path IS NULL AND tx_date = $1::date AND ($2::int IS NULL OR account_id = $2)`, [day, accId]);
       if (exact.rows.length === 1) tx = exact.rows[0];
       else if (!exact.rows.length) {
         const near = await query(
           `SELECT id, description, money_out FROM bank_transactions
-            WHERE money_out > 0 AND receipt_path IS NULL
-              AND tx_date BETWEEN $1::date - interval '2 days' AND $1::date + interval '2 days'`, [day]);
+            WHERE money_out > 0 AND receipt_path IS NULL AND ($2::int IS NULL OR account_id = $2)
+              AND tx_date BETWEEN $1::date - interval '2 days' AND $1::date + interval '2 days'`, [day, accId]);
         if (near.rows.length === 1) tx = near.rows[0];
       }
     }
