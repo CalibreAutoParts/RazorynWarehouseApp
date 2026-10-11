@@ -22543,6 +22543,7 @@ function renderBooks() {
       <div class="card" style="margin-bottom:14px">
         <div class="card-head"><h3>Transactions</h3><div class="card-desc">Link each line to an invoice or payout, set the VAT, attach receipts. Claude pre-fills most of it from the statement.</div>
           <input id="bk-search" placeholder="🔍 Filter — ebay, royal mail, INV-148, 450.00…" style="font-size:12px;min-width:220px" oninput="BK.q=this.value;bkPaintTxs()">
+          <label class="btn btn-primary btn-sm" style="cursor:pointer" title="Upload any invoice/receipt (PDF or photo) — Claude reads the supplier, date, total and VAT, finds the matching payment, and asks you to confirm before anything is saved.">🤖 Smart-attach invoice<input type="file" multiple accept=".pdf,image/*" style="display:none" onchange="bkSmartReceipts(this.files);this.value=''"></label>
           <label class="btn btn-ghost btn-sm" style="cursor:pointer" title="Got a folder of receipts (e.g. Mettle's export ships a receipts/ folder)? Select them all — each file is matched by the date in its filename to the right transaction.">📎 Bulk-attach receipts<input type="file" multiple accept=".pdf,image/*" style="display:none" onchange="bkBulkReceipts(this.files)"></label></div>
         <div class="card-body" style="padding:0"><div id="bk-txs" style="font-size:12.5px">Loading…</div></div>
       </div>
@@ -23006,6 +23007,81 @@ async function bkUploadReceipts(id, files) {
 // Bulk receipt attach — a whole export folder in one go. Each file matches
 // by the date in its filename (e.g. "Mettle-INV-133-2026-04-25.pdf") to the
 // unique receipt-less money-out transaction on that day (±2 days fallback).
+// ── Smart invoice attach: Claude reads the document, user confirms ────────
+// Each file: upload → Claude extracts supplier/date/total/VAT → the best
+// matching payments come back scored → a confirmation modal; NOTHING is
+// attached until "Attach" is clicked. Several files process one by one.
+async function bkSmartReceipts(files) {
+  const list = Array.from(files || []);
+  if (!list.length) return;
+  for (let i = 0; i < list.length; i++) await bkSmartOne(list[i], i + 1, list.length);
+  bkLoad();
+}
+function bkSmartOne(file, idx, total) {
+  return new Promise(async (resolve) => {
+    const taskId = Task.start(`🤖 Claude is reading ${file.name}…`);
+    let r;
+    try {
+      const fd = new FormData();
+      fd.append('receipt', file);
+      r = await Api.postForm('/api/books/receipts/smart', fd);
+      Task.done(taskId, 'Read ✓');
+    } catch (e) {
+      Task.fail(taskId, `${file.name}: ` + (e.data?.message || e.message));
+      toast(`${file.name}: ` + (e.data?.message || e.message), 'error', 8000);
+      return resolve();
+    }
+    const ex = r.extracted || {};
+    const cands = r.candidates || [];
+    let done = false;
+    const finish = () => { if (!done) { done = true; closeModal(); resolve(); } };
+    modal({
+      title: `🧾 ${ex.supplier || file.name}${total > 1 ? ` — ${idx} of ${total}` : ''}`,
+      body: `
+        <div style="font-size:12.5px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px 14px">
+            <span><strong>${escapeHtml(ex.supplier || '?')}</strong>${ex.invoiceNumber ? ' · ' + escapeHtml(ex.invoiceNumber) : ''}</span>
+            <span>${ex.invoiceDate ? bkUkDate(ex.invoiceDate) : 'no date found'}</span>
+            <span><strong>${gbp(ex.totalGross)}</strong>${ex.currency && ex.currency !== 'GBP' ? ' ' + escapeHtml(ex.currency) + ' ⚠' : ''}</span>
+            <span>VAT ${gbp(ex.vatAmount || 0)}${ex.vatRate != null ? ' (' + ex.vatRate + '%)' : ''}</span>
+          </div>
+          ${ex.notes ? `<div style="color:var(--amber,orange);font-size:11px;margin-top:4px">⚠ ${escapeHtml(ex.notes)}</div>` : ''}
+        </div>
+        <div style="font-weight:600;font-size:12px;margin-bottom:5px">${cands.length ? 'Which payment is this for? (best match pre-selected)' : 'No matching payment found — check the amount/date, or attach it manually with 📎 on the right row.'}</div>
+        <div style="max-height:260px;overflow-y:auto">
+        ${cands.map((c, i2) => `
+          <label style="display:flex;gap:8px;align-items:flex-start;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:5px;cursor:pointer;font-size:12.5px">
+            <input type="radio" name="bksm-tx" value="${c.id}" ${i2 === 0 ? 'checked' : ''} style="margin-top:3px">
+            <div style="flex:1">
+              <div><strong>${gbp(c.money_out)}</strong> · ${bkUkDate(c.tx_date)} · ${escapeHtml(c.account_name || '')}</div>
+              <div style="color:var(--ink-soft)">${escapeHtml((c.counterparty || c.description || '').slice(0, 90))}</div>
+              <div style="font-size:10.5px;color:var(--green)">✓ ${c.why.join(' · ')}${c.receipt_count ? ` · <span style="color:var(--amber,orange)">already has ${c.receipt_count} receipt${c.receipt_count > 1 ? 's' : ''}</span>` : ''}</div>
+            </div>
+          </label>`).join('')}
+        </div>
+        ${cands.length ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-top:6px"><input type="checkbox" id="bksm-vat" ${ex.vatAmount > 0 ? 'checked' : ''}> Also save the VAT — £ <input type="number" id="bksm-vatamt" step="0.01" min="0" value="${ex.vatAmount > 0 ? ex.vatAmount.toFixed(2) : ''}" style="width:80px;font-size:12px"> on this payment</label>` : ''}`,
+      actions: [
+        { label: total > 1 ? 'Skip this one' : 'Cancel', onClick: finish },
+        ...(cands.length ? [{
+          label: '✓ Attach to selected', primary: true, onClick: async () => {
+            const sel = document.querySelector('input[name="bksm-tx"]:checked');
+            if (!sel) { toast('Pick a payment first', 'warn'); return; }
+            const useVat = el('bksm-vat')?.checked && el('bksm-vatamt')?.value;
+            try {
+              await Api.post('/api/books/receipts/smart/confirm', {
+                fileToken: r.fileToken, originalName: r.originalName || file.name, txId: sel.value,
+                vatAmount: useVat ? el('bksm-vatamt').value : null,
+                supplier: ex.supplier, invoiceNumber: ex.invoiceNumber,
+              });
+              toast(`✓ ${ex.supplier || file.name} attached${useVat ? ' — VAT £' + (+el('bksm-vatamt').value).toFixed(2) + ' saved' : ''}`, 'success');
+              finish();
+            } catch (e) { toast('Attach failed: ' + (e.data?.message || e.message), 'error', 7000); }
+          },
+        }] : []),
+      ],
+    });
+  });
+}
 async function bkBulkReceipts(files) {
   if (!files || !files.length) return;
   const fd = new FormData();

@@ -776,6 +776,50 @@ Do not invent numbers; if a summary line isn't on the statement use 0 and say so
   };
 }
 
+// ── Purchase invoice / receipt reader ──────────────────────────────────────
+// One uploaded document (PDF or photo) → who it's from, when, how much,
+// the VAT — so Books can find the matching bank transaction by itself.
+async function readPurchaseInvoice({ base64, mediaType }) {
+  const cfg = await getAiConfig();
+  const isPdf = /pdf/i.test(mediaType || '');
+  const out = await callClaude({
+    kind: 'invoice_read',
+    model: cfg.smartModel,
+    maxTokens: 800,
+    timeoutMs: 120000,
+    documents: isPdf ? [{ base64, mediaType: 'application/pdf' }] : undefined,
+    images: isPdf ? undefined : [{ base64, mediaType }],
+    system: 'You read supplier invoices, receipts and bills for a UK business’s bookkeeping. Extract exactly what is printed — never invent. Reply with ONLY JSON.',
+    user: `Read this invoice/receipt/bill and extract the fields for matching it to a bank payment.
+Reply ONLY:
+{"supplier":"<company the money was PAID TO, as printed>",
+ "invoiceNumber":"<invoice/receipt number or null>",
+ "invoiceDate":"YYYY-MM-DD or null",
+ "totalGross":<the TOTAL amount actually payable incl. VAT, number>,
+ "vatAmount":<VAT amount printed, or 0 if none shown>,
+ "vatRate":<VAT % if printed, else null>,
+ "currency":"GBP|EUR|USD|...",
+ "paymentHints":"<anything naming HOW/WHEN it was paid: card last digits, direct debit, due date — or null>",
+ "confidence":<0..1>,
+ "notes":"<anything odd: unreadable, handwritten, pro-forma, not an invoice at all>"}`,
+  });
+  const v = out.json;
+  if (!v) return null;
+  const num = (x) => { const n = parseFloat(x); return isFinite(n) ? +Math.abs(n).toFixed(2) : null; };
+  return {
+    supplier: v.supplier ? String(v.supplier).slice(0, 120) : null,
+    invoiceNumber: v.invoiceNumber ? String(v.invoiceNumber).slice(0, 60) : null,
+    invoiceDate: v.invoiceDate && /^\d{4}-\d{2}-\d{2}/.test(String(v.invoiceDate)) ? String(v.invoiceDate).slice(0, 10) : null,
+    totalGross: num(v.totalGross),
+    vatAmount: num(v.vatAmount) || 0,
+    vatRate: v.vatRate != null && isFinite(parseFloat(v.vatRate)) ? +parseFloat(v.vatRate).toFixed(2) : null,
+    currency: String(v.currency || 'GBP').slice(0, 6).toUpperCase(),
+    paymentHints: v.paymentHints ? String(v.paymentHints).slice(0, 200) : null,
+    confidence: Math.max(0, Math.min(1, +v.confidence || 0)),
+    notes: v.notes ? String(v.notes).slice(0, 300) : null,
+  };
+}
+
 // ── Dispute / chargeback advisor ───────────────────────────────────────────
 // One case at a time: the customer's claim, our evidence (photos included),
 // our shop policy and the PLATFORM's rules → a realistic win %, whether the
@@ -917,6 +961,7 @@ module.exports = {
   verifyAltNumber,
   parseBankStatement,
   parsePlatformStatement,
+  readPurchaseInvoice,
   disputeAdvisor,
   learnFromFeedback,
   recordFeedback,

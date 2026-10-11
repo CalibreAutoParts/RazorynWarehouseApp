@@ -755,6 +755,95 @@ router.post('/transactions/:id/receipt', upload.single('receipt'), async (req, r
   await audit(req, 'books_receipt_upload', 'bank_transaction', req.params.id);
   res.status(201).json({ transaction: r.rows[0] });
 });
+// ── Smart invoice attach: Claude reads the document, finds the payment ────
+// Upload any invoice/receipt (PDF or photo) → Claude extracts supplier,
+// date, total and VAT → the matching bank transactions are scored and
+// offered for CONFIRMATION — nothing is saved until the user picks one.
+const SMART_IMG_TYPES = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' };
+router.post('/receipts/smart', upload.single('receipt'), async (req, res) => {
+  try {
+    await ensureTables();
+    if (!req.file) return res.status(400).json({ error: 'receipt_required' });
+    const ai = require('../services/ai');
+    if (!ai.isConfigured()) return res.status(400).json({ error: 'ai_not_configured' });
+    const ext = path.extname(req.file.path).toLowerCase();
+    const mediaType = ext === '.pdf' ? 'application/pdf' : SMART_IMG_TYPES[ext];
+    if (!mediaType) return res.status(422).json({ error: 'unsupported_type', message: 'Upload a PDF or a photo (jpg/png/webp).' });
+    const base64 = fs.readFileSync(req.file.path).toString('base64');
+    const extracted = await ai.readPurchaseInvoice({ base64, mediaType });
+    if (!extracted || extracted.totalGross == null) {
+      return res.status(422).json({ error: 'unreadable', message: 'Claude couldn’t read a total off that document' + (extracted?.notes ? ' — ' + extracted.notes : '') + '. Attach it manually with 📎 on the right transaction.' });
+    }
+    // Candidate payments: same amount first, then nearby dates, then payee
+    // name — scored so the best match sits pre-selected.
+    const d = extracted.invoiceDate;
+    const { rows: cands } = await query(`
+      SELECT t.id, t.tx_date, t.description, t.counterparty, t.money_out, t.vat_amount, t.needs_vat_receipt, t.category,
+             a.name AS account_name,
+             (SELECT COUNT(*)::int FROM bank_tx_receipts br WHERE br.tx_id = t.id) AS receipt_count
+        FROM bank_transactions t
+        LEFT JOIN bank_accounts a ON a.id = t.account_id
+       WHERE t.money_out > 0
+         AND (ABS(t.money_out - $1) < 0.02
+              OR ($2::date IS NOT NULL AND t.tx_date BETWEEN $2::date - interval '21 days' AND $2::date + interval '21 days'))
+       ORDER BY t.tx_date DESC LIMIT 400`, [extracted.totalGross, d]);
+    const supTokens = String(extracted.supplier || '').toUpperCase().split(/[^A-Z0-9]+/).filter(w => w.length >= 3 && !['LTD', 'LIMITED', 'THE', 'AND', 'PLC', 'GMBH', 'INC', 'LLC', 'COMPANY'].includes(w));
+    const scored = cands.map(t => {
+      let score = 0; const why = [];
+      const amt = parseFloat(t.money_out);
+      if (Math.abs(amt - extracted.totalGross) < 0.02) { score += 60; why.push('exact amount'); }
+      else if (Math.abs(amt - extracted.totalGross) <= 0.05 * extracted.totalGross) { score += 15; why.push('close amount'); }
+      if (d) {
+        const days = Math.abs((new Date(isoDay(t.tx_date)) - new Date(d)) / 86400000);
+        if (days <= 3) { score += 25; why.push('same days'); }
+        else if (days <= 10) { score += 12; why.push('within 10 days'); }
+      }
+      const txt = ((t.counterparty || '') + ' ' + (t.description || '')).toUpperCase();
+      const hits = supTokens.filter(w => txt.includes(w)).length;
+      if (hits && supTokens.length) { score += Math.min(30, 12 * hits); why.push('payee name'); }
+      if (t.needs_vat_receipt) { score += 8; why.push('awaiting receipt'); }
+      if (t.receipt_count > 0) score -= 15;
+      return { ...t, tx_date: isoDay(t.tx_date), money_out: +amt.toFixed(2), score, why };
+    }).filter(t => t.score >= 15).sort((a, b) => b.score - a.score).slice(0, 6);
+    res.json({ extracted, fileToken: path.basename(req.file.path), originalName: req.file.originalname || null, candidates: scored });
+  } catch (e) {
+    console.error('[books] smart receipt failed:', (e && e.stack) || e);
+    res.status(502).json({ error: e.code || 'smart_failed', message: e.message });
+  }
+});
+// Confirmation: attach the already-uploaded file to the chosen transaction
+// (+ VAT amount and a supplier/invoice note if confirmed).
+router.post('/receipts/smart/confirm', async (req, res) => {
+  try {
+    await ensureTables();
+    const b = req.body || {};
+    const token = path.basename(String(b.fileToken || ''));
+    const txId = parseInt(b.txId);
+    if (!token || !txId) return res.status(400).json({ error: 'token_and_tx_required' });
+    const file = path.join(RECEIPTS_DIR, token);
+    if (!fs.existsSync(file)) return res.status(404).json({ error: 'file_gone', message: 'The uploaded file expired — upload it again.' });
+    const relPath = path.relative(UPLOAD_DIR, file);
+    const note = b.supplier ? ('🧾 ' + String(b.supplier).slice(0, 80) + (b.invoiceNumber ? ' · ' + String(b.invoiceNumber).slice(0, 40) : '')) : null;
+    const vat = b.vatAmount != null && b.vatAmount !== '' && isFinite(parseFloat(b.vatAmount)) ? +parseFloat(b.vatAmount).toFixed(2) : null;
+    const r = await query(`
+      UPDATE bank_transactions
+         SET receipt_path = COALESCE(receipt_path, $1), needs_vat_receipt = false,
+             vat_amount = COALESCE($3, vat_amount),
+             notes = CASE WHEN $4::text IS NULL OR COALESCE(notes,'') LIKE '%' || $4 || '%' THEN notes
+                          WHEN notes IS NULL OR notes = '' THEN $4 ELSE notes || ' · ' || $4 END,
+             updated_at = now()
+       WHERE id = $2 RETURNING *`, [relPath, txId, vat, note]);
+    if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+    await query(`INSERT INTO bank_tx_receipts (tx_id, file_path, original_name) VALUES ($1,$2,$3)`,
+      [txId, relPath, String(b.originalName || token).slice(0, 200)]);
+    await audit(req, 'books_smart_receipt', 'bank_transaction', txId, { supplier: b.supplier, vat });
+    res.status(201).json({ ok: true, transaction: r.rows[0] });
+  } catch (e) {
+    console.error('[books] smart confirm failed:', (e && e.stack) || e);
+    res.status(500).json({ error: 'confirm_failed', message: e.message });
+  }
+});
+
 // Serve one receipt file by its receipt-row id (a payment can hold several).
 router.get('/receipt-file/:rid', async (req, res) => {
   await ensureTables();
