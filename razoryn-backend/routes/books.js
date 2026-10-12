@@ -1443,8 +1443,12 @@ router.get('/export/invoice-pack', async (req, res) => {
   res.set('Content-Type', 'text/html').send(await buildInvoicePackHtml({ from, to, basis }));
 });
 
+// ONE CSV across every bank for the period (rows carry the account/bank),
+// in date order, with the VAT trio the accountant's return needs per
+// purchase: gross, VAT rate, VAT amount, and the net-of-VAT figure.
 function buildCsv(rows) {
-  const cols = ['date', 'account', 'bank', 'business', 'description', 'counterparty', 'money_in', 'money_out', 'category', 'match', 'invoice_no', 'payout_ref', 'vat_amount', 'receipt', 'notes'];
+  const cols = ['date', 'account', 'bank', 'description', 'counterparty', 'money_in', 'money_out',
+    'net_ex_vat', 'vat_rate_pct', 'vat_amount', 'category', 'match', 'invoice_no', 'payout_ref', 'receipt', 'notes'];
   const cell = (v) => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
   const lines = [cols.join(',')];
   for (const t of rows) {
@@ -1452,14 +1456,20 @@ function buildCsv(rows) {
     const invoiceCol = allocs.length
       ? allocs.map(a => (a.invoiceNumber || ('#' + a.saleId)) + ' £' + (+a.amount).toFixed(2)).join(' | ')
       : (t.invoice_number || '');
+    const vat = t.vat_amount != null ? +t.vat_amount : null;
+    const gross = t.money_out > 0 ? +t.money_out : (t.money_in > 0 ? +t.money_in : null);
+    const net = vat != null && gross != null ? +(gross - vat).toFixed(2) : null;
+    const hasReceipt = (Array.isArray(t.receipts) && t.receipts.length) || t.receipt_path;
     lines.push([
-      ukDate(t.tx_date), t.account_name || '', t.account_bank || t.bank_detected || '', t.business || '',
+      ukDate(t.tx_date), t.account_name || '', t.account_bank || t.bank_detected || '',
       t.description || '', t.counterparty || '',
       t.money_in > 0 ? (+t.money_in).toFixed(2) : '', t.money_out > 0 ? (+t.money_out).toFixed(2) : '',
+      net != null ? net.toFixed(2) : '',
+      t.vat_rate != null ? (+t.vat_rate).toFixed(1) : '',
+      vat != null ? vat.toFixed(2) : '',
       t.category || '', t.match_type || '',
       invoiceCol, t.payout_ref || (t.payout_platform || ''),
-      t.vat_amount != null ? (+t.vat_amount).toFixed(2) : '',
-      t.receipt_path ? 'yes' : (t.needs_vat_receipt ? 'MISSING' : ''),
+      hasReceipt ? 'yes' : (t.needs_vat_receipt ? 'MISSING' : ''),
       t.notes || '',
     ].map(cell).join(','));
   }
