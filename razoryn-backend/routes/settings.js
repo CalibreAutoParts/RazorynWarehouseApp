@@ -936,6 +936,13 @@ router.get('/vinsearch', async (req, res) => {
     // Default ON — the whole point is the warehouse floor using it. Admin can
     // flip showToStaff off to keep the login admin-only.
     const showLogin = isAdmin || v.showToStaff !== false;
+    // Extra VIN platforms (different makes use different lookup sites) —
+    // each with its own URL and optional login, shown with the site's icon.
+    const platforms = (Array.isArray(d.vinPlatforms) ? d.vinPlatforms : []).map(p => ({
+      id: p.id, name: p.name, url: p.url, notes: p.notes || '',
+      email: showLogin ? (p.email || '') : null,
+      password: showLogin ? (p.password || '') : null,
+    }));
     res.json({
       url: v.url || VINSEARCH_DEFAULT_URL,
       email: showLogin ? (v.email || '') : null,
@@ -944,8 +951,54 @@ router.get('/vinsearch', async (req, res) => {
       autoLogin: !!v.autoLogin,
       configured: !!(v.email || v.password),
       isAdmin,
+      platforms,
     });
   } catch (e) { res.status(500).json({ error: 'load_failed', message: e.message }); }
+});
+
+// Add / edit / remove the extra VIN platforms (admin). Stored in
+// app_settings.data.vinPlatforms = [{ id, name, url, email, password, notes }].
+async function saveVinPlatforms(mutate) {
+  await query(`INSERT INTO app_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+  const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+  const list = Array.isArray(cur.vinPlatforms) ? cur.vinPlatforms : [];
+  const next = mutate(list);
+  await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`,
+    [JSON.stringify({ ...cur, vinPlatforms: next.slice(0, 30) })]);
+  return next;
+}
+const cleanPlatform = (b, old = {}) => ({
+  id: old.id || Date.now(),
+  name: String(b.name !== undefined ? b.name : old.name || '').trim().slice(0, 80),
+  url: String(b.url !== undefined ? b.url : old.url || '').trim().slice(0, 500),
+  email: String(b.email !== undefined ? b.email : old.email || '').trim().slice(0, 200),
+  password: String(b.password !== undefined ? b.password : old.password || '').slice(0, 200),
+  notes: String(b.notes !== undefined ? b.notes : old.notes || '').trim().slice(0, 200),
+});
+router.post('/vinsearch/platforms', requireAdmin, async (req, res) => {
+  try {
+    const p = cleanPlatform(req.body || {});
+    if (!p.name || !/^https?:\/\//i.test(p.url)) return res.status(400).json({ error: 'name_and_url_required', message: 'Give it a name and a full URL (https://…).' });
+    await saveVinPlatforms((list) => [...list, p]);
+    await audit(req, 'vin_platform_add', null, null, { name: p.name });
+    res.status(201).json({ ok: true, platform: p });
+  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+});
+router.patch('/vinsearch/platforms/:id', requireAdmin, async (req, res) => {
+  try {
+    let found = null;
+    await saveVinPlatforms((list) => list.map(p => String(p.id) === String(req.params.id) ? (found = cleanPlatform(req.body || {}, p)) : p));
+    if (!found) return res.status(404).json({ error: 'not_found' });
+    await audit(req, 'vin_platform_update', null, null, { name: found.name });
+    res.json({ ok: true, platform: found });
+  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+});
+router.delete('/vinsearch/platforms/:id', requireAdmin, async (req, res) => {
+  try {
+    await saveVinPlatforms((list) => list.filter(p => String(p.id) !== String(req.params.id)));
+    await audit(req, 'vin_platform_delete', null, null, { id: req.params.id });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
 });
 
 router.post('/vinsearch', requireAdmin, async (req, res) => {

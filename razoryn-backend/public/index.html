@@ -16919,6 +16919,7 @@ async function renderVinSearch() {
   let cfg;
   try { cfg = await Api.get('/api/settings/vinsearch'); }
   catch (e) { el('vs-body').innerHTML = `<div class="card-body"><div style="color:var(--red)">Couldn't load: ${escapeHtml(e.message)}</div></div>`; return; }
+  _vsCfg = cfg;
   const box = el('vs-body'); if (!box || State.page !== 'vinsearch') return;
   const credRow = (label, value, mask) => value ? `
     <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line-2)">
@@ -16954,9 +16955,75 @@ async function renderVinSearch() {
         <div style="font-size:13px;color:var(--ink-soft)">No login saved yet${cfg.isAdmin ? ' — add the shared email + password in <strong>Settings → 🔎 VIN Search portal</strong> and it will show here for everyone' : ' — ask an admin to add it in Settings'}.</div>
       `}
       <div style="font-size:11px;color:var(--ink-soft);margin-top:12px">The portal opens in its own ${State.appShell ? 'browser window' : 'tab'} — it runs its own login session, so it can't sit inside this page.</div>
+      <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div><div style="font-weight:700;font-size:13px">Other VIN platforms</div>
+          <div style="font-size:11.5px;color:var(--ink-soft)">Different makes use different lookup sites — each opens in its own tab, with the login to copy where one is saved.</div></div>
+          ${cfg.isAdmin ? '<button class="btn btn-ghost btn-sm" onclick="vsAddPlatform()">+ Add platform</button>' : ''}
+        </div>
+        <div id="vs-platforms">${vsPlatformsHtml(cfg)}</div>
+      </div>
     </div>`;
   // Stash the raw password for the reveal toggle without inlining it twice.
   const pw = el('vs-password'); if (pw && cfg.password) pw.dataset.v = cfg.password;
+}
+// The site's own favicon makes each platform recognisable at a glance —
+// Google's favicon service resolves it from the domain, no scraping needed.
+function vsIcon(url) {
+  try { return 'https://www.google.com/s2/favicons?sz=64&domain=' + encodeURIComponent(new URL(url).hostname); }
+  catch (_) { return ''; }
+}
+function vsPlatformsHtml(cfg) {
+  const ps = cfg.platforms || [];
+  if (!ps.length) return `<div style="font-size:12.5px;color:var(--ink-soft)">None added yet${cfg.isAdmin ? ' — hit + Add platform (e.g. partslink24 for VAG, Microcat for Hyundai/Kia…).' : '.'}</div>`;
+  return `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px">` + ps.map(p => `
+    <div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px">
+      <div style="display:flex;align-items:center;gap:8px">
+        ${vsIcon(p.url) ? `<img src="${escapeAttr(vsIcon(p.url))}" alt="" style="width:22px;height:22px;border-radius:5px" onerror="this.style.display='none'">` : ''}
+        <div style="flex:1;min-width:0"><div style="font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(p.name)}</div>
+        ${p.notes ? `<div style="font-size:10.5px;color:var(--ink-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(p.notes)}</div>` : ''}</div>
+        ${cfg.isAdmin ? `<button class="btn btn-ghost btn-sm" style="padding:1px 6px" onclick="vsEditPlatform(${p.id})" title="Edit">✎</button><button class="btn btn-ghost btn-sm" style="padding:1px 6px;color:var(--red)" onclick="vsDeletePlatform(${p.id})" title="Remove">×</button>` : ''}
+      </div>
+      <a class="btn btn-outline btn-sm" style="text-align:center" href="${escapeAttr(p.url)}" target="_blank" rel="noopener">Open ↗</a>
+      ${(p.email || p.password) ? `<div style="display:flex;gap:4px;flex-wrap:wrap">
+        ${p.email ? `<button class="btn btn-ghost btn-sm" style="font-size:10.5px;padding:2px 8px" onclick="copyToClipboard(this.dataset.v);toast('Email copied','success',1500)" data-v="${escapeAttr(p.email)}">📋 Email</button>` : ''}
+        ${p.password ? `<button class="btn btn-ghost btn-sm" style="font-size:10.5px;padding:2px 8px" onclick="copyToClipboard(this.dataset.v);toast('Password copied','success',1500)" data-v="${escapeAttr(p.password)}">📋 Password</button>` : ''}
+      </div>` : ''}
+    </div>`).join('') + '</div>';
+}
+function vsPlatformModal(p) {
+  modal({
+    title: p ? '✎ Edit VIN platform' : '+ Add VIN platform',
+    body: `
+      <div class="field"><label>Name <span style="color:var(--ink-soft);font-weight:400">— what the team calls it</span></label><input id="vsp-name" value="${escapeAttr(p?.name || '')}" placeholder="e.g. partslink24 (VAG)"></div>
+      <div class="field"><label>URL</label><input id="vsp-url" value="${escapeAttr(p?.url || '')}" placeholder="https://www.partslink24.com/"></div>
+      <div class="field"><label>Covers <span style="color:var(--ink-soft);font-weight:400">(optional — which makes/models)</span></label><input id="vsp-notes" value="${escapeAttr(p?.notes || '')}" placeholder="e.g. VW · Audi · Seat · Skoda"></div>
+      <div style="display:flex;gap:10px">
+        <div class="field" style="flex:1"><label>Login email <span style="color:var(--ink-soft);font-weight:400">(optional)</span></label><input id="vsp-email" value="${escapeAttr(p?.email || '')}"></div>
+        <div class="field" style="flex:1"><label>Password <span style="color:var(--ink-soft);font-weight:400">(optional)</span></label><input id="vsp-password" value="${escapeAttr(p?.password || '')}"></div>
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft)">Logins show to the same people as the main portal's (the "show login to staff" switch in Settings covers these too).</div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: p ? 'Save' : 'Add', primary: true, onClick: async () => {
+        const body = { name: el('vsp-name').value.trim(), url: el('vsp-url').value.trim(), notes: el('vsp-notes').value.trim(), email: el('vsp-email').value.trim(), password: el('vsp-password').value };
+        try {
+          if (p) await Api.patch('/api/settings/vinsearch/platforms/' + p.id, body);
+          else await Api.post('/api/settings/vinsearch/platforms', body);
+          closeModal(); toast(p ? '✓ Platform updated' : '✓ Platform added', 'success'); renderVinSearch();
+        } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+      } },
+    ],
+  });
+}
+let _vsCfg = null;
+function vsAddPlatform() { vsPlatformModal(null); }
+function vsEditPlatform(id) { const p = (_vsCfg?.platforms || []).find(x => String(x.id) === String(id)); if (p) vsPlatformModal(p); }
+async function vsDeletePlatform(id) {
+  const p = (_vsCfg?.platforms || []).find(x => String(x.id) === String(id));
+  if (!confirm(`Remove "${p?.name || 'this platform'}" from the list?`)) return;
+  try { await Api.delete('/api/settings/vinsearch/platforms/' + id); toast('Removed', 'info'); renderVinSearch(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 // ── Dispatch pick-check: scan each item to verify it's the RIGHT part ───────
