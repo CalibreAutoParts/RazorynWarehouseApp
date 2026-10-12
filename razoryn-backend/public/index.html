@@ -22521,6 +22521,7 @@ function renderBooks() {
             <button class="btn btn-outline" onclick="bkOpenPack('paid')" title="One print-ready document: the FULL invoice for every order PAID in the period, one per page — Save as PDF for the pack.">📄 Invoice pack — paid in period</button>
             <button class="btn btn-outline" onclick="bkOpenPack('issued')">📄 Invoice pack — issued in period</button>
             <button class="btn btn-outline" onclick="bkCsv()">⬇ Transactions CSV</button>
+            <button class="btn btn-outline" onclick="bkZip()" title="One ZIP with EVERYTHING for the period — transactions.csv (all banks), every sales invoice as a PDF, every attached receipt/purchase invoice, the statement files, and a plain-English READ-ME. Perfect for emailing to an accountant who won't use links.">📦 Full pack (ZIP) — email-ready</button>
             <button class="btn btn-primary" onclick="bkCreateShare()" title="Creates a private read-only link for the accountant: summary, every transaction, linked invoices, receipts and the statement PDFs — downloadable singly or as a pack.">🔗 Create accountant link</button>
           </div>
           <div id="bk-shares" style="margin-top:10px;font-size:12px;color:var(--ink-soft)"></div>
@@ -23187,6 +23188,10 @@ async function bkDeleteStatement(id) {
 }
 function bkOpenPack(basis) {
   window.open(`/api/books/export/invoice-pack?from=${BK.from}&to=${BK.to}&basis=${basis}`, '_blank');
+}
+function bkZip() {
+  toast('📦 Building the pack — CSV, invoice PDFs, receipts, statements. Bigger quarters take a minute; the download starts when it’s ready.', 'info', 9000);
+  window.open(`/api/books/export/zip?from=${BK.from}&to=${BK.to}` + (BK.accountId ? '&accountId=' + BK.accountId : ''), '_blank');
 }
 function bkCsv() {
   // One CSV across ALL banks is what the accountant's VAT return wants —

@@ -1485,6 +1485,135 @@ router.get('/export/csv', async (req, res) => {
   res.send(buildCsv(rows));
 });
 
+// ── The accountant PACK: one ZIP with everything, for emailing ────────────
+// Accountants who won't use a web link get a single file: the combined
+// transactions CSV, every sales invoice as its own PDF, every attached
+// receipt/purchase invoice, the bank statement files that still exist on
+// disk, and a plain-English READ-ME. Download, attach to an email, done.
+const zipSafe = (s) => String(s || '').replace(/[^A-Za-z0-9 ._()-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 80);
+async function streamAccountsZip(res, { from, to, accountId }) {
+    const archiver = require('archiver');
+    const brand = require('../lib/brand');
+    const salesMod = require('./sales');
+    const { buildInvoicePdf } = require('../lib/invoice-pdf');
+
+    const txs = await loadTransactions({ from, to, accountId });
+    const sales = await loadInvoiceSales({ from, to, basis: 'paid' });
+    const company = await salesMod.getCompanySettings();
+
+    res.set('Content-Type', 'application/zip');
+    res.set('Content-Disposition', `attachment; filename="${zipSafe(brand.name || 'accounts')}-VAT-pack-${from}-to-${to}.zip"`);
+    const zip = archiver('zip', { zlib: { level: 6 } });
+    zip.on('warning', (e) => console.warn('[books] zip warning:', e.message));
+    zip.on('error', (e) => { console.error('[books] zip error:', e.message); try { res.destroy(e); } catch (_) {} });
+    zip.pipe(res);
+
+    // 1. The combined transactions CSV (all banks, date order).
+    zip.append(buildCsv(txs), { name: 'transactions.csv' });
+
+    // 2. Sales invoices — one PDF each, named by invoice number + customer.
+    let invoiceCount = 0, invoiceFails = 0;
+    for (const sale of sales) {
+      try {
+        const items = (await query(`SELECT * FROM sale_items WHERE sale_id = $1`, [sale.id])).rows;
+        await salesMod.enrichSaleCustomer(sale);
+        const pdf = await buildInvoicePdf({ sale, items, company, brand, mode: sale.payment_method === 'cash' ? 'receipt' : 'invoice' });
+        zip.append(pdf, { name: `sales-invoices/${zipSafe((sale.invoice_number || ('invoice-' + sale.id)) + ' - ' + (sale.customer_name || ''))}.pdf` });
+        invoiceCount++;
+      } catch (e) { invoiceFails++; console.warn('[books] zip invoice', sale.id, ':', e.message); }
+    }
+
+    // 3. Receipts / purchase invoices attached to the period's payments —
+    //    named so they sort by date and are findable by payee + amount.
+    let receiptCount = 0;
+    const seenFiles = new Set();
+    for (const t of txs) {
+      const recs = Array.isArray(t.receipts) ? t.receipts : [];
+      for (const r2 of recs) {
+        const row = (await query(`SELECT file_path, original_name FROM bank_tx_receipts WHERE id = $1`, [r2.id])).rows[0];
+        if (!row || !row.file_path) continue;
+        const abs = path.join(UPLOAD_DIR, row.file_path);
+        if (!fs.existsSync(abs) || seenFiles.has(row.file_path)) continue;
+        seenFiles.add(row.file_path);
+        const ext = path.extname(row.file_path) || path.extname(row.original_name || '') || '.pdf';
+        const amt = t.money_out > 0 ? (+t.money_out).toFixed(2) : (+t.money_in || 0).toFixed(2);
+        const day = isoDay(t.tx_date);
+        zip.file(abs, { name: `receipts-and-purchase-invoices/${day} ${zipSafe((t.counterparty || t.description || 'payment').slice(0, 40))} ${amt} (${r2.id})${ext}` });
+        receiptCount++;
+      }
+    }
+
+    // 4. Bank + marketplace statement files that still exist on disk.
+    let stmtCount = 0;
+    const stmtIds = [...new Set(txs.map(t => t.statement_id).filter(Boolean))];
+    if (stmtIds.length) {
+      const stmts = (await query(`SELECT s.*, a.name AS account_name, a.bank FROM bank_statements s LEFT JOIN bank_accounts a ON a.id = s.account_id WHERE s.id = ANY($1)`, [stmtIds])).rows;
+      for (const s of stmts) {
+        const abs = s.file_path ? path.join(UPLOAD_DIR, s.file_path) : null;
+        if (!abs || !fs.existsSync(abs)) continue;
+        zip.file(abs, { name: `bank-statements/${zipSafe((s.account_name || s.bank_detected || 'statement') + ' ' + (isoDay(s.period_start) || ''))}${path.extname(s.file_path) || '.pdf'}` });
+        stmtCount++;
+      }
+      const plats = (await query(`SELECT * FROM platform_statements WHERE period_start <= $2::date AND period_end >= $1::date`, [from, to])).rows;
+      for (const s of plats) {
+        const abs = s.file_path ? path.join(UPLOAD_DIR, s.file_path) : null;
+        if (!abs || !fs.existsSync(abs)) continue;
+        zip.file(abs, { name: `marketplace-statements/${zipSafe((s.platform || 'platform').toUpperCase() + ' ' + (s.label || s.account_name || '') + ' ' + (isoDay(s.period_start) || ''))}${path.extname(s.file_path) || '.pdf'}` });
+        stmtCount++;
+      }
+    }
+
+    // 5. Plain-English guide, written for a non-technical reader.
+    zip.append(`${brand.fullName || brand.name || ''} — VAT records pack
+Period: ${ukDate(from)} to ${ukDate(to)}
+Prepared: ${new Date().toLocaleDateString('en-GB')}
+
+WHAT'S IN THIS FOLDER
+=====================
+1. transactions.csv
+   Every bank transaction for the period, all accounts in one file,
+   in date order. Columns include the account/bank, money in, money out,
+   net (ex VAT), VAT rate, VAT amount, the linked sales invoice number,
+   and whether a receipt is attached ("yes") or still missing ("MISSING").
+   Opens in Excel.
+
+2. sales-invoices\\  (${invoiceCount} file${invoiceCount === 1 ? '' : 's'})
+   A PDF of every sales invoice PAID in the period — this is the sales
+   (output VAT) side. Each file is named by invoice number and customer.
+
+3. receipts-and-purchase-invoices\\  (${receiptCount} file${receiptCount === 1 ? '' : 's'})
+   The receipts and purchase invoices attached to the period's payments —
+   the purchases (input VAT) side. Named date · payee · amount, so each
+   one lines up with its row in transactions.csv.
+
+4. bank-statements\\ and marketplace-statements\\  (${stmtCount} file${stmtCount === 1 ? '' : 's'})
+   The original statement files where available.
+
+NOTES
+=====
+- Rows categorised "transfer" are money moving between our own accounts —
+  not sales or purchases.
+- "MISSING" in the receipt column means no VAT receipt exists for that
+  payment yet; most are overseas suppliers (no UK VAT to reclaim) and are
+  marked as such in the notes column.
+- Purchases are mainly overseas, so many carry no reclaimable UK VAT.
+`, { name: 'READ-ME-FIRST.txt' });
+
+    await zip.finalize();
+}
+router.get('/export/zip', async (req, res) => {
+  try {
+    await ensureTables();
+    const { from, to } = req.query;
+    if (!from || !to) return res.status(400).json({ error: 'from_to_required' });
+    await streamAccountsZip(res, { from, to, accountId: req.query.accountId || null });
+  } catch (e) {
+    console.error('[books] zip export failed:', (e && e.stack) || e);
+    if (!res.headersSent) res.status(500).json({ error: 'zip_failed', message: e.message });
+    else try { res.end(); } catch (_) {}
+  }
+});
+
 // ── Accountant share links ─────────────────────────────────────────────────
 router.post('/share', async (req, res) => {
   await ensureTables();
@@ -1568,6 +1697,7 @@ publicRouter.get('/:token', pubAw(async (req, res) => {
     <div class="card"><div class="l">VAT receipts missing</div><div class="v">${sum.receiptsMissing}</div></div>
   </div>
   <div class="bar">
+    <a class="btn" href="${base}/zip" style="background:#176b2c">📦 Download EVERYTHING (one ZIP — CSV + invoices + receipts)</a>
     <a class="btn" href="${base}/pack?basis=paid" target="_blank">📄 Invoice pack — all PAID in period</a>
     <a class="btn" href="${base}/pack?basis=issued" target="_blank">📄 Invoice pack — all ISSUED in period</a>
     <a class="btn ghost" href="${base}/csv">⬇ Transactions CSV</a>
@@ -1597,6 +1727,11 @@ publicRouter.get('/:token', pubAw(async (req, res) => {
   </tbody></table>
   <div style="color:#999;font-size:11px;margin:16px 0">Generated by the ${esc(brand.name || '')} warehouse system. Figures are working records, not filed returns.</div>
 </div></body></html>`);
+}));
+publicRouter.get('/:token/zip', pubAw(async (req, res) => {
+  const share = await shareFor(req.params.token);
+  if (!share) return res.status(404).send('Link revoked.');
+  await streamAccountsZip(res, { from: isoDay(share.from_date), to: isoDay(share.to_date), accountId: share.account_id });
 }));
 publicRouter.get('/:token/csv', pubAw(async (req, res) => {
   const share = await shareFor(req.params.token);
