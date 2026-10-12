@@ -23189,7 +23189,14 @@ function bkOpenPack(basis) {
   window.open(`/api/books/export/invoice-pack?from=${BK.from}&to=${BK.to}&basis=${basis}`, '_blank');
 }
 function bkCsv() {
-  window.open(`/api/books/export/csv?from=${BK.from}&to=${BK.to}` + (BK.accountId ? '&accountId=' + BK.accountId : ''), '_blank');
+  // One CSV across ALL banks is what the accountant's VAT return wants —
+  // only narrow it when the account filter is set on purpose.
+  let acc = BK.accountId || '';
+  if (acc) {
+    const name = BK.accounts.find(a => String(a.id) === String(acc))?.name || 'the selected account';
+    if (!confirm(`Export only ${name}?\n\nOK = just ${name}\nCancel = every bank in ONE file (what the accountant usually wants)`)) acc = '';
+  }
+  window.open(`/api/books/export/csv?from=${BK.from}&to=${BK.to}` + (acc ? '&accountId=' + acc : ''), '_blank');
 }
 async function bkCreateShare() {
   const label = prompt('Label for this accountant link (e.g. "Q3 VAT return"):') || '';
