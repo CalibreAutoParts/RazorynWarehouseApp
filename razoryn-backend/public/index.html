@@ -22544,7 +22544,8 @@ function renderBooks() {
         <div class="card-head"><h3>Transactions</h3><div class="card-desc">Link each line to an invoice or payout, set the VAT, attach receipts. Claude pre-fills most of it from the statement.</div>
           <input id="bk-search" placeholder="🔍 Filter — ebay, royal mail, INV-148, 450.00…" style="font-size:12px;min-width:220px" oninput="BK.q=this.value;bkPaintTxs()">
           <label class="btn btn-primary btn-sm" style="cursor:pointer" title="Upload any invoice/receipt (PDF or photo) — Claude reads the supplier, date, total and VAT, finds the matching payment, and asks you to confirm before anything is saved.">🤖 Smart-attach invoice<input type="file" multiple accept=".pdf,image/*" style="display:none" onchange="bkSmartReceipts(this.files);this.value=''"></label>
-          <label class="btn btn-ghost btn-sm" style="cursor:pointer" title="Got a folder of receipts (e.g. Mettle's export ships a receipts/ folder)? Select them all — each file is matched by the date in its filename to the right transaction.">📎 Bulk-attach receipts<input type="file" multiple accept=".pdf,image/*" style="display:none" onchange="bkBulkReceipts(this.files)"></label></div>
+          <label class="btn btn-ghost btn-sm" style="cursor:pointer" title="Got a folder of receipts (e.g. Mettle's export ships a receipts/ folder)? Select them all — each file is matched by the date in its filename to the right transaction.">📎 Bulk-attach receipts<input type="file" multiple accept=".pdf,image/*" style="display:none" onchange="bkBulkReceipts(this.files)"></label>
+          <button class="btn btn-ghost btn-sm" onclick="bkCleanupReceipts(this)" title="Remove dead receipt links — files uploaded before persistent storage was set up no longer exist, so their 📄 links show an error. This deletes just those dead entries; working receipts are untouched.">🧹 Clear dead links</button></div>
         <div class="card-body" style="padding:0"><div id="bk-txs" style="font-size:12.5px">Loading…</div></div>
       </div>
       <div class="card">
@@ -23007,6 +23008,18 @@ async function bkUploadReceipts(id, files) {
 // Bulk receipt attach — a whole export folder in one go. Each file matches
 // by the date in its filename (e.g. "Mettle-INV-133-2026-04-25.pdf") to the
 // unique receipt-less money-out transaction on that day (±2 days fallback).
+// Remove receipt rows whose files were wiped before the volume existed.
+async function bkCleanupReceipts(btn) {
+  if (!confirm('Remove all DEAD receipt links (files lost before persistent storage was set up)? Working receipts are untouched. Rows left without any receipt may need re-attaching.')) return;
+  btn.disabled = true;
+  try {
+    const r = await Api.post('/api/books/receipts/cleanup', {});
+    toast(`🧹 ${r.removedRows} dead receipt link${r.removedRows === 1 ? '' : 's'} removed${r.clearedPaths ? ` · ${r.clearedPaths} transaction(s) repointed/cleared` : ''}`, 'success', 7000);
+    bkLoad();
+  } catch (e) { toast('Cleanup failed: ' + (e.data?.message || e.message), 'error'); }
+  btn.disabled = false;
+}
+
 // ── Smart invoice attach: Claude reads the document, user confirms ────────
 // Each file: upload → Claude extracts supplier/date/total/VAT → the best
 // matching payments come back scored → a confirmation modal; NOTHING is

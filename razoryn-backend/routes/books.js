@@ -217,7 +217,9 @@ function sendUpload(res, relPath, what) {
 }
 
 const gbp = (n) => '£' + (parseFloat(n) || 0).toFixed(2);
-const ukDate = (d) => String(d || '').slice(0, 10).split('-').reverse().join('/');
+// isoDay first: pg hands DATE columns back as JS Date objects, and naive
+// String() gives "Mon Jun 01" — which is what the shared page briefly showed.
+const ukDate = (d) => { const i = isoDay(d); return i ? i.split('-').reverse().join('/') : ''; };
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 // ── Accounts ───────────────────────────────────────────────────────────────
@@ -860,6 +862,39 @@ router.post('/receipts/smart/confirm', async (req, res) => {
   } catch (e) {
     console.error('[books] smart confirm failed:', (e && e.stack) || e);
     res.status(500).json({ error: 'confirm_failed', message: e.message });
+  }
+});
+
+// ── Dead-link cleanup ──────────────────────────────────────────────────────
+// Files uploaded before the Railway volume existed are gone from disk, but
+// their rows survive — leaving "file 1 · file 2" where file 1 is dead. This
+// walks every stored receipt reference, checks the disk, and removes the
+// rows whose file no longer exists. Re-attached receipts are untouched.
+router.post('/receipts/cleanup', async (req, res) => {
+  try {
+    await ensureTables();
+    let removedRows = 0, clearedPaths = 0;
+    const recs = (await query(`SELECT id, file_path FROM bank_tx_receipts`)).rows;
+    for (const r of recs) {
+      if (!r.file_path || !fs.existsSync(path.join(UPLOAD_DIR, r.file_path))) {
+        await query(`DELETE FROM bank_tx_receipts WHERE id = $1`, [r.id]);
+        removedRows++;
+      }
+    }
+    const paths = (await query(`SELECT id, receipt_path FROM bank_transactions WHERE receipt_path IS NOT NULL`)).rows;
+    for (const t of paths) {
+      if (!fs.existsSync(path.join(UPLOAD_DIR, t.receipt_path))) {
+        // Point at a surviving receipt row if one exists, else clear.
+        const alive = (await query(`SELECT file_path FROM bank_tx_receipts WHERE tx_id = $1 ORDER BY id LIMIT 1`, [t.id])).rows[0];
+        await query(`UPDATE bank_transactions SET receipt_path = $2, updated_at = now() WHERE id = $1`, [t.id, alive ? alive.file_path : null]);
+        clearedPaths++;
+      }
+    }
+    await audit(req, 'books_receipts_cleanup', null, null, { removedRows, clearedPaths });
+    res.json({ ok: true, removedRows, clearedPaths });
+  } catch (e) {
+    console.error('[books] receipts cleanup failed:', (e && e.stack) || e);
+    res.status(500).json({ error: 'cleanup_failed', message: e.message });
   }
 });
 
