@@ -204,6 +204,18 @@ async function doMigrate() {
   } catch (e) { console.warn('[books] migration:', e.message); }
 }
 
+// Serve an uploaded file — with a straight answer when it's GONE. Railway's
+// filesystem is wiped on every deploy unless a Volume is mounted, so files
+// uploaded before the volume was set up no longer exist on disk even though
+// their database rows survive.
+function sendUpload(res, relPath, what) {
+  const abs = relPath ? path.join(UPLOAD_DIR, relPath) : null;
+  if (!abs || !fs.existsSync(abs)) {
+    return res.status(410).send(`This ${what} is no longer stored on the server. Files uploaded before persistent storage was configured are wiped on each deploy — re-upload/re-attach this one. (Fix: in Railway, add a Volume mounted at /app/uploads so uploads survive deploys.)`);
+  }
+  res.sendFile(abs);
+}
+
 const gbp = (n) => '£' + (parseFloat(n) || 0).toFixed(2);
 const ukDate = (d) => String(d || '').slice(0, 10).split('-').reverse().join('/');
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -486,7 +498,7 @@ router.get('/statements/:id/file', async (req, res) => {
   await ensureTables();
   const r = await query(`SELECT file_path FROM bank_statements WHERE id = $1`, [req.params.id]);
   if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
-  res.sendFile(path.join(UPLOAD_DIR, r.rows[0].file_path));
+  sendUpload(res, r.rows[0].file_path, 'statement file');
 });
 
 // ── Transactions ───────────────────────────────────────────────────────────
@@ -856,13 +868,13 @@ router.get('/receipt-file/:rid', async (req, res) => {
   await ensureTables();
   const r = await query(`SELECT file_path FROM bank_tx_receipts WHERE id = $1`, [req.params.rid]);
   if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
-  res.sendFile(path.join(UPLOAD_DIR, r.rows[0].file_path));
+  sendUpload(res, r.rows[0].file_path, 'receipt');
 });
 router.get('/transactions/:id/receipt', async (req, res) => {
   await ensureTables();
   const r = await query(`SELECT receipt_path FROM bank_transactions WHERE id = $1`, [req.params.id]);
   if (!r.rows[0]?.receipt_path) return res.status(404).json({ error: 'no_receipt' });
-  res.sendFile(path.join(UPLOAD_DIR, r.rows[0].receipt_path));
+  sendUpload(res, r.rows[0].receipt_path, 'receipt');
 });
 
 // POST /api/books/receipts/bulk — attach a FOLDER of receipts in one go (the
@@ -1311,7 +1323,7 @@ router.get('/platform-statements/:id/file', async (req, res) => {
   await ensureTables();
   const r = await query(`SELECT file_path FROM platform_statements WHERE id = $1`, [req.params.id]);
   if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
-  res.sendFile(path.join(UPLOAD_DIR, r.rows[0].file_path));
+  sendUpload(res, r.rows[0].file_path, 'statement file');
 });
 // Re-run the bank match (e.g. after uploading the bank statement that holds
 // the missing payouts).
@@ -1575,21 +1587,21 @@ publicRouter.get('/:token/receipt-file/:rid', pubAw(async (req, res) => {
   if (!share) return res.status(404).send('Link revoked.');
   const r = await query(`SELECT file_path FROM bank_tx_receipts WHERE id = $1`, [req.params.rid]);
   if (!r.rows[0]) return res.status(404).send('No receipt');
-  res.sendFile(path.join(UPLOAD_DIR, r.rows[0].file_path));
+  sendUpload(res, r.rows[0].file_path, 'receipt');
 }));
 publicRouter.get('/:token/receipt/:txId', pubAw(async (req, res) => {
   const share = await shareFor(req.params.token);
   if (!share) return res.status(404).send('Link revoked.');
   const r = await query(`SELECT receipt_path FROM bank_transactions WHERE id = $1`, [req.params.txId]);
   if (!r.rows[0]?.receipt_path) return res.status(404).send('No receipt');
-  res.sendFile(path.join(UPLOAD_DIR, r.rows[0].receipt_path));
+  sendUpload(res, r.rows[0].receipt_path, 'receipt');
 }));
 publicRouter.get('/:token/statement/:id', pubAw(async (req, res) => {
   const share = await shareFor(req.params.token);
   if (!share) return res.status(404).send('Link revoked.');
   const r = await query(`SELECT file_path FROM bank_statements WHERE id = $1`, [req.params.id]);
   if (!r.rows[0]) return res.status(404).send('Not found');
-  res.sendFile(path.join(UPLOAD_DIR, r.rows[0].file_path));
+  sendUpload(res, r.rows[0].file_path, 'statement file');
 }));
 
 publicRouter.use((err, req, res, next) => {

@@ -263,7 +263,9 @@ router.get('/events/:eventId(\\d+)/file', aw(async (req, res) => {
   await ensureTables();
   const r = await query(`SELECT file_path, file_name FROM dispute_events WHERE id = $1`, [req.params.eventId]);
   if (!r.rows[0] || !r.rows[0].file_path) return res.status(404).json({ error: 'not_found' });
-  res.sendFile(path.join(UPLOAD_DIR, r.rows[0].file_path));
+  const abs = path.join(UPLOAD_DIR, r.rows[0].file_path);
+  if (!fs.existsSync(abs)) return res.status(410).send('This file is no longer stored on the server — it was uploaded before persistent storage was configured (Railway wipes files on each deploy without a Volume). Re-upload it to the case.');
+  res.sendFile(abs);
 }));
 
 // ── AI battle plan ─────────────────────────────────────────────────────────
