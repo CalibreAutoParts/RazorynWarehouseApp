@@ -1,0 +1,17 @@
+api_version = "2026-01"
+
+[[extensions]]
+name = "Warehouse invoice"
+handle = "warehouse-invoice"
+type = "ui_extension"
+description = "Download the Warehouse Hub invoice from the order page."
+
+# More actions → Apps → Warehouse invoice
+[[extensions.targeting]]
+module = "./src/ActionExtension.jsx"
+target = "admin.order-details.action.render"
+
+# Order page card (add it once with "+ Block")
+[[extensions.targeting]]
+module = "./src/BlockExtension.jsx"
+target = "admin.order-details.block.render"

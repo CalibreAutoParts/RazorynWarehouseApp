@@ -1,0 +1,15 @@
+{
+  "name": "razoryn-warehouse-shopify-app",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Shopify admin extensions for the Razoryn Warehouse app: Download / print the Warehouse invoice from an order page.",
+  "workspaces": ["extensions/*"],
+  "scripts": {
+    "config:link": "shopify app config link --client-id 44e00f0f5325bf6fab3cf71111eaa211",
+    "deploy": "shopify app deploy"
+  },
+  "devDependencies": {
+    "@shopify/cli": "^3.94.3"
+  },
+  "engines": { "node": ">=20.10" }
+}

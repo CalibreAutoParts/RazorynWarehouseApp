@@ -1,0 +1,5 @@
+# Razoryn Warehouse — Shopify app config, used only to deploy the admin extensions
+# in ./extensions. Run `npm run config:link` before every deploy: it replaces this file
+# with the app's live configuration (scopes, URLs), so a deploy never changes them.
+client_id = "44e00f0f5325bf6fab3cf71111eaa211"
+name = "Razoryn Warehouse"
