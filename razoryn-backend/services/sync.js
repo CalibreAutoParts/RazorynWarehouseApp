@@ -428,9 +428,49 @@ async function pullShopify(opts = {}) {
   let invoiceLinks = null;
   try { invoiceLinks = await pushInvoiceLinksToShopify(); }
   catch (e) { console.warn('[sync] invoice links:', e.message); invoiceLinks = { error: e.message }; }
+  // Keep tag-based storefront collections (e.g. "Fog lights & DRL") in step with titles.
+  try { await syncCategoryTags(); } catch (e) { console.warn('[sync] category tags:', e.message); }
   // Older imports didn't store discount names — fill them in a batch at a time.
   try { await backfillDiscountLabels(); } catch (e) { console.warn('[sync] discount labels:', e.message); }
   return { channel: 'shopify', since, orders: orders.length, inserted, invoiceLinks };
+}
+
+// --------- Category tags for merged storefront collections ---------
+// Shopify smart collections can't OR rules that also have exclusions, so a merged
+// collection uses a tag instead. These rules mirror the original collections' title
+// rules; every sync adds the tag to matching products and removes it from ones that
+// no longer match.
+const CATEGORY_TAGS = [
+  {
+    tag: 'Fog lights & DRL',       // collection: fog-lights-drl
+    search: 'title:fog* OR title:running',
+    // = Fog Lights (fog, minus covers/trims/bezels/surrounds/grilles/inserts) + DRL (running)
+    match: (t) => (/fog/i.test(t) && !/cover|trim|bezel|surround|grille|insert/i.test(t)) || /running/i.test(t),
+  },
+];
+
+function categoryTagChanges(rule, candidates, tagged) {
+  const shouldHave = new Set(candidates.filter(p => rule.match(p.title || '')).map(p => p.id));
+  const has = new Set(tagged.map(p => p.id));
+  return {
+    add: [...shouldHave].filter(id => !has.has(id)),
+    remove: tagged.filter(p => !rule.match(p.title || '')).map(p => p.id),
+  };
+}
+
+async function syncCategoryTags() {
+  if (!shopify.isConfigured()) return { skipped: 'not_configured' };
+  const out = [];
+  for (const rule of CATEGORY_TAGS) {
+    const tagged = await shopify.searchProducts(`tag:"${rule.tag}"`);
+    const candidates = await shopify.searchProducts(rule.search);
+    const { add, remove } = categoryTagChanges(rule, candidates, tagged);
+    for (const id of add) await shopify.setProductTag(id, rule.tag, true);
+    for (const id of remove) await shopify.setProductTag(id, rule.tag, false);
+    if (add.length || remove.length) console.log(`[sync] "${rule.tag}": +${add.length} −${remove.length}`);
+    out.push({ tag: rule.tag, added: add.length, removed: remove.length });
+  }
+  return out;
 }
 
 // --------- Discount names for invoices (orders imported before they were stored) ---------
@@ -986,6 +1026,9 @@ module.exports = {
   pullShopify,
   pushInvoiceLinksToShopify,
   backfillDiscountLabels,
+  syncCategoryTags,
+  categoryTagChanges,
+  CATEGORY_TAGS,
   pullEbay,
   backfillEbayOrders,
   isNativeShopifyOrder,

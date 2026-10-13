@@ -178,6 +178,21 @@ async function deleteDiscountCode(discountGid) {
   return true;
 }
 
+// Product search (Shopify search syntax) → [{ id, title, tags }]. Needs read_products.
+async function searchProducts(q, limit = 250) {
+  const d = await gqlOrThrow(`query($q: String!, $n: Int!) { products(first: $n, query: $q) { nodes { id title tags } } }`,
+    { q, n: limit });
+  return d.products?.nodes || [];
+}
+
+async function setProductTag(productGid, tag, on) {
+  const field = on ? 'tagsAdd' : 'tagsRemove';
+  const d = await gqlOrThrow(`mutation($id: ID!, $tags: [String!]!) { ${field}(id: $id, tags: $tags) { userErrors { message } } }`,
+    { id: productGid, tags: [tag] });
+  const errs = d[field]?.userErrors || [];
+  if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
+}
+
 // Shop metafields are readable without any extra scope.
 async function getShopMetafieldValue(namespace, key) {
   const d = await gqlOrThrow(`query($ns: String!, $key: String!) { shop { metafield(namespace: $ns, key: $key) { value } } }`,
@@ -1434,6 +1449,8 @@ module.exports = {
   createWatchedOfferCode,
   deleteDiscountCode,
   getShopMetafieldValue,
+  searchProducts,
+  setProductTag,
   setProductRating,
   getAccessToken,
   getProductSeo,
