@@ -1,4 +1,5 @@
 api_version = "2026-01"
+uid = "8f75e861-648a-2683-352f-61e99252b0df31a324c6"
 
 [[extensions]]
 name = "Warehouse invoice"

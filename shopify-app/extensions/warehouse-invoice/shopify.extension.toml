@@ -1,4 +1,5 @@
 api_version = "2026-01"
+uid = "adcb6c4a-9b18-d832-6684-0604b8a59885b2d715b1"
 
 [[extensions]]
 name = "Warehouse invoice"
@@ -10,8 +11,3 @@ description = "Download the Warehouse Hub invoice from the order page."
 [[extensions.targeting]]
 module = "./src/ActionExtension.jsx"
 target = "admin.order-details.action.render"
-
-# Order page card (add it once with "+ Block")
-[[extensions.targeting]]
-module = "./src/BlockExtension.jsx"
-target = "admin.order-details.block.render"
