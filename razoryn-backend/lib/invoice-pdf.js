@@ -21,11 +21,13 @@ function channelLabel(sale) {
   if (ch === 'direct_bank') return 'Bank transfer';
   if (ch === 'direct_card') return 'Card';
   if (ch.startsWith('ebay')) return 'eBay';
-  if (ch === 'shopify') return 'Shopify';
+  if (ch === 'shopify') return 'Online store';
   return ch.replace(/_/g, ' ');
 }
+// Customer-facing wording — never the platform name for website orders.
 function paymentLabel(pm) {
-  return pm === 'cash' ? 'Cash' : pm === 'bank' ? 'Bank transfer' : pm === 'card' ? 'Card' : (pm || '');
+  return pm === 'cash' ? 'Cash' : pm === 'bank' ? 'Bank transfer' : pm === 'card' ? 'Card'
+       : pm === 'shopify' ? 'Paid online' : pm === 'ebay' ? 'eBay' : (pm || '');
 }
 
 // Resolve a logo image source (Buffer) — prefer an uploaded logo, else the
