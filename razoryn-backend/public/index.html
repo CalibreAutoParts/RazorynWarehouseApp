@@ -1235,6 +1235,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
           Books &amp; VAT
         </button>
+        <button class="nav-item" data-page="printstation">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+          Print station <span id="nav-print-badge" style="display:none;margin-left:auto;background:var(--amber,orange);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;line-height:18px"></span>
+        </button>
         <button class="nav-item admin-only" data-page="disputes">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Disputes
@@ -3380,6 +3384,7 @@ function hasPerm(page) {
     pushes:       false,
     books:        false,
     disputes:     false,
+    printstation: true,
   };
   const v = map[page];
   if (v === true) return true;
@@ -3435,7 +3440,8 @@ function routeTo(page) {
     ai: renderAiPage,
     pushes: renderPushQueue,
     books: renderBooks,
-    disputes: renderDisputes
+    disputes: renderDisputes,
+    printstation: renderPrintStation
   };
   // The handheld's Home is the plain task workbench, not the money dashboard.
   if (State.appShell && page === 'dashboard') pages.dashboard = renderAppHome;
@@ -23440,6 +23446,134 @@ async function bkDeletePlatform(id) {
   if (!confirm('Delete this marketplace statement from Books? (Bank transactions keep any payout IDs already stamped.)')) return;
   try { await Api.delete('/api/books/platform-statements/' + id); bkLoadPlatform(); toast('Deleted', 'info'); }
   catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+
+// ── Print station — auto-printed 6x4 packing slips ─────────────────────────
+// Leave this page open on the warehouse PC with the label printer. It polls
+// the server queue; the SERVER decides when jobs release (channel toggles,
+// batch interval, quiet hours), so orders made anywhere — a phone-order
+// invoice typed at home included — print here. A PC that slept prints
+// everything pending the moment this tab resumes.
+const PS = { timer: null, cfg: null, printing: false, active: true };
+function renderPrintStation() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>🖨 Print station</h1><div class="desc">Auto-prints a 6x4 packing label per item for every new order — buyer, channel, part, pieces and its location, numbered 1/2, 2/2… Orders queue on the server, so anything created while this computer was off prints as soon as this page is open again.</div></div>
+        <div class="actions"><a class="btn btn-outline" href="/api/printing/labels/test" target="_blank">🧪 Test label</a></div>
+      </div>
+      <div class="card" style="margin-bottom:14px"><div class="card-body" id="ps-status">Loading…</div></div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>⚙ Printing rules</h3><div class="card-desc">Which channels print, how often, and when to stay quiet. The server enforces these — the queue simply waits outside the window.</div></div>
+        <div class="card-body" id="ps-settings">Loading…</div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>🛠 One-time printer setup</h3></div>
+        <div class="card-body" style="font-size:13px;line-height:1.7">
+          <ol style="margin:0;padding-left:20px">
+            <li><strong>Pair the label printer</strong> with this computer — Bluetooth (Windows Settings → Bluetooth &amp; devices → Add device) or USB. Either way it becomes a normal Windows printer.</li>
+            <li><strong>Make it the default printer</strong> (Settings → Printers &amp; scanners), and set its paper size to 4x6 / 100x150mm.</li>
+            <li><strong>Silent printing:</strong> make a Chrome shortcut with the flag <code style="background:var(--line-2);padding:1px 5px;border-radius:4px">--kiosk-printing</code> (right-click shortcut → Properties → add it after chrome.exe in Target). Opened that way, labels print with no dialogs. Without the flag everything still works — a print window pops up per batch and you press Enter.</li>
+            <li><strong>Keep this PC awake</strong> (Settings → Power → never sleep when plugged in). This page also holds a screen wake-lock while open. If it does sleep or shut down, nothing is lost — the queue prints when it's back.</li>
+          </ol>
+        </div>
+      </div>
+    </div>`;
+  psLoad();
+  if (PS.timer) clearInterval(PS.timer);
+  PS.timer = setInterval(() => { if (State.page === 'printstation') psPoll(); else { clearInterval(PS.timer); PS.timer = null; } }, 45000);
+  psPoll();
+  // Screen wake-lock — best effort, keeps the station tab from idling.
+  try { navigator.wakeLock?.request('screen').catch(() => {}); } catch (_) {}
+}
+async function psLoad() {
+  try {
+    const c = await Api.get('/api/printing/settings');
+    PS.cfg = c;
+    psPaintStatus(c); psPaintSettings(c);
+  } catch (e) { const b = el('ps-status'); if (b) b.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
+}
+function psPaintStatus(c) {
+  const box = el('ps-status'); if (!box) return;
+  const hh = (h) => h == null ? '—' : String(h).padStart(2, '0') + ':00';
+  box.innerHTML = `
+    <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center">
+      <div style="font-size:15px;font-weight:800;color:${c.enabled ? 'var(--green)' : 'var(--red)'}">${c.enabled ? '● Auto-print ON' : '○ Auto-print OFF'}</div>
+      <div><strong>${c.pending}</strong> <span style="color:var(--ink-soft)">waiting to print</span></div>
+      ${c.quietNow ? '<span class="pill amber">🌙 quiet hours — holding</span>' : ''}
+      <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;margin-left:auto"><input type="checkbox" ${PS.active ? 'checked' : ''} onchange="PS.active=this.checked;toast(this.checked ? 'This tab will print' : 'This tab paused — jobs keep queueing', 'info')"> This computer prints</label>
+    </div>
+    ${(c.recent || []).length ? `<div style="margin-top:10px;font-size:12px;color:var(--ink-soft)">Recent: ` + c.recent.slice(0, 6).map(r => `${escapeHtml(r.invoice_number || ('#' + r.id))} ${escapeHtml(r.customer_name || '')} <a href="#" onclick="event.preventDefault();psReprint(${r.id})" title="Print again">↻</a>`).join(' · ') + '</div>' : ''}`;
+}
+function psPaintSettings(c) {
+  const box = el('ps-settings'); if (!box) return;
+  if (!c.isAdmin) { box.innerHTML = '<span style="font-size:12.5px;color:var(--ink-soft)">Rules are set by an admin. Current: ' + (c.enabled ? 'ON' : 'OFF') + (c.everyMins ? ', batch every ' + (c.everyMins / 60) + 'h' : ', print immediately') + (c.quietFrom != null ? `, quiet ${c.quietFrom}:00–${c.quietTo}:00` : '') + '.</span>'; return; }
+  const hourOpts = (sel) => '<option value="">off</option>' + Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${sel === h ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
+  box.innerHTML = `
+    <label style="display:flex;align-items:center;gap:8px;font-weight:700;margin-bottom:10px"><input type="checkbox" id="ps-enabled" ${c.enabled ? 'checked' : ''}> Auto-print packing labels for new orders</label>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px">
+      ${['ebay', 'shopify', 'bank', 'cash', 'card'].map(k => `<label style="display:flex;align-items:center;gap:5px;font-size:13px"><input type="checkbox" id="ps-ch-${k}" ${c.channels[k] ? 'checked' : ''}> ${{ ebay: 'eBay', shopify: 'Shopify', bank: 'Bank transfer', cash: 'Cash', card: 'Card' }[k]}</label>`).join('')}
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end">
+      <div class="field" style="margin:0"><label>Print batch</label><select id="ps-every">
+        <option value="0" ${!c.everyMins ? 'selected' : ''}>Immediately</option>
+        <option value="60" ${c.everyMins === 60 ? 'selected' : ''}>Every hour</option>
+        <option value="120" ${c.everyMins === 120 ? 'selected' : ''}>Every 2 hours</option>
+        <option value="240" ${c.everyMins === 240 ? 'selected' : ''}>Every 4 hours</option>
+        <option value="360" ${c.everyMins === 360 ? 'selected' : ''}>Every 6 hours</option></select></div>
+      <div class="field" style="margin:0"><label>Quiet from</label><select id="ps-qfrom">${hourOpts(c.quietFrom)}</select></div>
+      <div class="field" style="margin:0"><label>until</label><select id="ps-qto">${hourOpts(c.quietTo)}</select></div>
+      <button class="btn btn-primary btn-sm" onclick="psSave(this)">Save rules</button>
+    </div>
+    <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Quiet hours hold the queue (e.g. 22:00 until 07:00) — everything prints in one batch when the window opens. Only orders created AFTER auto-print was first switched on ever print, so history can't flood out.</div>`;
+}
+async function psSave(btn) {
+  btn.disabled = true;
+  try {
+    await Api.post('/api/printing/settings', {
+      enabled: el('ps-enabled').checked,
+      channels: Object.fromEntries(['ebay', 'shopify', 'bank', 'cash', 'card'].map(k => [k, el('ps-ch-' + k).checked])),
+      everyMins: el('ps-every').value,
+      quietFrom: el('ps-qfrom').value === '' ? null : el('ps-qfrom').value,
+      quietTo: el('ps-qto').value === '' ? null : el('ps-qto').value,
+    });
+    toast('✓ Printing rules saved', 'success'); psLoad();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  btn.disabled = false;
+}
+async function psPoll() {
+  if (PS.printing || !PS.active) { psLoad(); return; }
+  let q;
+  try { q = await Api.get('/api/printing/queue'); } catch (_) { return; }
+  const badge = el('nav-print-badge');
+  if (badge) { badge.style.display = q.pending ? '' : 'none'; badge.textContent = q.pending || ''; }
+  if (!q.allowed || !q.jobs.length) { if (State.page === 'printstation') psLoad(); return; }
+  PS.printing = true;
+  try {
+    const ids = q.jobs.map(j => j.jobId);
+    await psPrintLabels(ids);
+    for (const id of ids) { try { await Api.post('/api/printing/jobs/' + id + '/printed', {}); } catch (_) {} }
+    toast(`🖨 Printed packing labels for ${q.jobs.length} order${q.jobs.length === 1 ? '' : 's'}`, 'success', 6000);
+  } catch (e) { toast('Print failed: ' + e.message, 'error'); }
+  PS.printing = false;
+  psLoad();
+}
+function psPrintLabels(jobIds) {
+  return new Promise((resolve) => {
+    const f = document.createElement('iframe');
+    f.style.cssText = 'position:fixed;width:0;height:0;border:0;visibility:hidden';
+    f.src = '/api/printing/labels?jobs=' + jobIds.join(',');
+    f.onload = () => {
+      try { f.contentWindow.focus(); f.contentWindow.print(); } catch (_) {}
+      // Give the dialog/spooler a moment before tearing the frame down.
+      setTimeout(() => { try { f.remove(); } catch (_) {} resolve(); }, 4000);
+    };
+    document.body.appendChild(f);
+  });
+}
+async function psReprint(jobId) {
+  try { await Api.post('/api/printing/jobs/' + jobId + '/requeue', {}); toast('Queued to print again', 'info'); psPoll(); }
+  catch (e) { toast('Failed', 'error'); }
 }
 
 // ── Disputes & Chargebacks — every fight in one place ──────────────────────
