@@ -345,8 +345,8 @@ async function pullShopify(opts = {}) {
       const sale = await c.query(
         `INSERT INTO sales (channel, external_order_id, customer_name, customer_email, customer_phone,
                             subtotal, vat, shipping, total, status, occurred_at, shipping_address,
-                            payment_method, payment_reference, order_number, invoice_number)
-         VALUES ('shopify',$1,$2,$3,$4,$5,$6,$7,$8,'paid',$9,$10,$11,$12,$13,$14) RETURNING id`,
+                            payment_method, payment_reference, order_number, invoice_number, discount_label)
+         VALUES ('shopify',$1,$2,$3,$4,$5,$6,$7,$8,'paid',$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
         [
           String(order.id),
           [order.customer?.first_name, order.customer?.last_name].filter(Boolean).join(' ') || ship?.first_name + ' ' + ship?.last_name || null,
@@ -356,6 +356,7 @@ async function pullShopify(opts = {}) {
           order.created_at,
           shipAddr,
           'shopify', paymentRef, order.name || String(order.order_number || order.id), paymentRef,
+          shopify.orderDiscountLabel(order),
         ]
       );
 
@@ -427,7 +428,35 @@ async function pullShopify(opts = {}) {
   let invoiceLinks = null;
   try { invoiceLinks = await pushInvoiceLinksToShopify(); }
   catch (e) { console.warn('[sync] invoice links:', e.message); invoiceLinks = { error: e.message }; }
+  // Older imports didn't store discount names — fill them in a batch at a time.
+  try { await backfillDiscountLabels(); } catch (e) { console.warn('[sync] discount labels:', e.message); }
   return { channel: 'shopify', since, orders: orders.length, inserted, invoiceLinks };
+}
+
+// --------- Discount names for invoices (orders imported before they were stored) ---------
+// Only orders whose parts add up to more than the subtotal had a discount; the rest
+// are marked '' without asking Shopify.
+async function backfillDiscountLabels({ limit = 40 } = {}) {
+  if (!shopify.isConfigured()) return { skipped: 'not_configured' };
+  await query(`UPDATE sales s SET discount_label = ''
+                WHERE s.channel = 'shopify' AND s.discount_label IS NULL
+                  AND s.subtotal >= (SELECT COALESCE(SUM(line_total), 0) FROM sale_items WHERE sale_id = s.id) - 0.005`);
+  const { rows } = await query(
+    `SELECT id, external_order_id FROM sales
+      WHERE channel = 'shopify' AND discount_label IS NULL AND external_order_id IS NOT NULL
+      ORDER BY occurred_at DESC LIMIT $1`, [limit]);
+  let filled = 0;
+  for (const s of rows) {
+    try {
+      const label = await shopify.getOrderDiscountLabel(s.external_order_id);
+      await query(`UPDATE sales SET discount_label = $2 WHERE id = $1`, [s.id, label || '']);
+      filled++;
+    } catch (e) {
+      if (e.response?.status === 404) await query(`UPDATE sales SET discount_label = '' WHERE id = $1`, [s.id]);
+      else throw e;
+    }
+  }
+  return { pending: rows.length, filled };
 }
 
 // --------- PUSH: customer invoice links → Shopify orders ---------
@@ -956,6 +985,7 @@ module.exports = {
   runFullSync,
   pullShopify,
   pushInvoiceLinksToShopify,
+  backfillDiscountLabels,
   pullEbay,
   backfillEbayOrders,
   isNativeShopifyOrder,
