@@ -268,6 +268,7 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
       if (!reviews.length && gg) reviews.push({ label: 'Google', url: gg });
 
       const blockNeed = totalsRows * 16 + 34 + (isBank ? 80 : 20)
+        + ((parseFloat(sale.amount_paid) || 0) > 0 ? 62 : 0)   // paid-to-date + balance bar
         + (socials.length ? 28 : 0) + (reviews.length ? 46 : 0) + 110;
       if (y + blockNeed > pageBottom) { doc.addPage(); y = 40; }
 
@@ -294,6 +295,19 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
       doc.text(mode === 'estimate' ? 'ESTIMATE TOTAL' : (showVat ? 'TOTAL (incl. VAT)' : 'TOTAL'), barX + 12, y + 7);
       doc.text(money(total), barX + barW - 110, y + 7, { width: 98, align: 'right' });
       y += barH + 18;
+      // Part-paid invoice: say what's been received and what's still owed —
+      // this is the "statement" the customer gets sent mid-payment.
+      const paidToDate = Math.min(parseFloat(sale.amount_paid) || 0, total);
+      if (mode !== 'estimate' && paidToDate > 0.005 && paidToDate < total - 0.005) {
+        y -= 8;
+        totalRow('Paid to date', '-' + money(paidToDate));
+        y += 2;
+        doc.rect(barX, y, barW, barH).fillColor('#b00020').fill();
+        doc.fillColor('#fff').font('Helvetica-Bold').fontSize(12);
+        doc.text('BALANCE DUE', barX + 12, y + 7);
+        doc.text(money(total - paidToDate), barX + barW - 110, y + 7, { width: 98, align: 'right' });
+        y += barH + 18;
+      }
 
       // Bank details box (bank-transfer invoices)
       if (isBank) {

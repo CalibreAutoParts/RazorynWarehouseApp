@@ -1787,6 +1787,15 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
         ${sale.is_export ? `<div class="row"><span>VAT (0% — zero-rated export)</span><span>${fmt(0)}</span></div>` : ''}
       `}
       <div class="grand"><span>TOTAL${showVatBreakdown ? ' (incl. VAT)' : ''}</span><span>${fmt(sale.total)}</span></div>
+      ${(() => {
+        // Part-paid: show what's been received and the balance still owed —
+        // so a part-pay invoice can be issued/re-sent as a running statement.
+        const paidToDate = Math.min(parseFloat(sale.amount_paid) || 0, parseFloat(sale.total) || 0);
+        const tot = parseFloat(sale.total) || 0;
+        if (!(paidToDate > 0.005) || paidToDate >= tot - 0.005 || mode === 'estimate') return '';
+        return `<div class="row" style="margin-top:6px"><span style="color:#888">Paid to date</span><span>−${fmt(paidToDate)}</span></div>
+        <div class="grand" style="background:#b00020;color:#fff"><span>BALANCE DUE</span><span>${fmt(tot - paidToDate)}</span></div>`;
+      })()}
     </div>
   </div>
 
