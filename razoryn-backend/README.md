@@ -200,8 +200,9 @@ Once the custom domain works, update `CORS_ORIGIN` in Railway variables to
 2. **Configuration → Admin API access scopes**, enable:
    - `read_products`, `write_products`
    - `read_inventory`, `write_inventory`
-   - `read_orders`
+   - `read_orders`, `write_orders` (customer invoice links on each order)
    - `read_locations`
+   - `read_customers`, `write_discounts` (Watched listings offer codes)
 
 3. **Install the app** → reveal the Admin API access token (shown once).
    Set it as `SHOPIFY_ADMIN_TOKEN` in Railway.
@@ -359,6 +360,24 @@ railway run node scripts/backfill-invoice-hub.js --month 2026-08
 ```
 
 ---
+
+## Watched listings (discount codes for parts customers keep viewing)
+
+The storefront theme sends a product-view beacon to `POST /api/watched/view` for
+logged-in customers who accept marketing emails and allow marketing cookies.
+It records whether they arrived by searching the part number or opening the link
+directly. Each request is signed in Liquid with HMAC-SHA256(`id|email`), keyed with
+the shop metafield `razoryn.watch_key`. The Hub reads the same metafield, or the
+`VIEW_TRACK_SECRET` env var if that's set.
+
+**Watched listings** (admin) lists the hot parts. **Send offer** creates a single-use
+Shopify code locked to that customer and product, then emails it (Resend) with a
+link that applies it. Offers also show on the product page and on My account
+(`GET /api/watched/mine`). With **Auto-send** on, an hourly sweep (`WATCHED_CRON`,
+default `25 * * * *`) offers each customer their hottest unbought part, at most one
+a week. It only emails customers who are subscribed to marketing, skips trade
+accounts unless you include them, and every email carries an unsubscribe link.
+Needs the `read_customers` + `write_discounts` scopes.
 
 ## API surface (cheat sheet)
 

@@ -118,6 +118,73 @@ async function setOrderInvoiceMetafields(orderId, { url, number }) {
   return errs.length ? { ok: false, error: errs.map(e => e.message).join('; ') } : { ok: true };
 }
 
+// ---------- Watched-listing offers ----------
+// GraphQL helper for the offer flow: returns `data`, or throws a readable error
+// (Shopify's access-denied message names the missing scope).
+async function gqlOrThrow(query, variables) {
+  const r = await shopifyRequest('post', '/graphql.json', { data: { query, variables } });
+  if (r.data.errors) {
+    const msg = Array.isArray(r.data.errors) ? r.data.errors.map(e => e.message).join('; ') : JSON.stringify(r.data.errors);
+    throw new Error(msg.slice(0, 300));
+  }
+  return r.data.data;
+}
+
+// Email + marketing consent for a storefront customer. Needs read_customers.
+async function getCustomerForOffer(customerId) {
+  const d = await gqlOrThrow(`query($id: ID!) { customer(id: $id) { id firstName email tags
+    emailMarketingConsent { marketingState } } }`, { id: `gid://shopify/Customer/${customerId}` });
+  const c = d.customer;
+  if (!c) return null;
+  return {
+    id: String(customerId), firstName: c.firstName || '', email: c.email || null, tags: c.tags || [],
+    subscribed: c.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
+  };
+}
+
+async function getProductForOffer(productId) {
+  const d = await gqlOrThrow(`query($id: ID!) { product(id: $id) { title handle status featuredImage { url } } }`,
+    { id: `gid://shopify/Product/${productId}` });
+  const p = d.product;
+  return p ? { title: p.title, handle: p.handle, status: p.status, image: p.featuredImage?.url || null } : null;
+}
+
+// A single-use code locked to one customer and one product. Doesn't stack with
+// other product/order discounts (e.g. the trade tiers) — free-delivery offers
+// still apply. Needs write_discounts.
+async function createWatchedOfferCode({ customerId, productId, code, percent, endsAt, title }) {
+  const d = await gqlOrThrow(`mutation($d: DiscountCodeBasicInput!) {
+    discountCodeBasicCreate(basicCodeDiscount: $d) { codeDiscountNode { id } userErrors { field message } } }`, { d: {
+    title, code, startsAt: new Date().toISOString(), endsAt,
+    customerSelection: { customers: { add: [`gid://shopify/Customer/${customerId}`] } },
+    customerGets: {
+      value: { percentage: Number(percent) / 100 },
+      items: { products: { productsToAdd: [`gid://shopify/Product/${productId}`] } },
+    },
+    usageLimit: 1,
+    appliesOncePerCustomer: true,
+    combinesWith: { productDiscounts: false, orderDiscounts: false, shippingDiscounts: true },
+  } });
+  const out = d.discountCodeBasicCreate;
+  if (out.userErrors && out.userErrors.length) throw new Error(out.userErrors.map(e => e.message).join('; '));
+  return out.codeDiscountNode.id;
+}
+
+async function deleteDiscountCode(discountGid) {
+  const d = await gqlOrThrow(`mutation($id: ID!) { discountCodeDelete(id: $id) { deletedCodeDiscountId userErrors { field message } } }`,
+    { id: discountGid });
+  const errs = d.discountCodeDelete.userErrors || [];
+  if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
+  return true;
+}
+
+// Shop metafields are readable without any extra scope.
+async function getShopMetafieldValue(namespace, key) {
+  const d = await gqlOrThrow(`query($ns: String!, $key: String!) { shop { metafield(namespace: $ns, key: $key) { value } } }`,
+    { ns: namespace, key });
+  return d.shop?.metafield?.value || null;
+}
+
 // ---------- Public API ----------
 async function getLocations() {
   if (!isConfigured()) return [];
@@ -1348,6 +1415,11 @@ async function setProductRating(productId, rating, count) {
 module.exports = {
   isConfigured,
   setOrderInvoiceMetafields,
+  getCustomerForOffer,
+  getProductForOffer,
+  createWatchedOfferCode,
+  deleteDiscountCode,
+  getShopMetafieldValue,
   setProductRating,
   getAccessToken,
   getProductSeo,

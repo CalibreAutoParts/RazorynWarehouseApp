@@ -115,6 +115,9 @@ app.use('/api/reviews',      require('./routes/reviews'));
 // + back-in-stock signups. Their routers set their own CORS headers per request.
 app.use('/api/track',        require('./routes/track'));
 app.use('/api/notify',       require('./routes/notify'));
+// Watched listings: signed product-view beacon + the customer's live offers (theme),
+// staff list / offer codes behind auth. See routes/watched.js.
+app.use('/api/watched',      require('./routes/watched'));
 // PUBLIC customer invoice download — /invoice/<saleId>/<hmac>.pdf. The signature
 // is the credential (lib/invoice-links.js); linked from the customer's Shopify order.
 app.use('/invoice',          require('./routes/public-invoices'));
@@ -641,6 +644,17 @@ if (cron.validate(bisCronExpr)) {
     } catch (e) { console.error('[cron back-in-stock] failed:', e.message); }
   });
   console.log(`[boot] back-in-stock sweep scheduled: ${bisCronExpr}`);
+}
+
+// Watched listings — prune old views; when auto-send is on (Watched listings page),
+// email a one-off discount code for each customer's most-viewed part. Hourly.
+const watchedCronExpr = (process.env.WATCHED_CRON || '25 * * * *').trim();
+if (cron.validate(watchedCronExpr)) {
+  cron.schedule(watchedCronExpr, async () => {
+    try { await require('./routes/watched').runWatchedSweep(); }
+    catch (e) { console.error('[cron watched] failed:', e.message); }
+  });
+  console.log(`[boot] watched-listing offers sweep scheduled: ${watchedCronExpr}`);
 }
 
 // eBay feedback → Shopify review metafields. Nightly by default (REVIEWS_SYNC_CRON).
