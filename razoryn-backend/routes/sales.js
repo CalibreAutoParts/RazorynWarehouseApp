@@ -1275,19 +1275,19 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
 
   const paymentLabel = (() => {
     const pm = sale.payment_method;
-    if (pm === 'shopify') return 'Shopify Payment';
+    if (pm === 'shopify') return 'Paid online';
     if (pm === 'ebay')    return 'eBay Payment';
     if (pm === 'cash')    return 'Cash';
     if (pm === 'bank')    return 'Bank Transfer';
     if (pm === 'card')    return 'Card (Stripe)';
-    if (isShopify) return 'Shopify Payment';
+    if (isShopify) return 'Paid online';
     if (isEbay) return 'eBay Payment';
     if (sale.channel === 'direct_cash') return 'Cash';
     if (sale.channel === 'direct_bank') return 'Bank Transfer';
     return '\u2014';
   })();
   const channelLabel = (() => {
-    if (isShopify) return 'Store';
+    if (isShopify) return 'Online store';
     if (isEbay) return 'eBay';
     if (sale.channel === 'direct_cash') return 'Cash sale';
     if (sale.channel === 'direct_bank') return 'Bank transfer';
