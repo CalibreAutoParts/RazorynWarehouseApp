@@ -227,6 +227,20 @@ async function getRecentOrders(updatedAtMin) {
   return { orders: r.data.orders || [] };
 }
 
+// Human-readable names of the discounts on a REST order: the code for discount
+// codes, the title for automatic/manual ones (e.g. "Trade Discount Plus — 7% off").
+function orderDiscountLabel(order) {
+  const names = (order?.discount_applications || [])
+    .map(a => String(a.code || a.title || a.description || '').trim())
+    .filter(Boolean);
+  return [...new Set(names)].join(', ').slice(0, 200);
+}
+
+async function getOrderDiscountLabel(orderId) {
+  const r = await shopifyRequest('get', `/orders/${orderId}.json`, { params: { fields: 'id,discount_applications' } });
+  return orderDiscountLabel(r.data?.order);
+}
+
 // Cumulative amount refunded on a Shopify order. The REST order carries a
 // `refunds[]` array (each with `transactions[]` money movements); we sum the
 // successful 'refund' transactions. `financial_status` is the safety net: a
@@ -1436,6 +1450,8 @@ module.exports = {
   getLocations,
   setInventoryLevel,
   getRecentOrders,
+  orderDiscountLabel,
+  getOrderDiscountLabel,
   orderRefundInfo,
   pushStockForProduct,
   iterateAllProductsAndVariants,

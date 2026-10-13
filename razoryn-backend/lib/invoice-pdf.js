@@ -260,7 +260,7 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
       const vat = parseFloat(sale.vat || 0);
       const total = parseFloat(sale.total || 0);
       const isBank = sale.payment_method === 'bank' && company.bank_account_name;
-      const totalsRows = (showVat ? (shippingGross > 0 ? 3 : 2) : (shippingGross > 0 ? 2 : 1)) + (disc ? 2 : 0);
+      const totalsRows = (showVat ? (shippingGross > 0 ? 3 : 2) : (shippingGross > 0 ? 2 : 1)) + (disc ? (disc.label ? 3 : 2) : 0);
 
       // Social handles + review CTA — same rules as the on-screen invoice.
       const handle = (h) => String(h || '').replace(/^@/, '');
@@ -291,6 +291,11 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
       if (disc) {
         totalRow(showVat ? 'Items (net)' : 'Items', money(disc.items));
         totalRow(showVat ? 'Discount (net)' : 'Discount', '-' + money(disc.discount));
+        if (disc.label) {
+          // Which discount it was (code or offer name), small and grey under the line.
+          doc.font('Helvetica').fontSize(7.5).fillColor('#999').text(disc.label, tLabelX - 130, y - 3, { width: 250, align: 'right' });
+          y += 9;
+        }
       }
       if (showVat) {
         totalRow('Subtotal (net)', money(net(subtotalGross)));

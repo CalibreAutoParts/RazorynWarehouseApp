@@ -14,7 +14,8 @@ function orderDiscount({ sale, items, netFactor = 1 }) {
   const itemsShown = r2((items || []).reduce((s, i) => s + r2(Number(i.line_total) * netFactor), 0));
   const subtotalShown = r2(Number(sale.subtotal || 0) * netFactor);
   const discount = r2(itemsShown - subtotalShown);
-  return discount >= 0.01 ? { items: itemsShown, discount, subtotal: subtotalShown } : null;
+  if (discount < 0.01) return null;
+  return { items: itemsShown, discount, subtotal: subtotalShown, label: String(sale.discount_label || '').trim() };
 }
 
 module.exports = { orderDiscount };

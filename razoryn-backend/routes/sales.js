@@ -1787,7 +1787,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     <div class="totals">
       ${disc ? `
         <div class="row"><span>Items${showVatBreakdown ? ' (Net)' : ''}</span><span>${fmt(disc.items)}</span></div>
-        <div class="row"><span>Discount${showVatBreakdown ? ' (Net)' : ''}</span><span>-${fmt(disc.discount)}</span></div>
+        <div class="row"><span>Discount${showVatBreakdown ? ' (Net)' : ''}${disc.label ? `<br><small style="color:#888;font-size:10px">${escapeHtml(disc.label)}</small>` : ''}</span><span>-${fmt(disc.discount)}</span></div>
       ` : ''}
       ${showVatBreakdown ? `
         <div class="row"><span>Subtotal (Net)</span><span>${fmt(subtotalNet)}</span></div>
