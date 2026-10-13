@@ -115,6 +115,9 @@ app.use('/api/reviews',      require('./routes/reviews'));
 // + back-in-stock signups. Their routers set their own CORS headers per request.
 app.use('/api/track',        require('./routes/track'));
 app.use('/api/notify',       require('./routes/notify'));
+// PUBLIC customer invoice download — /invoice/<saleId>/<hmac>.pdf. The signature
+// is the credential (lib/invoice-links.js); linked from the customer's Shopify order.
+app.use('/invoice',          require('./routes/public-invoices'));
 // Public logo serving — mounted at /public-logo (NOT /api/settings) so it
 // completely bypasses the auth middleware that the settings router applies
 // to its whole namespace. Used by <img src="/public-logo"> in invoice HTML

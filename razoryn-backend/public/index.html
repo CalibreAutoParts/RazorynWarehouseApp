@@ -9725,10 +9725,22 @@ async function openSaleDetail(id) {
       ...(isUnpaidSale ? [{ label: '💷 Record payment', onClick: () => { closeModal(); recordPartialPayment(id, Math.max(0, orderTotalNum - paidSoFar)); } }] : []),
       ...(!s.is_estimate ? [{ label: '↩ Log return', onClick: () => openReturnFromSale(id) }] : []),
       ...(!s.is_estimate && hasRefund ? [{ label: '↩ Undo returns / reopen', onClick: () => undoReturnsForSale(id) }] : []),
+      ...(data.customerInvoiceUrl ? [{ label: '🔗 Copy customer link', onClick: () => copyCustomerInvoiceLink(data.customerInvoiceUrl) }] : []),
       { label: '✉ Email', onClick: () => { closeModal(); emailSingleInvoice(id); } },
       { label: '🖨 Print / PDF', primary: true, onClick: () => { closeModal(); printSingleInvoice(id); } },
     ],
   });
+}
+
+// Copy the customer's no-login invoice PDF link (e.g. to paste into WhatsApp/eBay
+// messages). The same link is shown on their Shopify order + storefront account.
+async function copyCustomerInvoiceLink(url) {
+  try {
+    await navigator.clipboard.writeText(url);
+    toast('Customer invoice link copied ✓', 'success');
+  } catch (_) {
+    window.prompt('Copy the customer invoice link:', url);
+  }
 }
 
 // Remove ALL returns booked against a sale, reverse the restock, and reopen the

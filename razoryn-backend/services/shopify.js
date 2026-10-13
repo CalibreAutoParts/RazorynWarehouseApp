@@ -97,6 +97,27 @@ async function shopifyRequest(method, path, opts = {}) {
   }
 }
 
+// ---------- Order invoice link ----------
+// Write the customer invoice download link (+ invoice number) onto a Shopify
+// order as metafields razoryn.invoice_url / razoryn.invoice_number. The
+// storefront account page and order admin read these. Needs the write_orders
+// scope on the Admin API token.
+async function setOrderInvoiceMetafields(orderId, { url, number }) {
+  if (!isConfigured() || !orderId || !url) return { ok: false, skipped: 'not_configured' };
+  const ownerId = `gid://shopify/Order/${orderId}`;
+  const metafields = [{ ownerId, namespace: 'razoryn', key: 'invoice_url', type: 'url', value: url }];
+  if (number) metafields.push({ ownerId, namespace: 'razoryn', key: 'invoice_number', type: 'single_line_text_field', value: String(number) });
+  const r = await shopifyRequest('post', '/graphql.json', {
+    data: {
+      query: `mutation($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { userErrors { field message } } }`,
+      variables: { m: metafields },
+    },
+  });
+  if (r.data.errors) return { ok: false, error: JSON.stringify(r.data.errors).slice(0, 300) };
+  const errs = r.data.data?.metafieldsSet?.userErrors || [];
+  return errs.length ? { ok: false, error: errs.map(e => e.message).join('; ') } : { ok: true };
+}
+
 // ---------- Public API ----------
 async function getLocations() {
   if (!isConfigured()) return [];
@@ -1326,6 +1347,7 @@ async function setProductRating(productId, rating, count) {
 
 module.exports = {
   isConfigured,
+  setOrderInvoiceMetafields,
   setProductRating,
   getAccessToken,
   getProductSeo,
