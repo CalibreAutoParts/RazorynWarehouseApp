@@ -461,6 +461,9 @@ async function pushInvoiceLinksToShopify({ limit = 40 } = {}) {
       if (/access|scope|denied|403/i.test(String(out.error))) break;
     }
   }
+  if (lastError && /access|denied|scope|403/i.test(String(lastError))) {
+    lastError = 'the Razoryn Warehouse Shopify app needs the write_orders scope (Shopify admin → Apps → Razoryn Warehouse → API access).';
+  }
   if (lastError) console.warn('[sync] invoice links: last error:', lastError);
   return { pending: rows.length, pushed, failed, lastError };
 }

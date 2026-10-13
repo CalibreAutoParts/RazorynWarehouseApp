@@ -1153,6 +1153,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           Customers
         </button>
+        <button class="nav-item admin-only" data-page="watched">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          Watched listings
+        </button>
         <button class="nav-item" data-page="dispatch">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16h6"/><path d="M19 13v6"/><path d="M14 8h6"/><path d="M3 7l9-4 9 4M3 7v10l9 4 9-4V7M3 7l9 4 9-4M12 11v10"/></svg>
           Dispatch
@@ -3422,7 +3426,7 @@ function routeTo(page) {
     dashboard: renderDashboard, inventory: renderInventory, scan: renderScan,
     incoming: renderIncoming, clock: renderClock,
     stocktake: renderStockTake,
-    locations: renderLocations, returns: renderReturns, sales: renderSales, customers: renderCustomers,
+    locations: renderLocations, returns: renderReturns, sales: renderSales, customers: renderCustomers, watched: renderWatched,
     pricing: renderQuoteBuilder, schedule: renderSchedule, videos: renderVideos,
     kb: renderKB, notifications: renderNotifications, staff: renderStaff, settings: renderSettings, mirror: renderMirror, bulk: renderBulkEditor,
     activity: renderActivity, pricingrules: renderPricingRules,
@@ -8866,6 +8870,145 @@ async function toggleCustomerOrders(row, key) {
         </tr>`).join('')}</tbody>
       </table>
     </div>`;
+}
+
+// ---------- Watched listings (routes/watched.js) ----------
+// Parts logged-in storefront customers keep coming back to, with one-click
+// customer-locked discount codes (emailed, and shown on their account + product page).
+function renderWatched() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Watched listings</h1><div class="desc">Parts logged-in customers keep coming back to — including ones they found by searching the part number or opening the link directly. Send a single-use code, locked to that customer and part, to nudge the sale. Only customers who accept marketing emails (and allow marketing cookies) are tracked.</div></div>
+        <div class="actions"><button class="btn btn-outline" onclick="loadWatched()">↻ Refresh</button></div>
+      </div>
+      <div id="watched-status"></div>
+      <div class="grid-4" style="margin-bottom:16px" id="watched-stats"></div>
+      <div class="card" style="margin-bottom:16px"><div class="card-body" id="watched-settings" style="padding:14px 16px">Loading…</div></div>
+      <div class="toolbar" style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none">
+          <input type="checkbox" id="watched-all" ${State.watchedAll?'checked':''}> Show single views too
+        </label>
+      </div>
+      <div class="card"><div class="table-wrap"><table class="table">
+        <thead><tr><th>Customer</th><th>Part</th><th class="num">Visits</th><th>Last seen</th><th>Status</th><th></th></tr></thead>
+        <tbody id="watched-tbody"><tr><td colspan="6" style="text-align:center;padding:24px;color:var(--ink-soft)">Loading…</td></tr></tbody>
+      </table></div></div>
+    </div>`;
+  el('watched-all')?.addEventListener('change', (e) => { State.watchedAll = e.target.checked; loadWatched(); });
+  loadWatched();
+}
+
+function watchedAgo(x) {
+  if (!x) return '';
+  const m = Math.round((Date.now() - new Date(x).getTime()) / 60000);
+  if (m < 60) return `${Math.max(m, 1)} min ago`;
+  if (m < 48 * 60) return `${Math.round(m / 60)} h ago`;
+  return `${Math.round(m / 1440)} days ago`;
+}
+
+async function loadWatched() {
+  const tbody = el('watched-tbody');
+  if (!tbody) return;
+  let data;
+  try { data = await Api.get('/api/watched' + (State.watchedAll ? '?all=1' : '')); }
+  catch (e) { tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--red)">Couldn't load: ${escapeHtml(e.message||'')}</td></tr>`; return; }
+  State.watchedSettings = data.settings;
+  const st = data.status || {};
+  const warn = [];
+  if (!st.keyReady) warn.push('The storefront tracking key isn\'t set up yet (shop metafield <code>razoryn.watch_key</code> or the <code>VIEW_TRACK_SECRET</code> env var), so no views are being recorded.');
+  if (!st.emailReady) warn.push('Email isn\'t configured (<code>RESEND_API_KEY</code>), so offers can only be shown on-site.');
+  el('watched-status').innerHTML = warn.length ? `<div class="card" style="margin-bottom:16px;border-color:#f59e0b"><div class="card-body" style="padding:12px 16px;font-size:13px">⚠️ ${warn.join('<br>⚠️ ')}</div></div>` : '';
+  el('watched-stats').innerHTML = `
+    <div class="stat"><div class="label">Customers tracked</div><div class="value">${data.tracked?.customers ?? 0}</div><div class="delta">last 30 days</div></div>
+    <div class="stat"><div class="label">Watched parts</div><div class="value">${(data.rows || []).filter(r => r.hot).length}</div><div class="delta">hot right now</div></div>
+    <div class="stat"><div class="label">Live offers</div><div class="value">${data.offers?.live ?? 0}</div><div class="delta">codes not yet expired</div></div>
+    <div class="stat"><div class="label">Offers sent</div><div class="value">${data.offers?.sent ?? 0}</div><div class="delta">last 30 days</div></div>`;
+  const s = data.settings || {};
+  el('watched-settings').innerHTML = `
+    <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;font-size:13px">
+      <label style="display:inline-flex;align-items:center;gap:8px;font-weight:600;cursor:pointer"><input type="checkbox" id="ws-auto" ${s.auto_send?'checked':''}> Auto-send offers</label>
+      <label>Discount %<br><input type="number" id="ws-pct" min="1" max="30" step="0.5" value="${Number(s.percent||5)}" style="width:80px"></label>
+      <label>Valid for (hours)<br><input type="number" id="ws-hours" min="12" max="720" value="${s.valid_hours||72}" style="width:90px"></label>
+      <label>Hot after (visits)<br><input type="number" id="ws-visits" min="2" max="20" value="${s.min_visits||3}" style="width:80px"></label>
+      <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="ws-trade" ${s.include_trade?'checked':''}> Include trade accounts</label>
+      <button class="btn btn-primary" onclick="saveWatchedSettings(this)">Save</button>
+    </div>
+    <p style="margin:10px 0 0;font-size:12px;color:var(--ink-soft)">Auto-send runs hourly: each customer gets at most one offer a week, for their most-watched part they haven't bought (a part-number search or direct link counts double). Codes are single use, locked to that customer and part, and don't stack with trade or bundle discounts.</p>`;
+
+  const rows = data.rows || [];
+  if (!rows.length) { tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--ink-soft)">Nothing watched yet — repeat visits from logged-in customers show up here.</td></tr>`; return; }
+  const shop = 'https://' + ((State.brand && State.brand.domain) || 'razoryn.co.uk');
+  State.watchedRows = rows;
+  tbody.innerHTML = rows.map((r, i) => {
+    const liveOffer = r.offer_code && !r.offer_cancelled && new Date(r.offer_expires) > new Date();
+    let status;
+    if (r.purchased) status = '<span style="color:var(--green,#16a34a);font-weight:600">Bought</span>' + (r.offer_code ? ` <span style="font-size:11px;color:var(--ink-soft)">(offer ${escapeHtml(r.offer_code)})</span>` : '');
+    else if (liveOffer) status = `<strong style="font-family:ui-monospace,monospace">${escapeHtml(r.offer_code)}</strong> ${Number(r.offer_percent)}% · until ${custDateShort(r.offer_expires)}<br><span style="font-size:11px;color:${r.offer_email_error?'var(--red)':'var(--ink-soft)'}">${r.offer_emailed ? 'Emailed' : (r.offer_email_error ? 'Email failed: ' + escapeHtml(r.offer_email_error) : 'On-site only')}</span>`;
+    else if (r.hot) status = '<span style="background:var(--red,#c8202d);color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">HOT</span>';
+    else status = '<span style="font-size:12px;color:var(--ink-soft)">Watching</span>';
+    if (r.opted_out) status += '<br><span style="font-size:11px;color:var(--ink-soft)">Unsubscribed from offers</span>';
+    const action = r.purchased ? ''
+      : liveOffer ? `<button class="btn btn-outline btn-sm" onclick="cancelWatchedOffer(${Number(r.offer_id)}, this)">Cancel code</button>`
+      : `<button class="btn ${r.hot ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="openWatchedOffer(${i})">Send offer</button>`;
+    return `<tr>
+      <td><strong>${escapeHtml(r.first_name || '—')}</strong><br><span style="font-size:12px;color:var(--ink-soft)">${escapeHtml(r.email || '')}</span></td>
+      <td>${r.product_handle ? `<a href="${shop}/products/${encodeURIComponent(r.product_handle)}" target="_blank" rel="noopener">${escapeHtml(r.product_title || r.product_handle)}</a>` : escapeHtml(r.product_title || ('#' + r.product_id))}${r.qty_on_hand != null ? `<br><span style="font-size:11px;color:var(--ink-soft)">${r.qty_on_hand} in stock</span>` : ''}</td>
+      <td class="num"><strong>${r.visits}</strong>${r.direct_visits ? `<br><span style="font-size:11px;color:var(--ink-soft)" title="Arrived by searching the part number or opening the link directly">${r.direct_visits}× by part no. / link</span>` : ''}</td>
+      <td style="font-size:12px">${watchedAgo(r.last_seen)}</td>
+      <td style="font-size:12px">${status}</td>
+      <td>${action}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function saveWatchedSettings(btn) {
+  btn.disabled = true;
+  try {
+    await Api.put('/api/watched/settings', {
+      auto_send: el('ws-auto').checked, percent: el('ws-pct').value, valid_hours: el('ws-hours').value,
+      min_visits: el('ws-visits').value, include_trade: el('ws-trade').checked,
+    });
+    toast('Saved', 'success');
+    loadWatched();
+  } catch (e) { toast(e.message, 'error', 5000); }
+  finally { btn.disabled = false; }
+}
+
+function openWatchedOffer(i) {
+  const row = (State.watchedRows || [])[i];
+  if (!row) return;
+  const { customer_id: customerId, product_id: productId, email, product_title: title, opted_out: optedOut } = row;
+  const s = State.watchedSettings || {};
+  modal({
+    title: 'Send a watched-listing offer',
+    body: `<p style="margin:0 0 12px;font-size:13px"><strong>${escapeHtml(title)}</strong><br>for ${escapeHtml(email)}</p>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:13px">
+        <label>Discount %<br><input type="number" id="wo-pct" min="1" max="30" step="0.5" value="${Number(s.percent||5)}" style="width:90px"></label>
+        <label>Valid for (hours)<br><input type="number" id="wo-hours" min="12" max="720" value="${s.valid_hours||72}" style="width:100px"></label>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;margin-top:12px;font-size:13px;cursor:pointer"><input type="checkbox" id="wo-email" ${optedOut ? '' : 'checked'} ${optedOut ? 'disabled' : ''}> Email the code to the customer${optedOut ? ' (they unsubscribed from offers)' : ''}</label>
+      <p style="margin:10px 0 0;font-size:12px;color:var(--ink-soft)">Creates a single-use Shopify code locked to this customer and part. It also shows on their account page and on the product page while they're logged in.</p>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: 'Create code', primary: true, onClick: async (ev) => {
+        const b = ev.target; b.disabled = true;
+        try {
+          const r = await Api.post('/api/watched/offers', { customerId, productId, percent: el('wo-pct').value, hours: el('wo-hours').value, email: el('wo-email').checked });
+          closeModal();
+          toast(`Code ${r.offer.code} created` + (r.offer.emailed_at ? ' and emailed' : (r.offer.email_error ? ' — email failed: ' + r.offer.email_error : '')), r.offer.email_error ? 'error' : 'success', 6000);
+          loadWatched();
+        } catch (e) { b.disabled = false; toast(e.message, 'error', 7000); }
+      } },
+    ],
+  });
+}
+
+async function cancelWatchedOffer(id, btn) {
+  if (!confirm('Cancel this code? It is deleted in Shopify and stops working straight away.')) return;
+  btn.disabled = true;
+  try { await Api.delete('/api/watched/offers/' + id); toast('Code cancelled', 'success'); loadWatched(); }
+  catch (e) { btn.disabled = false; toast(e.message, 'error', 5000); }
 }
 
 function renderSales() {
@@ -26977,6 +27120,9 @@ function syncReportLines(r) {
     else if (s.skipped) lines.push('• Shopify: not configured');
     else if (s.inserted > 0) lines.push(`✓ Shopify: ${s.inserted} new order${s.inserted === 1 ? '' : 's'} imported${s.orders != null ? ` (${s.orders} in window)` : ''}`);
     else lines.push(`• Shopify: no new orders${s.orders ? ` (${s.orders} already imported)` : ''}`);
+    const il = s.invoiceLinks;
+    if (il && il.lastError) errors.push(`Invoice links couldn't be added to Shopify orders: ${il.lastError}`);
+    else if (il && il.pushed > 0) lines.push(`✓ Invoice links added to ${il.pushed} Shopify order${il.pushed === 1 ? '' : 's'}`);
   }
   const e = r.ebay;
   if (e) {
