@@ -1,0 +1,13 @@
+api_version = "2026-01"
+uid = "f9de6ffc-2520-095a-f6e9-f5cdafe16fee54fe6cc3"
+
+[[extensions]]
+name = "Warehouse invoice"
+handle = "warehouse-invoice-block"
+type = "ui_extension"
+description = "Warehouse Hub invoice card on the order page."
+
+# Order page card (add it once with "+ Block"). Shopify needs blocks in their own extension.
+[[extensions.targeting]]
+module = "./src/BlockExtension.jsx"
+target = "admin.order-details.block.render"

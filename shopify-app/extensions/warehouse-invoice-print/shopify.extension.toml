@@ -1,0 +1,13 @@
+api_version = "2026-01"
+uid = "8f75e861-648a-2683-352f-61e99252b0df31a324c6"
+
+[[extensions]]
+name = "Warehouse invoice"
+handle = "warehouse-invoice-print"
+type = "ui_extension"
+description = "Print the Warehouse Hub invoice from the order page."
+
+# More actions → Print → Warehouse invoice (print actions allow one target each)
+[[extensions.targeting]]
+module = "./src/PrintActionExtension.jsx"
+target = "admin.order-details.print-action.render"

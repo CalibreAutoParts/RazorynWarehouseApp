@@ -1,0 +1,21 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "44e00f0f5325bf6fab3cf71111eaa211"
+name = "Razoryn Warehouse"
+application_url = "https://razorynwarehouseapp-production.up.railway.app/"
+embedded = true
+
+[pos]
+embedded = true
+
+[webhooks]
+api_version = "2026-04"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_all_orders,read_customers,read_discounts,write_discounts,write_inventory,read_inventory,read_locations,read_orders,write_orders,read_products,write_products,customer_write_customers,customer_read_customers,customer_read_orders,customer_write_orders"
+optional_scopes = [ ]
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = [ "https://razorynwarehouseapp-production.up.railway.app/" ]
