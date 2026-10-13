@@ -422,7 +422,47 @@ async function pullShopify(opts = {}) {
     lastSyncedAt: new Date(),
     status: 'ok',
   });
-  return { channel: 'shopify', since, orders: orders.length, inserted };
+  // Stamp customer invoice download links onto Shopify orders (new imports and,
+  // a batch at a time, any older orders that don't have one yet).
+  let invoiceLinks = null;
+  try { invoiceLinks = await pushInvoiceLinksToShopify(); }
+  catch (e) { console.warn('[sync] invoice links:', e.message); invoiceLinks = { error: e.message }; }
+  return { channel: 'shopify', since, orders: orders.length, inserted, invoiceLinks };
+}
+
+// --------- PUSH: customer invoice links → Shopify orders ---------
+// Writes metafields razoryn.invoice_url / razoryn.invoice_number on each
+// Shopify order whose sale hasn't been stamped yet (sales.shopify_invoice_link_at).
+// Newest first, `limit` per run, so a large backlog drains over a few syncs
+// without hogging the API. Stops early on an access/scope error (the Admin
+// token needs write_orders) instead of failing every order.
+async function pushInvoiceLinksToShopify({ limit = 40 } = {}) {
+  if (!shopify.isConfigured()) return { skipped: 'not_configured' };
+  const { invoiceUrlForSale } = require('../lib/invoice-links');
+  const { rows } = await query(
+    `SELECT id, external_order_id, invoice_number, payment_reference
+       FROM sales
+      WHERE channel = 'shopify' AND external_order_id IS NOT NULL
+        AND COALESCE(is_estimate, false) = false
+        AND shopify_invoice_link_at IS NULL
+      ORDER BY occurred_at DESC
+      LIMIT $1`, [limit]);
+  let pushed = 0, failed = 0, lastError = null;
+  for (const s of rows) {
+    const out = await shopify.setOrderInvoiceMetafields(s.external_order_id, {
+      url: invoiceUrlForSale(s.id),
+      number: s.invoice_number || s.payment_reference,
+    }).catch(e => ({ ok: false, error: e.response?.status === 403 ? 'access_denied (token needs write_orders)' : e.message }));
+    if (out.ok) {
+      await query(`UPDATE sales SET shopify_invoice_link_at = now() WHERE id = $1`, [s.id]);
+      pushed++;
+    } else {
+      failed++; lastError = out.error;
+      if (/access|scope|denied|403/i.test(String(out.error))) break;
+    }
+  }
+  if (lastError) console.warn('[sync] invoice links: last error:', lastError);
+  return { pending: rows.length, pushed, failed, lastError };
 }
 
 // Import ONE eBay order into a sale (dedup on external_order_id). Shared by the
@@ -912,6 +952,7 @@ async function pushAllStockToBoth(onProgress, opts = {}) {
 module.exports = {
   runFullSync,
   pullShopify,
+  pushInvoiceLinksToShopify,
   pullEbay,
   backfillEbayOrders,
   isNativeShopifyOrder,

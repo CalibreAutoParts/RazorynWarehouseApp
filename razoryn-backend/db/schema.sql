@@ -342,6 +342,11 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'refunded_at') THEN
     ALTER TABLE sales ADD COLUMN refunded_at TIMESTAMPTZ;
   END IF;
+  -- When the customer invoice link was written onto the Shopify order
+  -- (metafield razoryn.invoice_url). NULL = still to push (see services/sync.js).
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'shopify_invoice_link_at') THEN
+    ALTER TABLE sales ADD COLUMN shopify_invoice_link_at TIMESTAMPTZ;
+  END IF;
 END $$;
 
 -- Settings: VAT registration toggle + company details — see migration block below

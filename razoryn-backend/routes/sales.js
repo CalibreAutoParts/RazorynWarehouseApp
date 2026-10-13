@@ -602,7 +602,11 @@ router.get('/:id', requireAdmin, async (req, res, next) => {
     payments = (await query(`SELECT id, amount, method, notes, paid_at FROM sale_payments WHERE sale_id = $1 ORDER BY paid_at`, [req.params.id])).rows;
   } catch (_) {}
   await audit(req, 'view_sale', 'sale', req.params.id);  // GDPR: log customer-data read
-  res.json({ sale: s.rows[0], items: items.rows, returns: returns.rows, payments });
+  // Shareable, unguessable PDF link for the customer (no login) — also written
+  // onto the Shopify order for Shopify sales (services/sync.js).
+  const customerInvoiceUrl = s.rows[0].is_estimate ? null
+    : require('../lib/invoice-links').invoiceUrlForSale(s.rows[0].id);
+  res.json({ sale: s.rows[0], items: items.rows, returns: returns.rows, payments, customerInvoiceUrl });
 });
 
 // POST /api/sales — record a manual sale or estimate.
