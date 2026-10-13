@@ -94,6 +94,8 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
       const grossTotalForVat = parseFloat(sale.subtotal || 0) + parseFloat(sale.shipping || 0);
       const netFactor = (showVat && grossTotalForVat > 0) ? (grossTotalForVat - vatAmt) / grossTotalForVat : 1;
       const net = (g) => Number(g) * netFactor;
+      const disc = require('./invoice-discount').orderDiscount({ sale, items, netFactor });
+      const ratePct = `${(rate * 100).toFixed(0)}%`;
       const companyName = company.company_name || brand.fullName || brand.name || 'Invoice';
       const ref = sale.invoice_number || sale.payment_reference || ('#' + sale.id);
 
@@ -214,13 +216,17 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
       y += stripH + 18;
 
       // ---------- Items table ----------
-      const cols = { desc: left + 8, qty: right - 220, unit: right - 150, total: right - 70 };
+      // With VAT shown, each line also states its VAT rate (HMRC: rate per item).
+      const cols = showVat
+        ? { desc: left + 8, qty: right - 270, vat: right - 210, unit: right - 150, total: right - 70 }
+        : { desc: left + 8, qty: right - 220, unit: right - 150, total: right - 70 };
       const drawTableHeader = () => {
         doc.moveTo(left, y).lineTo(right, y).strokeColor(ink).lineWidth(1).stroke();
         y += 6;
         doc.font('Helvetica-Bold').fontSize(8).fillColor(muted);
         doc.text('DESCRIPTION', cols.desc, y, { width: cols.qty - cols.desc - 8 });
         doc.text('QTY', cols.qty, y, { width: 50, align: 'right' });
+        if (cols.vat) doc.text('VAT', cols.vat, y, { width: 50, align: 'right' });
         doc.text(showVat ? 'UNIT NET' : 'UNIT', cols.unit, y, { width: 70, align: 'right' });
         doc.text(showVat ? 'TOTAL NET' : 'TOTAL', cols.total, y, { width: right - cols.total, align: 'right' });
         y += 16;
@@ -240,6 +246,7 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
         if (hasSku) doc.fillColor('#999').fontSize(8).text(it.sku, cols.desc, y + titleH + 1, { width: descW });
         doc.fillColor('#222').fontSize(9.5);
         doc.text(String(it.qty), cols.qty, y, { width: 50, align: 'right' });
+        if (cols.vat) doc.text(ratePct, cols.vat, y, { width: 50, align: 'right' });
         doc.text(money(net(it.unit_price)), cols.unit, y, { width: 70, align: 'right' });
         doc.text(money(net(it.line_total)), cols.total, y, { width: right - cols.total, align: 'right' });
         y += rowH;
@@ -253,7 +260,7 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
       const vat = parseFloat(sale.vat || 0);
       const total = parseFloat(sale.total || 0);
       const isBank = sale.payment_method === 'bank' && company.bank_account_name;
-      const totalsRows = (showVat ? (shippingGross > 0 ? 3 : 2) : (shippingGross > 0 ? 2 : 1));
+      const totalsRows = (showVat ? (shippingGross > 0 ? 3 : 2) : (shippingGross > 0 ? 2 : 1)) + (disc ? 2 : 0);
 
       // Social handles + review CTA — same rules as the on-screen invoice.
       const handle = (h) => String(h || '').replace(/^@/, '');
@@ -281,6 +288,10 @@ function buildInvoicePdf({ sale, items = [], company = {}, brand, mode = 'invoic
         doc.text(val, tValX, y, { width: 120 - 6, align: 'right' });
         y += 16;
       };
+      if (disc) {
+        totalRow(showVat ? 'Items (net)' : 'Items', money(disc.items));
+        totalRow(showVat ? 'Discount (net)' : 'Discount', '-' + money(disc.discount));
+      }
       if (showVat) {
         totalRow('Subtotal (net)', money(net(subtotalGross)));
         if (shippingGross > 0) totalRow('Delivery (net)', money(net(shippingGross)));

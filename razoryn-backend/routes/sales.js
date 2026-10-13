@@ -1560,6 +1560,8 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
   const netFactor = (showVatBreakdown && grossTotal > 0) ? (grossTotal - vatAmount) / grossTotal : 1;
   const subtotalNet = parseFloat(sale.subtotal || 0) * netFactor;
   const shippingNet = shippingGross * netFactor;
+  const disc = require('../lib/invoice-discount').orderDiscount({ sale, items, netFactor });
+  const vatRatePct = `${company.vat_rate || 20}%`;
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>${downloadTitle}</title>
@@ -1760,6 +1762,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     <thead><tr>
       <th>Description</th>
       <th class="num" style="width:60px">Qty</th>
+      ${showVatBreakdown ? '<th class="num" style="width:60px">VAT</th>' : ''}
       <th class="num" style="width:110px">Unit ${showVatBreakdown ? 'Net' : ''}</th>
       <th class="num" style="width:110px">Total ${showVatBreakdown ? 'Net' : ''}</th>
     </tr></thead>
@@ -1772,6 +1775,7 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
         return `<tr>
           <td>${escapeHtml(i.title)}<div class="sku">${escapeHtml(i.sku || '')}</div></td>
           <td class="num">${i.qty}</td>
+          ${showVatBreakdown ? `<td class="num">${vatRatePct}</td>` : ''}
           <td class="num">${fmt(unitNet)}</td>
           <td class="num">${fmt(lineNet)}</td>
         </tr>`;
@@ -1781,6 +1785,10 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
 
   <div class="totals-wrap">
     <div class="totals">
+      ${disc ? `
+        <div class="row"><span>Items${showVatBreakdown ? ' (Net)' : ''}</span><span>${fmt(disc.items)}</span></div>
+        <div class="row"><span>Discount${showVatBreakdown ? ' (Net)' : ''}</span><span>-${fmt(disc.discount)}</span></div>
+      ` : ''}
       ${showVatBreakdown ? `
         <div class="row"><span>Subtotal (Net)</span><span>${fmt(subtotalNet)}</span></div>
         ${shippingGross > 0 ? `<div class="row"><span>Delivery (Net)</span><span>${fmt(shippingNet)}</span></div>` : ''}
