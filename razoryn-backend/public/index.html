@@ -2273,6 +2273,7 @@ function enterApp() {
   initCopyTap();            // tap a part number / SKU to copy it
   initMoneyMask();          // hide all £ amounts from non-admin (warehouse) staff
   initNativeApp();          // register device + native push (FCM) when in the APK
+  psInitBackground();       // this computer = print station → prints on ANY page
   initEditingTracker();
   initTableLabeller();
   // Deep link: a #hash in the URL (from "open in new tab", a bookmark, or a
@@ -23609,7 +23610,28 @@ async function bkDeletePlatform(id) {
 // batch interval, quiet hours), so orders made anywhere — a phone-order
 // invoice typed at home included — print here. A PC that slept prints
 // everything pending the moment this tab resumes.
-const PS = { timer: null, cfg: null, printing: false, active: true };
+const PS = { timer: null, cfg: null, printing: false };
+// "This computer is the print station" is remembered per device, so the
+// station keeps printing in the background while staff use any other page
+// in the same window — they don't have to sit on the Print station page.
+function psIsStation() { try { return localStorage.getItem('rzn_print_station') === '1'; } catch (_) { return false; } }
+function psSetStation(on) {
+  try { on ? localStorage.setItem('rzn_print_station', '1') : localStorage.removeItem('rzn_print_station'); } catch (_) {}
+  psInitBackground();
+  toast(on ? '🖨 This computer is now the print station — it prints in the background on any page while the app is open' : 'This computer no longer prints — jobs keep queueing for the station', on ? 'success' : 'info', 6000);
+}
+function psInitBackground() {
+  if (PS.timer) { clearInterval(PS.timer); PS.timer = null; }
+  if (!psIsStation() || State.appShell) return;
+  PS.timer = setInterval(psPoll, 45000);
+  setTimeout(psPoll, 3000);
+  // Catch up immediately when the PC wakes / the window comes back.
+  if (!PS._visHooked) {
+    PS._visHooked = true;
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && psIsStation()) psPoll(); });
+    window.addEventListener('online', () => { if (psIsStation()) psPoll(); });
+  }
+}
 function renderPrintStation() {
   el('content').innerHTML = `
     <div class="page">
@@ -23639,9 +23661,7 @@ function renderPrintStation() {
       </div>
     </div>`;
   psLoad();
-  if (PS.timer) clearInterval(PS.timer);
-  PS.timer = setInterval(() => { if (State.page === 'printstation') psPoll(); else { clearInterval(PS.timer); PS.timer = null; } }, 45000);
-  psPoll();
+  if (psIsStation()) psPoll();
   // Screen wake-lock — best effort, keeps the station tab from idling.
   try { navigator.wakeLock?.request('screen').catch(() => {}); } catch (_) {}
 }
@@ -23660,8 +23680,9 @@ function psPaintStatus(c) {
       <div style="font-size:15px;font-weight:800;color:${c.enabled ? 'var(--green)' : 'var(--red)'}">${c.enabled ? '● Auto-print ON' : '○ Auto-print OFF'}</div>
       <div><strong>${c.pending}</strong> <span style="color:var(--ink-soft)">waiting to print</span></div>
       ${c.quietNow ? '<span class="pill amber">🌙 quiet hours — holding</span>' : ''}
-      <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;margin-left:auto"><input type="checkbox" ${PS.active ? 'checked' : ''} onchange="PS.active=this.checked;toast(this.checked ? 'This tab will print' : 'This tab paused — jobs keep queueing', 'info')"> This computer prints</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-left:auto;font-weight:700;${psIsStation() ? 'color:var(--green)' : ''}" title="Tick on the ONE computer that has the label printer. It then prints in the background on any page of the app — staff can keep working in the same window."><input type="checkbox" ${psIsStation() ? 'checked' : ''} onchange="psSetStation(this.checked);psLoad()"> 🖨 This computer is the print station</label>
     </div>
+    ${psIsStation() ? '' : '<div style="margin-top:8px;font-size:12px;background:var(--bg-soft);border-radius:7px;padding:7px 10px">This computer isn’t printing. On the warehouse PC with the label printer, tick <strong>This computer is the print station</strong> — once, it’s remembered.</div>'}
     ${(c.recent || []).length ? `<div style="margin-top:10px;font-size:12px;color:var(--ink-soft)">Recent: ` + c.recent.slice(0, 6).map(r => `${escapeHtml(r.invoice_number || ('#' + r.id))} ${escapeHtml(r.customer_name || '')} <a href="#" onclick="event.preventDefault();psReprint(${r.id})" title="Print again">↻</a>`).join(' · ') + '</div>' : ''}`;
 }
 function psPaintSettings(c) {
@@ -23701,7 +23722,7 @@ async function psSave(btn) {
   btn.disabled = false;
 }
 async function psPoll() {
-  if (PS.printing || !PS.active) { psLoad(); return; }
+  if (PS.printing || !psIsStation()) { if (State.page === 'printstation') psLoad(); return; }
   let q;
   try { q = await Api.get('/api/printing/queue'); } catch (_) { return; }
   const badge = el('nav-print-badge');
@@ -23715,16 +23736,21 @@ async function psPoll() {
     toast(`🖨 Printed packing labels for ${q.jobs.length} order${q.jobs.length === 1 ? '' : 's'}`, 'success', 6000);
   } catch (e) { toast('Print failed: ' + e.message, 'error'); }
   PS.printing = false;
-  psLoad();
+  if (State.page === 'printstation') psLoad();
 }
 function psPrintLabels(jobIds) {
   return new Promise((resolve) => {
+    // Staff may be mid-typing on another page: remember where the cursor
+    // was (and the selection) and put it straight back after printing.
+    const prev = document.activeElement;
+    const sel = (prev && typeof prev.selectionStart === 'number') ? [prev.selectionStart, prev.selectionEnd] : null;
     const f = document.createElement('iframe');
     f.style.cssText = 'position:fixed;width:0;height:0;border:0;visibility:hidden';
     f.src = '/api/printing/labels?jobs=' + jobIds.join(',');
     f.onload = () => {
-      try { f.contentWindow.focus(); f.contentWindow.print(); } catch (_) {}
-      // Give the dialog/spooler a moment before tearing the frame down.
+      try { f.contentWindow.print(); } catch (_) {}
+      try { if (prev && prev.focus && prev !== document.body) { prev.focus({ preventScroll: true }); if (sel) prev.setSelectionRange(sel[0], sel[1]); } } catch (_) {}
+      // Give the spooler a moment before tearing the frame down.
       setTimeout(() => { try { f.remove(); } catch (_) {} resolve(); }, 4000);
     };
     document.body.appendChild(f);
