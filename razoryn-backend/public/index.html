@@ -23614,14 +23614,30 @@ const PS = { timer: null, cfg: null, printing: false };
 // "This computer is the print station" is remembered per device, so the
 // station keeps printing in the background while staff use any other page
 // in the same window — they don't have to sit on the Print station page.
-function psIsStation() { try { return localStorage.getItem('rzn_print_station') === '1'; } catch (_) { return false; } }
+// Inside the Warehouse Hub DESKTOP app, a native print agent does the
+// printing (tray, starts with Windows, silent, keeps going with the window
+// closed) — the page only controls it, and the browser poller stays off.
+const DP = (typeof window !== 'undefined' && window.desktopPrint && window.desktopPrint.available) ? window.desktopPrint : null;
+function psIsStation() {
+  if (DP) return !!PS.agentOn;
+  try { return localStorage.getItem('rzn_print_station') === '1'; } catch (_) { return false; }
+}
 function psSetStation(on) {
+  if (DP) {
+    DP.setEnabled(on).then(s => {
+      PS.agentOn = !!s.enabled;
+      toast(on ? '🖨 Print agent ON — this computer prints labels from the tray, even with the window closed, and starts with Windows' : 'Print agent off on this computer — jobs keep queueing', on ? 'success' : 'info', 7000);
+      if (State.page === 'printstation') psLoad();
+    }).catch(e => toast('Failed: ' + e.message, 'error'));
+    return;
+  }
   try { on ? localStorage.setItem('rzn_print_station', '1') : localStorage.removeItem('rzn_print_station'); } catch (_) {}
   psInitBackground();
   toast(on ? '🖨 This computer is now the print station — it prints in the background on any page while the app is open' : 'This computer no longer prints — jobs keep queueing for the station', on ? 'success' : 'info', 6000);
 }
 function psInitBackground() {
   if (PS.timer) { clearInterval(PS.timer); PS.timer = null; }
+  if (DP) { DP.status().then(s => { PS.agentOn = !!s.enabled; }).catch(() => {}); return; }
   if (!psIsStation() || State.appShell) return;
   PS.timer = setInterval(psPoll, 45000);
   setTimeout(psPoll, 3000);
@@ -23637,7 +23653,9 @@ function renderPrintStation() {
     <div class="page">
       <div class="page-head">
         <div><h1>🖨 Print station</h1><div class="desc">Auto-prints a 6x4 packing label per item for every new order — buyer, channel, part, pieces and its location, numbered 1/2, 2/2… Orders queue on the server, so anything created while this computer was off prints as soon as this page is open again.</div></div>
-        <div class="actions"><a class="btn btn-outline" href="/api/printing/labels/test?print=1" target="_blank" title="Opens a sample 2-label order and immediately asks to print it — with kiosk-printing it goes straight to the printer.">🧪 Test print</a>
+        <div class="actions">${DP
+          ? '<button class="btn btn-outline" onclick="psAgentTest(this)" title="Prints a sample 2-label order silently through the desktop print agent.">🧪 Test print</button>'
+          : '<a class="btn btn-outline" href="/api/printing/labels/test?print=1" target="_blank" title="Opens a sample 2-label order and immediately asks to print it — with kiosk-printing it goes straight to the printer.">🧪 Test print</a>'}
         <a class="btn btn-ghost" href="/api/printing/labels/test" target="_blank" title="Just view the sample labels without printing.">👁 Preview</a></div>
       </div>
       <div class="card" style="margin-bottom:14px"><div class="card-body" id="ps-status">Loading…</div></div>
@@ -23648,6 +23666,10 @@ function renderPrintStation() {
       <div class="card">
         <div class="card-head"><h3>🛠 One-time printer setup</h3></div>
         <div class="card-body" style="font-size:13px;line-height:1.7">
+          ${DP ? `<div style="background:color-mix(in srgb, var(--green) 10%, transparent);border:1px solid var(--green);border-radius:8px;padding:9px 12px">
+            ✅ <strong>You're in the Warehouse Hub desktop app</strong> — its built-in print agent handles everything: no Chrome shortcuts or flags. Pair the label printer with Windows (Bluetooth or USB), pick it in the <strong>Label printer</strong> box above, set its paper to 4x6 / 100x150mm, and tick <strong>Print packing labels on this computer</strong>. It lives in the system tray, starts with Windows, and keeps printing with the window closed.</div>`
+          : `<div style="background:var(--bg-soft);border-radius:8px;padding:9px 12px;margin-bottom:10px">
+            💡 <strong>Recommended:</strong> install the <a href="https://github.com/CalibreAutoParts/RazorynWarehouseApp/releases/latest" target="_blank" rel="noopener">Warehouse Hub desktop app</a> (Windows: the <em>Setup .exe</em>) on the printing PC. Like the FedEx / Royal Mail apps it runs a print agent from the system tray — starts with Windows, prints silently with the window closed, and doesn't touch your everyday Chrome. The browser setup below still works if you'd rather not install anything.</div>
           <ol style="margin:0;padding-left:20px">
             <li><strong>Pair the label printer</strong> with this computer — Bluetooth (Windows Settings → Bluetooth &amp; devices → Add device) or USB. Either way it becomes a normal Windows printer.</li>
             <li><strong>Make it the default printer</strong> (Settings → Printers &amp; scanners), and set its paper size to 4x6 / 100x150mm.</li>
@@ -23655,7 +23677,7 @@ function renderPrintStation() {
               <code style="background:var(--line-2);padding:1px 5px;border-radius:4px;display:inline-block;margin:2px 0">"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir="C:\\WarehousePrint" --kiosk-printing --app=${location.origin}</code>
               The <code style="background:var(--line-2);padding:1px 5px;border-radius:4px">--user-data-dir</code> part runs the station as its <strong>own separate Chrome</strong>: normal Chrome can be open or closed, in any order, and the silent printing only ever applies to this window — your everyday browsing keeps its normal print dialog. Sign in to the app once inside it (it keeps its own logins), then use 🧪 Test print: silent = working.</li>
             <li><strong>Keep this PC awake</strong> (Settings → Power → never sleep when plugged in). This page also holds a screen wake-lock while open. If it does sleep or shut down, nothing is lost — the queue prints when it's back.</li>
-          </ol>
+          </ol>`}
         </div>
       </div>
     </div>`;
@@ -23668,6 +23690,7 @@ async function psLoad() {
   try {
     const c = await Api.get('/api/printing/settings');
     PS.cfg = c;
+    if (DP) { try { PS.agent = await DP.status(); PS.agentOn = !!PS.agent.enabled; PS.printers = await DP.listPrinters(); } catch (_) {} }
     psPaintStatus(c); psPaintSettings(c);
   } catch (e) { const b = el('ps-status'); if (b) b.innerHTML = '<span style="color:var(--red)">' + escapeHtml(e.data?.message || e.message) + '</span>'; }
 }
@@ -23679,10 +23702,44 @@ function psPaintStatus(c) {
       <div style="font-size:15px;font-weight:800;color:${c.enabled ? 'var(--green)' : 'var(--red)'}">${c.enabled ? '● Auto-print ON' : '○ Auto-print OFF'}</div>
       <div><strong>${c.pending}</strong> <span style="color:var(--ink-soft)">waiting to print</span></div>
       ${c.quietNow ? '<span class="pill amber">🌙 quiet hours — holding</span>' : ''}
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-left:auto;font-weight:700;${psIsStation() ? 'color:var(--green)' : ''}" title="Tick on the ONE computer that has the label printer. It then prints in the background on any page of the app — staff can keep working in the same window."><input type="checkbox" ${psIsStation() ? 'checked' : ''} onchange="psSetStation(this.checked);psLoad()"> 🖨 This computer is the print station</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-left:auto;font-weight:700;${psIsStation() ? 'color:var(--green)' : ''}" title="Tick on the ONE computer that has the label printer."><input type="checkbox" ${psIsStation() ? 'checked' : ''} onchange="psSetStation(this.checked)"> 🖨 ${DP ? 'Print packing labels on this computer' : 'This computer is the print station'}</label>
     </div>
-    ${psIsStation() ? '' : '<div style="margin-top:8px;font-size:12px;background:var(--bg-soft);border-radius:7px;padding:7px 10px">This computer isn’t printing. On the warehouse PC with the label printer, tick <strong>This computer is the print station</strong> — once, it’s remembered.</div>'}
+    ${DP ? psAgentPanelHtml() : (psIsStation() ? '' : '<div style="margin-top:8px;font-size:12px;background:var(--bg-soft);border-radius:7px;padding:7px 10px">This computer isn’t printing. On the warehouse PC with the label printer, tick <strong>This computer is the print station</strong> — once, it’s remembered.</div>')}
     ${(c.recent || []).length ? `<div style="margin-top:10px;font-size:12px;color:var(--ink-soft)">Recent: ` + c.recent.slice(0, 6).map(r => `${escapeHtml(r.invoice_number || ('#' + r.id))} ${escapeHtml(r.customer_name || '')} <a href="#" onclick="event.preventDefault();psReprint(${r.id})" title="Print again">↻</a>`).join(' · ') + '</div>' : ''}`;
+}
+function psAgentPanelHtml() {
+  const a = PS.agent || {};
+  const stateText = { off: '○ Agent off', ok: '● Agent ready', paused: '● Agent ready — auto-print is OFF in the rules below', login: '⚠ Sign in needed', error: '⚠ Problem' }[a.state] || '…';
+  const stateColor = a.state === 'ok' ? 'var(--green)' : (a.state === 'error' || a.state === 'login') ? 'var(--red)' : 'var(--ink-soft)';
+  const printers = PS.printers || [];
+  return `<div style="margin-top:10px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:12.5px">
+    <strong style="color:${stateColor}">🖥 Desktop print agent: ${stateText}</strong>
+    ${a.lastError && a.state === 'error' ? `<span style="color:var(--red)">${escapeHtml(a.lastError)}</span>` : ''}
+    ${a.printed ? `<span style="color:var(--ink-soft)">${a.printed} printed this session</span>` : ''}
+    <label style="display:flex;align-items:center;gap:6px">Label printer
+      <select onchange="psAgentPrinter(this.value)" style="font-size:12px">
+        <option value="" ${!a.printer ? 'selected' : ''}>Windows default</option>
+        ${printers.map(p => `<option value="${escapeAttr(p.name)}" ${a.printer === p.name ? 'selected' : ''}>${escapeHtml(p.displayName)}${p.isDefault ? ' (default)' : ''}</option>`).join('')}
+      </select></label>
+    <label style="display:flex;align-items:center;gap:5px"><input type="checkbox" ${a.startAtLogin ? 'checked' : ''} onchange="psAgentLogin(this.checked)"> Start with Windows</label>
+    <button class="btn btn-outline btn-sm" onclick="psAgentTest(this)">🧪 Silent test print</button>
+  </div>`;
+}
+async function psAgentPrinter(name) {
+  try { await DP.setPrinter(name); toast('🖨 Label printer set' + (name ? ': ' + name : ' to the Windows default'), 'success'); psLoad(); }
+  catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+async function psAgentLogin(on) {
+  try { await DP.setStartAtLogin(on); toast(on ? 'Will start with Windows (in the tray)' : 'Won’t start with Windows', 'info'); }
+  catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+async function psAgentTest(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await DP.testPrint();
+    toast(r.ok ? '✓ Test label sent to the printer' : 'Test print failed: ' + (r.reason || 'check the printer is on'), r.ok ? 'success' : 'error', 7000);
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+  if (btn) btn.disabled = false;
 }
 function psPaintSettings(c) {
   const box = el('ps-settings'); if (!box) return;
@@ -23721,7 +23778,7 @@ async function psSave(btn) {
   btn.disabled = false;
 }
 async function psPoll() {
-  if (PS.printing || !psIsStation()) { if (State.page === 'printstation') psLoad(); return; }
+  if (DP || PS.printing || !psIsStation()) { if (State.page === 'printstation') psLoad(); return; }
   let q;
   try { q = await Api.get('/api/printing/queue'); } catch (_) { return; }
   const badge = el('nav-print-badge');

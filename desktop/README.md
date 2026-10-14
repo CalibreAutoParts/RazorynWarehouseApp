@@ -8,6 +8,23 @@ Because it loads the **live** site, the desktop app is always up to date — you
 never have to rebuild it when the web app is updated. You only rebuild to ship a
 new icon, name, or app behaviour.
 
+## Print agent (packing labels)
+
+Like the FedEx / Royal Mail Click & Drop desktop apps, the desktop app runs a
+**print agent** for the warehouse's auto-printed 6x4 packing labels:
+
+- On first launch it asks which business the computer is for (Calibre or
+  Razoryn) — change later from the tray icon → *Switch business*.
+- Open **Print station** in the app and tick **Print packing labels on this
+  computer**, pick the label printer, and run a silent test print.
+- It then lives in the **system tray**, starts with Windows (in the tray),
+  keeps printing with the window closed, and catches up after sleep.
+- Printing is silent and native — no Chrome flags, and everyday Chrome is
+  unaffected.
+- The server decides *when* labels release (channel toggles, batch interval,
+  quiet hours on the Print station page); the agent prints and confirms each
+  job, so nothing double-prints.
+
 ## Get the installers (no local setup needed)
 
 The installers are built automatically by GitHub Actions on **real Windows, Mac
