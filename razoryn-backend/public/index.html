@@ -23615,7 +23615,8 @@ function renderPrintStation() {
     <div class="page">
       <div class="page-head">
         <div><h1>🖨 Print station</h1><div class="desc">Auto-prints a 6x4 packing label per item for every new order — buyer, channel, part, pieces and its location, numbered 1/2, 2/2… Orders queue on the server, so anything created while this computer was off prints as soon as this page is open again.</div></div>
-        <div class="actions"><a class="btn btn-outline" href="/api/printing/labels/test" target="_blank">🧪 Test label</a></div>
+        <div class="actions"><a class="btn btn-outline" href="/api/printing/labels/test?print=1" target="_blank" title="Opens a sample 2-label order and immediately asks to print it — with kiosk-printing it goes straight to the printer.">🧪 Test print</a>
+        <a class="btn btn-ghost" href="/api/printing/labels/test" target="_blank" title="Just view the sample labels without printing.">👁 Preview</a></div>
       </div>
       <div class="card" style="margin-bottom:14px"><div class="card-body" id="ps-status">Loading…</div></div>
       <div class="card" style="margin-bottom:14px">
@@ -23628,7 +23629,10 @@ function renderPrintStation() {
           <ol style="margin:0;padding-left:20px">
             <li><strong>Pair the label printer</strong> with this computer — Bluetooth (Windows Settings → Bluetooth &amp; devices → Add device) or USB. Either way it becomes a normal Windows printer.</li>
             <li><strong>Make it the default printer</strong> (Settings → Printers &amp; scanners), and set its paper size to 4x6 / 100x150mm.</li>
-            <li><strong>Silent printing:</strong> make a Chrome shortcut with the flag <code style="background:var(--line-2);padding:1px 5px;border-radius:4px">--kiosk-printing</code> (right-click shortcut → Properties → add it after chrome.exe in Target). Opened that way, labels print with no dialogs. Without the flag everything still works — a print window pops up per batch and you press Enter.</li>
+            <li><strong>Silent printing:</strong> make a shortcut whose Target is
+              <code style="background:var(--line-2);padding:1px 5px;border-radius:4px;display:inline-block;margin:2px 0">"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --kiosk-printing --app=${location.origin}</code>
+              (use <code style="background:var(--line-2);padding:1px 5px;border-radius:4px">chrome.exe</code>, not chrome_proxy.exe — and add <code style="background:var(--line-2);padding:1px 5px;border-radius:4px">--profile-directory="Profile 2"</code> if you use that profile).
+              <strong>The flag only works if Chrome starts fresh:</strong> close EVERY Chrome window first and check the system tray — if Chrome is already running, the shortcut joins it and the flag is ignored. (Chrome Settings → System → turn OFF "Continue running background apps" to stop it lurking.) Then launch this shortcut and use 🧪 Test print: silent = working; a dialog = Chrome wasn't fully closed. Without the flag everything still works, you just press Enter on a dialog per batch.</li>
             <li><strong>Keep this PC awake</strong> (Settings → Power → never sleep when plugged in). This page also holds a screen wake-lock while open. If it does sleep or shut down, nothing is lost — the queue prints when it's back.</li>
           </ol>
         </div>

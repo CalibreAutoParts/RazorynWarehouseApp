@@ -197,7 +197,7 @@ router.post('/jobs/:id(\\d+)/requeue', async (req, res) => {
 });
 
 // ── The labels themselves: exact 4in × 6in pages, one per item line ───────
-function labelPagesHtml(orders) {
+function labelPagesHtml(orders, { autoPrint = false } = {}) {
   const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const pages = [];
   for (const o of orders) {
@@ -246,7 +246,7 @@ function labelPagesHtml(orders) {
   .qn { font-size: 30pt; font-weight: 900; line-height: 1; margin-top: 2pt; }
   .foot { display: flex; justify-content: space-between; align-items: baseline; gap: 4pt; margin-top: 6pt; font-size: 8.5pt; }
   .num { font-size: 13pt; font-weight: 900; }
-  </style></head><body>${pages.join('')}</body></html>`;
+  </style></head><body>${pages.join('')}${autoPrint ? '<script>window.onload = () => setTimeout(() => window.print(), 250);<' + '/script>' : ''}</body></html>`;
 }
 router.get('/labels', async (req, res) => {
   try {
@@ -254,7 +254,7 @@ router.get('/labels', async (req, res) => {
     const ids = String(req.query.jobs || '').split(',').map(x => parseInt(x)).filter(Boolean).slice(0, 60);
     if (!ids.length) return res.status(400).send('jobs required');
     const orders = await jobLabelData(ids);
-    res.type('html').send(labelPagesHtml(orders));
+    res.type('html').send(labelPagesHtml(orders, { autoPrint: req.query.print === '1' }));
   } catch (e) { res.status(500).send('Labels failed: ' + e.message); }
 });
 // A sample label so printer alignment can be checked without a real order.
@@ -265,7 +265,7 @@ router.get('/labels/test', async (req, res) => {
       { title: 'Peugeot 208 2024-2026 Front Bumper Main Grille with Cover (Black)', sku: '9855774880', qty: 1, loc: 'A3 · Front panels', locNote: '3rd shelf, behind the door' },
       { title: 'VW Polo Headlight RH', sku: '6C1941006', qty: 2, loc: 'B1 · Lighting', locNote: '' },
     ],
-  }]));
+  }], { autoPrint: req.query.print === '1' }));
 });
 
 module.exports = router;
