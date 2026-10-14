@@ -34,6 +34,7 @@ async function ensureTables() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       printed_at TIMESTAMPTZ
     )`);
+    await query(`ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ`);
     _ready = true;
   } catch (e) { console.warn('[printing] migration:', e.message); }
 }
@@ -165,6 +166,9 @@ router.get('/queue', async (req, res) => {
     await ensureTables();
     const cfg = await getCfg();
     await enqueueNewSales(cfg);
+    // A job handed to a station is 'printing' until confirmed; one that was
+    // never confirmed (station closed mid-print) goes back in after 10 min.
+    await query(`UPDATE print_jobs SET status = 'queued', claimed_at = NULL WHERE status = 'printing' AND claimed_at < now() - interval '10 minutes'`);
     const pending = (await query(`SELECT id FROM print_jobs WHERE status = 'queued' ORDER BY id`)).rows.map(r => r.id);
     const quiet = inQuietHours(cfg);
     let holdUntil = null;
@@ -176,9 +180,15 @@ router.get('/queue', async (req, res) => {
     if (!allowed) {
       return res.json({ allowed: false, pending: pending.length, quietNow: quiet, holdUntil, enabled: cfg.enabled, jobs: [] });
     }
+    // Claim atomically — only jobs THIS request flipped are returned, so
+    // two station windows polling at once can never both print an order.
+    const claimed = (await query(
+      `UPDATE print_jobs SET status = 'printing', claimed_at = now()
+        WHERE id = ANY($1) AND status = 'queued' RETURNING id`, [pending.slice(0, 40)])).rows.map(r => r.id);
+    if (!claimed.length) return res.json({ allowed: false, pending: 0, jobs: [], enabled: true, quietNow: false, holdUntil: null });
     cfg.lastReleaseAt = new Date().toISOString();
     await saveCfg(cfg);
-    const jobs = await jobLabelData(pending.slice(0, 40));
+    const jobs = await jobLabelData(claimed);
     res.json({ allowed: true, pending: pending.length, jobs, enabled: true, quietNow: false, holdUntil: null });
   } catch (e) {
     console.error('[printing] queue failed:', (e && e.stack) || e);
