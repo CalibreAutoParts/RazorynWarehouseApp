@@ -142,6 +142,41 @@ async function mergeIntoLiveSpecifics(itemId, storeCode, addSpecifics, meta = {}
   return { ok: true, sent: full.length, warnings: r.warnings };
 }
 
+// Push a product's COMPLETE warehouse alternate list to the channels:
+// Shopify's alternate-numbers metafield, and the eBay cross-reference
+// specifics on every linked live listing. eBay gets each number in all its
+// written forms (compact, spaced, hyphenated) as separate values — eBay search
+// is literal — merged into what the listing already carries, never replacing.
+async function pushAlternatesToChannels(productId, { superseded = [], extra = [], source = 'ai' } = {}) {
+  const out = { shopify: null, ebay: [] };
+  const nm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const pr = (await query(`SELECT shopify_product_id, part_number FROM products WHERE id = $1`, [productId])).rows[0] || {};
+  const codes = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [productId])).rows.map(r => r.code);
+  try {
+    const shopify = require('../services/shopify');
+    if (pr.shopify_product_id && shopify.isConfigured() && codes.length) {
+      await shopify.updateProduct(pr.shopify_product_id, { metafields: [{ namespace: 'custom', key: 'alternate_part_numbers', type: 'single_line_text_field', value: codes.join(', ') }] });
+      out.shopify = 'ok';
+    }
+  } catch (e) { out.shopify = 'error: ' + e.message; }
+  const { pnVariants } = require('../lib/part-numbers');
+  const forms = (c) => { try { return pnVariants(c); } catch (_) { return [c]; } };
+  const specifics = [];
+  if (superseded.length) specifics.push({ name: 'Superseded Part Number', values: [...new Set(superseded.flatMap(forms))].slice(0, 25) });
+  const alts = codes.filter(c => nm(c) && nm(c) !== nm(pr.part_number) && !superseded.some(x => nm(x) === nm(c)));
+  const refs = [...new Set([...extra, ...alts].flatMap(forms))];
+  if (refs.length) specifics.push({ name: 'Reference OE/OEM Number', values: refs.slice(0, 25) });
+  if (specifics.length) {
+    for (const l of await ebayLinksForProduct(productId)) {
+      try {
+        const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, specifics, { productId, source, union: true });
+        out.ebay.push(r.queued ? { itemId: l.ebay_item_id, queued: true } : { itemId: l.ebay_item_id, ok: true, sent: r.sent });
+      } catch (e) { out.ebay.push({ itemId: l.ebay_item_id, error: e.message }); }
+    }
+  }
+  return out;
+}
+
 // eBay listings linked to a product (via its Shopify product id).
 async function ebayLinksForProduct(productId) {
   const pr = await query(`SELECT shopify_product_id FROM products WHERE id = $1`, [productId]);
@@ -309,44 +344,9 @@ async function applySuggestion(s, payloadOverride) {
         if (r.rows[0]) out.added++;
       } catch (_) {}
     }
-    try {
-      const shopify = require('../services/shopify');
-      const pr = await query(`SELECT shopify_product_id FROM products WHERE id = $1`, [s.product_id]);
-      const sid = pr.rows[0]?.shopify_product_id;
-      if (sid && shopify.isConfigured()) {
-        const { rows } = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [s.product_id]);
-        await shopify.updateProduct(sid, { metafields: [{ namespace: 'custom', key: 'alternate_part_numbers', type: 'single_line_text_field', value: rows.map(r => r.code).join(', ') }] });
-        out.shopify = 'ok';
-      }
-    } catch (e) { out.shopify = 'error: ' + e.message; }
-    // eBay: each number as its OWN value (eBay searches item specifics per
-    // value; one comma-joined string capped at 65 chars hides numbers), and
-    // the COMPLETE warehouse alternate list goes up every time — merged into
-    // what the listing already carries — so earlier pushes are never lost
-    // and a number that's "already on the product" still reaches eBay.
-    const specifics = [];
-    if (superseded.length) specifics.push({ name: 'Superseded Part Number', values: superseded.slice(0, 25) });
-    let allAlts = [];
-    try {
-      const mainPn = (await query(`SELECT part_number FROM products WHERE id = $1`, [s.product_id])).rows[0]?.part_number || '';
-      const nm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-      allAlts = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [s.product_id])).rows
-        .map(r => r.code).filter(c => nm(c) && nm(c) !== nm(mainPn) && !superseded.some(x => nm(x) === nm(c)));
-    } catch (_) {}
-    // Every written form of each number (compact, spaced, hyphenated) —
-    // buyers type them all, and eBay only matches what's literally there.
-    const { pnVariants } = require('../lib/part-numbers');
-    const refs = [...new Set([...regional, ...reference, ...allAlts].flatMap(c => { try { return pnVariants(c); } catch (_) { return [c]; } }))];
-    if (refs.length) specifics.push({ name: 'Reference OE/OEM Number', values: refs.slice(0, 25) });
-    if (specifics.length) {
-      for (const l of await ebayLinksForProduct(s.product_id)) {
-        try {
-          const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, specifics, { productId: s.product_id, source: 'ai-' + s.kind, union: true });
-          out.ebay.push(r.queued ? { itemId: l.ebay_item_id, queued: true } : { itemId: l.ebay_item_id, ok: true, sent: r.sent });
-        }
-        catch (e) { out.ebay.push({ itemId: l.ebay_item_id, error: e.message }); }
-      }
-    }
+    const pushed = await pushAlternatesToChannels(s.product_id, { superseded, extra: [...regional, ...reference], source: 'ai-' + s.kind });
+    out.shopify = pushed.shopify;
+    out.ebay = pushed.ebay;
     return out;
   }
   if (s.kind === 'listing_opt') {
@@ -530,6 +530,49 @@ router.post('/add-alt-number', async (req, res) => {
   await audit(req, 'ai_pn_add', 'product', ids[0], { code, relationship, override, listings: ids.length });
   res.json({ ok: true, results, summary: { total: ids.length, ok: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length } });
 });
+
+// ── Bulk: re-push EVERY product's alternates to eBay + Shopify ────────────
+// Repairs listings whose eBay cross-reference numbers were wiped by the old
+// replace-not-merge push, and fills in written forms (compact/spaced) eBay
+// search needs. Runs in the background; the page polls the progress.
+let _altPush = { state: 'idle', total: 0, done: 0, ebayUpdated: 0, ebayQueued: 0, ebayFailed: 0, shopifyUpdated: 0, noEbay: 0, errors: [], startedAt: null, finishedAt: null };
+async function runAltPushAll() {
+  const { rows } = await query(`
+    SELECT DISTINCT p.id FROM products p
+      JOIN product_part_numbers pp ON pp.product_id = p.id
+     ORDER BY p.id`);
+  _altPush = { state: 'running', total: rows.length, done: 0, ebayUpdated: 0, ebayQueued: 0, ebayFailed: 0, shopifyUpdated: 0, noEbay: 0, errors: [], startedAt: new Date().toISOString(), finishedAt: null };
+  for (const { id } of rows) {
+    try {
+      const r = await pushAlternatesToChannels(id, { source: 'ai-bulk-alts' });
+      if (r.shopify === 'ok') _altPush.shopifyUpdated++;
+      if (!r.ebay.length) _altPush.noEbay++;
+      for (const e of r.ebay) {
+        if (e.ok) _altPush.ebayUpdated++;
+        else if (e.queued) _altPush.ebayQueued++;
+        else { _altPush.ebayFailed++; if (_altPush.errors.length < 20) _altPush.errors.push(`product ${id} / eBay ${e.itemId}: ${e.error}`); }
+      }
+    } catch (e) {
+      if (_altPush.errors.length < 20) _altPush.errors.push(`product ${id}: ${e.message}`);
+    }
+    _altPush.done++;
+    await new Promise(r => setTimeout(r, 250));   // gentle on eBay's API limits
+  }
+  _altPush.state = 'done';
+  _altPush.finishedAt = new Date().toISOString();
+  await aiScanNotify('Alternate numbers re-pushed',
+    `${_altPush.total} products · eBay ${_altPush.ebayUpdated} listings updated${_altPush.ebayQueued ? `, ${_altPush.ebayQueued} queued (open offers)` : ''}${_altPush.ebayFailed ? `, ${_altPush.ebayFailed} failed` : ''} · Shopify ${_altPush.shopifyUpdated} updated`,
+    _altPush.ebayFailed ? 'warning' : 'info');
+}
+router.post('/alts/push-all', async (req, res) => {
+  if (_altPush.state === 'running') return res.json({ ok: true, alreadyRunning: true, status: _altPush });
+  runAltPushAll().catch(e => { _altPush.state = 'error'; _altPush.errors.push(e.message); console.error('[ai] alt push-all failed:', e); });
+  await audit(req, 'ai_alts_push_all', null, null, {});
+  // Let the job count the products before answering.
+  await new Promise(r => setTimeout(r, 400));
+  res.json({ ok: true, status: _altPush });
+});
+router.get('/alts/push-all', (req, res) => res.json({ status: _altPush }));
 
 async function aiScanNotify(title, body, severity) {
   try {

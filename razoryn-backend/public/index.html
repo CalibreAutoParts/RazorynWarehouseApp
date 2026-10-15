@@ -24253,6 +24253,41 @@ async function pnckPush(override, btn) {
   }
 }
 
+// ── Bulk re-push of every product's alternate numbers ─────────────────────
+let _altPushPoll = null;
+async function altPushAll(btn) {
+  if (!confirm('Re-push the full alternate-number list of EVERY product to its eBay listings and Shopify?\n\nNumbers are only ever ADDED (in compact, spaced and hyphenated forms) — nothing is removed. Runs in the background; you can leave this page.')) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/ai/alts/push-all', {});
+    toast(r.alreadyRunning ? 'Already running — showing progress' : `⬆ Pushing alternates for ${r.status.total} products…`, 'info', 6000);
+    altPushWatch();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
+}
+function altPushPaint(s) {
+  const box = el('alt-push-status'); if (!box || !s) return;
+  if (s.state === 'idle') { box.innerHTML = ''; return; }
+  const pct = s.total ? Math.round(s.done / s.total * 100) : 0;
+  box.innerHTML = `${s.state === 'running' ? `⏳ ${s.done}/${s.total} products (${pct}%)` : (s.state === 'done' ? '✅ Done' : '⚠ Stopped')} · eBay <strong>${s.ebayUpdated}</strong> listings updated`
+    + (s.ebayQueued ? ` · ${s.ebayQueued} queued (open offers — retry automatically)` : '')
+    + (s.ebayFailed ? ` · <span style="color:var(--red)">${s.ebayFailed} failed</span>` : '')
+    + ` · Shopify ${s.shopifyUpdated}` + (s.noEbay ? ` · ${s.noEbay} products with no linked eBay listing` : '')
+    + ((s.errors || []).length && s.state !== 'running' ? `<details style="margin-top:4px"><summary style="cursor:pointer">errors</summary>${s.errors.map(e => '<div>' + escapeHtml(e) + '</div>').join('')}</details>` : '');
+}
+function altPushWatch() {
+  if (_altPushPoll) clearInterval(_altPushPoll);
+  const tick = async () => {
+    if (State.page !== 'ai') { clearInterval(_altPushPoll); _altPushPoll = null; return; }
+    try {
+      const r = await Api.get('/api/ai/alts/push-all');
+      altPushPaint(r.status);
+      if (r.status.state !== 'running') { clearInterval(_altPushPoll); _altPushPoll = null; }
+    } catch (_) {}
+  };
+  tick();
+  _altPushPoll = setInterval(tick, 4000);
+}
+
 // ── eBay category audit — scan every live listing for a wrong category (vs
 // eBay's own suggestion for the title) and missing required specifics, then
 // move flagged listings to the right category (per-row or all at once). ──
@@ -24658,6 +24693,10 @@ function renderAiPage() {
             </div>
           </div>
           <div id="pnck-result" style="margin-top:12px"></div>
+          <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-outline btn-sm" onclick="altPushAll(this)" title="Re-sends EVERY product's full alternate-number list to its eBay listings (all written forms, merged — nothing removed) and the Shopify alternate-numbers field. Repairs numbers wiped by earlier pushes.">⬆ Bulk push ALL alternates to eBay + Shopify</button>
+            <div id="alt-push-status" style="font-size:12px;color:var(--ink-soft)"></div>
+          </div>
         </div>
       </div>
 
@@ -24679,6 +24718,8 @@ function renderAiPage() {
   clearInterval(_aiPagePoll);
   _aiPagePoll = setInterval(aiPagePollTick, 2500);
   aiPagePollTick();
+  // A bulk alternate push may be running/finished — show where it got to.
+  Api.get('/api/ai/alts/push-all').then(r => { altPushPaint(r.status); if (r.status.state === 'running') altPushWatch(); }).catch(() => {});
 }
 async function loadAiPageBanner() {
   const b = el('ai-page-banner');
