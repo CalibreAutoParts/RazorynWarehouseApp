@@ -24169,7 +24169,8 @@ async function pnckCheck(btn) {
   if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
   if (out) out.innerHTML = '<div style="font-size:12px;color:var(--ink-soft)">🤖 Verifying ' + escapeHtml(code) + ' against ' + escapeHtml(p.partNumber || p.sku) + ' (and the photo)…</div>';
   try {
-    const r = await Api.post('/api/ai/check-part-number', { productId: p.id, code });
+    const groupIds = [...document.querySelectorAll('.pnck-member:checked')].map(c => parseInt(c.value)).filter(Boolean);
+    const r = await Api.post('/api/ai/check-part-number', { productId: p.id, code, productIds: groupIds.length ? groupIds : [p.id] });
     _pnck.verdict = r.verdict; _pnck.code = code;
     pnckPaintVerdict(r);
   } catch (e) {
@@ -24184,7 +24185,16 @@ function pnckPaintVerdict(r) {
   const conf = Math.round((v.confidence || 0) * 100) + '%';
   const relLabel = { superseded: 'superseded / updated revision', regional: 'regional code — same part & fitment', alternative: 'alternative number for the same part', same_number: 'the same number (different layout)', unrelated: 'a different part' }[v.relationship] || v.relationship;
   if (r.alreadyKnown) {
-    out.innerHTML = '<div style="padding:10px;border:1px solid var(--line);border-radius:8px;font-size:13px">ℹ️ ' + escapeHtml(v.reason) + '</div>';
+    // In the warehouse already — but show per-listing whether eBay has it,
+    // and always offer the push (it fills any gaps, never removes numbers).
+    const chk = r.ebayCheck || [];
+    const missing = chk.filter(x => x.has === false).length;
+    out.innerHTML = `<div style="padding:12px;border:1px solid ${missing ? 'var(--amber, orange)' : 'var(--line)'};border-radius:8px;font-size:13px">
+      <div>${missing ? '⚠️' : 'ℹ️'} ${escapeHtml(v.reason)}</div>
+      ${chk.length ? `<div style="margin-top:6px;font-size:12px">${chk.map(x => `<div>${x.has === true ? '✅' : x.has === false ? '❌' : '❔'} eBay <a href="https://www.ebay.co.uk/itm/${escapeAttr(x.itemId)}" target="_blank" rel="noopener">${escapeHtml(x.itemId)}</a>${x.has === false ? ' — number missing' : x.has === true ? ' — has it' : ' — couldn’t check'}</div>`).join('')}</div>` : ''}
+      <div style="margin-top:10px"><button class="btn ${missing ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="pnckPush(false, this)">⬆ Push to eBay + Shopify${(_pnck.group || []).length > 1 ? ' (shared group)' : ''}</button></div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Adds it to the eBay "Reference OE/OEM Number" specifics on every linked listing, alongside the numbers already there — nothing gets removed.</div>
+    </div>`;
     return;
   }
   if (v.same) {
@@ -24224,11 +24234,16 @@ async function pnckPush(override, btn) {
       override, verdict: v || null,
     });
     const s = r.summary || {};
-    const queued = (r.results || []).some(x => (x.ebay || []).some(e => e.queued));
-    toast(`Added ${code} to ${s.ok}/${s.total} listing(s)` + (queued ? ' · some eBay pushes queued (offer open)' : '') + (s.failed ? ' · ' + s.failed + ' failed' : ''), s.failed ? 'warn' : 'success', 8000);
+    const ebayAll = (r.results || []).flatMap(x => x.ebay || []);
+    const ebayOk = ebayAll.filter(e => e.ok).length, ebayQ = ebayAll.filter(e => e.queued).length, ebayErr = ebayAll.filter(e => e.error).length;
+    const noEbay = (r.results || []).filter(x => x.ok && !(x.ebay || []).length).length;
+    toast(`Added ${code} to ${s.ok}/${s.total} listing(s) · eBay: ${ebayOk} updated` + (ebayQ ? `, ${ebayQ} queued (offer open)` : '') + (ebayErr ? `, ${ebayErr} failed` : '') + (s.failed ? ' · ' + s.failed + ' failed' : ''), (s.failed || ebayErr) ? 'warn' : 'success', 9000);
     if (el('pnck-result')) {
-      el('pnck-result').innerHTML = '<div style="font-size:13px;color:var(--green);font-weight:600">✓ ' + escapeHtml(code) + ' is now on ' + s.ok + ' listing(s) — warehouse, Shopify & eBay.</div>'
-        + ((r.results || []).filter(x => !x.ok).map(x => '<div style="font-size:12px;color:var(--red)">Product #' + x.productId + ': ' + escapeHtml(x.error || '') + '</div>').join(''));
+      el('pnck-result').innerHTML = '<div style="font-size:13px;color:var(--green);font-weight:600">✓ ' + escapeHtml(code) + ` pushed — warehouse ✓ · eBay ${ebayOk} listing${ebayOk === 1 ? '' : 's'} updated${ebayQ ? ` · ${ebayQ} queued (an offer is open — retries automatically)` : ''}.</div>`
+        + (noEbay ? `<div style="font-size:12px;color:var(--amber,orange)">⚠ ${noEbay} listing(s) have no linked eBay listing in the warehouse — nothing to push to on eBay for those.</div>` : '')
+        + ebayAll.filter(e => e.error).map(e => '<div style="font-size:12px;color:var(--red)">eBay ' + escapeHtml(e.itemId) + ': ' + escapeHtml(e.error) + '</div>').join('')
+        + ((r.results || []).filter(x => !x.ok).map(x => '<div style="font-size:12px;color:var(--red)">Product #' + x.productId + ': ' + escapeHtml(x.error || '') + '</div>').join(''))
+        + '<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">eBay search can take a few hours to pick up revised item specifics.</div>';
     }
     if (el('pnck-code')) el('pnck-code').value = '';
     Store.refresh('products').catch(() => {});

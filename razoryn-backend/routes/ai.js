@@ -116,8 +116,22 @@ async function mergeIntoLiveSpecifics(itemId, storeCode, addSpecifics, meta = {}
     if (!sp || !sp.name || !vals.length) continue;
     const key = String(sp.name).toLowerCase();
     before[sp.name] = byName.has(key) ? byName.get(key).values.join(', ') : null;
-    after[sp.name] = vals.join(', ');
-    byName.set(key, { name: String(sp.name), values: vals.slice(0, 25) });
+    // union: ADD to what eBay already has (cross-reference number lists) —
+    // never replace, or every earlier alternate on the listing is wiped.
+    let next = vals;
+    if (meta.union && byName.has(key)) {
+      const seen = new Set();
+      // Dedupe on the exact text, NOT the normalised number: eBay search
+      // doesn't treat "98 237 184 80" and "9823718480" as the same, so both
+      // written forms must stay on the listing.
+      next = [...byName.get(key).values, ...vals].filter(v => {
+        const n = String(v).trim().toUpperCase();
+        if (!n || seen.has(n)) return false;
+        seen.add(n); return true;
+      });
+    }
+    after[sp.name] = next.join(', ');
+    byName.set(key, { name: String(sp.name), values: next.slice(0, 25) });
   }
   const full = [...byName.values()].map(e => e.values.length > 1 ? { name: e.name, values: e.values } : { name: e.name, value: e.values[0] });
   const r = await pushQueue.revisePush(itemId, { itemSpecifics: full }, storeCode, {
@@ -305,14 +319,29 @@ async function applySuggestion(s, payloadOverride) {
         out.shopify = 'ok';
       }
     } catch (e) { out.shopify = 'error: ' + e.message; }
+    // eBay: each number as its OWN value (eBay searches item specifics per
+    // value; one comma-joined string capped at 65 chars hides numbers), and
+    // the COMPLETE warehouse alternate list goes up every time — merged into
+    // what the listing already carries — so earlier pushes are never lost
+    // and a number that's "already on the product" still reaches eBay.
     const specifics = [];
-    if (superseded.length) specifics.push({ name: 'Superseded Part Number', value: superseded.join(', ').slice(0, 65) });
-    const refs = [...new Set([...regional, ...reference])];
-    if (refs.length) specifics.push({ name: 'Reference OE/OEM Number', value: refs.join(', ').slice(0, 65) });
+    if (superseded.length) specifics.push({ name: 'Superseded Part Number', values: superseded.slice(0, 25) });
+    let allAlts = [];
+    try {
+      const mainPn = (await query(`SELECT part_number FROM products WHERE id = $1`, [s.product_id])).rows[0]?.part_number || '';
+      const nm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      allAlts = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [s.product_id])).rows
+        .map(r => r.code).filter(c => nm(c) && nm(c) !== nm(mainPn) && !superseded.some(x => nm(x) === nm(c)));
+    } catch (_) {}
+    // Every written form of each number (compact, spaced, hyphenated) —
+    // buyers type them all, and eBay only matches what's literally there.
+    const { pnVariants } = require('../lib/part-numbers');
+    const refs = [...new Set([...regional, ...reference, ...allAlts].flatMap(c => { try { return pnVariants(c); } catch (_) { return [c]; } }))];
+    if (refs.length) specifics.push({ name: 'Reference OE/OEM Number', values: refs.slice(0, 25) });
     if (specifics.length) {
       for (const l of await ebayLinksForProduct(s.product_id)) {
         try {
-          const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, specifics, { productId: s.product_id, source: 'ai-' + s.kind });
+          const r = await mergeIntoLiveSpecifics(l.ebay_item_id, l.store_code, specifics, { productId: s.product_id, source: 'ai-' + s.kind, union: true });
           out.ebay.push(r.queued ? { itemId: l.ebay_item_id, queued: true } : { itemId: l.ebay_item_id, ok: true, sent: r.sent });
         }
         catch (e) { out.ebay.push({ itemId: l.ebay_item_id, error: e.message }); }
@@ -430,10 +459,32 @@ router.post('/check-part-number', async (req, res) => {
   if (!p) return res.status(404).json({ error: 'product_not_found' });
   let alternates = [];
   try { alternates = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [productId])).rows.map(r => r.code); } catch (_) {}
-  // Already on file? Say so without burning a call.
+  // Already on file in the WAREHOUSE? That doesn't mean eBay has it — look
+  // at every linked live listing (whole shared group) and report which ones
+  // actually carry the number, so missing ones can be pushed in one click.
   const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   if ([p.part_number, ...alternates].some(c => c && norm(c) === norm(code))) {
-    return res.json({ ok: true, alreadyKnown: true, verdict: { same: true, relationship: 'same_number', confidence: 1, reason: 'This number (or another typed form of it) is already on the product.', differences: null } });
+    const groupIds = (Array.isArray(req.body?.productIds) && req.body.productIds.length
+      ? [...new Set(req.body.productIds.map(x => parseInt(x)).filter(Boolean))] : [productId]).slice(0, 12);
+    const ebayCheck = [];
+    for (const pid of groupIds) {
+      for (const l of (await ebayLinksForProduct(pid)).slice(0, 4)) {
+        try {
+          const det = await ebay.getItemDetails(l.ebay_item_id, l.store_code);
+          // Look for the EXACT form typed — eBay search is literal, so a
+          // listing holding only "98 237 184 80" won't come up for "9823718480".
+          const want = code.toUpperCase().replace(/\s+/g, ' ').trim();
+          const hay = [det.title || '', ...(det.specifics || []).flatMap(sp => specVals(sp))].map(h => String(h).toUpperCase().replace(/\s+/g, ' '));
+          ebayCheck.push({ productId: pid, itemId: l.ebay_item_id, has: hay.some(h => h.includes(want)) });
+        } catch (e) { ebayCheck.push({ productId: pid, itemId: l.ebay_item_id, has: null, error: e.message }); }
+      }
+    }
+    const missing = ebayCheck.filter(x => x.has === false).length;
+    return res.json({ ok: true, alreadyKnown: true, ebayCheck, verdict: { same: true, relationship: 'same_number', confidence: 1,
+      reason: missing
+        ? `This number is already in the warehouse — but ${missing} of ${ebayCheck.length} live eBay listing${ebayCheck.length === 1 ? '' : 's'} DON'T carry it yet, so eBay buyers searching it won't find them. Push it below.`
+        : (ebayCheck.length ? `This number is already in the warehouse and on all ${ebayCheck.length} linked eBay listing${ebayCheck.length === 1 ? '' : 's'}.` : 'This number is already in the warehouse. (No linked eBay listing found to check — it may not be mirrored to eBay.)'),
+      differences: null } });
   }
   try {
     const verdict = await ai.verifyAltNumber({
