@@ -575,9 +575,12 @@ router.post('/alts/push-all', async (req, res) => {
 router.get('/alts/push-all', (req, res) => res.json({ status: _altPush }));
 
 async function aiScanNotify(title, body, severity) {
+  // In-app + pushed to admins' devices (AI results carry prices/margins).
   try {
-    await query(`INSERT INTO notifications (type, title, body, severity, related_type, related_id)
-                 VALUES ('ai_scan', $1, $2, $3, NULL, NULL)`, [title, body, severity || 'info']);
+    await require('../lib/notify').notifyEvent({
+      type: 'ai_scan', title: '🤖 ' + title, body, severity: severity || 'info',
+      audience: 'admin', url: '/#ai', tag: 'ai-' + title.toLowerCase().replace(/[^a-z]+/g, '-'), force: true,
+    });
   } catch (_) {}
 }
 

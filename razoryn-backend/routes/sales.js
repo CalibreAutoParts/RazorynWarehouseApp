@@ -808,6 +808,16 @@ router.post('/', requireAdmin, async (req, res) => {
   await audit(req, isEstimate ? 'create_estimate' : (isPreorder ? 'create_preorder' : 'create_sale'), 'sale', result.sale.id, {
     channel: b.channel, total: result.sale.total
   });
+  // 💷 Direct sale (counter, phone order from home…) → same batched "sold" alert.
+  if (!isEstimate) {
+    try {
+      require('../lib/notify').saleSold({
+        saleId: result.sale.id, channel: b.channel, ref: result.sale.invoice_number,
+        customer: result.sale.customer_name, total: result.sale.total, occurredAt: new Date(),
+        items: (result.items || []).map(i => ({ title: i.title, sku: i.sku, qty: i.qty })),
+      });
+    } catch (_) {}
+  }
 
   // Push stock for non-estimate, non-preorder sales (pre-orders don't change stock).
   if (!isEstimate && !isPreorder) {

@@ -77,18 +77,25 @@ async function removeSubscription(endpoint) {
 // the window are dropped (the in-app notifications list still records them all).
 const _lastPushByCategory = {};
 const PUSH_COOLDOWN_MS = 45_000;
-async function sendToAll({ title, body, url, tag, category, force } = {}) {
+// audience: null = every device · 'admin' = devices signed in as an admin ·
+// 'staff' = devices signed in as non-admin staff (money stays off their tray).
+const AUDIENCE_SQL = `(
+  $1::text IS NULL
+  OR ($1 = 'admin' AND EXISTS (SELECT 1 FROM users u WHERE u.id = s.user_id AND u.role = 'admin'))
+  OR ($1 = 'staff' AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = s.user_id AND u.role = 'admin'))
+)`;
+async function sendToAll({ title, body, url, tag, category, force, audience = null } = {}) {
   try {
     if (category && !force) {
-      const last = _lastPushByCategory[category] || 0;
+      const last = _lastPushByCategory[category + '|' + (audience || '')] || 0;
       if (Date.now() - last < PUSH_COOLDOWN_MS) return { sent: 0, throttled: true };
-      _lastPushByCategory[category] = Date.now();
+      _lastPushByCategory[category + '|' + (audience || '')] = Date.now();
     }
     // Also deliver to native Android app devices via FCM (no-op until Firebase is
     // configured). Best-effort — never let native push break web push.
-    try { require('./fcm').sendToAll({ title, body, url, category }); } catch (_) {}
+    try { require('./fcm').sendToAll({ title, body, url, category, audience }); } catch (_) {}
     await ensureSetup();
-    const { rows } = await query(`SELECT endpoint, p256dh, auth FROM push_subscriptions`);
+    const { rows } = await query(`SELECT s.endpoint, s.p256dh, s.auth FROM push_subscriptions s WHERE ${AUDIENCE_SQL}`, [audience || null]);
     if (!rows.length) return { sent: 0, total: 0 };
     const payload = JSON.stringify({
       title: title || 'Warehouse Hub',

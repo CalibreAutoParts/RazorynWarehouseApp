@@ -6,11 +6,18 @@ const { requireAuth } = require('../middleware/auth');
 const router = express.Router();
 router.use(requireAuth);
 
+// Audience: admins see everyone + 'admin' rows; staff see everyone + 'staff'
+// rows — money-bearing alerts (sale totals, competitor prices, AI pricing)
+// never reach warehouse staff.
+const { ensureCols } = require('../lib/notify');
+const audienceFor = (req) => (req.user.role === 'admin' ? 'admin' : 'staff');
+
 // GET /api/notifications?unread=1
 router.get('/', async (req, res) => {
+  await ensureCols();
   const { unread } = req.query;
-  const where = ['(target_user_id IS NULL OR target_user_id = $1)'];
-  const params = [req.user.id];
+  const where = ['(target_user_id IS NULL OR target_user_id = $1)', '(audience IS NULL OR audience = $2)'];
+  const params = [req.user.id, audienceFor(req)];
   if (unread === '1') where.push('read_at IS NULL');
   const { rows } = await query(
     `SELECT * FROM notifications WHERE ${where.join(' AND ')}
@@ -18,10 +25,25 @@ router.get('/', async (req, res) => {
   );
   const unreadCount = await query(
     `SELECT COUNT(*)::int AS n FROM notifications
-     WHERE (target_user_id IS NULL OR target_user_id = $1) AND read_at IS NULL`,
-    [req.user.id]
+     WHERE (target_user_id IS NULL OR target_user_id = $1) AND (audience IS NULL OR audience = $2) AND read_at IS NULL`,
+    [req.user.id, audienceFor(req)]
   );
   res.json({ notifications: rows, unreadCount: unreadCount.rows[0].n });
+});
+
+// GET /api/notifications/feed?after=<id> — what the Windows desktop app polls
+// to raise native OS notifications. Without ?after it only returns the latest
+// id, so a fresh install never dumps the whole history as toasts.
+router.get('/feed', async (req, res) => {
+  await ensureCols();
+  const latest = (await query(`SELECT COALESCE(MAX(id), 0)::int AS id FROM notifications`)).rows[0].id;
+  const after = parseInt(req.query.after);
+  if (!(after >= 0) || req.query.after === undefined) return res.json({ latestId: latest, items: [] });
+  const { rows } = await query(`
+    SELECT id, type, title, body, severity, related_type, related_id, created_at FROM notifications
+     WHERE id > $1 AND (target_user_id IS NULL OR target_user_id = $2) AND (audience IS NULL OR audience = $3)
+     ORDER BY id LIMIT 25`, [after, req.user.id, audienceFor(req)]);
+  res.json({ latestId: latest, items: rows });
 });
 
 // POST /api/notifications/:id/read

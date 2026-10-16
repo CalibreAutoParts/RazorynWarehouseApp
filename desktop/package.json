@@ -1,7 +1,7 @@
 {
   "name": "calibre-warehouse-desktop",
-  "version": "1.1.0",
-  "description": "Warehouse Hub desktop app + background packing-label print agent",
+  "version": "1.2.0",
+  "description": "Warehouse Hub desktop app \u2014 native notifications + background packing-label print agent",
   "author": "Calibre Auto Parts Ltd",
   "license": "UNLICENSED",
   "private": true,
