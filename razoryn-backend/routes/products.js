@@ -715,6 +715,47 @@ router.delete('/:id/photos/:photoId', requirePermission('inventory'), async (req
 // ReviseFixedPriceItem (legacy ReviseItem can silently ignore a package change
 // on listings that already have package details). Shared by the admin PATCH and
 // the staff-permitted /:id/package endpoint.
+// Listings of the SAME physical part — same shared stock pool, or the same
+// part number under a different SKU — ship in the same box. A parcel size /
+// weight / "no fixed box" / packaging change on one is copied to all of
+// them (and each pushes to its own eBay + Shopify listings).
+const PKG_COLS = ['pkg_length_cm', 'pkg_width_cm', 'pkg_height_cm', 'pkg_weight_g', 'fixed_box', 'packaging_included', 'packaging_cost'];
+async function pkgSnapshot(id) {
+  return (await query(`SELECT ${PKG_COLS.join(', ')} FROM products WHERE id = $1`, [id])).rows[0] || null;
+}
+// Only what actually CHANGED is copied — editors resend every field on each
+// save — and a blank size/weight never overwrites a sibling's real one.
+function pkgChangedCols(before, after) {
+  const DIMS = ['pkg_length_cm', 'pkg_width_cm', 'pkg_height_cm', 'pkg_weight_g'];
+  return PKG_COLS.filter(c => {
+    const a = before ? before[c] : undefined, b = after[c];
+    if (String(a ?? '') === String(b ?? '')) return false;
+    if (DIMS.includes(c) && (b == null || !(parseFloat(b) > 0))) return false;
+    return true;
+  });
+}
+async function propagatePackageToSiblings(row, cols, { pushDims = false } = {}) {
+  if (!cols || !cols.length) return { count: 0 };
+  const pn = String(row.part_number || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const { rows: sibs } = await query(`
+    SELECT id FROM products
+     WHERE id <> $1
+       AND (($2::int IS NOT NULL AND stock_group_id = $2)
+            OR (length($3::text) >= 5 AND upper(regexp_replace(COALESCE(part_number, ''), '[^A-Za-z0-9]', '', 'g')) = $3::text))`,
+    [row.id, row.stock_group_id || null, pn]);
+  if (!sibs.length) return { count: 0 };
+  const params = cols.map(c => row[c] === undefined ? null : row[c]);
+  const sets = cols.map((c, i) => `${c} = $${i + 1}`).join(', ');
+  const ids = sibs.map(s => s.id);
+  const { rows: updated } = await query(
+    `UPDATE products SET ${sets}, updated_at = now() WHERE id = ANY($${cols.length + 1}) RETURNING *`, [...params, ids]);
+  const dimsChanged = cols.some(c => c.startsWith('pkg_'));
+  if (pushDims && dimsChanged) {
+    for (const s of updated) { try { await pushPackageToChannels(s); } catch (e) { console.warn('[products] sibling package push', s.id, e.message); } }
+  }
+  return { count: updated.length };
+}
+
 async function pushPackageToChannels(row) {
   const packagePush = { shopifyWeight: null, shopifyDims: null, ebay: [] };
   if (row.shopify_product_id) {
@@ -791,14 +832,35 @@ router.post('/:id/package', requirePermission('inventory'), async (req, res) => 
     if (b.packagingCost !== undefined) add('packaging_cost', num(b.packagingCost));
     if (!sets.length) return res.status(400).json({ error: 'no_fields' });
     params.push(req.params.id);
+    const before = await pkgSnapshot(req.params.id);
     const { rows } = await query(
       `UPDATE products SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length} RETURNING *`, params);
     if (!rows[0]) return res.status(404).json({ error: 'not_found' });
     const pkgTouched = [b.pkgLengthCm, b.pkgWidthCm, b.pkgHeightCm, b.pkgWeightG].some(v => v !== undefined);
     const packagePush = pkgTouched ? await pushPackageToChannels(rows[0]) : null;
-    await audit(req, 'update_product_package', 'product', rows[0].id, { fixedBox: b.fixedBox, packagingIncluded: b.packagingIncluded });
-    res.json({ product: rows[0], ...(packagePush ? { packagePush } : {}) });
+    let siblings = { count: 0 };
+    if (b.applyToSiblings !== false) {
+      try { siblings = await propagatePackageToSiblings(rows[0], pkgChangedCols(before, rows[0]), { pushDims: pkgTouched }); } catch (e) { console.warn('[products] package siblings:', e.message); }
+    }
+    await audit(req, 'update_product_package', 'product', rows[0].id, { fixedBox: b.fixedBox, packagingIncluded: b.packagingIncluded, siblings: siblings.count });
+    res.json({ product: rows[0], siblingsUpdated: siblings.count, ...(packagePush ? { packagePush } : {}) });
   } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+});
+
+// POST /:id/package/copy-to-siblings — push THIS item's parcel size/weight
+// (and box/packaging flags) onto every listing of the same part, e.g. sizes
+// entered before automatic copying existed.
+router.post('/:id/package/copy-to-siblings', requirePermission('inventory'), async (req, res) => {
+  try {
+    await ensureProductLocationColumns();
+    const row = (await query(`SELECT * FROM products WHERE id = $1`, [req.params.id])).rows[0];
+    if (!row) return res.status(404).json({ error: 'not_found' });
+    const cols = PKG_COLS.filter(c => row[c] != null && (!c.startsWith('pkg_') || parseFloat(row[c]) > 0));
+    if (!cols.length) return res.status(400).json({ error: 'nothing_to_copy', message: 'This item has no parcel size saved yet.' });
+    const r = await propagatePackageToSiblings(row, cols, { pushDims: true });
+    await audit(req, 'copy_package_to_siblings', 'product', row.id, { siblings: r.count });
+    res.json({ ok: true, siblingsUpdated: r.count });
+  } catch (e) { res.status(500).json({ error: 'copy_failed', message: e.message }); }
 });
 
 // PATCH /api/products/:id  — update fields (admin)
@@ -841,6 +903,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   }
   if (!sets.length) return res.status(400).json({ error: 'no_updatable_fields' });
   params.push(req.params.id);
+  const pkgBefore = await pkgSnapshot(req.params.id);
   // Bump updated_at so the frontend's ?v= cache-buster sees changed photos.
   const { rows } = await query(
     `UPDATE products SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length} RETURNING *`,
@@ -866,6 +929,12 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   }
   let packagePush = null;
   if (pkgTouched) packagePush = await pushPackageToChannels(rows[0]);
+  // Same part, other SKUs/listings → same box.
+  let siblingsUpdated = 0;
+  const pkgAnyTouched = pkgTouched || ['fixedBox', 'fixed_box', 'packagingIncluded', 'packaging_included', 'packagingCost', 'packaging_cost'].some(k => k in (req.body || {}));
+  if (pkgAnyTouched && req.body?.applyToSiblings !== false) {
+    try { siblingsUpdated = (await propagatePackageToSiblings(rows[0], pkgChangedCols(pkgBefore, rows[0]), { pushDims: pkgTouched })).count; } catch (e) { console.warn('[products] package siblings:', e.message); }
+  }
   // Position / part-number edits → storefront info metafields (Position,
   // Secondary Position, Part Number), resolved by the store's own definitions.
   if (!pkgTouched && ['position', 'partNumber', 'part_number'].some(k => k in (req.body || {})) && rows[0].shopify_product_id) {
@@ -885,7 +954,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
     if (auditBody[f]) auditBody[f] = '[photo]';
   }
   await audit(req, 'update_product', 'product', rows[0].id, auditBody);
-  res.json({ product: rows[0], ...(packagePush ? { packagePush } : {}) });
+  res.json({ product: rows[0], siblingsUpdated, ...(packagePush ? { packagePush } : {}) });
 });
 
 // PATCH /api/products/:id/location — warehouse-staff-safe subset of the product

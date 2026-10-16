@@ -5316,6 +5316,7 @@ function openProductModal(id) {
           <div><input type="number" step="0.1" min="0" id="m-pkg-h" value="${p.pkgHeightCm ?? ''}" placeholder="H cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Height</div></div>
           <div><input type="number" step="0.1" min="0" id="m-pkg-g" value="${p.pkgWeightG != null ? +(p.pkgWeightG / 1000).toFixed(2) : ''}" placeholder="kg"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (kg)</div></div>
         </div>
+        ${id && pkgSiblingsOf(p).length ? `<button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="pkgCopyToSiblings('${p.id}', this)" title="Same part number / shared pool = same box. Copies this size, weight and packaging to every other listing of the part (and pushes to their eBay + Shopify).">📦 Copy this size to ${pkgSiblingsOf(p).length} same-part listing${pkgSiblingsOf(p).length === 1 ? '' : 's'}</button>` : ''}
         <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
           <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><label class="switch"><input type="checkbox" id="m-pkg-inc" ${p.packagingIncluded !== false ? 'checked' : ''} onchange="el('m-pkg-cost-wrap').style.display=this.checked?'none':''"><span></span></label> Packaging came with the purchase cost</label>
           <span id="m-pkg-cost-wrap" style="display:${p.packagingIncluded === false ? '' : 'none'};align-items:center;gap:6px">
@@ -5374,6 +5375,7 @@ function openProductModal(id) {
               (pp.ebay || []).forEach(e2 => { if (e2.error) errs.push('eBay ' + e2.itemId + ': ' + e2.error); });
               if (errs.length) toast('⚠ Parcel push issues: ' + errs.join(' · '), 'warn', 10000);
             }
+            if (patchRes && patchRes.siblingsUpdated) toast(`📦 Parcel details also applied to ${patchRes.siblingsUpdated} other listing${patchRes.siblingsUpdated === 1 ? '' : 's'} of the same part`, 'info', 6000);
             const newQty = +el('m-qty').value;
             if (newQty !== (p.qtyOnHand ?? p.qtyShopify)) {
               // set-quantity sets the absolute value AND pushes to Shopify + eBay
@@ -16238,13 +16240,15 @@ function openProductQuickSheet(id) {
           <div><input type="number" step="0.1" min="0" id="qs-h" value="${p.pkgHeightCm ?? ''}" placeholder="H"><div style="font-size:9px;color:var(--ink-soft);text-align:center">H cm</div></div>
           <div><input type="number" step="0.01" min="0" id="qs-kg" value="${p.pkgWeightG != null ? +(p.pkgWeightG / 1000).toFixed(2) : ''}" placeholder="kg"><div style="font-size:9px;color:var(--ink-soft);text-align:center">kg</div></div>
         </div>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:6px"><label class="switch"><input type="checkbox" id="qs-fixed" ${p.fixedBox ? 'checked' : ''}><span></span></label> Has a fixed box (settled carton size)</label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:6px"><label class="switch"><input type="checkbox" id="qs-fixed" ${p.fixedBox !== false ? 'checked' : ''}><span></span></label> Has a fixed box (settled carton size)</label>
+        ${p.fixedBox === false ? '<div style="font-size:11px;color:var(--amber,orange);margin:-2px 0 6px">Marked “no fixed box” — enter the size above and save to undo.</div>' : ''}
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:6px"><label class="switch"><input type="checkbox" id="qs-prepack" ${p.packagingIncluded !== false ? 'checked' : ''} onchange="el('qs-pack-cost-wrap').style.display=this.checked?'none':''"><span></span></label> Comes pre-packaged (packaging in the purchase cost)</label>
         <div id="qs-pack-cost-wrap" style="display:${p.packagingIncluded === false ? '' : 'none'};margin-bottom:6px">
           <input id="qs-pack-cost" type="number" step="0.01" min="0" inputmode="decimal" value="${p.packagingCost ?? ''}" placeholder="£ packaging per item" style="width:100%">
           <div style="font-size:10px;color:var(--ink-soft);margin-top:2px">Bought separately — this £ goes into the item's cost maths.</div>
         </div>
         <button class="btn btn-outline" style="width:100%" onclick="qsSavePackage('${p.id}')">💾 Save parcel &amp; packaging</button>
+        ${pkgSiblingsOf(p).length ? `<button class="btn btn-ghost btn-sm" style="width:100%;margin-top:6px" onclick="pkgCopyToSiblings('${p.id}', this)">📦 Copy saved size to ${pkgSiblingsOf(p).length} same-part listing${pkgSiblingsOf(p).length === 1 ? '' : 's'}</button>` : ''}
         ${State.user?.role === 'admin' ? `
         <div style="border-top:1px solid var(--line-2);margin-top:10px;padding-top:10px">
           <button class="btn btn-outline btn-sm" style="width:100%" onclick="qsEstimatePostage('${p.id}', this)">💷 Estimate postage from courier rate sheets</button>
@@ -16354,15 +16358,37 @@ async function qsSetPostage(id, price, btn) {
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
 }
 
+// Other listings of the SAME physical part (shared pool or same part
+// number on a different SKU) — they ship in the same box.
+function pkgSiblingsOf(p) {
+  if (!p) return [];
+  const pn = String(p.partNumber || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return (State.products || []).filter(x => String(x.id) !== String(p.id) && (
+    (p.stockGroupId && x.stockGroupId === p.stockGroupId) ||
+    (pn.length >= 5 && String(x.partNumber || '').toUpperCase().replace(/[^A-Z0-9]/g, '') === pn)));
+}
+async function pkgCopyToSiblings(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post(`/api/products/${id}/package/copy-to-siblings`, {});
+    toast(`📦 Size copied to ${r.siblingsUpdated} same-part listing${r.siblingsUpdated === 1 ? '' : 's'} — pushed to their eBay + Shopify`, 'success', 6000);
+    await Store.refresh('products').catch(() => {});
+    if (State.page === 'iteminfo') iiPaint();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
+}
 async function qsSavePackage(id) {
   const v = (x) => { const n = el(x); return n && n.value !== '' ? n.value : null; };
   const prepack = !!el('qs-prepack')?.checked;
+  // A full size entered IS a fixed box — never let an untouched toggle save
+  // it as "no fixed box" (that hid items from the size worklist for good).
+  const dimsComplete = ['qs-l', 'qs-w', 'qs-h', 'qs-kg'].every(x => v(x) != null && parseFloat(v(x)) > 0);
   const taskId = Task.start('Saving parcel');
   try {
     const r = await Api.post(`/api/products/${id}/package`, {
       pkgLengthCm: v('qs-l'), pkgWidthCm: v('qs-w'), pkgHeightCm: v('qs-h'),
       pkgWeightG: v('qs-kg') != null ? Math.round(parseFloat(v('qs-kg')) * 1000) : null,
-      fixedBox: !!el('qs-fixed')?.checked,
+      fixedBox: dimsComplete ? true : !!el('qs-fixed')?.checked,
       packagingIncluded: prepack,
       packagingCost: prepack ? null : v('qs-pack-cost'),
     });
@@ -16374,8 +16400,10 @@ async function qsSavePackage(id) {
       if (pp.shopifyDims && pp.shopifyDims !== 'ok') errs.push('Shopify dims: ' + pp.shopifyDims);
       (pp.ebay || []).forEach(e2 => { if (e2.error) errs.push('eBay ' + e2.itemId + ': ' + e2.error); });
     }
-    toast(errs.length ? '⚠ Saved, but: ' + errs.join(' · ') : 'Parcel & packaging saved' + (pp ? ' — pushed to channels' : ''), errs.length ? 'warn' : 'success', 6000);
-    Store.refresh('products').catch(() => {});
+    const sib = r.siblingsUpdated ? ` · also applied to ${r.siblingsUpdated} other listing${r.siblingsUpdated === 1 ? '' : 's'} of the same part` : '';
+    toast(errs.length ? '⚠ Saved, but: ' + errs.join(' · ') + sib : 'Parcel & packaging saved' + (pp ? ' — pushed to channels' : '') + sib, errs.length ? 'warn' : 'success', 7000);
+    await Store.refresh('products').catch(() => {});
+    if (State.page === 'iteminfo') iiPaint();
   } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
@@ -16494,9 +16522,28 @@ function iiPaint() {
   const box = el('ii-list'); if (!box) return;
   const f = State.infoFilter || 'size';
   const q = (el('ii-q')?.value || '').trim().toLowerCase();
-  let list = dedupeSharedPools((State.products || []).filter(p => !p.isPrelisted && !p.hidden)).filter(p => iiNeeds(p, f));
+  const pool = dedupeSharedPools((State.products || []).filter(p => !p.isPrelisted && !p.hidden));
+  // Size view toggle: items still missing a size, or items marked "no fixed
+  // box" — so a mis-tap is never a dead end (open one, or undo in one tap).
+  const noBox = f === 'size' ? pool.filter(p => p.fixedBox === false) : [];
+  const showNoBox = f === 'size' && State.iiNoBoxView && noBox.length;
+  let list = showNoBox ? noBox : pool.filter(p => iiNeeds(p, f));
   if (q) list = list.filter(p => matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model));
-  const cnt = el('ii-count'); if (cnt) cnt.textContent = `${list.length} item${list.length === 1 ? '' : 's'} still missing this`;
+  const cnt = el('ii-count');
+  if (cnt) cnt.innerHTML = (showNoBox ? `${list.length} item${list.length === 1 ? '' : 's'} marked “no fixed box”` : `${list.length} item${list.length === 1 ? '' : 's'} still missing this`)
+    + (f === 'size' && noBox.length ? ` · <a href="#" onclick="event.preventDefault();State.iiNoBoxView=!State.iiNoBoxView;iiPaint()">${showNoBox ? '← back to missing sizes' : `📦 ${noBox.length} marked “no fixed box” — view / undo`}</a>` : '');
+  if (showNoBox) {
+    box.innerHTML = list.slice(0, 80).map(p => `
+    <div style="display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:7px" onclick="openProductQuickSheet('${p.id}')">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(p.title || '')}</div>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')}</div>
+      </div>
+      <button class="btn btn-outline btn-sm" style="flex:none" onclick="event.stopPropagation();iiUndoNoBox('${p.id}', this)" title="Put it back on the missing-size list">↩ Undo</button>
+      <span style="color:var(--ink-soft)">›</span>
+    </div>`).join('') || '<div class="empty" style="padding:20px;text-align:center"><div class="t">None</div></div>';
+    return;
+  }
   box.innerHTML = list.slice(0, 80).map(p => `
     <div style="display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:7px" onclick="openProductQuickSheet('${p.id}')">
       ${(p.itemPhoto || p.imageUrl) ? `<img src="${escapeAttr(p.itemPhoto || p.imageUrl)}" loading="lazy" style="width:44px;height:44px;object-fit:cover;border-radius:8px;flex:none">` : '<div style="width:44px;height:44px;border-radius:8px;background:var(--line-2);flex:none"></div>'}
@@ -16511,8 +16558,18 @@ function iiPaint() {
 async function iiNoFixedBox(id, btn) {
   if (btn) btn.disabled = true;
   try {
-    await Api.post(`/api/products/${id}/package`, { fixedBox: false });
-    toast('Marked: no fixed box — it won\'t nag for a size', 'success', 3000);
+    const r = await Api.post(`/api/products/${id}/package`, { fixedBox: false });
+    toast('Marked: no fixed box' + (r.siblingsUpdated ? ` (+${r.siblingsUpdated} same-part listing${r.siblingsUpdated === 1 ? '' : 's'})` : '') + ' — mis-tap? Use “view / undo” at the top of this list.', 'success', 6000);
+    await Store.refresh('products').catch(() => {});
+    iiPaint();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
+}
+async function iiUndoNoBox(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    // fixed_box back to "not decided" (true = asks for a size again).
+    await Api.post(`/api/products/${id}/package`, { fixedBox: true });
+    toast('↩ Back on the missing-size list', 'success', 3000);
     await Store.refresh('products').catch(() => {});
     iiPaint();
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
