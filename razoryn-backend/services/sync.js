@@ -416,6 +416,16 @@ async function pullShopify(opts = {}) {
       }
     } catch (_) {}
     inserted++;
+    // 💷 "Sold" alert (batched; orders older than 48h stay silent).
+    try {
+      const sid = (await query(`SELECT id FROM sales WHERE channel = 'shopify' AND external_order_id = $1`, [String(order.id)])).rows[0]?.id;
+      require('../lib/notify').saleSold({
+        saleId: sid, channel: 'shopify', ref: order.name || order.order_number,
+        customer: [order.customer?.first_name, order.customer?.last_name].filter(Boolean).join(' ') || null,
+        total: order.total_price, occurredAt: order.created_at,
+        items: (order.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity || 1 })),
+      });
+    } catch (_) {}
   }
 
   await setCursor('shopify', {
@@ -494,6 +504,15 @@ async function importEbayOrderRow(order, store, { vatRegistered, vatRate, adjust
   // (not on backfill). Fire-and-forget + fully guarded (enabled/eligible) inside.
   if (adjustStock && newSaleId) {
     setImmediate(() => require('./fitment-messages').sendForSale(newSaleId).catch(() => {}));
+    // 💷 "Sold" alert (batched; never for backfill).
+    try {
+      require('../lib/notify').saleSold({
+        saleId: newSaleId, channel: store.channelCode || 'ebay_em', ref: order.orderId,
+        customer: order.buyer?.name || order.buyer?.username || null,
+        total: order.pricingSummary?.total?.value, occurredAt: order.creationDate,
+        items: (order.lineItems || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity || 1 })),
+      });
+    } catch (_) {}
   }
   return 'inserted';
 }

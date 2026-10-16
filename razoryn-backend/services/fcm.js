@@ -84,12 +84,18 @@ async function getAccessToken() {
 // Send one notification to every registered device that has a push token. Clears
 // tokens FCM reports as unregistered (keeps the device row for activity tracking).
 // Never throws — push is auxiliary to the in-app notification.
-async function sendToAll({ title, body, url, category } = {}) {
+async function sendToAll({ title, body, url, category, audience = null } = {}) {
   try {
     if (!isConfigured()) return { sent: 0, skipped: 'fcm_not_configured' };
     await ensureTable();
     const sa = serviceAccount();
-    const { rows } = await query(`SELECT device_id, push_token FROM app_devices WHERE push_token IS NOT NULL`);
+    // Same audience rule as web push: money-bearing alerts only to admins.
+    const { rows } = await query(`
+      SELECT s.device_id, s.push_token FROM app_devices s
+       WHERE s.push_token IS NOT NULL AND (
+         $1::text IS NULL
+         OR ($1 = 'admin' AND EXISTS (SELECT 1 FROM users u WHERE u.id = s.user_id AND u.role = 'admin'))
+         OR ($1 = 'staff' AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = s.user_id AND u.role = 'admin')))`, [audience || null]);
     if (!rows.length) return { sent: 0, total: 0 };
     const accessToken = await getAccessToken();
     const endpoint = `https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`;
@@ -100,7 +106,7 @@ async function sendToAll({ title, body, url, category } = {}) {
           token: r.push_token,
           notification: { title: title || 'Warehouse Hub', body: body || '' },
           data: { url: String(url || '/'), category: String(category || '') },
-          android: { priority: 'HIGH', notification: { default_sound: true } },
+          android: { priority: 'HIGH', notification: { default_sound: true, channel_id: 'warehouse_alerts', tag: String(category || 'general') } },
         },
       };
       try {

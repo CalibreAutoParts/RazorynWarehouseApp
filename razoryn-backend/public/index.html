@@ -3032,6 +3032,9 @@ async function initNativeApp() {
     try {
       const Push = P.PushNotifications;
       if (Push) {
+        // High-importance channel → proper heads-up pop-ups with sound
+        // (the server sends to channel 'warehouse_alerts').
+        try { await Push.createChannel({ id: 'warehouse_alerts', name: 'Warehouse alerts', description: 'Sales, returns, competitor prices and AI updates', importance: 5, visibility: 1, vibration: true }); } catch (_) {}
         const perm = await Push.requestPermissions();
         if (perm && perm.receive === 'granted') {
           Push.addListener('registration', (t) => { if (t && t.value) registerDevice(t.value); });
@@ -3042,7 +3045,8 @@ async function initNativeApp() {
             try { const t = n?.title, b = n?.body; if (t) toast(b ? `${t} — ${b}` : t, 'info', 6000); } catch (_) {}
           });
           Push.addListener('pushNotificationActionPerformed', (a) => {
-            try { const url = a?.notification?.data?.url; if (url && url.startsWith('/')) { /* deep-link handled by the SPA */ } } catch (_) {}
+            // Tapping the notification opens the matching page (/#sales, /#ai…).
+            try { const url = a?.notification?.data?.url; const page = url && url.includes('#') ? url.split('#')[1] : ''; if (page && typeof routeTo === 'function' && hasPerm(page)) routeTo(page); } catch (_) {}
           });
           await Push.register();
         }

@@ -136,12 +136,11 @@ async function isNotifiableOpportunity(listing) {
 // ---------- alerts (reuse notifications + push) ----------
 
 async function notify({ type, title, body, severity, listingId, tag }) {
-  await query(
-    `INSERT INTO notifications (type, title, body, severity, related_type, related_id)
-     VALUES ($1,$2,$3,$4,'competitor_listing',$5)`,
-    [type, title, body, severity, listingId]
-  );
-  push.sendToAll({ title, body, url: '/', tag: tag || `${type}-${listingId}`, category: type }).catch(() => {});
+  // Competitor prices are money → admins only (in-app + push).
+  await require('../lib/notify').notifyEvent({
+    type, title, body, severity, relatedType: 'competitor_listing', relatedId: listingId,
+    audience: 'admin', url: '/#competitors', tag: tag || `${type}-${listingId}`,
+  });
 }
 
 async function hasUnread(type, listingId) {

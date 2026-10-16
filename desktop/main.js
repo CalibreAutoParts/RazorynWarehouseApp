@@ -82,12 +82,12 @@ function createWindow({ hidden = false } = {}) {
   // With the print agent on, closing the window hides it to the tray —
   // like the shipping apps — so printing carries on.
   mainWindow.on('close', (e) => {
-    if (cfg.printAgent && !quitting) {
+    if ((cfg.printAgent || cfg.notifications !== false) && !quitting) {
       e.preventDefault();
       mainWindow.hide();
       if (!cfg.toldAboutTray) {
         cfg.toldAboutTray = true; saveCfg();
-        notify('Still printing in the background', 'Warehouse Hub keeps printing packing labels from the system tray. Right-click the tray icon to open it or quit.');
+        notify('Still running in the background', 'Warehouse Hub keeps ' + (cfg.printAgent ? 'printing packing labels and ' : '') + 'showing notifications from the system tray. Right-click the tray icon to open it or quit.');
       }
     }
   });
@@ -95,7 +95,7 @@ function createWindow({ hidden = false } = {}) {
     mainWindow = null;
     // Hidden agent/print windows would keep the app alive — with the agent
     // off, closing the main window means quit.
-    if (!cfg.printAgent && process.platform !== 'darwin') { quitting = true; app.quit(); }
+    if (!cfg.printAgent && cfg.notifications === false && process.platform !== 'darwin') { quitting = true; app.quit(); }
   });
 }
 
@@ -245,6 +245,68 @@ function agentStatus() {
   };
 }
 
+// ── Desktop notifications ─────────────────────────────────────────────────
+// Electron can't use web push, so the background process reads the server's
+// notification feed and raises native Windows notifications — sales, returns,
+// competitor price moves, AI updates — even with the window closed. Admins
+// get the £ versions; staff logins get the money-free ones (server decides).
+let notifTimer = null;
+let notifBusy = false;
+function openPage(page) {
+  showMain();
+  if (page && mainWindow) {
+    mainWindow.webContents.executeJavaScript(
+      `try { if (typeof routeTo === 'function' && hasPerm(${JSON.stringify(page)})) routeTo(${JSON.stringify(page)}); } catch (e) {}`, true).catch(() => {});
+  }
+}
+const PAGE_FOR_TYPE = (t) => /^sale|payment/.test(t) ? 'sales' : /^competitor/.test(t) ? 'competitors'
+  : /return/.test(t) ? 'returns' : /^ai/.test(t) ? 'ai' : /stock|incoming|preorder/.test(t) ? 'inventory' : 'notifications';
+async function notifPoll() {
+  if (cfg.notifications === false || notifBusy || !APP_URL) return;
+  notifBusy = true;
+  try {
+    const after = cfg.lastNotifId;
+    const r = await agentFetch('/api/notifications/feed' + (after != null ? '?after=' + after : ''));
+    if (r.status !== 200 || !r.data) return;
+    const { latestId, items = [] } = r.data;
+    if (after == null) { cfg.lastNotifId = latestId; saveCfg(); return; }   // first run: start from now
+    if (items.length) {
+      cfg.lastNotifId = items[items.length - 1].id; saveCfg();
+      const show = (title, body, page) => {
+        try {
+          if (!Notification.isSupported()) return;
+          const n = new Notification({ title, body: body || '', silent: false });
+          n.on('click', () => openPage(page));
+          n.show();
+        } catch (_) {}
+      };
+      // A burst (a sync landing many at once) collapses into one summary.
+      if (items.length > 4) {
+        show(`${items.length} new Warehouse Hub alerts`, items.slice(0, 3).map(i => i.title).join(' · ') + '…', 'notifications');
+      } else {
+        for (const it of items) show(it.title, it.body, PAGE_FOR_TYPE(it.type || ''));
+      }
+    } else if (latestId < (cfg.lastNotifId || 0)) {
+      cfg.lastNotifId = latestId; saveCfg();   // server data reset — resync
+    }
+  } catch (_) { /* offline — try again next tick */ }
+  finally { notifBusy = false; }
+}
+function startNotifications() {
+  if (notifTimer) clearInterval(notifTimer);
+  notifTimer = null;
+  if (cfg.notifications === false) return;
+  notifTimer = setInterval(notifPoll, 30000);
+  setTimeout(notifPoll, 4000);
+}
+function setNotifications(on) {
+  cfg.notifications = !!on;
+  if (on) delete cfg.lastNotifId;   // resume from "now", not a backlog
+  saveCfg();
+  startNotifications();
+  updateTray();
+}
+
 // ── Tray ──────────────────────────────────────────────────────────────────
 const STATE_TEXT = {
   off: 'Print station: off', ok: 'Print station: ready', paused: 'Print station: auto-print is OFF on the server',
@@ -260,6 +322,7 @@ async function updateTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Warehouse Hub', click: showMain },
     { type: 'separator' },
+    { label: 'Show notifications (sales, returns, competitors, AI)', type: 'checkbox', checked: cfg.notifications !== false, click: (mi) => setNotifications(mi.checked) },
     { label: 'Print packing labels on this computer', type: 'checkbox', checked: !!cfg.printAgent, click: (mi) => setAgentEnabled(mi.checked) },
     { label: status + (agent.pending ? ` · ${agent.pending} waiting` : ''), enabled: false },
     {
@@ -317,7 +380,12 @@ ipcMain.handle('agent:poll', async () => { await agentPoll(); return agentStatus
 
 app.whenReady().then(async () => {
   if (!gotLock) return;
+  // Windows only shows toasts for an app with a registered AppUserModelID.
+  try { app.setAppUserModelId('uk.co.calibreautoparts.warehouse'); } catch (_) {}
   loadCfg();
+  // Notifications only work while the app runs, so start with Windows (to the
+  // tray) by default — once; untick "Start with Windows" in the tray to stop.
+  if (!cfg.loginDefaulted) { cfg.loginDefaulted = true; saveCfg(); setStartAtLogin(true); }
   if (!APP_URL) {
     if (!cfg.siteUrl) { cfg.siteUrl = await chooseSite(); saveCfg(); }
     APP_URL = cfg.siteUrl;
@@ -346,14 +414,15 @@ app.whenReady().then(async () => {
   ]));
 
   // Started by Windows at login with the agent on → straight to the tray.
-  const startHidden = process.argv.includes('--hidden') && cfg.printAgent;
+  const startHidden = process.argv.includes('--hidden') && (cfg.printAgent || cfg.notifications !== false);
   createWindow({ hidden: startHidden });
   buildTray();
   startAgent();
+  startNotifications();
 
   // Back from sleep / network back → print whatever queued meanwhile.
-  powerMonitor.on('resume', () => setTimeout(agentPoll, 8000));
-  powerMonitor.on('unlock-screen', () => setTimeout(agentPoll, 3000));
+  powerMonitor.on('resume', () => { setTimeout(agentPoll, 8000); setTimeout(notifPoll, 9000); });
+  powerMonitor.on('unlock-screen', () => { setTimeout(agentPoll, 3000); setTimeout(notifPoll, 4000); });
 
   // Self-update the desktop shell from GitHub Releases (installs on next
   // relaunch). The web content is always live already.
@@ -368,5 +437,5 @@ app.whenReady().then(async () => {
 app.on('before-quit', () => { quitting = true; });
 app.on('window-all-closed', () => {
   // The agent keeps running in the tray; otherwise behave normally.
-  if (process.platform !== 'darwin' && !cfg.printAgent) app.quit();
+  if (process.platform !== 'darwin' && !cfg.printAgent && cfg.notifications === false) app.quit();
 });
