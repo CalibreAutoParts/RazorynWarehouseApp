@@ -24,6 +24,71 @@ const samePrice = (a, b) => cents(a) === cents(b);
 
 // Decide the best match for a competitor listing. Returns the match row fields:
 //   { product_id, match_type, confidence, is_opportunity }
+// ── Fit rules shared by the title matchers ────────────────────────────────
+// Position tags from a title: side (L/R), upper/lower, front/rear.
+function posTags(title) {
+  const t = ' ' + String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ') + ' ';
+  const tag = (a, b) => (a && b) ? 'both' : a ? 1 : b ? 2 : null;
+  return {
+    side: tag(/ (left|lh|lhs|nearside|n s) /.test(t), / (right|rh|rhs|offside|o s) /.test(t)),
+    ul: tag(/ upper /.test(t), / lower /.test(t)),
+    fr: tag(/ front /.test(t), / rear /.test(t)),
+  };
+}
+function posConflict(a, b) {
+  return ['side', 'ul', 'fr'].some(k => a[k] && b[k] && a[k] !== 'both' && b[k] !== 'both' && a[k] !== b[k]);
+}
+// "2020-2025", "2021 - 2024", "2019" → [from, to]; null when absent.
+function yearRange(str) {
+  const m = String(str || '').match(/((?:19|20)\d{2})(?:\s*[-–\/]\s*((?:19|20)\d{2}|on|onwards|\+))?/i);
+  if (!m) return null;
+  const a = parseInt(m[1]);
+  const b = m[2] && /^\d{4}$/.test(m[2]) ? parseInt(m[2]) : (m[2] ? 2100 : a);
+  return [Math.min(a, b), Math.max(a, b)];
+}
+function yearsOverlap(listingYear, productTitle) {
+  const a = yearRange(listingYear), b = yearRange(productTitle);
+  if (!a || !b) return null;                 // unknown — neutral
+  return a[0] <= b[1] && b[0] <= a[1];
+}
+// The BASE model must appear ("Juke" of "Juke F16", "Golf" of "Golf Mk8");
+// generation codes are often left off our titles, so they only add score.
+const wordRe = (w) => new RegExp('(^|[^a-z0-9])' + String(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([^a-z0-9]|$)', 'i');
+function modelHit(listing, prod) {
+  const m = String(listing.parsed_model || '').toLowerCase().trim();
+  if (!m) return null;
+  const base = m.split(/\s+/)[0];
+  const hay = String(prod.model || '') + ' ' + String(prod.title || '');
+  return wordRe(base).test(hay);
+}
+function fullModelHit(listing, prod) {
+  const m = String(listing.parsed_model || '').toLowerCase().trim();
+  return !!m && wordRe(m).test(String(prod.model || '') + ' ' + String(prod.title || ''));
+}
+// Same vehicle model (when the listing names one), years overlap (when both
+// state years), and no left/right · upper/lower · front/rear contradiction.
+function fitCompatible(listing, prod) {
+  if (modelHit(listing, prod) === false) return false;
+  if (yearsOverlap(listing.parsed_year || listing.title, prod.title) === false) return false;
+  return !posConflict(posTags(listing.title), posTags(prod.title));
+}
+function pickBestCandidate(listing, cands) {
+  const lw = new Set(String(listing.title || '').toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2));
+  let best = null;
+  for (const c of cands) {
+    if (!fitCompatible(listing, c)) continue;
+    let score = 0;
+    if (modelHit(listing, c)) score += 50;
+    if (fullModelHit(listing, c)) score += 10;
+    if (yearsOverlap(listing.parsed_year || listing.title, c.title)) score += 20;
+    const cw = String(c.title || '').toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2);
+    score += Math.min(30, cw.filter(w => lw.has(w)).length * 4);   // shared words
+    if (!best || score > best.score) best = { id: c.id, score };
+  }
+  if (!best) return null;
+  return { id: best.id, confidence: Math.min(0.9, 0.5 + best.score / 200) };
+}
+
 async function computeMatch(listing) {
   // 1. Exact part number (normalised) against our part_number, SKU, OR any of
   //    the product's ALTERNATE part numbers (factory/country codes) — the same
@@ -64,37 +129,42 @@ async function computeMatch(listing) {
     if (r.rows[0]) return { product_id: r.rows[0].id, match_type: 'part_number_in_title', confidence: 0.95, is_opportunity: false };
   }
 
-  // 2. Make + part-type (model boosts confidence). Practical matcher for body parts.
+  // 2. Make + part-type, SCORED — the model must match (in our model field OR
+  //    our title, which is where it usually lives), years must overlap, and
+  //    left/right · upper/lower · front/rear must not contradict. A Mokka
+  //    grille must never link to our Corsa grille just because both are
+  //    "Vauxhall … grille" — a model we don't stock is an opportunity.
   if (listing.parsed_make && listing.parsed_part_type) {
-    const r = await query(
-      `SELECT id,
-              (model ILIKE $2) AS model_hit
-         FROM products
-        WHERE active = true
-          AND brand ILIKE $1
-          AND title ILIKE $3
-        ORDER BY (model ILIKE $2) DESC
-        LIMIT 1`,
-      [listing.parsed_make, `%${listing.parsed_model || ''}%`, `%${listing.parsed_part_type}%`]
+    const { rows: cands } = await query(
+      `SELECT id, title, model FROM products
+        WHERE active = true AND brand ILIKE $1
+          AND regexp_replace(lower(title), '\\s+', '', 'g') LIKE '%' || $2 || '%'
+        LIMIT 300`,
+      [listing.parsed_make, String(listing.parsed_part_type).toLowerCase().replace(/\s+/g, '')]
     );
-    if (r.rows[0]) {
-      const conf = (listing.parsed_model && r.rows[0].model_hit) ? 0.8 : 0.6;
-      return { product_id: r.rows[0].id, match_type: 'make_model_parttype', confidence: conf, is_opportunity: false };
+    const best = pickBestCandidate(listing, cands);
+    if (best) {
+      return { product_id: best.id, match_type: 'make_model_parttype', confidence: best.confidence, is_opportunity: false };
+    }
+    if (cands.length && listing.parsed_model) {
+      // We sell that part type for this make, just not this model/fit.
+      return { product_id: null, match_type: 'none', confidence: 0, is_opportunity: true };
     }
   }
 
   // 3. Fuzzy title similarity (pg_trgm) among products sharing the make.
   if (listing.parsed_make && listing.title) {
-    const r = await query(
-      `SELECT id, similarity(LOWER(title), LOWER($1)) AS sim
+    const { rows } = await query(
+      `SELECT id, title, model, similarity(LOWER(title), LOWER($1)) AS sim
          FROM products
         WHERE active = true AND brand ILIKE $2
         ORDER BY sim DESC
-        LIMIT 1`,
+        LIMIT 5`,
       [listing.title, listing.parsed_make]
     );
-    if (r.rows[0] && Number(r.rows[0].sim) >= 0.45) {
-      return { product_id: r.rows[0].id, match_type: 'fuzzy', confidence: Number(r.rows[0].sim), is_opportunity: false };
+    const ok = rows.find(r => Number(r.sim) >= 0.45 && fitCompatible(listing, r));
+    if (ok) {
+      return { product_id: ok.id, match_type: 'fuzzy', confidence: Number(ok.sim), is_opportunity: false };
     }
   }
 
