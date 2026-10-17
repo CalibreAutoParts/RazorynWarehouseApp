@@ -784,6 +784,44 @@ Do not invent numbers; if a summary line isn't on the statement use 0 and say so
   };
 }
 
+// ── Competitor like-for-like check ─────────────────────────────────────────
+// Same part number ≠ same thing: a "complete bumper" is listed under the bare
+// skin's number. Claude reads both titles and LOOKS at both photos to decide
+// whether the competitor's listing is the same spec as ours.
+async function compareCompetitorListing({ our, their }) {
+  const cfg = await getAiConfig();
+  const images = [our.image, their.image].filter(u => /^https:\/\//.test(String(u || '')));
+  const out = await callClaude({
+    kind: 'competitor_compare',
+    model: cfg.smartModel,
+    maxTokens: 500,
+    timeoutMs: 90000,
+    images,
+    system: 'You compare UK car-part listings for a parts seller. Decide whether two listings are the SAME item at the SAME spec — not just the same part number. Reply with ONLY JSON.',
+    user: `${images.length === 2 ? 'Image 1 is OUR listing photo, image 2 is THEIRS.' : images.length === 1 ? 'One photo is attached (' + (our.image && images[0] === our.image ? 'ours' : 'theirs') + ').' : 'No photos available — judge from titles.'}
+
+OURS:   "${our.title}" — £${our.price}
+THEIRS: "${their.title}" — £${their.price}
+
+Same part number often hides different specs: a COMPLETE bumper (skin + grilles + brackets + trims) vs a bare PRIMED skin; a grille panel vs a whole bumper; steel vs aluminium bonnet; with vs without sensor holes/washer jets; single item vs a pair/set; new vs used. Look at what is physically in each photo and what each title says is included.
+
+Reply ONLY:
+{"sameItem": true|false, "confidence": <0..1>,
+ "oursIncludes": "<short: what our listing includes>",
+ "theirsIncludes": "<short: what theirs includes>",
+ "reason": "<one sentence: why they are / aren't like-for-like>"}`,
+  });
+  const v = out.json;
+  if (!v || typeof v.sameItem !== 'boolean') return null;
+  return {
+    sameItem: v.sameItem,
+    confidence: Math.max(0, Math.min(1, +v.confidence || 0)),
+    oursIncludes: v.oursIncludes ? String(v.oursIncludes).slice(0, 160) : null,
+    theirsIncludes: v.theirsIncludes ? String(v.theirsIncludes).slice(0, 160) : null,
+    reason: v.reason ? String(v.reason).slice(0, 300) : null,
+  };
+}
+
 // ── Purchase invoice / receipt reader ──────────────────────────────────────
 // One uploaded document (PDF or photo) → who it's from, when, how much,
 // the VAT — so Books can find the matching bank transaction by itself.
@@ -970,6 +1008,7 @@ module.exports = {
   parseBankStatement,
   parsePlatformStatement,
   readPurchaseInvoice,
+  compareCompetitorListing,
   disputeAdvisor,
   learnFromFeedback,
   recordFeedback,
