@@ -26645,6 +26645,13 @@ function compProgressPoll() {
         window._compProgWasRunning = false;
         box.style.display = 'none';
         loadCompTab();   // job just finished → fresh numbers
+        // Say which competitors failed or skipped listings — never silent.
+        const per = scan?.result?.perCompetitor || (scan?.summary ? [scan.summary] : []);
+        const failed = per.filter(x => x && x.error);
+        const skipped = per.filter(x => x && x.itemErrors);
+        if (failed.length) toast('⚠ Scan failed for ' + failed.map(x => x.competitor + ': ' + x.error).join(' · '), 'error', 12000);
+        else if (skipped.length) toast('Scan done — ' + skipped.map(x => `${x.competitor} skipped ${x.itemErrors} odd listing(s)`).join(' · '), 'warn', 8000);
+        else if (per.length) toast(`✓ Scan finished — ${per.length} competitor${per.length === 1 ? '' : 's'} updated`, 'success', 5000);
       }
       return;
     }
@@ -26703,9 +26710,14 @@ async function loadCompManager() {
   const isAdmin = State.user.role === 'admin';
   const rows = competitors.map(c => {
     const src = c.source_type === 'ebay' ? `eBay: ${escapeHtml(c.ebay_username || '—')}` : `Web: ${escapeHtml(c.website_url || '—')}`;
+    // Stale = active but not successfully scanned for over a day (the 6-hourly
+    // scan should have reached it 4× by now) — never hide that behind "ok".
+    const stale = c.active && c.last_scanned_at && (Date.now() - new Date(c.last_scanned_at).getTime()) > 24 * 3600 * 1000;
     const status = c.last_status === 'error'
       ? `<span style="color:var(--red)">error</span>${c.last_error ? `<div style="font-size:10px;color:var(--red);max-width:260px;white-space:normal;line-height:1.4">${escapeHtml(String(c.last_error).slice(0, 180))}</div>` : ''}`
-      : (c.last_status || '—');
+      : (c.last_status || '—')
+        + (c.last_error ? `<div style="font-size:10px;color:var(--amber,orange);max-width:260px;white-space:normal;line-height:1.4">${escapeHtml(String(c.last_error).slice(0, 180))}</div>` : '')
+        + (stale ? `<div style="font-size:10px;color:var(--amber,orange)">⚠ stale — hit Scan</div>` : '');
     return `<tr>
       <td><strong>${escapeHtml(c.name)}</strong>${c.active ? '' : ' <span style="color:var(--ink-soft);font-size:11px">(paused)</span>'}<br><span style="font-size:11px;color:var(--ink-soft)">${src}</span></td>
       <td style="text-align:center">${c.active_listings || 0}</td>

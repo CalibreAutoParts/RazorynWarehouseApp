@@ -183,10 +183,14 @@ async function scanCompetitor(competitorId, status = {}) {
   const newItemCap = NEW_ITEM_MAX();
   status.phase = 'matching'; status.total = items.length;
 
+  let itemErrors = 0, firstItemError = null;
   for (const it of items) {
     status.done = (status.done || 0) + 1;
     if (!it.external_id || !it.title) continue;
     seenExternalIds.push(String(it.external_id));
+    // One bad listing (odd title, oversized field, matcher hiccup) must never
+    // abort the other 8,000 — skip it, count it, report it.
+    try {
 
     const parsed = parseForMatch(it.title);
     const price = it.price != null ? Number(it.price) : null;
@@ -327,7 +331,12 @@ async function scanCompetitor(competitorId, status = {}) {
         summary.alerts++;
       }
     }
+    } catch (e) {
+      itemErrors++;
+      if (!firstItemError) firstItemError = `${String(it.external_id)}: ${e.message}`;
+    }
   }
+  summary.itemErrors = itemErrors;
 
   // Mark listings that dropped out of this scan as unavailable.
   await query(
@@ -339,23 +348,47 @@ async function scanCompetitor(competitorId, status = {}) {
 
   summary.listings = seenExternalIds.length;
   await query(
-    `UPDATE competitors SET last_scanned_at = now(), last_status = 'ok', last_error = NULL WHERE id = $1`,
-    [competitorId]
+    `UPDATE competitors SET last_scanned_at = now(), last_status = $2, last_error = $3 WHERE id = $1`,
+    [competitorId, 'ok', itemErrors ? `${itemErrors} listing(s) skipped — first: ${firstItemError}`.slice(0, 500) : null]
   );
   return summary;
 }
 
+// Any failure that escapes (DB down, adapter crash mid-way) is RECORDED on the
+// competitor — before, it vanished and "last scan" silently stopped moving.
+async function scanCompetitorSafe(competitorId, status = {}) {
+  try { return await scanCompetitor(competitorId, status); }
+  catch (e) {
+    try {
+      await query(`UPDATE competitors SET last_scanned_at = now(), last_status = 'error', last_error = $2 WHERE id = $1`,
+        [competitorId, String(e.message || e).slice(0, 500)]);
+    } catch (_) {}
+    throw e;
+  }
+}
+
 // ---------- scan all active competitors ----------
 
+// One scan run at a time — the 6-hourly cron and "Scan all now" used to
+// overlap on the same competitors.
+let _scanAllRunning = false;
+function isScanAllRunning() { return _scanAllRunning; }
 async function scanAll(status = {}) {
-  const { rows } = await query(`SELECT id, code FROM competitors WHERE active = true ORDER BY id`);
+  if (_scanAllRunning) return { competitors: 0, skipped: 'already_running', perCompetitor: [] };
+  _scanAllRunning = true;
+  try { return await _scanAll(status); } finally { _scanAllRunning = false; }
+}
+async function _scanAll(status = {}) {
+  // Stalest first: if a deploy/restart cuts a run short, the competitors that
+  // missed out go FIRST next time instead of always losing to the same order.
+  const { rows } = await query(`SELECT id, code FROM competitors WHERE active = true ORDER BY last_scanned_at ASC NULLS FIRST, id`);
   const result = { competitors: 0, listings: 0, priceChanges: 0, alerts: 0, opportunities: 0, perCompetitor: [] };
   status.ofCompetitors = rows.length;
   for (let ci = 0; ci < rows.length; ci++) {
     const c = rows[ci];
     status.competitorIndex = ci + 1;
     try {
-      const s = await scanCompetitor(c.id, status);
+      const s = await scanCompetitorSafe(c.id, status);
       result.competitors++;
       result.listings += s.listings || 0;
       result.priceChanges += s.priceChanges || 0;
@@ -390,4 +423,4 @@ async function rematchCompetitor(competitorId, status = {}) {
   return { total: rows.length, matched: status.matched };
 }
 
-module.exports = { scanCompetitor, scanAll, computeMatch, rematchCompetitor };
+module.exports = { scanCompetitor: scanCompetitorSafe, scanAll, isScanAllRunning, computeMatch, rematchCompetitor };
