@@ -715,7 +715,7 @@ CREATE TABLE IF NOT EXISTS competitor_match (
   id             SERIAL PRIMARY KEY,
   listing_id     INTEGER NOT NULL REFERENCES competitor_listings(id) ON DELETE CASCADE,
   product_id     INTEGER REFERENCES products(id) ON DELETE CASCADE,
-  match_type     TEXT NOT NULL CHECK (match_type IN ('exact_part_number','make_model_parttype','fuzzy','none')),
+  match_type     TEXT NOT NULL CHECK (match_type IN ('exact_part_number','part_number_in_title','make_model_parttype','fuzzy','none')),
   confidence     NUMERIC(4,3) NOT NULL DEFAULT 0,
   is_opportunity BOOLEAN NOT NULL DEFAULT false,
   reviewed_at    TIMESTAMPTZ,
