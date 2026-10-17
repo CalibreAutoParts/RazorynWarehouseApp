@@ -67,8 +67,29 @@ async function autoResolveCompetitorAlerts() {
            > COALESCE(p.price_ebay, p.price_shopify) * (1 - $1::numeric / 100)`, [undercutPct]);
 }
 
+async function resolveNotLikeForLikeAlerts() {
+  await monitor.ensureAiCols();
+  const { rows } = await query(`
+    SELECT n.id, l.title AS their_title, l.price, l.shipping_cost, l.shipping_free,
+           p.title AS our_title, COALESCE(p.price_ebay, p.price_shopify) AS our_price, m.ai_same, m.ai_reason
+      FROM notifications n
+      JOIN competitor_match m ON m.listing_id = n.related_id
+      JOIN competitor_listings l ON l.id = m.listing_id
+      JOIN products p ON p.id = m.product_id
+     WHERE n.type IN ('competitor_undercut', 'competitor_price_drop') AND n.related_type = 'competitor_listing' AND n.resolved_at IS NULL`);
+  for (const r of rows) {
+    const delivered = r.price != null ? Number(r.price) + (r.shipping_free ? 0 : Number(r.shipping_cost || 0)) : null;
+    const lfl = monitor.likeForLike({ ourTitle: r.our_title, theirTitle: r.their_title, ourPrice: r.our_price, theirPrice: delivered, aiSame: r.ai_same });
+    if (lfl.ok === false) {
+      await query(`UPDATE notifications SET resolved_at = now(), read_at = COALESCE(read_at, now()), resolution = $2 WHERE id = $1`,
+        [r.id, ('not like-for-like — ' + (lfl.by === 'ai' ? (r.ai_reason || 'Claude: different item') : lfl.spec.reason)).slice(0, 200)]);
+    }
+  }
+}
+
 router.get('/alerts', canRead, async (req, res) => {
   try { await autoResolveCompetitorAlerts(); } catch (e) { console.warn('[competitors] auto-resolve:', e.message); }
+  try { await resolveNotLikeForLikeAlerts(); } catch (e) { console.warn('[competitors] lfl-resolve:', e.message); }
   const show = ['open', 'handled', 'all'].includes(req.query.show) ? req.query.show : 'open';
   const cond = show === 'open' ? 'AND resolved_at IS NULL' : show === 'handled' ? 'AND resolved_at IS NOT NULL' : '';
   const { rows } = await query(`
@@ -121,6 +142,7 @@ router.post('/alerts/resolve-all', requireAdmin, async (req, res) => {
 // fields so the frontend can run the same margin maths as Costs & margins.
 router.get('/compare', canRead, async (req, res) => {
   try {
+    await monitor.ensureAiCols();
     const where = [`m.product_id IS NOT NULL`, `m.dismissed = false`, `l.available = true`, `p.active = true`];
     const params = [];
     if (req.query.listingId) {
@@ -139,7 +161,7 @@ router.get('/compare', canRead, async (req, res) => {
              l.id AS listing_id, l.title AS their_title, l.price AS their_price, l.currency,
              l.shipping_cost AS their_shipping, l.shipping_free, l.shipping_type, l.url, l.image_url AS their_image,
              l.last_seen_at,
-             m.match_type, m.confidence,
+             m.match_type, m.confidence, m.ai_same, m.ai_reason, m.ai_ours, m.ai_theirs, m.ai_checked_at,
              c.id AS competitor_id, c.name AS competitor_name, c.code AS competitor_code
         FROM competitor_match m
         JOIN competitor_listings l ON l.id = m.listing_id
@@ -175,13 +197,26 @@ router.get('/compare', canRead, async (req, res) => {
         price, shipping: ship, shippingType: r.shipping_type, delivered,
         matchType: r.match_type, confidence: r.confidence != null ? parseFloat(r.confidence) : null,
         lastSeenAt: r.last_seen_at,
+        // Like-for-like: Claude's photo verdict wins, else title rules.
+        ...(() => {
+          const lfl = monitor.likeForLike({ ourTitle: r.our_title, theirTitle: r.their_title,
+            ourPrice: r.price_ebay ?? r.price_shopify, theirPrice: delivered, aiSame: r.ai_same });
+          return {
+            likeForLike: lfl.ok, verdictBy: lfl.by,
+            specReason: lfl.by === 'ai' ? r.ai_reason : lfl.spec.reason,
+            aiOurs: r.ai_ours, aiTheirs: r.ai_theirs, aiCheckedAt: r.ai_checked_at,
+          };
+        })(),
       });
     }
 
     const items = [...byProduct.values()];
     for (const it of items) {
       it.offers.sort((a, z) => (a.delivered == null) - (z.delivered == null) || (a.delivered ?? 0) - (z.delivered ?? 0));
-      const cheapest = it.offers.find(o => o.delivered != null);
+      // Only LIKE-FOR-LIKE offers count — a £115 primed skin isn't "cheaper"
+      // than our £445 complete bumper, it's a different product.
+      const cheapest = it.offers.find(o => o.delivered != null && o.likeForLike === true);
+      it.excludedOffers = it.offers.filter(o => o.likeForLike !== true).length;
       it.cheapestDelivered = cheapest ? cheapest.delivered : null;
       it.delta = (it.priceEbay != null && it.cheapestDelivered != null) ? +(it.cheapestDelivered - it.priceEbay).toFixed(2) : null;
     }
@@ -198,7 +233,7 @@ router.get('/compare', canRead, async (req, res) => {
     for (const it of items) {
       if (it.priceEbay == null) continue;
       for (const o of it.offers) {
-        if (o.delivered == null) continue;
+        if (o.delivered == null || o.likeForLike !== true) continue;
         if (!perComp.has(o.competitorId)) perComp.set(o.competitorId, { competitorId: o.competitorId, competitor: o.competitor, matched: 0, cheaper: 0, gapPctSum: 0 });
         const s = perComp.get(o.competitorId);
         s.matched++;
@@ -215,6 +250,28 @@ router.get('/compare', canRead, async (req, res) => {
     res.json({ items, competitors });
   } catch (e) { res.status(500).json({ error: 'compare_failed', message: e.message }); }
 });
+
+// 🤖 Check ONE offer now (title + both photos) — the per-offer button.
+router.post('/matches/by-listing/:listingId/ai-check', requireAdmin, async (req, res) => {
+  try {
+    const v = await monitor.aiVerifyMatch(parseInt(req.params.listingId));
+    res.json({ ok: true, verdict: v });
+  } catch (e) { res.status(502).json({ error: 'ai_check_failed', message: e.message }); }
+});
+// 🤖 Verify every suspect match in the background (big gap, titles unclear).
+let _verifyStatus = { running: false };
+router.post('/ai-verify', requireAdmin, async (req, res) => {
+  if (_verifyStatus.running) return res.status(409).json({ error: 'already_running', status: _verifyStatus });
+  _verifyStatus = { running: true, startedAt: new Date().toISOString() };
+  res.json({ ok: true, started: true });
+  (async () => {
+    try {
+      const r = await monitor.verifySuspects({ limit: Math.min(300, parseInt(req.body?.limit) || 150), status: _verifyStatus });
+      _verifyStatus = { ..._verifyStatus, running: false, finishedAt: new Date().toISOString(), result: r };
+    } catch (e) { _verifyStatus = { ..._verifyStatus, running: false, error: e.message }; }
+  })();
+});
+router.get('/ai-verify/status', canRead, (req, res) => res.json(_verifyStatus));
 
 // POST /api/competitors/:id/rematch — re-run matching over the stored listings
 // (no re-fetch). Runs in the background (9k listings take a few minutes);

@@ -27156,12 +27156,16 @@ function compPaintCompare() {
         <button class="${f === 'cheaper' ? 'active' : ''}" onclick="compCompareSetFilter('cheaper')">We're cheaper</button>
       </div>
       <input type="search" placeholder="Filter by name / SKU / part #…" style="flex:1;min-width:180px" value="${escapeAttr(State.comp.compareQ || '')}" oninput="State.comp.compareQ=this.value;compPaintCompare()">
+      ${State.user?.role === 'admin' ? '<button class="btn btn-outline btn-sm" onclick="compAiVerifyAll(this)" title="Claude checks matches where the price gap is big and the titles don\u2019t settle it — e.g. complete bumper vs bare skin — using both photos.">🤖 Verify suspicious matches</button>' : ''}
     </div>
+    <div style="font-size:11.5px;color:var(--ink-soft);margin-bottom:10px">Only <strong>like-for-like</strong> offers count in the price gap — a primed skin isn't a cheaper complete bumper. Clear cases are caught from the titles; unclear ones with a big gap get Claude's photo check (automatically after each scan, or press 🤖).</div>
     ${items.length ? items.map(it => compCompareRow(it, ranks)).join('') : '<div class="card"><div class="empty" style="padding:30px"><div class="t">No shared listings ' + (f !== 'all' || q ? 'match this filter' : 'yet — run a scan and matches appear here') + '</div></div></div>'}`;
 }
 function compCompareRow(it, ranks) {
   const ourM = compMarginAt(it, it.priceEbay);
-  const cheapest = (it.offers || []).find(o => o.delivered != null);
+  // Only like-for-like offers drive the comparison (a primed skin isn't a
+  // cheaper complete bumper — it's a different product).
+  const cheapest = (it.offers || []).find(o => o.delivered != null && o.likeForLike === true);
   const matchM = cheapest ? compMarginAt(it, cheapest.delivered) : null;
   const deltaPill = it.delta == null ? ''
     : it.delta < 0 ? `<span class="pill red" style="font-weight:700">they're £${Math.abs(it.delta).toFixed(2)} cheaper</span>`
@@ -27188,18 +27192,29 @@ function compCompareRow(it, ranks) {
       <div style="min-width:0">
         <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);font-weight:700;margin-bottom:4px">Them (${it.offers.length} offer${it.offers.length > 1 ? 's' : ''}, cheapest first)</div>
         ${(it.offers || []).map(o => {
-          const worse = it.priceEbay != null && o.delivered != null && o.delivered < it.priceEbay;
-          return `<div style="display:flex;gap:8px;align-items:center;border:1px solid ${worse ? 'var(--red)' : 'var(--line)'};border-radius:8px;padding:6px 9px;margin-bottom:5px;font-size:12px">
+          const lfl = o.likeForLike;
+          const worse = lfl === true && it.priceEbay != null && o.delivered != null && o.delivered < it.priceEbay;
+          const badge = lfl === false
+            ? `<span class="pill" style="font-size:9px;background:var(--bg-soft);color:var(--ink-soft)" title="${escapeAttr(o.specReason || '')}">≠ ${o.verdictBy === 'ai' ? '🤖 ' : ''}not like-for-like</span>`
+            : lfl === null
+              ? `<span class="pill amber" style="font-size:9px" title="${escapeAttr(o.specReason || '')}">❔ may differ</span>`
+              : (o.verdictBy === 'ai' ? `<span class="pill green" style="font-size:9px" title="${escapeAttr(o.specReason || '')}">🤖 same item ✓</span>` : '');
+          return `<div style="border:1px solid ${worse ? 'var(--red)' : 'var(--line)'};border-radius:8px;padding:6px 9px;margin-bottom:5px;font-size:12px;${lfl === false ? 'opacity:.55' : ''}">
+           <div style="display:flex;gap:8px;align-items:center">
             <div style="flex:1;min-width:0">
-              <div><strong>#${ranks[o.competitorId] || '–'} ${escapeHtml(o.competitor)}</strong> <span class="pill" style="font-size:9px;background:var(--bg-soft)" title="match: ${escapeAttr(o.matchType || '')}">${o.matchType === 'exact_part_number' ? 'part № match' : o.matchType === 'part_number_in_title' ? 'part № in title' : 'title match'}</span></div>
+              <div><strong>#${ranks[o.competitorId] || '–'} ${escapeHtml(o.competitor)}</strong> <span class="pill" style="font-size:9px;background:var(--bg-soft)" title="match: ${escapeAttr(o.matchType || '')}">${o.matchType === 'exact_part_number' ? 'part № match' : o.matchType === 'part_number_in_title' ? 'part № in title' : 'title match'}</span> ${badge}</div>
               <a href="${escapeAttr(o.url || '#')}" target="_blank" rel="noopener" style="font-size:11px;color:var(--ink-soft);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(o.title || '')}</a>
             </div>
             <div style="text-align:right;flex:none">
               <div style="font-weight:700;${worse ? 'color:var(--red)' : ''}">${o.delivered != null ? '£' + o.delivered.toFixed(2) : '—'}</div>
               <div style="font-size:10px;color:var(--ink-soft)">${o.price != null ? '£' + o.price.toFixed(2) : ''}${o.shipping ? ' + £' + o.shipping.toFixed(2) + ' P&P' : o.shippingType === 'free' || o.shipping === 0 ? ' free P&P' : ''}</div>
             </div>
+           </div>
+           ${(lfl !== true || o.verdictBy === 'ai') && (o.specReason || o.aiTheirs) ? `<div style="font-size:10.5px;color:var(--ink-soft);margin-top:3px">${o.verdictBy === 'ai' ? '🤖 ' : ''}${escapeHtml(o.specReason || '')}${o.aiTheirs ? ` <span style="opacity:.8">· theirs: ${escapeHtml(o.aiTheirs)}${o.aiOurs ? ' · ours: ' + escapeHtml(o.aiOurs) : ''}</span>` : ''}</div>` : ''}
+           ${State.user?.role === 'admin' && o.verdictBy !== 'ai' && lfl !== false ? `<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:1px 7px;margin-top:3px" onclick="event.stopPropagation();compAiCheck(${o.listingId}, ${it.productId}, this)" title="Claude compares both titles and both photos — same item, same spec?">🤖 Check with photos</button>` : ''}
           </div>`;
         }).join('')}
+        ${it.excludedOffers ? `<div style="font-size:10.5px;color:var(--ink-soft)">${it.excludedOffers} offer${it.excludedOffers === 1 ? '' : 's'} not counted in the price gap (different spec or awaiting a check)</div>` : ''}
       </div>
     </div>
   </div></div>`;
@@ -27237,6 +27252,38 @@ async function compSetPrice(productId, btn) {
     Store.refresh('products').catch(() => {});
   } catch (e) { Task.fail(taskId); toast('Failed: ' + (e.data?.message || e.message), 'error', 8000); }
   if (btn) btn.disabled = false;
+}
+
+async function compAiCheck(listingId, productId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '🤖 Looking at both photos…'; }
+  try {
+    const r = await Api.post(`/api/competitors/matches/by-listing/${listingId}/ai-check`, {});
+    const v = r.verdict || {};
+    toast(v.sameItem ? '🤖 Same item — counted in the comparison' : '🤖 Not like-for-like — ' + (v.reason || 'different spec'), v.sameItem ? 'success' : 'info', 8000);
+    // Refresh whichever view is open.
+    if (el('comp-body') && State.comp?.tab === 'compare') loadCompCompare();
+    else compOpenSideBySide(listingId);
+  } catch (e) { toast('Check failed: ' + (e.data?.message || e.message), 'error'); if (btn) { btn.disabled = false; btn.textContent = '🤖 Check with photos'; } }
+}
+async function compAiVerifyAll(btn) {
+  if (!confirm('Have Claude check every match where the price gap is big and the titles don\u2019t settle it (title + both photos)? Runs in the background — uses AI credits (up to 150 checks).')) return;
+  if (btn) btn.disabled = true;
+  try {
+    await Api.post('/api/competitors/ai-verify', {});
+    toast('🤖 Checking suspicious matches in the background…', 'info', 5000);
+    const poll = setInterval(async () => {
+      try {
+        const s = await Api.get('/api/competitors/ai-verify/status');
+        if (btn) btn.textContent = s.running ? `🤖 ${s.done || 0}/${s.total ?? '…'} checked` : '🤖 Verify suspicious matches';
+        if (!s.running) {
+          clearInterval(poll); if (btn) btn.disabled = false;
+          const r = s.result || {};
+          toast(s.error ? 'Verify failed: ' + s.error : `🤖 Done — ${r.same || 0} same item, ${r.different || 0} not like-for-like${r.errors ? `, ${r.errors} couldn\u2019t be checked` : ''}`, s.error ? 'error' : 'success', 9000);
+          if (State.comp?.tab === 'compare') loadCompCompare();
+        }
+      } catch (_) {}
+    }, 4000);
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
 }
 
 // Side-by-side popup from an alert: every offer on that part vs ours.

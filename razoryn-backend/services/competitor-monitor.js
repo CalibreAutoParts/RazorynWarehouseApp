@@ -355,6 +355,13 @@ async function scanCompetitor(competitorId, status = {}) {
         `SELECT sku, title, price_ebay, price_shopify FROM products WHERE id = $1`, [match.product_id]
       )).rows[0];
       const ourPrice = prod ? (prod.price_ebay != null ? Number(prod.price_ebay) : (prod.price_shopify != null ? Number(prod.price_shopify) : null)) : null;
+      // Same part number ≠ same spec (complete bumper vs primed skin): only
+      // alert on like-for-like. Suspects wait for Claude's photo check, which
+      // raises the undercut itself once it confirms.
+      let aiSame = null;
+      try { await ensureAiCols(); aiSame = (await query(`SELECT ai_same FROM competitor_match WHERE listing_id = $1`, [listingId])).rows[0]?.ai_same ?? null; } catch (_) {}
+      const lfl = likeForLike({ ourTitle: prod?.title, theirTitle: it.title, ourPrice, theirPrice: price != null ? price + (it.shipping_free ? 0 : Number(it.shipping_cost || 0)) : null, aiSame });
+      if (lfl.ok !== true) continue;
 
       // Undercut: competitor's DELIVERED price (item + shipping) meaningfully
       // below us (same currency only). Shipping is surfaced in the alert body.
@@ -469,6 +476,8 @@ async function _scanAll(status = {}) {
       result.perCompetitor.push({ competitor: c.code, error: e.message });
     }
   }
+  // Fresh suspects (big gap, titles inconclusive) get Claude's photo check.
+  try { result.aiVerified = await verifySuspects({ limit: 60 }); } catch (e) { console.warn('[competitors] verify:', e.message); }
   return result;
 }
 
@@ -493,4 +502,102 @@ async function rematchCompetitor(competitorId, status = {}) {
   return { total: rows.length, matched: status.matched };
 }
 
-module.exports = { scanCompetitor: scanCompetitorSafe, scanAll, isScanAllRunning, computeMatch, rematchCompetitor };
+// ── Like-for-like verification (title rules + Claude with photos) ─────────
+let _aiCols = false;
+async function ensureAiCols() {
+  if (_aiCols) return;
+  await query(`ALTER TABLE competitor_match ADD COLUMN IF NOT EXISTS ai_same BOOLEAN`);
+  await query(`ALTER TABLE competitor_match ADD COLUMN IF NOT EXISTS ai_reason TEXT`);
+  await query(`ALTER TABLE competitor_match ADD COLUMN IF NOT EXISTS ai_ours TEXT`);
+  await query(`ALTER TABLE competitor_match ADD COLUMN IF NOT EXISTS ai_theirs TEXT`);
+  await query(`ALTER TABLE competitor_match ADD COLUMN IF NOT EXISTS ai_checked_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE competitor_match ADD COLUMN IF NOT EXISTS ai_checked_price NUMERIC(10,2)`);
+  _aiCols = true;
+}
+const deliveredOf = (l) => l.price != null ? +(Number(l.price) + (l.shipping_free ? 0 : Number(l.shipping_cost || 0))).toFixed(2) : null;
+
+// Ask Claude about ONE match and store the verdict. Raises the undercut alert
+// a title-only scan held back, once Claude confirms it's the same item.
+async function aiVerifyMatch(listingId) {
+  await ensureAiCols();
+  const ai = require('./ai');
+  if (!ai.isConfigured()) throw new Error('ai_not_configured');
+  const r = (await query(`
+    SELECT m.listing_id, m.product_id, l.title AS their_title, l.price, l.shipping_cost, l.shipping_free, l.image_url AS their_image,
+           l.competitor_id, c.name AS competitor_name,
+           p.title AS our_title, p.image_url AS our_image, p.sku, COALESCE(p.price_ebay, p.price_shopify) AS our_price
+      FROM competitor_match m JOIN competitor_listings l ON l.id = m.listing_id
+      JOIN competitors c ON c.id = l.competitor_id JOIN products p ON p.id = m.product_id
+     WHERE m.listing_id = $1`, [listingId])).rows[0];
+  if (!r) throw new Error('match_not_found');
+  const delivered = deliveredOf(r);
+  const v = await ai.compareCompetitorListing({
+    our: { title: r.our_title, image: r.our_image, price: r.our_price },
+    their: { title: r.their_title, image: r.their_image, price: delivered },
+  });
+  if (!v) throw new Error('no_verdict');
+  await query(`UPDATE competitor_match SET ai_same = $2, ai_reason = $3, ai_ours = $4, ai_theirs = $5,
+                      ai_checked_at = now(), ai_checked_price = $6, updated_at = now() WHERE listing_id = $1`,
+    [listingId, v.sameItem, v.reason, v.oursIncludes, v.theirsIncludes, r.price]);
+  if (v.sameItem && delivered != null && r.our_price != null && delivered <= Number(r.our_price) * (1 - UNDERCUT_PCT() / 100)
+      && !(await hasUnread('competitor_undercut', listingId))) {
+    await notify({
+      type: 'competitor_undercut', severity: 'warn', listingId,
+      title: `Undercut: ${r.competitor_name} — £${delivered.toFixed(2)} delivered`,
+      body: `${r.their_title} vs our £${Number(r.our_price).toFixed(2)} (${r.sku}) — 🤖 verified same item`,
+    });
+  }
+  return v;
+}
+
+// Background pass: every matched listing whose titles can't settle it and
+// whose price gap is big gets Claude's look (title + photos). Re-checks when
+// their price moves >15%. Clear title mismatches never cost an AI call.
+let _verifyRunning = false;
+async function verifySuspects({ limit = 60, status = {} } = {}) {
+  if (_verifyRunning) return { skipped: 'already_running' };
+  _verifyRunning = true;
+  try {
+    await ensureAiCols();
+    const ai = require('./ai');
+    if (!ai.isConfigured()) return { skipped: 'ai_not_configured' };
+    const { specCheck } = require('../lib/spec-level');
+    const { rows } = await query(`
+      SELECT m.listing_id, l.title AS their_title, l.price, l.shipping_cost, l.shipping_free,
+             p.title AS our_title, COALESCE(p.price_ebay, p.price_shopify) AS our_price, m.ai_checked_price, m.ai_checked_at
+        FROM competitor_match m JOIN competitor_listings l ON l.id = m.listing_id
+        JOIN products p ON p.id = m.product_id
+       WHERE m.product_id IS NOT NULL AND m.dismissed = false AND l.available = true AND p.active = true
+         AND (m.ai_checked_at IS NULL OR (l.price IS NOT NULL AND m.ai_checked_price IS NOT NULL
+              AND ABS(l.price - m.ai_checked_price) > m.ai_checked_price * 0.15))
+       ORDER BY m.ai_checked_at NULLS FIRST
+       LIMIT 2000`);
+    const todo = rows.filter(r => specCheck({ ourTitle: r.our_title, theirTitle: r.their_title, ourPrice: r.our_price, theirPrice: deliveredOf(r) }).suspect).slice(0, limit);
+    status.total = todo.length; status.done = 0; status.same = 0; status.different = 0; status.errors = 0;
+    for (const r of todo) {
+      try {
+        const v = await aiVerifyMatch(r.listing_id);
+        if (v.sameItem) status.same++; else status.different++;
+      } catch (e) {
+        status.errors++;
+        if (/budget|not_configured/.test(e.message)) break;   // stop cleanly at the daily AI budget
+      }
+      status.done++;
+    }
+    return { checked: status.done, same: status.same, different: status.different, errors: status.errors };
+  } finally { _verifyRunning = false; }
+}
+
+// Is this match like-for-like? Claude's verdict wins; otherwise title rules
+// (a clear mismatch excludes; a suspect is held until Claude has looked).
+function likeForLike({ ourTitle, theirTitle, ourPrice, theirPrice, aiSame }) {
+  const { specCheck } = require('../lib/spec-level');
+  const sc = specCheck({ ourTitle, theirTitle, ourPrice, theirPrice });
+  if (aiSame === true) return { ok: true, spec: sc, by: 'ai' };
+  if (aiSame === false) return { ok: false, spec: sc, by: 'ai' };
+  if (sc.mismatch) return { ok: false, spec: sc, by: 'title' };
+  if (sc.suspect) return { ok: null, spec: sc, by: 'title' };   // unknown — awaiting Claude
+  return { ok: true, spec: sc, by: 'title' };
+}
+
+module.exports = { scanCompetitor: scanCompetitorSafe, scanAll, isScanAllRunning, computeMatch, rematchCompetitor, verifySuspects, aiVerifyMatch, ensureAiCols, likeForLike };
