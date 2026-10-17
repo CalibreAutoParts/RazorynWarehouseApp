@@ -291,6 +291,9 @@ router.post('/:id/scan', requireAdmin, async (req, res) => {
 // POST /api/competitors/scan — scan all active competitors now (background).
 router.post('/scan', requireAdmin, async (req, res) => {
   if (_scanStatus.running) return res.status(409).json({ error: 'already_running', status: _scanStatus });
+  if (monitor.isScanAllRunning && monitor.isScanAllRunning()) {
+    return res.status(409).json({ error: 'already_running', message: 'The automatic 6-hourly scan is running right now — give it a few minutes, then Refresh.' });
+  }
   _scanStatus = { running: true, scope: 'all', startedAt: new Date().toISOString() };
   res.json({ ok: true, started: true });
   (async () => {
