@@ -226,6 +226,7 @@ async function hasUnread(type, listingId) {
 // ---------- scan one competitor ----------
 
 async function scanCompetitor(competitorId, status = {}) {
+  await ensureAiCols();
   const c = (await query(`SELECT * FROM competitors WHERE id = $1`, [competitorId])).rows[0];
   if (!c) throw new Error(`competitor ${competitorId} not found`);
 
@@ -486,6 +487,7 @@ async function _scanAll(status = {}) {
 // numbers first (the user's priority order), then everything else; the status
 // object is mutated live so an endpoint can report progress.
 async function rematchCompetitor(competitorId, status = {}) {
+  await ensureAiCols();
   const { rows } = await query(
     `SELECT id, title, parsed_make, parsed_model, parsed_part_type, parsed_part_number
        FROM competitor_listings
@@ -493,19 +495,34 @@ async function rematchCompetitor(competitorId, status = {}) {
       ORDER BY (parsed_part_number IS NOT NULL) DESC, id`,
     [competitorId]);
   status.total = rows.length; status.done = 0; status.matched = 0;
+  status.skipped = 0;
   for (const l of rows) {
-    const m = await computeMatch(l);
-    await upsertMatch(l.id, m);
+    // One bad listing never aborts the whole re-match.
+    try {
+      const m = await computeMatch(l);
+      await upsertMatch(l.id, m);
+      if (m.product_id) status.matched++;
+    } catch (e) {
+      status.skipped++;
+      if (!status.firstError) status.firstError = e.message;
+    }
     status.done++;
-    if (m.product_id) status.matched++;
   }
-  return { total: rows.length, matched: status.matched };
+  return { total: rows.length, matched: status.matched, skipped: status.skipped, firstError: status.firstError || null };
 }
 
 // ── Like-for-like verification (title rules + Claude with photos) ─────────
 let _aiCols = false;
 async function ensureAiCols() {
   if (_aiCols) return;
+  // The match-type whitelist predates 'part_number_in_title' (our part number
+  // found inside their title) — every such match was rejected by the DB,
+  // which used to abort whole competitor scans. Widen it once.
+  try {
+    await query(`ALTER TABLE competitor_match DROP CONSTRAINT IF EXISTS competitor_match_match_type_check`);
+    await query(`ALTER TABLE competitor_match ADD CONSTRAINT competitor_match_match_type_check
+                 CHECK (match_type IN ('exact_part_number','part_number_in_title','make_model_parttype','fuzzy','none'))`);
+  } catch (e) { console.warn('[competitors] match_type constraint:', e.message); }
   await query(`ALTER TABLE competitor_match ADD COLUMN IF NOT EXISTS ai_same BOOLEAN`);
   await query(`ALTER TABLE competitor_match ADD COLUMN IF NOT EXISTS ai_reason TEXT`);
   await query(`ALTER TABLE competitor_match ADD COLUMN IF NOT EXISTS ai_ours TEXT`);
