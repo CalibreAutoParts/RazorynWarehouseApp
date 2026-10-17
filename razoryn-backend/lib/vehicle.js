@@ -63,7 +63,8 @@ function normCode(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g
 function extractPartType(title) {
   const t = ' ' + String(title || '').toLowerCase() + ' ';
   for (const p of PART_TYPES) {
-    const re = new RegExp('\\b' + p.replace(/\s+/g, '\\s+') + '\\b', 'i');
+    // Space optional: "fog lamp" also catches "foglamp", "tail light" "taillight".
+    const re = new RegExp('\\b' + p.replace(/\s+/g, '\\s*') + '\\b', 'i');
     if (re.test(t)) return p;
   }
   return null;
