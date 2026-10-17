@@ -33,13 +33,85 @@ router.get('/', canRead, async (req, res) => {
 });
 
 // GET /api/competitors/alerts — competitor notifications feed.
+// Alerts close themselves once they no longer apply, and close when acted
+// on (repriced from the side-by-side, or ✓ Done). ?show=open (default) |
+// handled | all.
+const { ensureCols: ensureNotifCols } = require('../lib/notify');
+async function autoResolveCompetitorAlerts() {
+  await ensureNotifCols();
+  const undercutPct = parseFloat(process.env.COMPETITOR_UNDERCUT_PCT) || 5;
+  // 1. Superseded: a newer alert of the same kind for the same listing.
+  await query(`
+    UPDATE notifications n SET resolved_at = now(), read_at = COALESCE(n.read_at, now()), resolution = 'superseded by a newer alert'
+     WHERE n.related_type = 'competitor_listing' AND n.resolved_at IS NULL
+       AND EXISTS (SELECT 1 FROM notifications n2
+                    WHERE n2.related_type = 'competitor_listing' AND n2.related_id = n.related_id
+                      AND n2.type = n.type AND n2.id > n.id)`);
+  // 2. Listing gone (sold out / ended on their side).
+  await query(`
+    UPDATE notifications n SET resolved_at = now(), read_at = COALESCE(n.read_at, now()), resolution = 'their listing is no longer live'
+      FROM competitor_listings l
+     WHERE n.related_type = 'competitor_listing' AND n.resolved_at IS NULL
+       AND l.id = n.related_id AND l.available = false`);
+  // 3. Undercut no longer true: we repriced (or they went up) so their
+  //    delivered price is no longer meaningfully below ours.
+  await query(`
+    UPDATE notifications n SET resolved_at = now(), read_at = COALESCE(n.read_at, now()), resolution = 'no longer undercut — prices now level'
+      FROM competitor_listings l
+      JOIN competitor_match m ON m.listing_id = l.id
+      JOIN products p ON p.id = m.product_id
+     WHERE n.type = 'competitor_undercut' AND n.related_type = 'competitor_listing' AND n.resolved_at IS NULL
+       AND l.id = n.related_id AND l.price IS NOT NULL
+       AND COALESCE(p.price_ebay, p.price_shopify) IS NOT NULL
+       AND (l.price + CASE WHEN l.shipping_free THEN 0 ELSE COALESCE(l.shipping_cost, 0) END)
+           > COALESCE(p.price_ebay, p.price_shopify) * (1 - $1::numeric / 100)`, [undercutPct]);
+}
+
 router.get('/alerts', canRead, async (req, res) => {
+  try { await autoResolveCompetitorAlerts(); } catch (e) { console.warn('[competitors] auto-resolve:', e.message); }
+  const show = ['open', 'handled', 'all'].includes(req.query.show) ? req.query.show : 'open';
+  const cond = show === 'open' ? 'AND resolved_at IS NULL' : show === 'handled' ? 'AND resolved_at IS NOT NULL' : '';
   const { rows } = await query(`
     SELECT * FROM notifications
-     WHERE related_type = 'competitor_listing'
-     ORDER BY created_at DESC
-     LIMIT 100`);
-  res.json({ alerts: rows });
+     WHERE related_type = 'competitor_listing' ${cond}
+     ORDER BY ${show === 'handled' ? 'resolved_at' : 'created_at'} DESC
+     LIMIT 200`);
+  const counts = (await query(`
+    SELECT COUNT(*) FILTER (WHERE resolved_at IS NULL)::int AS open,
+           COUNT(*) FILTER (WHERE resolved_at IS NOT NULL)::int AS handled
+      FROM notifications WHERE related_type = 'competitor_listing'`)).rows[0];
+  res.json({ alerts: rows, counts, show });
+});
+// ✓ Done on one alert (or ↩ reopen).
+router.post('/alerts/:id/resolve', requireAdmin, async (req, res) => {
+  await ensureNotifCols();
+  const reopen = req.body && req.body.reopen === true;
+  await query(`UPDATE notifications SET resolved_at = $2, resolution = $3, read_at = COALESCE(read_at, now())
+                WHERE id = $1 AND related_type = 'competitor_listing'`,
+    [req.params.id, reopen ? null : new Date(), reopen ? null : (String(req.body?.resolution || 'marked done').slice(0, 120))]);
+  res.json({ ok: true });
+});
+// Acting on a PRODUCT (repriced from the side-by-side) closes every open
+// alert about that part, whichever competitor raised it.
+router.post('/alerts/resolve-product', requireAdmin, async (req, res) => {
+  await ensureNotifCols();
+  const pid = parseInt(req.body?.productId);
+  if (!pid) return res.status(400).json({ error: 'productId_required' });
+  const r = await query(`
+    UPDATE notifications n SET resolved_at = now(), read_at = COALESCE(n.read_at, now()),
+           resolution = $2
+      FROM competitor_match m
+     WHERE n.related_type = 'competitor_listing' AND n.resolved_at IS NULL
+       AND m.listing_id = n.related_id AND m.product_id = $1
+     RETURNING n.id`, [pid, String(req.body?.resolution || 'repriced').slice(0, 120)]);
+  res.json({ ok: true, resolved: r.rows.length });
+});
+// Clear the whole open list.
+router.post('/alerts/resolve-all', requireAdmin, async (req, res) => {
+  await ensureNotifCols();
+  const r = await query(`UPDATE notifications SET resolved_at = now(), read_at = COALESCE(read_at, now()), resolution = 'cleared'
+                          WHERE related_type = 'competitor_listing' AND resolved_at IS NULL RETURNING id`);
+  res.json({ ok: true, resolved: r.rows.length });
 });
 
 // GET /api/competitors/compare?productId=&listingId=

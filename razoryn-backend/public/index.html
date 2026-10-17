@@ -27193,20 +27193,48 @@ async function dismissOpportunity(matchId) {
 
 // ---- Alerts tab ----
 async function loadCompAlerts() {
-  const { alerts } = await Api.get('/api/competitors/alerts');
+  const show = State.comp.alertShow || 'open';
+  const { alerts, counts } = await Api.get('/api/competitors/alerts?show=' + show);
+  const isAdmin = State.user?.role === 'admin';
   const sevCol = { warn: 'var(--amber, #d97706)', error: 'var(--red)', success: 'var(--green)', info: 'var(--ink-soft)' };
-  const rows = alerts.map(a => `<div style="padding:12px 14px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:flex-start;${a.related_id ? 'cursor:pointer' : ''}" ${a.related_id ? `onclick="compOpenSideBySide(${a.related_id})" title="Side-by-side: us vs every competitor on this part"` : ''}>
-    <span style="width:8px;height:8px;border-radius:50%;background:${sevCol[a.severity] || 'var(--ink-soft)'};margin-top:6px;flex:none"></span>
-    <div style="flex:1">
+  const rows = alerts.map(a => `<div style="padding:12px 14px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:flex-start;${a.related_id ? 'cursor:pointer' : ''}${a.resolved_at ? ';opacity:.6' : ''}" ${a.related_id ? `onclick="compOpenSideBySide(${a.related_id})" title="Side-by-side: us vs every competitor on this part"` : ''}>
+    <span style="width:8px;height:8px;border-radius:50%;background:${a.resolved_at ? 'var(--green)' : (sevCol[a.severity] || 'var(--ink-soft)')};margin-top:6px;flex:none"></span>
+    <div style="flex:1;min-width:0">
       <div style="font-weight:600;font-size:13px">${escapeHtml(a.title)}</div>
       <div style="font-size:12px;color:var(--ink-soft)">${escapeHtml(a.body || '')}</div>
-      ${a.related_id ? '<div style="font-size:11px;color:var(--brand-primary);margin-top:2px">🆚 Click for the side-by-side</div>' : ''}
+      ${a.resolved_at
+        ? `<div style="font-size:11px;color:var(--green);margin-top:2px">✓ Handled ${fmtDate(a.resolved_at)}${a.resolution ? ' — ' + escapeHtml(a.resolution) : ''}</div>`
+        : (a.related_id ? '<div style="font-size:11px;color:var(--brand-primary);margin-top:2px">🆚 Click for the side-by-side — repricing there closes this alert</div>' : '')}
     </div>
-    <div style="font-size:11px;color:var(--ink-soft);white-space:nowrap">${fmtDate(a.created_at)}</div>
+    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex:none">
+      <div style="font-size:11px;color:var(--ink-soft);white-space:nowrap">${fmtDate(a.created_at)}</div>
+      ${isAdmin ? (a.resolved_at
+        ? `<button class="btn btn-ghost btn-sm" style="padding:1px 8px;font-size:11px" onclick="event.stopPropagation();compResolveAlert(${a.id}, true)">↩ Reopen</button>`
+        : `<button class="btn btn-outline btn-sm" style="padding:1px 8px;font-size:11px" onclick="event.stopPropagation();compResolveAlert(${a.id}, false)" title="Dealt with / not worth acting on — close it">✓ Done</button>`) : ''}
+    </div>
   </div>`).join('');
-  el('comp-body').innerHTML = `<div class="card"><div class="card-body" style="padding:0">
-    ${rows || `<div style="padding:20px;text-align:center;color:var(--ink-soft)">No competitor alerts yet.</div>`}
+  el('comp-body').innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <div class="seg">
+        <button class="${show === 'open' ? 'active' : ''}" onclick="State.comp.alertShow='open';loadCompAlerts()">Open (${counts?.open ?? 0})</button>
+        <button class="${show === 'handled' ? 'active' : ''}" onclick="State.comp.alertShow='handled';loadCompAlerts()">Handled (${counts?.handled ?? 0})</button>
+      </div>
+      <span style="flex:1"></span>
+      ${isAdmin && show === 'open' && alerts.length ? `<button class="btn btn-ghost btn-sm" onclick="compResolveAllAlerts()">✓ Mark all handled</button>` : ''}
+    </div>
+    <div style="font-size:11.5px;color:var(--ink-soft);margin-bottom:8px">Alerts close themselves when they stop applying (you repriced, their listing ended, a newer alert replaced it) — or press ✓ Done.</div>
+    <div class="card"><div class="card-body" style="padding:0">
+    ${rows || `<div style="padding:20px;text-align:center;color:var(--ink-soft)">${show === 'open' ? 'Nothing open — all competitor alerts handled. 🎉' : 'No handled alerts yet.'}</div>`}
   </div></div>`;
+}
+async function compResolveAlert(id, reopen) {
+  try { await Api.post(`/api/competitors/alerts/${id}/resolve`, reopen ? { reopen: true } : {}); loadCompAlerts(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function compResolveAllAlerts() {
+  if (!confirm('Mark every open competitor alert as handled?')) return;
+  try { const r = await Api.post('/api/competitors/alerts/resolve-all', {}); toast(`✓ ${r.resolved} alert(s) marked handled`, 'success'); loadCompAlerts(); }
+  catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
 // Re-match runs in the background (9k listings take minutes) — poll the status
@@ -27348,6 +27376,12 @@ async function compSetPrice(productId, btn) {
     if (r.shopifySkipped === 'price_locked') bits.push('Shopify skipped (price-locked)');
     (r.errors || []).forEach(e2 => bits.push('⚠ ' + e2));
     toast(`Price set to £${price.toFixed(2)} — ${bits.join(' · ')}`, (r.errors || []).length ? 'warn' : 'success', 8000);
+    // Acting on the part closes every open competitor alert about it.
+    try {
+      const rr = await Api.post('/api/competitors/alerts/resolve-product', { productId, resolution: `repriced to £${price.toFixed(2)}` });
+      if (rr.resolved) toast(`✓ ${rr.resolved} competitor alert${rr.resolved === 1 ? '' : 's'} on this part closed`, 'info', 4000);
+      if (State.comp?.tab === 'alerts' || el('comp-body')?.innerHTML.includes('Mark all handled')) loadCompAlerts().catch(() => {});
+    } catch (_) {}
     // Update the cached compare item so deltas repaint without a refetch.
     const it = (State.comp?.compare?.items || []).find(x => x.productId === productId);
     if (it) {

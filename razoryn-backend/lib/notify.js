@@ -12,6 +12,10 @@ async function ensureCols() {
   if (_ready) return;
   try {
     await query(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS audience TEXT`);
+    // "Handled" is separate from "read": reading the bell menu must not hide
+    // competitor alerts, but acting on one (repricing, dismissing) closes it.
+    await query(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ`);
+    await query(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS resolution TEXT`);
     _ready = true;
   } catch (e) { console.warn('[notify] migration:', e.message); }
 }
