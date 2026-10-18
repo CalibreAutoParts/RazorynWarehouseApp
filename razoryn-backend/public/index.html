@@ -13629,7 +13629,7 @@ async function renderCreateListing() {
       </div>
     </div>`;
   try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (_) {}
-  CL.categoryId = ''; CL.categoryName = ''; CL.categoryAuto = false; CL._catResults = []; CL.images = [];
+  CL.categoryId = ''; CL.categoryName = ''; CL.categoryAuto = false; CL._catResults = []; CL.images = []; CL.studio = null;
   CL.editProductId = null; CL.imagesReadonly = false;   // create mode (not edit)
   CL.draftId = null;   // set when resuming a saved draft
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
@@ -13675,7 +13675,7 @@ async function renderEditListing() {
       </div>
     </div>`;
   try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (_) {}
-  CL.categoryId = ''; CL.categoryName = ''; CL.categoryAuto = false; CL._catResults = []; CL.images = []; CL.imagesReadonly = false; CL.imagesDirty = false;
+  CL.categoryId = ''; CL.categoryName = ''; CL.categoryAuto = false; CL._catResults = []; CL.images = []; CL.imagesReadonly = false; CL.imagesDirty = false; CL.studio = null;
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
 
   let detail;
@@ -13810,6 +13810,7 @@ async function submitUnifiedUpdate(btn) {
       metafields,
       itemSpecifics,
       images: CL.imagesDirty ? (CL.images || []) : undefined,
+      ebayImages: CL.imagesDirty ? (clStudioEbayImages() || undefined) : undefined,
       imagesChanged: !!CL.imagesDirty,
     });
     Task.done(taskId, 'Saved');
@@ -14084,7 +14085,9 @@ async function submitUnifiedCreate(btn, overrides = {}) {
   State._ceCtx = State._ceCtx || {};
   State._ceCtx.product = { id: created.productId, title: shopTitle, sku, shopify_product_id: created.shopifyProductId };
   await submitCreateEbayListing(created.productId, {
-    imageUrls: created.imageUrls || [],
+    // Studio-imported photos: eBay gets its own gallery (composite main);
+    // Shopify already has the website one (clean main + parts diagram).
+    imageUrls: clStudioEbayImages() || created.imageUrls || [],
     onSuccess: (r) => { toast(`✓ Listed everywhere — eBay ItemID ${r.itemId}`, 'success', 8000); clOfferRepeat(r); },
   });
   if (btn) btn.disabled = false;
@@ -14539,6 +14542,17 @@ async function clAddPhotos(input) {
 function clRemovePhoto(i) { CL.images.splice(i, 1); CL.imagesDirty = true; clRenderPhotos(); }
 
 // ── Studio photo import — pull finished image sets from the thumbnail app ──
+// The studio's eBay gallery for the imported photos — only while the form's
+// photos are exactly the imported website set (edited → both channels get
+// what the form shows).
+function clStudioEbayImages() {
+  const st = CL.studio;
+  if (!st || !st.ebay?.length) return null;
+  const cur = (CL.images || []).filter(u => /^https?:/i.test(String(u)));
+  const same = cur.length === (CL.images || []).length && cur.length === st.shop.length
+    && cur.every((u, i) => u === st.shop[i]);
+  return same ? st.ebay.slice() : null;
+}
 async function clFindStudioPhotos() {
   const wrap = el('cl-studio-matches'); if (!wrap) return;
   const partNumber = (el('cl-partnumber')?.value || '').trim() || (el('cl-sku')?.value || '').trim();
@@ -14575,11 +14589,18 @@ async function clFindStudioPhotos() {
 async function clImportStudioPhotos(setId, btn) {
   if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
   try {
-    const r = await Api.post(`/api/thumbnail/studio/sets/${setId}/image-urls`, {});
-    const urls = (r.images || []).filter(u => /^https:\/\//i.test(u) && !(CL.images || []).includes(u));
+    const r = await Api.post(`/api/thumbnail/studio/sets/${setId}/image-urls`, { sku: (el('cl-sku')?.value || '').trim() });
+    // Two galleries from the studio: the website one (clean main + the large
+    // parts diagram) goes in the form → Shopify; the eBay one (composite main)
+    // is kept aside and used for eBay as long as these photos aren't edited.
+    const https = (list) => (list || []).filter(u => /^https:\/\//i.test(u));
+    const shop = https(r.shopifyImages && r.shopifyImages.length ? r.shopifyImages : r.images);
+    const ebay = https(r.ebayImages && r.ebayImages.length ? r.ebayImages : r.images);
+    const urls = shop.filter(u => !(CL.images || []).includes(u));
     if (!urls.length) throw new Error('no images returned');
     CL.images = CL.images || [];
     CL.images.push(...urls);
+    CL.studio = { shop, ebay };
     CL.imagesDirty = true;
     clRenderPhotos();
     // Everything captured at photo time flows into the listing: the title
