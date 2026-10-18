@@ -355,6 +355,11 @@ router.post('/products/:sku/images', async (req, res) => {
     ? body.images.map(s => String(s || '').trim()).filter(Boolean)
     : [];
   const pushEbay = body.pushEbay !== false;
+  // Optional separate eBay gallery (the studio sends an eBay-main composite
+  // and keeps the large parts diagram website-only). https only, like images.
+  const ebayImages = Array.isArray(body.ebayImages)
+    ? body.ebayImages.map(s => String(s || '').trim()).filter(u => /^https:\/\//i.test(u))
+    : [];
   const idempotencyKey = String(body.idempotencyKey || '').trim();
 
   if (!images.length) return res.status(400).json({ error: 'images_required' });
@@ -428,7 +433,7 @@ router.post('/products/:sku/images', async (req, res) => {
   //    /api/listings/repush-ebay-images).
   const ebayResult = { pushed: 0, errors: [], truncated: false, skipped: !pushEbay };
   if (pushEbay) {
-    let ebayUrls = cdnUrls;
+    let ebayUrls = ebayImages.length ? ebayImages : cdnUrls;
     if (ebayUrls.length > EBAY_REVISE_IMAGE_CAP) {
       ebayUrls = ebayUrls.slice(0, EBAY_REVISE_IMAGE_CAP);
       ebayResult.truncated = true;
