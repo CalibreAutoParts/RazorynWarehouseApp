@@ -2162,9 +2162,15 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
   }
   // eBay can only point at hosted URLs. Prefer the freshly-hosted Shopify set;
   // fall back to the submitted list if it's already all URLs (no new uploads).
+  // Photos imported from the photo studio carry their own eBay gallery (the
+  // composite main; the large parts diagram stays website-only) — use it.
   let ebayPictureUrls;
+  const ebayImages = Array.isArray(b.ebayImages)
+    ? b.ebayImages.map(u => String(u || '').trim()).filter(u => /^https:\/\//i.test(u))
+    : [];
   if (imagesChanged) {
-    if (hostedImageUrls && hostedImageUrls.length) ebayPictureUrls = hostedImageUrls;
+    if (ebayImages.length) ebayPictureUrls = ebayImages;
+    else if (hostedImageUrls && hostedImageUrls.length) ebayPictureUrls = hostedImageUrls;
     else { const urlsOnly = (b.images || []).filter(u => /^https?:\/\//.test(String(u))); if (urlsOnly.length) ebayPictureUrls = urlsOnly; }
   }
 

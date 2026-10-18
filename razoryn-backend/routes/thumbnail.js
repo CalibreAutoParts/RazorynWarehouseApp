@@ -208,7 +208,11 @@ router.get('/studio/sets/:id/thumb', requireAuth, async (req, res) => {
 
 router.post('/studio/sets/:id/image-urls', requireAuth, async (req, res) => {
   try {
-    const r = await studioFetch(`/photo-sets/${parseInt(req.params.id, 10)}/image-urls`, { method: 'POST' });
+    // The SKU being listed: a shared part (one listing per vehicle) gets that
+    // listing's own main image from the studio.
+    const sku = String(req.body?.sku || '').trim();
+    const qs = sku ? `?sku=${encodeURIComponent(sku)}` : '';
+    const r = await studioFetch(`/photo-sets/${parseInt(req.params.id, 10)}/image-urls${qs}`, { method: 'POST' });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) {
       return res.status(502).json({
@@ -217,7 +221,18 @@ router.post('/studio/sets/:id/image-urls', requireAuth, async (req, res) => {
       });
     }
     await audit(req, 'thumbnail.studio.import', 'photo_set', req.params.id, { images: (body.images || []).length });
-    res.json({ images: body.images || [], sku: body.sku || null });
+    // Two galleries: eBay (composite main + photos) and the website (clean
+    // main, the large parts diagram, photos). Older studios send `images` only.
+    // Title / part numbers ride along so the form fills them in.
+    res.json({
+      images: body.images || [],
+      ebayImages: body.ebayImages || body.images || [],
+      shopifyImages: body.shopifyImages || body.images || [],
+      sku: body.sku || null,
+      title: body.title || null,
+      part_number: body.part_number || null,
+      alt_part_numbers: Array.isArray(body.alt_part_numbers) ? body.alt_part_numbers : [],
+    });
   } catch (e) {
     if (e.status === 400) return res.status(400).json({ error: 'studio_not_configured', message: 'Set the Thumbnail app URL and key in Settings → Thumbnail integration.' });
     res.status(500).json({ error: 'server_error', message: e.message });
