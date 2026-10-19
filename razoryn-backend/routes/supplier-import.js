@@ -30,93 +30,9 @@ const clean = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
 const norm = (v) => clean(v).toUpperCase().replace(/[^A-Z0-9]/g, '');
 const lowHead = (v) => clean(v).toLowerCase();
 
-// Column classifiers — tested against the real sheets from five suppliers.
-const COL = {
-  oem: (h) => /\b(oem|oe ?\d?|oe number|oem no)\b/.test(h) || h === 'part number' || h === 'pn',
-  supplierSku: (h) => (/\b(factory no|item no|lw no)\b/.test(h) || /part no/.test(h) || /\bno\.?$/.test(h))
-    && !/\b(oem|oe|invoice|order|carton|ctn|account)\b/.test(h),
-  title: (h) => /\b(description|label name|product name)\b/.test(h) || /^name\s?\d?$/.test(h),
-  make: (h) => /^(make|brand)$/.test(h),
-  model: (h) => /^model$/.test(h),
-  year: (h) => /^year/.test(h),
-  qty: (h) => /\b(qty|quantity)\b/.test(h) && !/\/|ctn|carton|per/.test(h),
-  price: (h) => (/\bprice\b/.test(h) || /unit cost/.test(h)) && !/total/.test(h),
-  remark: (h) => /remark/.test(h),
-  dim: (h) => /^[lwh]$/.test(h) || /l\s*\*\s*w\s*\*\s*h/.test(h),
-  weight: (h) => /weight/.test(h) && !/total/.test(h),
-};
-
-function mapHeaderRow(cells) {
-  const map = {};
-  const dims = [];
-  cells.forEach((raw, i) => {
-    const h = lowHead(raw);
-    if (!h) return;
-    if (map.oem === undefined && COL.oem(h)) { map.oem = i; return; }
-    if (map.title === undefined && COL.title(h)) { map.title = i; return; }
-    if (map.make === undefined && COL.make(h)) { map.make = i; return; }
-    if (map.model === undefined && COL.model(h)) { map.model = i; return; }
-    if (map.year === undefined && COL.year(h)) { map.year = i; return; }
-    if (map.qty === undefined && COL.qty(h)) { map.qty = i; return; }
-    if (map.price === undefined && COL.price(h)) { map.price = i; return; }
-    if (map.remark === undefined && COL.remark(h)) { map.remark = i; return; }
-    if (COL.dim(h) && dims.length < 3) { dims.push(i); return; }
-    if (map.weight === undefined && COL.weight(h)) { map.weight = i; return; }
-    if (map.supplierSku === undefined && COL.supplierSku(h)) { map.supplierSku = i; return; }
-  });
-  if (dims.length) map.dims = dims;
-  return map;
-}
-
-function headerScore(map) {
-  let s = 0;
-  for (const k of ['oem', 'supplierSku', 'title', 'qty', 'price']) if (map[k] !== undefined) s++;
-  for (const k of ['make', 'model', 'year']) if (map[k] !== undefined) s += 0.5;
-  return s;
-}
-
-function parseSheet(rows) {
-  // Find the best header row in the first 40 rows.
-  let best = null;
-  for (let r = 0; r < Math.min(rows.length, 40); r++) {
-    const map = mapHeaderRow(rows[r] || []);
-    const score = headerScore(map);
-    if (score >= 2 && (!best || score > best.score)) best = { r, map, score };
-  }
-  if (!best) return { lines: [] };
-  const { r, map } = best;
-  const lines = [];
-  for (let i = r + 1; i < rows.length; i++) {
-    const row = rows[i] || [];
-    const cell = (idx) => idx !== undefined ? clean(row[idx]) : '';
-    const qty = parseInt(String(cell(map.qty)).replace(/[^0-9]/g, ''), 10);
-    const partNumber = cell(map.oem);
-    const supplierSku = cell(map.supplierSku);
-    const title = cell(map.title);
-    if (!Number.isInteger(qty) || qty <= 0) continue;             // totals/footer/blank rows
-    if (!partNumber && !supplierSku && !title) continue;
-    const price = map.price !== undefined ? parseFloat(String(row[map.price]).replace(/[^\d.]/g, '')) : NaN;
-    // Carton dims: metres on some packing lists (1.2 × 0.6), cm on others (200 × 50).
-    let dims = (map.dims || []).map(di => parseFloat(row[di])).filter(Number.isFinite);
-    if (dims.length === 3 && dims.every(d => d > 0 && d < 10)) dims = dims.map(d => +(d * 100).toFixed(1));
-    const weight = map.weight !== undefined ? parseFloat(row[map.weight]) : NaN;
-    lines.push({
-      row: i + 1,
-      partNumber: partNumber || null,
-      supplierSku: supplierSku || null,
-      title: title || null,
-      make: cell(map.make) || null,
-      model: cell(map.model) || null,
-      year: cell(map.year) || null,
-      qty,
-      unitPrice: Number.isFinite(price) && price > 0 ? price : null,
-      lengthCm: dims[0] ?? null, widthCm: dims[1] ?? null, heightCm: dims[2] ?? null,
-      weightKg: Number.isFinite(weight) && weight > 0 ? weight : null,
-      remark: cell(map.remark) || null,
-    });
-  }
-  return { lines, headerRow: r + 1 };
-}
+const OS = require('../lib/order-sheet');
+const path = require('path');
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
 
 // Guess supplier name + invoice number from the header junk above the table.
 function guessMeta(sheets) {
@@ -146,23 +62,80 @@ router.post('/parse', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'file_required' });
     let wb;
-    try { wb = XLSX.read(req.file.buffer, { type: 'buffer' }); }
+    try { wb = XLSX.read(req.file.buffer, { type: 'buffer', cellFormula: true }); }
     catch (e) { return res.status(400).json({ error: 'unreadable_file', message: 'Could not read that file — is it a real .xlsx/.xls?' }); }
 
     const sheetRows = wb.SheetNames.map(n => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: null }));
-    const parsedSheets = sheetRows.map((rows, i) => ({ name: wb.SheetNames[i], ...parseSheet(rows) }))
-      .filter(s => s.lines.length);
+    const offsets = wb.SheetNames.map(n => { try { return XLSX.utils.decode_range(wb.Sheets[n]['!ref'] || 'A1').s.r; } catch (_) { return 0; } });
+    const meta = guessMeta(sheetRows);
+    const supplierHint = OS.clean(req.body?.supplier || '') || meta.supplier || '';
+    // A mapping corrected on the review screen: { sheet, headerRow (1-based), mapping: field->col, extras: {header: label}, ignore: [header] }
+    let override = null;
+    try { override = req.body?.mapping ? JSON.parse(req.body.mapping) : null; } catch (_) {}
+    const photos = OS.extractImages(req.file.buffer, wb, UPLOAD_DIR);
+    const saved = await OS.savedFormats(supplierHint);
+
+    const parsedSheets = [];
+    wb.SheetNames.forEach((name, si) => {
+      const rows = sheetRows[si];
+      let loc;
+      if (override && override.sheet === name && Number.isInteger(override.headerRow)) {
+        loc = { headerIdx: override.headerRow - 1, map: override.mapping || {}, source: 'manual', format: null, extras: override.extras || {} };
+      } else loc = OS.locateTable(rows, saved);
+      if (!loc) return;
+      parsedSheets.push({ name, si, rows, loc, offset: offsets[si] });
+    });
     if (!parsedSheets.length) return res.status(422).json({ error: 'no_lines_found', message: 'Couldn\'t find a parts table in this file — no header row with part number / qty columns.' });
 
-    // Primary sheet = the one with the most usable lines (prefer priced ones on
-    // a tie). Any OTHER parsed sheet enriches by part number — e.g. a PI sheet
-    // for prices + a PL packing sheet for carton dims in the same workbook.
+    // Lines per sheet (rules/saved/template/manual mapping first).
+    const extrasFor = (sh) => {
+      const ex = {};
+      if (sh.loc.format && sh.loc.format.extras) Object.assign(ex, sh.loc.format.extras);
+      if (override && override.sheet === sh.name && override.extras) Object.assign(ex, override.extras);
+      if (override && override.sheet === sh.name && Array.isArray(override.ignore)) ex.__ignore = override.ignore.map(OS.normHead);
+      return ex;
+    };
+    for (const sh of parsedSheets) {
+      sh.lines = OS.buildLines(sh.rows, sh.loc.headerIdx, sh.loc.map, extrasFor(sh), photos[sh.name] || {}, sh.offset);
+    }
     parsedSheets.sort((a, z) => z.lines.length - a.lines.length
       || z.lines.filter(l => l.unitPrice != null).length - a.lines.filter(l => l.unitPrice != null).length);
     const primary = parsedSheets[0];
+    if (!primary.lines.length) return res.status(422).json({ error: 'no_lines_found', message: 'Found a header row but no item lines under it (each item needs a quantity).' });
+
+    // New layout (built-in rules only)? Let Claude check the mapping, fill any
+    // gaps and say what the extra columns are — then rebuild the lines.
+    let aiNotes = null, currency = null;
+    const headers = (primary.rows[primary.loc.headerIdx] || []).map(h => OS.clean(h));
+    if (primary.loc.source === 'rules') {
+      const unmapped = headers.filter((h, i) => h && !Object.values(primary.loc.map).includes(i));
+      const missingCore = OS.CORE.filter(f => primary.loc.map[f] === undefined);
+      const ai = require('../services/ai');
+      if (ai.isConfigured() && (unmapped.length || missingCore.length)) {
+        try {
+          const sample = primary.rows.slice(primary.loc.headerIdx + 1, primary.loc.headerIdx + 9).map(r => (r || []).map(c => OS.clean(c).slice(0, 40)));
+          const v = await ai.mapSupplierColumns({ headers, sampleRows: sample, supplier: supplierHint, known: primary.loc.map });
+          if (v) {
+            const merged = { ...primary.loc.map };
+            for (const [f, c] of Object.entries(v.mapping)) {
+              for (const k of Object.keys(merged)) if (merged[k] === c && k !== f) delete merged[k];   // one field per column
+              merged[f] = c;
+            }
+            primary.loc.map = merged;
+            primary.loc.source = 'ai';
+            primary.loc.extras = Object.fromEntries(v.extras.filter(x => headers[x.col]).map(x => [headers[x.col], x.label]));
+            aiNotes = v.notes; currency = v.currency;
+            primary.lines = OS.buildLines(primary.rows, primary.loc.headerIdx, merged, primary.loc.extras, photos[primary.name] || {}, primary.offset);
+          }
+        } catch (e) { aiNotes = 'AI column check unavailable: ' + e.message; }
+      }
+    }
+
+    // Any OTHER parsed sheet enriches by part number — e.g. a PI sheet for
+    // prices + a PL packing sheet for carton dims/CBM in the same workbook.
     const enrich = new Map();
-    for (const s of parsedSheets.slice(1)) {
-      for (const l of s.lines) {
+    for (const s2 of parsedSheets.slice(1)) {
+      for (const l of s2.lines) {
         const k = norm(l.partNumber || l.supplierSku);
         if (k && !enrich.has(k)) enrich.set(k, l);
       }
@@ -170,9 +143,10 @@ router.post('/parse', upload.single('file'), async (req, res) => {
     for (const l of primary.lines) {
       const e = enrich.get(norm(l.partNumber || l.supplierSku));
       if (!e) continue;
-      for (const f of ['make', 'model', 'year', 'lengthCm', 'widthCm', 'heightCm', 'weightKg', 'unitPrice', 'title', 'supplierSku']) {
+      for (const f of ['make', 'model', 'year', 'lengthCm', 'widthCm', 'heightCm', 'weightKg', 'unitPrice', 'title', 'supplierSku', 'cbm', 'photo', 'cartons']) {
         if ((l[f] == null || l[f] === '') && e[f] != null) l[f] = e[f];
       }
+      for (const [k, v] of Object.entries(e.extras || {})) if (!(k in l.extras)) l.extras[k] = v;
     }
 
     // ── Match against our catalogue ──
@@ -239,21 +213,64 @@ router.post('/parse', upload.single('file'), async (req, res) => {
       l.autoProductId = l.candidates.length === 1 ? l.candidates[0].productId : null;
     }
 
-    const meta = guessMeta(sheetRows);
-    await audit(req, 'supplier_import_parse', null, null, { file: req.file.originalname, lines: primary.lines.length });
+    await audit(req, 'supplier_import_parse', null, null, { file: req.file.originalname, lines: primary.lines.length, format: primary.loc.source });
+    const sum = (f) => +primary.lines.reduce((a, l) => a + (Number(l[f]) || 0), 0).toFixed(3);
     res.json({
       ok: true,
       fileName: req.file.originalname,
       sheet: primary.name,
-      supplierGuess: meta.supplier,
+      supplierGuess: supplierHint || meta.supplier,
       invoiceGuess: meta.invoice,
       lines: primary.lines,
       matched: primary.lines.filter(l => l.candidates.length).length,
+      totals: { qty: sum('qty'), total: sum('total'), cbm: sum('cbm'), mismatches: primary.lines.filter(l => l.totalMismatch).length },
+      format: {
+        source: primary.loc.source,                 // template | saved | rules | ai | manual
+        savedFor: primary.loc.format ? primary.loc.format.supplier : null,
+        sheet: primary.name, headerRow: primary.loc.headerIdx + 1,
+        headers, mapping: primary.loc.map,
+        extras: primary.loc.extras || (primary.loc.format && primary.loc.format.extras) || {},
+        aiNotes, currency,
+      },
+      fields: OS.FIELDS, coreFields: OS.CORE,
     });
   } catch (e) {
     console.error('[supplier-import]', e);
     res.status(500).json({ error: 'parse_failed', message: e.message });
   }
+});
+
+// GET /api/supplier-import/template — our order list (.xlsx) to send suppliers.
+router.get('/template', async (req, res) => {
+  const buf = OS.buildTemplate({ supplier: OS.clean(req.query.supplier || ''), currency: OS.clean(req.query.currency || 'CNY') || 'CNY' });
+  const name = 'Order-list' + (req.query.supplier ? '-' + OS.clean(req.query.supplier).replace(/[^A-Za-z0-9]+/g, '-') : '') + '.xlsx';
+  res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.set('Content-Disposition', `attachment; filename="${name}"`);
+  res.send(buf);
+});
+// POST /api/supplier-import/formats — remember a supplier's layout.
+// { supplier, headers: [...], mapping: {field: col}, extras: {header: label}, source }
+router.post('/formats', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const headers = Array.isArray(b.headers) ? b.headers.map(OS.clean) : [];
+    if (!headers.length || !b.mapping) return res.status(400).json({ error: 'headers_and_mapping_required' });
+    const mapping = {};
+    for (const [f, c] of Object.entries(b.mapping)) if (OS.FIELDS[f] && Number.isInteger(c) && headers[c]) mapping[f] = headers[c];
+    const sig = await OS.saveFormat({ supplier: OS.clean(b.supplier || ''), headers, mapping, extras: b.extras || {}, source: b.source || 'manual' });
+    await audit(req, 'supplier_format_saved', null, null, { supplier: b.supplier, fields: Object.keys(mapping).length });
+    res.json({ ok: true, signature: sig });
+  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+});
+router.get('/formats', async (req, res) => {
+  await OS.ensureTables();
+  const { rows } = await query(`SELECT id, supplier, headers, mapping, extras, source, uses, updated_at FROM supplier_sheet_formats ORDER BY updated_at DESC LIMIT 200`);
+  res.json({ formats: rows });
+});
+router.delete('/formats/:id', async (req, res) => {
+  await OS.ensureTables();
+  await query(`DELETE FROM supplier_sheet_formats WHERE id = $1`, [req.params.id]);
+  res.json({ ok: true });
 });
 
 module.exports = router;
