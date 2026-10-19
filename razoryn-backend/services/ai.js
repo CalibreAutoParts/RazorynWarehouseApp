@@ -784,6 +784,49 @@ Do not invent numbers; if a summary line isn't on the statement use 0 and say so
   };
 }
 
+// ── Supplier order-list column mapping ─────────────────────────────────────
+// A new supplier layout: Claude reads the header row + a few sample rows and
+// says which column is which, and what any extra columns mean.
+async function mapSupplierColumns({ headers, sampleRows, supplier, known }) {
+  const cfg = await getAiConfig();
+  const fields = ['photo', 'title', 'partNumber', 'supplierSku', 'unitPrice', 'qty', 'total', 'cbm',
+    'make', 'model', 'year', 'remark', 'lengthCm', 'widthCm', 'heightCm', 'weightKg', 'cartons'];
+  const out = await callClaude({
+    kind: 'supplier_sheet_map',
+    model: cfg.smartModel,
+    maxTokens: 1200,
+    timeoutMs: 90000,
+    system: 'You map columns of a car-parts supplier order list / proforma invoice / packing list. Reply with ONLY JSON.',
+    user: `Supplier: ${supplier || 'unknown'}
+Header row (0-based column index: header): ${JSON.stringify(headers.map((h, i) => [i, h]))}
+Sample data rows: ${JSON.stringify(sampleRows)}
+Already mapped by rules (may be incomplete or wrong): ${JSON.stringify(known || {})}
+
+Map columns to these fields (use null when not present):
+photo (picture/image), title (item name/description), partNumber (OEM/OE number), supplierSku (the supplier's own item/factory code),
+unitPrice (price for ONE piece), qty (number of pieces), total (line amount = price × qty), cbm (cubic metres for the line),
+make, model, year, remark, lengthCm, widthCm, heightCm (carton dimensions), weightKg, cartons (number of cartons).
+Every OTHER non-empty column is an "extra": give it a short clear English label (e.g. "Colour", "Pieces per carton", "HS code", "Material").
+
+Reply ONLY:
+{"mapping": {${fields.map(f => `"${f}": <col|null>`).join(', ')}},
+ "extras": [{"col": <i>, "label": "<short English label>"}],
+ "currency": "CNY|USD|GBP|EUR|null",
+ "notes": "<anything odd: price looks like a total, qty column is cartons, etc.>"}`,
+  });
+  const v = out.json;
+  if (!v || !v.mapping) return null;
+  const mapping = {};
+  for (const f of fields) {
+    const c = v.mapping[f];
+    if (Number.isInteger(c) && c >= 0 && c < headers.length) mapping[f] = c;
+  }
+  const extras = (Array.isArray(v.extras) ? v.extras : [])
+    .filter(x => Number.isInteger(x.col) && x.col >= 0 && x.col < headers.length && x.label)
+    .map(x => ({ col: x.col, label: String(x.label).slice(0, 40) }));
+  return { mapping, extras, currency: v.currency || null, notes: v.notes ? String(v.notes).slice(0, 300) : null };
+}
+
 // ── Competitor like-for-like check ─────────────────────────────────────────
 // Same part number ≠ same thing: a "complete bumper" is listed under the bare
 // skin's number. Claude reads both titles and LOOKS at both photos to decide
@@ -1009,6 +1052,7 @@ module.exports = {
   parsePlatformStatement,
   readPurchaseInvoice,
   compareCompetitorListing,
+  mapSupplierColumns,
   disputeAdvisor,
   learnFromFeedback,
   recordFeedback,

@@ -93,6 +93,13 @@ async function ensureTable() {
   // product's true cost once a container is costed.
   await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS landed_unit_cost_gbp NUMERIC(12,4)`);
   await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS supplier_id INTEGER`);
+  // Order-list details kept per line: the supplier's photo, the line's CBM and
+  // total, and any extra columns their sheet carried (colour, carton qty…).
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS photo_url TEXT`);
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS cbm NUMERIC(10,4)`);
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS line_total_foreign NUMERIC(14,2)`);
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS supplier_sku TEXT`);
+  await query(`ALTER TABLE incoming_stock ADD COLUMN IF NOT EXISTS extras JSONB`);
   // Container-level freight/duty live here (one row per container_ref). Freight +
   // duty are entered once for the whole container and apportioned across its lines.
   await query(`CREATE TABLE IF NOT EXISTS incoming_containers (
@@ -364,14 +371,20 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
     const { gbp: lineGbp, rate: lineRate } = await costToGbp(l.unitCostForeign, lineCurrency, b.expectedDate, l.fxRate);
     const ins = await query(
       `INSERT INTO incoming_stock (product_id, sku, title, part_number, qty_ordered, container_ref, supplier, expected_date, status, notes, created_by,
-                                   unit_cost_foreign, currency, fx_rate, unit_cost_gbp, freight_total, duty)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
+                                   unit_cost_foreign, currency, fx_rate, unit_cost_gbp, freight_total, duty,
+                                   photo_url, cbm, line_total_foreign, supplier_sku, extras)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb) RETURNING id`,
       [prod.id, prod.sku, prod.title, prod.part_number, qty, b.containerRef || null, b.supplier || null,
-       b.expectedDate || null, b.status || 'on_order', b.notes || null, req.user.id,
+       b.expectedDate || null, b.status || 'on_order', l.notes || b.notes || null, req.user.id,
        (l.unitCostForeign != null && l.unitCostForeign !== '') ? parseFloat(l.unitCostForeign) : null,
        lineCurrency, lineRate, lineGbp,
        (b.freightTotal != null && b.freightTotal !== '') ? parseFloat(b.freightTotal) : null,
-       (b.duty != null && b.duty !== '') ? parseFloat(b.duty) : null]);
+       (b.duty != null && b.duty !== '') ? parseFloat(b.duty) : null,
+       l.photoUrl ? String(l.photoUrl).slice(0, 500) : null,
+       (l.cbm != null && l.cbm !== '') ? parseFloat(l.cbm) : null,
+       (l.lineTotal != null && l.lineTotal !== '') ? parseFloat(l.lineTotal) : null,
+       l.supplierSku ? String(l.supplierSku).slice(0, 80) : null,
+       l.extras && Object.keys(l.extras).length ? JSON.stringify(l.extras) : null]);
     created.push({ id: ins.rows[0].id, productId: prod.id, sku: prod.sku, qty });
   }
   await audit(req, 'incoming_bulk_add', 'incoming', null, { created: created.length, unmatched: unmatched.length, container: b.containerRef });
