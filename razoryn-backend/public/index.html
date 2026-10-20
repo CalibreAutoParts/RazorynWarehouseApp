@@ -17133,11 +17133,21 @@ function vsPlatformsHtml(cfg) {
         ${cfg.isAdmin ? `<button class="btn btn-ghost btn-sm" style="padding:1px 6px" onclick="vsEditPlatform(${p.id})" title="Edit">✎</button><button class="btn btn-ghost btn-sm" style="padding:1px 6px;color:var(--red)" onclick="vsDeletePlatform(${p.id})" title="Remove">×</button>` : ''}
       </div>
       <a class="btn btn-outline btn-sm" style="text-align:center" href="${escapeAttr(p.url)}" target="_blank" rel="noopener">Open ↗</a>
-      ${(p.email || p.password) ? `<div style="display:flex;gap:4px;flex-wrap:wrap">
-        ${p.email ? `<button class="btn btn-ghost btn-sm" style="font-size:10.5px;padding:2px 8px" onclick="copyToClipboard(this.dataset.v);toast('Email copied','success',1500)" data-v="${escapeAttr(p.email)}">📋 Email</button>` : ''}
+      ${((p.fields || []).length || p.email || p.password) ? `<div style="display:flex;gap:4px;flex-wrap:wrap">
+        ${(p.fields || []).map(f => `<button class="btn btn-ghost btn-sm" style="font-size:10.5px;padding:2px 8px" onclick="copyToClipboard(this.dataset.v);toast(this.dataset.l + ' copied','success',1500)" data-v="${escapeAttr(f.value)}" data-l="${escapeAttr(f.label)}" title="${f.secret ? 'Copy' : escapeAttr(f.value)}">📋 ${escapeHtml(f.label)}</button>`).join('')}
+        ${p.email ? `<button class="btn btn-ghost btn-sm" style="font-size:10.5px;padding:2px 8px" onclick="copyToClipboard(this.dataset.v);toast('User name copied','success',1500)" data-v="${escapeAttr(p.email)}" title="${escapeAttr(p.email)}">📋 User name</button>` : ''}
         ${p.password ? `<button class="btn btn-ghost btn-sm" style="font-size:10.5px;padding:2px 8px" onclick="copyToClipboard(this.dataset.v);toast('Password copied','success',1500)" data-v="${escapeAttr(p.password)}">📋 Password</button>` : ''}
       </div>` : ''}
     </div>`).join('') + '</div>';
+}
+// One extra login line (label + value) for portals with more than user/password.
+function vsFieldRow(f) {
+  return `<div class="vsp-field" style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+    <input class="vsp-f-label" placeholder="Label (e.g. Company ID)" value="${escapeAttr(f.label || '')}" style="width:150px">
+    <input class="vsp-f-value" placeholder="Value (e.g. gb-182069)" value="${escapeAttr(f.value || '')}" style="flex:1">
+    <label style="display:flex;align-items:center;gap:3px;font-size:11px;white-space:nowrap" title="Hide the value on the card (copy still works)"><input type="checkbox" class="vsp-f-secret" ${f.secret ? 'checked' : ''}> hide</label>
+    <button type="button" class="btn btn-ghost btn-sm" style="color:var(--red);padding:1px 6px" onclick="this.closest('.vsp-field').remove()" title="Remove line">×</button>
+  </div>`;
 }
 function vsPlatformModal(p) {
   modal({
@@ -17146,15 +17156,21 @@ function vsPlatformModal(p) {
       <div class="field"><label>Name <span style="color:var(--ink-soft);font-weight:400">— what the team calls it</span></label><input id="vsp-name" value="${escapeAttr(p?.name || '')}" placeholder="e.g. partslink24 (VAG)"></div>
       <div class="field"><label>URL</label><input id="vsp-url" value="${escapeAttr(p?.url || '')}" placeholder="https://www.partslink24.com/"></div>
       <div class="field"><label>Covers <span style="color:var(--ink-soft);font-weight:400">(optional — which makes/models)</span></label><input id="vsp-notes" value="${escapeAttr(p?.notes || '')}" placeholder="e.g. VW · Audi · Seat · Skoda"></div>
+      <div style="font-weight:600;font-size:12px;margin:4px 0 6px">Login <span style="color:var(--ink-soft);font-weight:400">(optional — each line gets a copy button on the card)</span></div>
+      <div id="vsp-fields">${(p?.fields || []).map(f => vsFieldRow(f)).join('')}</div>
+      <button type="button" class="btn btn-ghost btn-sm" style="margin-bottom:8px" onclick="el('vsp-fields').insertAdjacentHTML('beforeend', vsFieldRow({}))" title="For portals that ask for more than a user name + password — e.g. partslink24's Company ID">+ Add login line (e.g. Company ID)</button>
       <div style="display:flex;gap:10px">
-        <div class="field" style="flex:1"><label>Login email <span style="color:var(--ink-soft);font-weight:400">(optional)</span></label><input id="vsp-email" value="${escapeAttr(p?.email || '')}"></div>
-        <div class="field" style="flex:1"><label>Password <span style="color:var(--ink-soft);font-weight:400">(optional)</span></label><input id="vsp-password" value="${escapeAttr(p?.password || '')}"></div>
+        <div class="field" style="flex:1"><label>User name / email</label><input id="vsp-email" value="${escapeAttr(p?.email || '')}"></div>
+        <div class="field" style="flex:1"><label>Password</label><input id="vsp-password" value="${escapeAttr(p?.password || '')}"></div>
       </div>
       <div style="font-size:11px;color:var(--ink-soft)">Logins show to the same people as the main portal's (the "show login to staff" switch in Settings covers these too).</div>`,
     actions: [
       { label: 'Cancel', onClick: closeModal },
       { label: p ? 'Save' : 'Add', primary: true, onClick: async () => {
-        const body = { name: el('vsp-name').value.trim(), url: el('vsp-url').value.trim(), notes: el('vsp-notes').value.trim(), email: el('vsp-email').value.trim(), password: el('vsp-password').value };
+        const fields = [...document.querySelectorAll('#vsp-fields .vsp-field')].map(r => ({
+          label: r.querySelector('.vsp-f-label').value.trim(), value: r.querySelector('.vsp-f-value').value.trim(), secret: r.querySelector('.vsp-f-secret').checked,
+        })).filter(f => f.label && f.value);
+        const body = { name: el('vsp-name').value.trim(), url: el('vsp-url').value.trim(), notes: el('vsp-notes').value.trim(), email: el('vsp-email').value.trim(), password: el('vsp-password').value, fields };
         try {
           if (p) await Api.patch('/api/settings/vinsearch/platforms/' + p.id, body);
           else await Api.post('/api/settings/vinsearch/platforms', body);

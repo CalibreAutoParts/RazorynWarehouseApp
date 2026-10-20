@@ -942,6 +942,8 @@ router.get('/vinsearch', async (req, res) => {
       id: p.id, name: p.name, url: p.url, notes: p.notes || '',
       email: showLogin ? (p.email || '') : null,
       password: showLogin ? (p.password || '') : null,
+      // Extra login lines some portals need (partslink24: Company ID).
+      fields: showLogin ? (Array.isArray(p.fields) ? p.fields : []) : [],
     }));
     res.json({
       url: v.url || VINSEARCH_DEFAULT_URL,
@@ -974,6 +976,10 @@ const cleanPlatform = (b, old = {}) => ({
   email: String(b.email !== undefined ? b.email : old.email || '').trim().slice(0, 200),
   password: String(b.password !== undefined ? b.password : old.password || '').slice(0, 200),
   notes: String(b.notes !== undefined ? b.notes : old.notes || '').trim().slice(0, 200),
+  fields: (b.fields !== undefined ? (Array.isArray(b.fields) ? b.fields : []) : (old.fields || []))
+    .map(f => ({ label: String(f?.label || '').trim().slice(0, 40), value: String(f?.value || '').slice(0, 200), secret: !!f?.secret }))
+    .filter(f => f.label && f.value)
+    .slice(0, 6),
 });
 router.post('/vinsearch/platforms', requireAdmin, async (req, res) => {
   try {
