@@ -2040,16 +2040,35 @@ router.get('/listing-detail/:productId', requireAdmin, async (req, res) => {
       `SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`,
       [product.shopify_product_id]);
     out.ebayLinks = links.rows.map(r => ({ itemId: r.ebay_item_id, storeCode: r.store_code }));
-    if (links.rows[0]) {
+    // Check EVERY linked listing: live, ended, or unreadable (removed / wrong
+    // account). Pre-fill from the first LIVE one. A dead link is as good as no
+    // listing — the page offers to create a fresh one for that store.
+    for (const link of out.ebayLinks) {
       try {
-        out.ebay = await ebay.getItemDetails(links.rows[0].ebay_item_id, links.rows[0].store_code);
-        out.ebay.itemId = links.rows[0].ebay_item_id;
-        out.ebay.storeCode = links.rows[0].store_code;
-        // Live quantity (GetItem's price block doesn't carry it reliably).
-        try { out.ebay.quantity = await ebay.getQuantityTradingAPI(links.rows[0].ebay_item_id, links.rows[0].store_code); } catch (_) {}
-      } catch (e) { out.ebayError = e.message; }
+        const det = await ebay.getItemDetails(link.itemId, link.storeCode);
+        link.status = /^(ended|completed)$/i.test(det.listingStatus || '') ? 'ended' : 'live';
+        if (link.status === 'live' && !out.ebay) {
+          out.ebay = det;
+          out.ebay.itemId = link.itemId;
+          out.ebay.storeCode = link.storeCode;
+          // Live quantity (GetItem's price block doesn't carry it reliably).
+          try { out.ebay.quantity = await ebay.getQuantityTradingAPI(link.itemId, link.storeCode); } catch (_) {}
+        } else if (!out.ebay) { out.ebayEndedDetail = det; }
+      } catch (e) {
+        link.status = 'error';
+        link.error = e.message;
+        if (!out.ebayError) out.ebayError = e.message;
+      }
     }
-  } catch (e) { out.ebayLinks = []; }
+    // Ended listing's details still pre-fill the form (category, specifics…).
+    if (!out.ebay && out.ebayEndedDetail) { out.ebay = out.ebayEndedDetail; delete out.ebayEndedDetail; }
+    // Active eBay accounts this product has NO working listing on.
+    const healthy = new Set(out.ebayLinks.filter(l => l.status === 'live').map(l => l.storeCode));
+    out.ebayStores = ebay.listStores().filter(s2 => s2.hasToken && !s2.disabled && String(s2.channelCode || '').startsWith('ebay_'))
+      .map(s2 => ({ code: s2.code, name: s2.name, primary: s2.primary,
+        status: healthy.has(s2.code) ? 'live' : (out.ebayLinks.find(l => l.storeCode === s2.code) ? (out.ebayLinks.find(l => l.storeCode === s2.code).status) : 'missing'),
+        deadItemId: (out.ebayLinks.find(l => l.storeCode === s2.code && l.status !== 'live') || {}).itemId || null }));
+  } catch (e) { out.ebayLinks = []; out.ebayStores = []; }
 
   // Persisted eBay config on the product is the fallback source of truth for the
   // edit form, so specifics reload even when there's no live listing yet (draft)
