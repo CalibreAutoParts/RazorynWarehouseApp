@@ -13510,6 +13510,7 @@ async function renderEditListing() {
         <div><h1>Edit listing</h1><div class="desc">Edit a live listing and push the changes to the Warehouse (master), Shopify &amp; eBay in one go. Fields are pre-filled from the current listing.</div></div>
         <div class="actions">
           <button class="btn btn-outline" onclick="routeTo('inventory')">Cancel</button>
+          <span id="el-create-ebay-btn"></span>
           <button class="btn btn-primary" onclick="submitUnifiedUpdate(this)">Save &amp; push everywhere</button>
         </div>
       </div>
@@ -13537,10 +13538,28 @@ async function renderEditListing() {
   if (detail.ebayError) warn.push('eBay: ' + detail.ebayError);
   // No eBay listing yet → the eBay panel opens in CREATE mode (policies, VAT,
   // promotion) and Save offers to publish it + link it to this product.
-  const noEbay = !detail.ebayLinks || !detail.ebayLinks.length;
+  // Per-store health: live / ended / unreadable / missing. No LIVE listing
+  // anywhere → the panel opens in create mode; any store without a working
+  // listing gets a "Create eBay listing" button.
+  const stores = detail.ebayStores || [];
+  const needStores = stores.filter(x => x.status !== 'live');
+  const noEbay = !stores.some(x => x.status === 'live') && !((detail.ebayLinks || []).some(l => !l.status || l.status === 'live'));
   CL._editNoEbay = noEbay;
-  if (warn.length) el('el-banner').innerHTML = `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--amber)"><div class="card-body" style="padding:10px 14px;font-size:12px;color:var(--ink-soft)">⚠ ${warn.map(escapeHtml).join(' · ')}</div></div>`;
-  if (noEbay) el('el-banner').insertAdjacentHTML('beforeend', `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--blue)"><div class="card-body" style="padding:10px 14px;font-size:12.5px">🛒 <strong>This item isn't on eBay yet.</strong> The eBay panel is ready to create the listing — check the category, condition and specifics, then <strong>Save &amp; push everywhere</strong> will offer to list it on eBay and link it to this product.</div></div>`);
+  CL._ebayNeed = needStores;
+  if (warn.length && !needStores.length) el('el-banner').innerHTML = `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--amber)"><div class="card-body" style="padding:10px 14px;font-size:12px;color:var(--ink-soft)">⚠ ${warn.map(escapeHtml).join(' · ')}</div></div>`;
+  if (needStores.length) {
+    const why = (x) => x.status === 'missing' ? 'not listed on this account'
+      : x.status === 'ended' ? `listing ${escapeHtml(x.deadItemId || '')} has <strong>ended</strong> on eBay`
+      : `linked listing ${escapeHtml(x.deadItemId || '')} <strong>can't be read</strong> (removed, or on another account)${(detail.ebayLinks || []).find(l => l.itemId === x.deadItemId)?.error ? ' — ' + escapeHtml((detail.ebayLinks.find(l => l.itemId === x.deadItemId).error || '').slice(0, 120)) : ''}`;
+    el('el-banner').insertAdjacentHTML('beforeend', `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--blue)"><div class="card-body" style="padding:10px 14px;font-size:12.5px">
+      🛒 <strong>${noEbay ? "This item isn't live on eBay." : 'Missing on some eBay accounts.'}</strong>
+      ${needStores.map(x => `<div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap"><span><strong>${escapeHtml(x.name)}</strong> — ${why(x)}</span>
+        <button class="btn btn-primary btn-sm" onclick="elOfferCreateEbay(${productId}, { storeCode: '${escapeAttr(x.code)}', deadItemId: ${x.deadItemId ? `'${escapeAttr(x.deadItemId)}'` : 'null'}, skipConfirm: true })">🛒 Create eBay listing on ${escapeHtml(x.name)}</button></div>`).join('')}
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Uses the eBay panel's title, category, condition, price, quantity, specifics and photos — it only asks for what's missing (business policies, empty required specifics), then links the new listing to this product.</div>
+    </div></div>`);
+    const hb = el('el-create-ebay-btn');
+    if (hb) { const x = needStores[0]; hb.innerHTML = `<button class="btn btn-outline" onclick="elOfferCreateEbay(${productId}, { storeCode: '${escapeAttr(x.code)}', deadItemId: ${x.deadItemId ? `'${escapeAttr(x.deadItemId)}'` : 'null'}, skipConfirm: true })">🛒 Create eBay listing</button>`; }
+  }
 
   // Existing photos shown read-only (use the Re-push images tool to change them).
   CL.images = Array.isArray(sh.imageUrls) ? sh.imageUrls.slice() : (p.image_url ? [p.image_url] : []);
@@ -13592,8 +13611,19 @@ async function renderEditListing() {
 // page doesn't already have (business policies, store, empty required
 // specifics), then create it via the normal create-ebay flow — which also
 // writes the warehouse/Shopify ↔ eBay link.
-async function elOfferCreateEbay(productId) {
-  if (!confirm("This item isn't on eBay yet.\n\nCreate the eBay listing now from the eBay panel's details (title, category, condition, price, quantity, specifics, photos)?")) return false;
+async function elOfferCreateEbay(productId, opts = {}) {
+  if (!opts.skipConfirm && !confirm("This item isn't on eBay yet.\n\nCreate the eBay listing now from the eBay panel's details (title, category, condition, price, quantity, specifics, photos)?")) return false;
+  // The panel may be in EDIT mode (another store is live) — that form has no
+  // policy / preview fields, so add hidden ones for the create call to read.
+  const panel = el('cl-ebay-panel');
+  for (const id of ['ce-policy-shipping', 'ce-policy-payment', 'ce-policy-return']) {
+    if (!el(id) && panel) panel.insertAdjacentHTML('beforeend', `<select id="${id}" style="display:none"><option value=""></option></select>`);
+  }
+  if (!el('ce-preview') && panel) panel.insertAdjacentHTML('beforeend', '<input type="checkbox" id="ce-preview" style="display:none">');
+  if (opts.storeCode && el('ce-store')) {
+    if (![...(el('ce-store').options || [])].some(o => o.value === opts.storeCode) && el('ce-store').tagName === 'SELECT') el('ce-store').add(new Option(opts.storeCode, opts.storeCode));
+    el('ce-store').value = opts.storeCode;
+  }
   if (!(el('ce-category')?.value || '').trim()) {
     toast('Pick an eBay category in the eBay panel first (search by name), then press Save again', 'warn', 9000);
     el('ce-category')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -13653,6 +13683,11 @@ async function elOfferCreateEbay(productId) {
             onSuccess: (res) => { ok = true; toast(`🛒 Listed on eBay — ItemID ${res.itemId} · linked to this product (warehouse, Shopify & eBay now in sync)`, 'success', 10000); },
           });
           if (preview) { done('stay'); return; }   // fees shown — stay to publish for real
+          if (ok && opts.deadItemId) {
+            // The ended/unreadable listing's link is replaced by the new one.
+            try { await Api.post('/api/listings/link-status/unlink', { ebayItemId: opts.deadItemId }); } catch (_) {}
+          }
+          if (ok && opts.skipConfirm) { renderEditListing(); }   // reload: banner + panel reflect the new listing
           done(ok ? true : 'stay');               // failed → stay, the error toast says why
         } },
       ],
@@ -13768,7 +13803,7 @@ async function submitUnifiedUpdate(btn) {
   for (const x of ebayEntries) {
     if (x.ok) bits.push(`${storeName(x.store)} ✓`);
     else if (x.queued) bits.push(`${storeName(x.store)} ⏳ queued — eBay blocked it (offer open); auto-retrying every 12h (see Push queue)`);
-    else if (x.error) { bits.push(`${storeName(x.store)} ✗`); ebErr++; }
+    else if (x.error) { bits.push(`${storeName(x.store)} ✗ (${String(x.error).slice(0, 90)})`); ebErr++; }
     else if (x.skipped === 'no_ebay_link') bits.push('not linked to eBay');
     else if (x.skipped) bits.push(`${storeName(x.store)} – (${escapeHtml(x.skipped)})`);
   }

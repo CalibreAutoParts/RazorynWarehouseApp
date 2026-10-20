@@ -991,6 +991,8 @@ async function getItemDetails(itemId, storeArg) {
       withinDays: returnsWithinDays,
     },
     dispatchDays: dispatchMax != null && dispatchMax !== '' ? parseInt(dispatchMax) : null,
+    // Active | Completed | Ended — an ended listing can't be revised.
+    listingStatus: extractOne(extractOne(xml, 'SellingStatus') || '', 'ListingStatus') || null,
     storeCode: resolveStore(storeArg)?.code,
   };
 }
