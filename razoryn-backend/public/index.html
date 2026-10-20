@@ -13690,8 +13690,12 @@ async function renderEditListing() {
   const warn = [];
   if (detail.shopifyError) warn.push('Shopify: ' + detail.shopifyError);
   if (detail.ebayError) warn.push('eBay: ' + detail.ebayError);
-  if (!detail.ebayLinks || !detail.ebayLinks.length) warn.push('This product has no linked eBay listing — eBay fields below won’t be pushed.');
+  // No eBay listing yet → the eBay panel opens in CREATE mode (policies, VAT,
+  // promotion) and Save offers to publish it + link it to this product.
+  const noEbay = !detail.ebayLinks || !detail.ebayLinks.length;
+  CL._editNoEbay = noEbay;
   if (warn.length) el('el-banner').innerHTML = `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--amber)"><div class="card-body" style="padding:10px 14px;font-size:12px;color:var(--ink-soft)">⚠ ${warn.map(escapeHtml).join(' · ')}</div></div>`;
+  if (noEbay) el('el-banner').insertAdjacentHTML('beforeend', `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--blue)"><div class="card-body" style="padding:10px 14px;font-size:12.5px">🛒 <strong>This item isn't on eBay yet.</strong> The eBay panel is ready to create the listing — check the category, condition and specifics, then <strong>Save &amp; push everywhere</strong> will offer to list it on eBay and link it to this product.</div></div>`);
 
   // Existing photos shown read-only (use the Re-push images tool to change them).
   CL.images = Array.isArray(sh.imageUrls) ? sh.imageUrls.slice() : (p.image_url ? [p.image_url] : []);
@@ -13721,7 +13725,7 @@ async function renderEditListing() {
     shopify_product_id: p.shopify_product_id || null,
     shopify_price: p.price_shopify, price_shopify: p.price_shopify,
   };
-  await openCreateEbayListing(productId, { draft: true, edit: true, container: 'cl-ebay-panel', draftProduct, editSpecifics: eb.specifics || [], editCategoryId: eb.categoryId || '' });
+  await openCreateEbayListing(productId, { draft: true, edit: !noEbay, container: 'cl-ebay-panel', draftProduct, editSpecifics: eb.specifics || [], editCategoryId: eb.categoryId || '' });
   // Pre-fill eBay fields from the live listing (specifics already rendered above).
   set('ce-title', eb.title || draftProduct.title);
   if (el('ce-title-count') && el('ce-title')) el('ce-title-count').textContent = el('ce-title').value.length + '/80';
@@ -13737,6 +13741,95 @@ async function renderEditListing() {
     if (pr) pr.addEventListener('input', clUpdateDerivedFromEbay);
     clUpdateDerivedFromEbay();
   }, 150);
+}
+
+// Edit listing on an item with NO eBay listing: ask, collect only what the
+// page doesn't already have (business policies, store, empty required
+// specifics), then create it via the normal create-ebay flow — which also
+// writes the warehouse/Shopify ↔ eBay link.
+async function elOfferCreateEbay(productId) {
+  if (!confirm("This item isn't on eBay yet.\n\nCreate the eBay listing now from the eBay panel's details (title, category, condition, price, quantity, specifics, photos)?")) return false;
+  if (!(el('ce-category')?.value || '').trim()) {
+    toast('Pick an eBay category in the eBay panel first (search by name), then press Save again', 'warn', 9000);
+    el('ce-category')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return 'stay';
+  }
+  const cfg = State.pricingConfig || {};
+  const storeSel = el('ce-store');
+  const stores = (State.brand?.stores || []).filter(x => x.channelCode && x.channelCode.startsWith('ebay_'));
+  const missingSpecs = [...document.querySelectorAll('#ce-specifics input[data-spec][placeholder="required"]')]
+    .filter(i => !(i.value || '').trim()).map(i => i.getAttribute('data-spec'));
+  const pick = (id) => el(id)?.value || '';
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    modal({
+      title: '🛒 Create the eBay listing — just these details',
+      body: `
+        <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Everything else comes from the eBay panel. Once created, the listing is <strong>linked to this product</strong> — stock, price and edits then sync to eBay like the rest.</div>
+        ${stores.length > 1 ? `<div class="field"><label>eBay store</label><select id="elc-store" onchange="elcLoadPolicies(this.value)">
+          ${stores.map(x => `<option value="${escapeAttr(x.code)}" ${x.code === (storeSel?.value || '') ? 'selected' : ''}>${escapeHtml(x.name)}</option>`).join('')}</select></div>` : ''}
+        <div style="font-weight:600;font-size:12px;margin:2px 0 6px">Business policies</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+          <div class="field"><label>Shipping</label><select id="elc-ship"><option value="">Saved default</option></select></div>
+          <div class="field"><label>Payment</label><select id="elc-pay"><option value="">Saved default</option></select></div>
+          <div class="field"><label>Returns</label><select id="elc-ret"><option value="">Saved default</option></select></div>
+        </div>
+        <div id="elc-pol-note" style="font-size:11px;color:var(--ink-soft);margin:-4px 0 8px">Loading your eBay policies…</div>
+        ${missingSpecs.length ? `<div style="font-weight:600;font-size:12px;margin:6px 0">Required item specifics still empty <span style="font-weight:400;color:var(--ink-soft)">— eBay rejects the listing without them</span></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">${missingSpecs.map(n => `<div class="field"><label>${escapeHtml(n)} <span style="color:var(--red)">*</span></label><input class="elc-spec" data-spec-name="${escapeAttr(n)}"></div>`).join('')}</div>` : ''}
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-top:6px"><input type="checkbox" id="elc-preview"> Preview only (check fees, don't list yet)</label>`,
+      actions: [
+        { label: 'Not now', onClick: () => { closeModal(); done(false); } },
+        { label: '🛒 Create on eBay & link', primary: true, onClick: async () => {
+          // Required specifics typed here → back into the panel's inputs.
+          for (const inp of document.querySelectorAll('.elc-spec')) {
+            const v = inp.value.trim(), name = inp.dataset.specName;
+            if (!v) { toast(`${name} is required by eBay`, 'warn'); inp.focus(); return; }
+            const target = [...document.querySelectorAll('#ce-specifics input[data-spec]')].find(i => i.getAttribute('data-spec') === name);
+            if (target) target.value = v;
+          }
+          // Store + policies → into the panel (what ceCollectListingInput reads).
+          const store = el('elc-store')?.value || storeSel?.value || '';
+          if (storeSel && store) storeSel.value = store;
+          const savedPol = (cfg.ebayPerStorePolicies || {})[store] || {};
+          const polVal = { ship: pick('elc-ship'), pay: pick('elc-pay'), ret: pick('elc-ret') };
+          const haveDefault = { ship: savedPol.shipping || cfg.ebayPolicyShipping, pay: savedPol.payment || cfg.ebayPolicyPayment, ret: savedPol.return || cfg.ebayPolicyReturn };
+          const missingPol = Object.entries({ ship: 'shipping', pay: 'payment', ret: 'return' }).filter(([k]) => !polVal[k] && !haveDefault[k]).map(([, n]) => n);
+          if (missingPol.length) { toast(`Pick a ${missingPol.join(' / ')} policy — there's no saved default for this store`, 'warn', 8000); return; }
+          const setSel = (id, v) => { const e = el(id); if (!e) return; if (v && ![...e.options].some(o => o.value === v)) e.add(new Option(v, v)); e.value = v; };
+          setSel('ce-policy-shipping', polVal.ship); setSel('ce-policy-payment', polVal.pay); setSel('ce-policy-return', polVal.ret);
+          const pv = el('ce-preview'); if (pv) pv.checked = !!el('elc-preview')?.checked;
+          const preview = !!el('elc-preview')?.checked;
+          closeModal();
+          let ok = false;
+          await submitCreateEbayListing(productId, {
+            imageUrls: (CL.images || []).filter(u => /^https?:/i.test(u)),
+            onSuccess: (res) => { ok = true; toast(`🛒 Listed on eBay — ItemID ${res.itemId} · linked to this product (warehouse, Shopify & eBay now in sync)`, 'success', 10000); },
+          });
+          if (preview) { done('stay'); return; }   // fees shown — stay to publish for real
+          done(ok ? true : 'stay');               // failed → stay, the error toast says why
+        } },
+      ],
+    });
+    elcLoadPolicies(el('elc-store')?.value || storeSel?.value || '');
+  });
+}
+async function elcLoadPolicies(storeCode) {
+  const note = el('elc-pol-note');
+  const cfg = State.pricingConfig || {};
+  const saved = (cfg.ebayPerStorePolicies || {})[storeCode] || {};
+  const defaults = { ship: saved.shipping || cfg.ebayPolicyShipping, pay: saved.payment || cfg.ebayPolicyPayment, ret: saved.return || cfg.ebayPolicyReturn };
+  let r;
+  try { r = await Api.get('/api/listings/business-policies?storeCode=' + encodeURIComponent(storeCode || '')); }
+  catch (e) { if (note) note.textContent = 'Couldn’t load policies (' + (e.data?.message || e.message) + ') — saved defaults will be used.'; return; }
+  const fill = (id, list, def) => {
+    const sel = el(id); if (!sel) return;
+    sel.innerHTML = `<option value="">${def ? 'Saved default' : '— pick one —'}</option>` + (list || []).map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+  };
+  fill('elc-ship', r.shipping, defaults.ship); fill('elc-pay', r.payment, defaults.pay); fill('elc-ret', r.return, defaults.ret);
+  const missing = ['ship', 'pay', 'ret'].filter(k => !defaults[k]).length;
+  if (note) note.textContent = missing ? `No saved default for ${missing} of these on this store — pick ${missing === 1 ? 'it' : 'them'} above.` : 'Leave as "Saved default" to use your Settings policies, or pick one for this listing.';
 }
 
 // Render the eBay item specifics from the listing's actual values (edit mode) —
@@ -13841,6 +13934,16 @@ async function submitUnifiedUpdate(btn) {
   const missing = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_') && !pushedCodes.has(s.code));
   if (missing.length && ebayEntries.length) bits.push(`${missing.map(s => storeName(s.code)).join(', ')} — not linked`);
   if (r.images?.ok) bits.push(`Photos ✓ (${r.images.count})`); else if (r.images?.error) bits.push('Photos ✗');
+  if (CL._editNoEbay) {
+    // Warehouse + Shopify are saved — now offer the missing eBay listing.
+    toast(`Saved — Warehouse ✓${bits.filter(b => !/not linked/.test(b)).length ? ' · ' + bits.filter(b => !/not linked/.test(b)).join(' · ') : ''}`, 'success', 5000);
+    if (btn) btn.disabled = false;
+    const created = await elOfferCreateEbay(productId);
+    if (created === 'stay') return;           // something to fix on the page first
+    await Store.refresh('products').catch(() => {});
+    routeTo('inventory');
+    return;
+  }
   const anyBad = ebErr || r.shopify?.error || r.images?.error;   // a store simply not listed is info, not an error
   toast(`Saved & pushed — Warehouse ✓${bits.length ? ' · ' + bits.join(' · ') : ''}${missing.length ? ' · (to also list on the missing account, use Listing Mirror → Force match or Copy to 2nd store)' : ''}`, anyBad ? 'warn' : 'success', 9000);
   await Store.refresh('products').catch(() => {});
