@@ -607,21 +607,9 @@ async function runFitmentSweep() {
   }
 }
 
-const fitmentStaticCron = (process.env.FITMENT_MSG_CRON || '').trim();
-if (fitmentStaticCron && cron.validate(fitmentStaticCron)) {
-  cron.schedule(fitmentStaticCron, runFitmentSweep);
-  console.log(`[boot] eBay fitment-message sweep scheduled (static override): ${fitmentStaticCron}`);
-} else {
-  // Tick every minute; actually sweep only once the time-of-day interval has elapsed.
-  let lastSweepMs = 0;
-  cron.schedule('* * * * *', async () => {
-    const now = Date.now();
-    if (now - lastSweepMs < fitmentSweepIntervalMs(new Date(now))) return;
-    lastSweepMs = now;
-    await runFitmentSweep();
-  });
-  console.log('[boot] eBay fitment-message sweep scheduled: dynamic (07:00–13:00 UK every 10–15 min, faster toward noon; otherwise every 2h)');
-}
+// eBay fitment-message sweep: NOT scheduled — automated eBay buyer messages are
+// hard-disabled after an eBay messaging-policy restriction (services/fitment-messages.js).
+console.log('[boot] eBay fitment-message sweep DISABLED (eBay messaging policy)');
 
 // Email digests + scheduled reports — hourly tick: batches new notifications to
 // opted-in staff and sends daily/weekly/monthly/quarterly reports at ~07:00 UK

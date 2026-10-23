@@ -13,6 +13,13 @@
 
 const { query } = require('../db');
 
+// ⛔ HARD-DISABLED (Oct 2026): eBay restricted an account after automated
+// buyer messages tripped its member-to-member contact policy. Automated
+// messages to eBay buyers are switched off in CODE — no setting, cron or
+// "run now" button can send them. Don't re-enable without reviewing eBay's
+// messaging policy first.
+const AUTO_EBAY_MESSAGES_DISABLED = true;
+
 const DEFAULT_SUBJECT = 'Quick check so your part fits first time';
 const DEFAULT_BODY =
 `Hi, thanks for your order with us!
@@ -37,7 +44,8 @@ async function getConfig() {
   const { rows } = await query(`SELECT data FROM app_settings WHERE id = 1`);
   const c = (rows[0]?.data && rows[0].data.fitmentMsg) || {};
   return {
-    enabled: !!c.enabled,
+    enabled: AUTO_EBAY_MESSAGES_DISABLED ? false : !!c.enabled,
+    hardDisabled: AUTO_EBAY_MESSAGES_DISABLED,
     subject: c.subject || DEFAULT_SUBJECT,
     body: c.body || DEFAULT_BODY,
     windowDays: Number.isFinite(+c.windowDays) ? Math.min(90, Math.max(1, +c.windowDays)) : 14,
@@ -51,7 +59,7 @@ async function saveConfig(patch = {}) {
   await ensureColumns();
   const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
   const next = { ...(cur.fitmentMsg || {}) };
-  if (patch.enabled !== undefined)    next.enabled = !!patch.enabled;
+  if (patch.enabled !== undefined)    next.enabled = AUTO_EBAY_MESSAGES_DISABLED ? false : !!patch.enabled;
   if (patch.subject !== undefined)    next.subject = String(patch.subject || '').slice(0, 200);
   if (patch.body !== undefined)       next.body = String(patch.body || '').slice(0, 2000);
   if (patch.windowDays !== undefined) next.windowDays = Math.min(90, Math.max(1, parseInt(patch.windowDays) || 14));
@@ -169,6 +177,7 @@ async function sendOneSale(sale, cfg) {
 // order is a still-open eBay sale, not already messaged, no return/refund. Ignores
 // the delay/window (those only bound the catch-up cron).
 async function sendForSale(saleId) {
+  if (AUTO_EBAY_MESSAGES_DISABLED) return { ok: false, skipped: 'hard_disabled' };
   try {
     const cfg = await getConfig();
     if (!cfg.enabled) return { ok: false, skipped: 'disabled' };
@@ -194,6 +203,7 @@ async function sendForSale(saleId) {
 // transiently). Automatic (short cron) when enabled; `allowDisabled` lets an
 // admin trigger a run on demand.
 async function sendFitmentMessagesCore({ allowDisabled = false } = {}) {
+  if (AUTO_EBAY_MESSAGES_DISABLED) return { ok: true, skipped: 'hard_disabled', sent: 0, message: 'Automated eBay buyer messages are disabled (eBay messaging policy).' };
   const cfg = await getConfig();
   if (!cfg.enabled && !allowDisabled) return { ok: true, skipped: 'disabled', sent: 0 };
   const ebay = require('./ebay');
