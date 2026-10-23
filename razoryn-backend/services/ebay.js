@@ -567,7 +567,8 @@ async function pushStockForProduct(product) {
 async function setQuantityTradingAPI(itemId, quantity, storeArg) {
   if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
   if (!itemId) throw new Error('missing_item_id');
-  const qty = Math.max(0, parseInt(quantity) || 0);
+  // Limited accounts show at most their cap; the warehouse keeps the real count.
+  const qty = await require('../lib/ebay-qty-cap').applyCap(quantity, resolveStore(storeArg)?.code);
   const body = `<InventoryStatus><ItemID>${escapeXml(String(itemId))}</ItemID><Quantity>${qty}</Quantity></InventoryStatus>`;
   const xml = await tradingCall('ReviseInventoryStatus', body, storeArg);
   if (xml.includes('<Ack>Failure</Ack>')) {
@@ -1293,6 +1294,25 @@ async function addItem(storeArg, opts = {}) {
   if (!categoryId) throw new Error('categoryId required');
   if (price == null || isNaN(parseFloat(price))) throw new Error('valid price required');
 
+  // Per-account quantity cap (limited accounts) — then, for accounts eBay puts
+  // monthly selling limits on, refuse up front with a plain message rather than
+  // a cryptic AddItem failure.
+  const storeCode = resolveStore(storeArg)?.code;
+  const listQty = await require('../lib/ebay-qty-cap').applyCap(
+    (() => { const q = parseInt(quantity); return Number.isFinite(q) && q >= 0 ? q : 1; })(), storeCode);
+  if (!verify && listQty > 0) {
+    const lim = await getSellingLimits(storeArg).catch(() => null);
+    if (lim && lim.limited) {
+      const value = listQty * parseFloat(price);
+      if (lim.qtyRemaining != null && listQty > lim.qtyRemaining) {
+        throw new Error(`eBay selling limit: this account can only list ${lim.qtyRemaining} more item${lim.qtyRemaining === 1 ? '' : 's'} this month (you tried ${listQty}). Lower the quantity or request higher limits on eBay.`);
+      }
+      if (lim.amountRemaining != null && value > lim.amountRemaining + 0.001) {
+        throw new Error(`eBay selling limit: this account has £${lim.amountRemaining.toFixed(2)} of listing value left this month — this listing is £${value.toFixed(2)} (${listQty} × £${parseFloat(price).toFixed(2)}). Request higher limits on eBay or list a cheaper item.`);
+      }
+    }
+  }
+
   // eBay title limit is 80 characters. Truncate cleanly at a word boundary
   // if possible, else hard-cut.
   let cleanTitle = String(title).replace(/\s+/g, ' ').trim();
@@ -1393,7 +1413,7 @@ async function addItem(storeArg, opts = {}) {
       <Description><![CDATA[${description || cleanTitle}]]></Description>
       <PrimaryCategory><CategoryID>${escapeXml(categoryId)}</CategoryID></PrimaryCategory>
       <StartPrice currencyID="${escapeXml(currency)}">${parseFloat(price).toFixed(2)}</StartPrice>
-      <Quantity>${(() => { const q = parseInt(quantity); return Number.isFinite(q) && q >= 0 ? q : 1; })()}</Quantity>
+      <Quantity>${listQty}</Quantity>
       <SKU>${escapeXml(sku)}</SKU>
       <ConditionID>${parseInt(conditionId) || 1000}</ConditionID>
       <Country>${escapeXml(country)}</Country>
@@ -1423,6 +1443,7 @@ async function addItem(storeArg, opts = {}) {
   const ack = extractOne(xml, 'Ack') || '';
   if (ack === 'Success' || ack === 'Warning') {
     const itemId = extractOne(xml, 'ItemID');
+    if (!verify) delete _sellingLimitsCache[storeCode];   // allowance just changed
     // VerifyAddItem returns no real ItemID (it's a validation), but does return fees.
     return { ok: true, verified: verify, ack, itemId: verify ? null : itemId, fees: extractOne(xml, 'Fee') };
   }
@@ -1430,6 +1451,43 @@ async function addItem(storeArg, opts = {}) {
   const errCode = extractOne(xml, 'ErrorCode') || 'unknown';
   const errMsg  = extractOne(xml, 'ShortMessage') || extractOne(xml, 'LongMessage') || 'eBay returned Failure';
   throw new Error(`${callName} ${ack} [${errCode}]: ${errMsg}`);
+}
+
+// ---------- Monthly selling limits ----------
+// New eBay accounts get monthly limits ("25 items / £523.78"). GetMyeBaySelling's
+// Summary reports what's left: QuantityLimitRemaining + AmountLimitRemaining.
+// Accounts without limits simply don't return those fields → limited:false.
+// Cached 10 min per store (AddItem clears it) so listing checks stay cheap.
+const _sellingLimitsCache = {};
+async function getSellingLimits(storeArg, { fresh = false } = {}) {
+  const store = resolveStore(storeArg);
+  const code = store?.code || '_';
+  const hit = _sellingLimitsCache[code];
+  if (!fresh && hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.value;
+  if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
+  const xml = await tradingCall('GetMyeBaySelling', `
+    <SellingSummary><Include>true</Include></SellingSummary>
+    <ActiveList><Include>false</Include></ActiveList>
+    <SoldList><Include>false</Include></SoldList>
+    <UnsoldList><Include>false</Include></UnsoldList>`, storeArg);
+  const ack = extractOne(xml, 'Ack') || '';
+  if (ack !== 'Success' && ack !== 'Warning') {
+    throw new Error(decodeEntities(extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'GetMyeBaySelling failed'));
+  }
+  const summary = extractOne(xml, 'Summary') || '';
+  const qRaw = extractOne(summary, 'QuantityLimitRemaining');
+  const aRaw = extractOne(summary, 'AmountLimitRemaining');
+  const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+  const value = {
+    storeCode: store?.code || null,
+    limited: qRaw != null || aRaw != null,
+    qtyRemaining: qRaw != null ? Math.max(0, Math.floor(num(qRaw) ?? 0)) : null,
+    amountRemaining: aRaw != null ? Math.max(0, num(aRaw) ?? 0) : null,
+    currency: (summary.match(/<AmountLimitRemaining[^>]*currencyID="([A-Z]{3})"/) || [])[1] || 'GBP',
+    checkedAt: new Date().toISOString(),
+  };
+  _sellingLimitsCache[code] = { at: Date.now(), value };
+  return value;
 }
 
 // ---------- eBay shop/store categories ----------
@@ -2095,6 +2153,7 @@ module.exports = {
   pushStockForProduct,
   setQuantityTradingAPI,
   getQuantityTradingAPI,
+  getSellingLimits,
   getActiveListings,
   reviseItem,
   endItem,

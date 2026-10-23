@@ -1210,11 +1210,15 @@ router.post('/pull-ebay-stock', requireAdmin, async (req, res) => {
     LIMIT 2000
   `);
 
-  let updated = 0, checked = 0, unchanged = 0;
+  // Capped (limited) accounts deliberately show less than the warehouse holds —
+  // their eBay quantity must never be copied back over the real count.
+  const caps = await require('../lib/ebay-qty-cap').getCaps();
+  let updated = 0, checked = 0, unchanged = 0, skippedCapped = 0;
   const errors = [];
   for (const link of links.rows) {
     const store = stores.find(s => s.code === link.store_code) || (link.store_code ? null : stores[0]);
     if (!store) continue;
+    if (caps[store.code]) { skippedCapped++; continue; }
     checked++;
     try {
       const ebayQty = await ebay.getQuantityTradingAPI(link.ebay_item_id, store.code);
@@ -1234,7 +1238,7 @@ router.post('/pull-ebay-stock', requireAdmin, async (req, res) => {
     }
   }
   await audit(req, 'pull_ebay_stock', null, null, { checked, updated });
-  res.json({ ok: true, checked, updated, unchanged, errors: errors.slice(0, 20) });
+  res.json({ ok: true, checked, updated, unchanged, skippedCapped, errors: errors.slice(0, 20) });
 });
 // Body: { ids: [..], hard: true|false, shopify: true|false }
 router.post('/bulk-delete', requireAdmin, async (req, res) => {

@@ -855,6 +855,65 @@ router.get('/ebay-health', requireAdmin, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// eBay selling limits + per-account quantity cap.
+// GET  /api/settings/ebay-limits           → each store's cap + eBay's live monthly allowance
+// PUT  /api/settings/ebay-limits           { caps: { storeCode: n | null } }
+// POST /api/settings/ebay-limits/apply/:code → push min(warehouse, cap) to every
+//      listing linked to that account now (otherwise it applies on the next push).
+router.get('/ebay-limits', requireAdmin, async (req, res) => {
+  const ebay = require('../services/ebay');
+  const caps = await require('../lib/ebay-qty-cap').getCaps();
+  const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
+  const out = [];
+  for (const s of stores) {
+    const row = { code: s.code, name: s.name, cap: caps[s.code] || null, limits: null, error: null, linked: 0 };
+    try { row.limits = await ebay.getSellingLimits(s.code, { fresh: req.query.fresh === '1' }); }
+    catch (e) { row.error = e.message; }
+    try {
+      row.linked = parseInt((await query(`SELECT COUNT(*)::int AS n FROM mirror_links WHERE store_code = $1`, [s.code])).rows[0].n) || 0;
+    } catch (_) {}
+    out.push(row);
+  }
+  res.json({ stores: out });
+});
+
+router.put('/ebay-limits', requireAdmin, async (req, res) => {
+  const caps = (req.body && req.body.caps) || {};
+  const ebay = require('../services/ebay');
+  const known = new Set(ebay.listStores().map(s => s.code));
+  const clean = {};
+  for (const [code, v] of Object.entries(caps)) if (known.has(code)) clean[code] = v;
+  const saved = await require('../lib/ebay-qty-cap').saveCaps(clean);
+  await audit(req, 'ebay_qty_caps', null, null, { caps: saved });
+  res.json({ ok: true, caps: saved });
+});
+
+router.post('/ebay-limits/apply/:code', requireAdmin, async (req, res) => {
+  const ebay = require('../services/ebay');
+  const store = ebay.listStores().find(s => s.code === req.params.code && s.hasToken && !s.disabled);
+  if (!store) return res.status(404).json({ error: 'store_not_found' });
+  const cap = await require('../lib/ebay-qty-cap').capFor(store.code);
+  if (!cap) return res.status(400).json({ error: 'no_cap', message: 'Set a cap for this account first.' });
+  const { rows } = await query(`
+    SELECT DISTINCT ON (ml.ebay_item_id) ml.ebay_item_id, p.sku, p.qty_on_hand
+    FROM mirror_links ml
+    JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text AND p.active = true
+    WHERE ml.store_code = $1
+    LIMIT 1000`, [store.code]);
+  let pushed = 0;
+  const errors = [];
+  for (const r of rows) {
+    try { await ebay.setQuantityTradingAPI(r.ebay_item_id, r.qty_on_hand, store.code); pushed++; }
+    catch (e) {
+      errors.push({ itemId: r.ebay_item_id, sku: r.sku, error: e.message });
+      if (/usage limit|exceeded|21917/i.test(e.message)) break;
+    }
+  }
+  await audit(req, 'ebay_qty_caps_apply', null, null, { store: store.code, cap, pushed, errors: errors.length });
+  res.json({ ok: true, total: rows.length, pushed, errors: errors.slice(0, 20), errorCount: errors.length });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
 // Logo upload + delete + serve.
 // POST /api/settings/logo with { dataUrl, filename } — stores as base64 data
 //   URL in app_settings.logo_data_url. Validates content-type and decoded
