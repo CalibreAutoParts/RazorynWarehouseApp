@@ -267,6 +267,55 @@ app.get('/app', (req, res) => {
 </div></body></html>`);
 });
 
+// ---------- Public pages for eBay's developer "Sign-in Settings" ----------
+// eBay refuses user-token sign-in (error 20.1.5) unless the app's RuName has a
+// real https privacy-policy URL. These are public (no login) and brand-aware.
+function simplePage(title, bodyHtml) {
+  const brand = require('./lib/brand');
+  const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  return `<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)} — ${esc(brand.name || 'Warehouse')}</title>
+<style>body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f6f7f9;color:#1b2430;padding:32px 16px}
+.wrap{max-width:720px;margin:0 auto;background:#fff;border:1px solid #e3e6eb;border-radius:12px;padding:28px}
+h1{font-size:22px;margin:0 0 12px}h2{font-size:16px;margin:22px 0 6px}p,li{font-size:14px;line-height:1.6}</style>
+</head><body><div class="wrap">${bodyHtml.replace(/\{\{BRAND\}\}/g, esc(brand.name || 'our company'))}</div></body></html>`;
+}
+
+app.get('/privacy', (req, res) => {
+  res.type('html').send(simplePage('Privacy Policy', `
+  <h1>Privacy Policy</h1>
+  <p>This is the internal warehouse system used by {{BRAND}} to manage our own stock, listings and orders.
+  It is not a public service and is only used by our staff.</p>
+  <h2>What we process</h2>
+  <p>When we connect our own eBay, Shopify and other selling accounts, the system receives order details
+  (buyer name, delivery address, items bought and order status) so we can pick, pack, dispatch and handle returns.</p>
+  <h2>How it is used</h2>
+  <ul><li>Only to fulfil and support orders placed with {{BRAND}}.</li>
+  <li>Never sold or shared with third parties, except carriers needed to deliver the order.</li>
+  <li>Never used to contact buyers outside the marketplace they bought on.</li></ul>
+  <h2>Storage and retention</h2>
+  <p>Data is held on secure, access-controlled servers and kept only as long as needed for order handling,
+  returns, accounting and legal obligations (UK VAT records). We honour marketplace account-deletion requests.</p>
+  <h2>Your rights</h2>
+  <p>Under UK GDPR you can ask what we hold about you or ask for it to be deleted. Contact us through the
+  marketplace you bought on.</p>`));
+});
+
+app.get('/ebay/connected', (req, res) => {
+  res.type('html').send(simplePage('eBay connected', `
+  <h1>✅ eBay account authorised</h1>
+  <p>eBay has issued the token. Go back to the eBay developer page, copy the new <b>User Token</b>,
+  paste it into Railway as the variable for this store, and redeploy.</p>`));
+});
+
+app.get('/ebay/declined', (req, res) => {
+  res.type('html').send(simplePage('eBay not connected', `
+  <h1>eBay authorisation was declined</h1>
+  <p>No token was issued. Go back to the eBay developer page and try <b>Sign in to Production</b> again,
+  signing in as the eBay store you want to connect.</p>`));
+});
+
 // ---------- Static: PWA ----------
 app.use(express.static(path.join(__dirname, 'public'), {
   // index.html should not be aggressively cached — it changes on every deploy
