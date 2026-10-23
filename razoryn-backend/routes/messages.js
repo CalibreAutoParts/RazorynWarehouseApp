@@ -554,6 +554,15 @@ router.post('/ebay/:saleId', requireAdmin, async (req, res) => {
   const body = (req.body.body || '').trim();
   const subject = (req.body.subject || '').trim() || 'Update on your order';
   if (!body) return res.status(400).json({ error: 'body_required' });
+  // eBay member-to-member policy: no phone / email / outside links / WhatsApp —
+  // an account was permanently restricted over messages like these.
+  {
+    const problems = require('../lib/ebay-message-guard').check(subject + '\n' + body);
+    if (problems.length) {
+      return res.status(422).json({ error: 'ebay_message_policy', problems,
+        message: `Not sent — eBay's messaging policy forbids ${problems.join(', ')} in messages to buyers. Remove ${problems.length > 1 ? 'them' : 'it'} and keep the message about this order only. (Use email or WhatsApp for anything else — never via eBay.)` });
+    }
+  }
 
   // Look up the buyer's eBay UserID via GetOrders (we don't store it locally).
   // Also need the ItemID for AddMemberMessageAAQToPartner — pulled from mirror_links.

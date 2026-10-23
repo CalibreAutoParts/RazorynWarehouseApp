@@ -22314,6 +22314,11 @@ async function loadFitmentConfig() {
     if (el('fm-window')) el('fm-window').value = c.windowDays ?? 14;
     if (el('fm-max')) el('fm-max').value = c.maxPerRun ?? 40;
     if (el('fm-status')) el('fm-status').textContent = c.enabled ? `On — ${c.pending} order(s) awaiting a message` : `Off — ${c.pending} eligible order(s)`;
+    if (c.hardDisabled) {
+      // Switched off in code after an eBay messaging-policy restriction.
+      if (el('fm-enabled')) { el('fm-enabled').checked = false; el('fm-enabled').disabled = true; }
+      if (el('fm-status')) el('fm-status').innerHTML = '<span style="color:var(--red);font-weight:600">⛔ Disabled — automated eBay buyer messages are switched off permanently after eBay restricted an account under its member-to-member messaging policy. Ask buyers for their VIN through the listing/checkout instead.</span>';
+    }
   } catch (_) {}
 }
 async function saveFitmentConfig(btn) {

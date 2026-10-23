@@ -1224,6 +1224,8 @@ async function sendMemberMessage(storeArg, { itemId, recipientId, subject, body,
   if (!itemId) throw new Error('itemId required');
   if (!recipientId) throw new Error('recipientId (buyer username) required');
   if (!body) throw new Error('body required');
+  // eBay member-to-member policy: refuse contact details / off-eBay links.
+  require('../lib/ebay-message-guard').assertClean(subject, body);
   const bodyInner = `
     <ItemID>${escapeXml(String(itemId))}</ItemID>
     <MemberMessage>
