@@ -2069,6 +2069,7 @@ router.get('/listing-detail/:productId', requireAdmin, async (req, res) => {
         status: healthy.has(s2.code) ? 'live' : (out.ebayLinks.find(l => l.storeCode === s2.code) ? (out.ebayLinks.find(l => l.storeCode === s2.code).status) : 'missing'),
         deadItemId: (out.ebayLinks.find(l => l.storeCode === s2.code && l.status !== 'live') || {}).itemId || null }));
   } catch (e) { out.ebayLinks = []; out.ebayStores = []; }
+  try { out.qtyCaps = await require('../lib/ebay-qty-cap').getCaps(); } catch (_) { out.qtyCaps = {}; }
 
   // Persisted eBay config on the product is the fallback source of truth for the
   // edit form, so specifics reload even when there's no live listing yet (draft)

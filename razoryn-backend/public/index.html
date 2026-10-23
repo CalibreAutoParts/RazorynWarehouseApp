@@ -13739,7 +13739,10 @@ async function renderEditListing() {
   // Right panel — reuse the eBay form in edit mode, pre-filled from the live listing.
   const draftProduct = {
     id: productId, title: eb.title || sh.title || p.title || '', sku: p.sku || '',
-    qty_on_hand: (eb.quantity != null ? eb.quantity : p.qty_on_hand) ?? 1,
+    // Warehouse is the source of truth for stock. eBay's live number can be lower
+    // on purpose (capped / limited accounts) — pre-filling from it and saving
+    // would shrink the real warehouse count.
+    qty_on_hand: (p.qty_on_hand != null ? p.qty_on_hand : eb.quantity) ?? 1,
     brand: p.brand || '', model: p.model || '', part_number: p.part_number || '',
     shopify_product_id: p.shopify_product_id || null,
     shopify_price: p.price_shopify, price_shopify: p.price_shopify,
@@ -13749,7 +13752,20 @@ async function renderEditListing() {
   set('ce-title', eb.title || draftProduct.title);
   if (el('ce-title-count') && el('ce-title')) el('ce-title-count').textContent = el('ce-title').value.length + '/80';
   if (eb.price != null) set('ce-price', eb.price); else if (p.price_ebay != null) set('ce-price', p.price_ebay);
-  set('ce-qty', (eb.quantity != null ? eb.quantity : p.qty_on_hand) ?? 1);
+  set('ce-qty', draftProduct.qty_on_hand);
+  {
+    const caps = detail.qtyCaps || {};
+    const capped = (detail.ebayStores || []).filter(s2 => caps[s2.code]);
+    const q = el('ce-qty');
+    if (q && (capped.length || (eb.quantity != null && eb.quantity !== draftProduct.qty_on_hand))) {
+      const note = document.createElement('div');
+      note.style.cssText = 'font-size:11px;color:var(--ink-soft);margin-top:4px';
+      note.innerHTML = 'Warehouse stock — the real count.'
+        + (eb.quantity != null ? ` eBay currently shows <b>${escapeHtml(String(eb.quantity))}</b>.` : '')
+        + capped.map(s2 => ` <b>${escapeHtml(s2.name)}</b> shows at most <b>${caps[s2.code]}</b> (selling-limit cap).`).join('');
+      q.insertAdjacentElement('afterend', note);
+    }
+  }
   if (eb.categoryId) { set('ce-category', eb.categoryId); const path = el('ce-cat-path'); if (path && eb.categoryName) path.textContent = eb.categoryName; }
   if (eb.description) set('ce-desc', eb.description);
   // Keep the derived Shopify price label in sync with the eBay price + show a
@@ -21629,6 +21645,12 @@ function renderSettings() {
           <div id="ebay-health-result" style="margin-bottom:12px"></div>
 
           <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px;margin-bottom:12px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">📏 Selling limits &amp; eBay quantity cap</div>
+            <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">New eBay accounts get a monthly limit (items <em>and</em> £ value — every unit listed counts). Set <strong>“Show at most”</strong> on a limited account (1 is best) so each listing only uses 1 unit of the allowance — you can list many more different parts. The warehouse keeps the <strong>real</strong> stock; eBay is topped back up to the cap after each sale while stock remains.</p>
+            <div id="ebay-limits-box" style="font-size:13px;color:var(--ink-soft)">Loading…</div>
+          </div>
+
+          <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px;margin-bottom:12px">
             <div style="font-weight:600;font-size:14px;margin-bottom:4px">🗂 eBay category audit</div>
             <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">Copied listings often went live with the <strong>template's</strong> category, so they sit in the wrong branch of eBay, miss category-filtered searches, and rank poorly. This checks <strong>every live listing</strong> against the category eBay itself suggests for its title, flags wrong categories and missing <em>required</em> item specifics, and can move listings to the right category — one at a time or all at once.</p>
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -22313,7 +22335,7 @@ function renderSettings() {
   loadThumbnailConfig();
   loadFitmentConfig();
   settingsMakeCollapsible();
-  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); loadAiSettings(); }
+  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); loadAiSettings(); loadEbayLimits(); }
   // Re-attach to a category audit that's running (or finished) in the background.
   Api.get('/api/listings/category-audit/status?slim=1').then(s => {
     if (!s || s.state === 'idle') return;
@@ -22480,6 +22502,51 @@ async function saveVinSearchSettings(btn) {
 }
 
 // ── eBay fitment-confirmation messages ──
+async function loadEbayLimits(fresh) {
+  const box = el('ebay-limits-box'); if (!box) return;
+  box.textContent = 'Checking eBay selling limits…';
+  let r;
+  try { r = await Api.get('/api/settings/ebay-limits' + (fresh ? '?fresh=1' : '')); }
+  catch (e) { box.innerHTML = `<span style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</span>`; return; }
+  if (!(r.stores || []).length) { box.textContent = 'No connected eBay accounts.'; return; }
+  box.innerHTML = r.stores.map(s => {
+    const L = s.limits;
+    const lim = s.error ? `<span style="color:var(--red)">Couldn't read limits: ${escapeHtml(s.error)}</span>`
+      : !L ? '—'
+      : !L.limited ? '<span style="color:var(--green)">No monthly selling limits on this account</span>'
+      : `<b>${L.qtyRemaining != null ? L.qtyRemaining : '?'}</b> more items · <b>£${L.amountRemaining != null ? Number(L.amountRemaining).toFixed(2) : '?'}</b> more value this month`
+        + (L.amountRemaining != null && L.qtyRemaining ? ` <span style="opacity:.75">(≈ £${(L.amountRemaining / Math.max(1, L.qtyRemaining)).toFixed(2)} avg per item to use it all)</span>` : '');
+    return `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin-bottom:8px;color:var(--ink)">
+      <div style="min-width:150px"><b>${escapeHtml(s.name)}</b><div style="font-size:11px;color:var(--ink-soft)">${s.linked} linked listing${s.linked === 1 ? '' : 's'}</div></div>
+      <div style="flex:1;min-width:220px;font-size:12px">${lim}</div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px">Show at most
+        <input type="number" min="1" step="1" style="width:70px" id="ebay-cap-${escapeAttr(s.code)}" value="${s.cap || ''}" placeholder="all"> on eBay</label>
+      <button class="btn btn-sm btn-primary" onclick="saveEbayCap('${escapeAttr(s.code)}', this)">Save</button>
+      ${s.cap ? `<button class="btn btn-sm btn-outline" title="Push min(warehouse stock, cap) to every listing on this account now" onclick="applyEbayCap('${escapeAttr(s.code)}', this)">Apply to live listings</button>` : ''}
+    </div>`;
+  }).join('') + `<button class="btn btn-sm btn-outline" onclick="loadEbayLimits(true)">↻ Re-check with eBay</button>`;
+}
+
+async function saveEbayCap(code, btn) {
+  const v = el('ebay-cap-' + code)?.value;
+  btn.disabled = true;
+  try {
+    await Api.put('/api/settings/ebay-limits', { caps: { [code]: v ? parseInt(v) : null } });
+    toast(v ? `Saved — eBay will show at most ${parseInt(v)} on this account` : 'Cap removed — full warehouse stock will show', 'success');
+    loadEbayLimits();
+  } catch (e) { toast(e.data?.message || e.message, 'error'); btn.disabled = false; }
+}
+
+async function applyEbayCap(code, btn) {
+  if (!confirm('Push the capped quantity to every listing on this eBay account now? Warehouse stock is not changed.')) return;
+  btn.disabled = true; btn.textContent = 'Applying…';
+  try {
+    const r = await Api.post('/api/settings/ebay-limits/apply/' + encodeURIComponent(code), {});
+    toast(`Updated ${r.pushed} of ${r.total} listing(s)` + (r.errorCount ? ` — ${r.errorCount} failed (e.g. ${r.errors[0]?.sku || r.errors[0]?.itemId}: ${r.errors[0]?.error})` : ''), r.errorCount ? 'error' : 'success', 8000);
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+  btn.disabled = false; btn.textContent = 'Apply to live listings';
+}
+
 async function loadFitmentConfig() {
   try {
     const c = await Api.get('/api/messages/fitment/config');
