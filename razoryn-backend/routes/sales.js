@@ -1945,7 +1945,7 @@ router.get('/:id/invoice.html', requireAdmin, async (req, res) => {
   if (!s.rows[0]) return res.status(404).send('Not found');
   const sale = await enrichSaleCustomer(s.rows[0]);
   const items = (await query('SELECT * FROM sale_items WHERE sale_id = $1', [req.params.id])).rows;
-  const company = await getCompanySettings();
+  const company = await require('../lib/store-vat').companyForSale(sale, await getCompanySettings());
   const forceProforma = req.query.proforma === '1' || req.query.proforma === 'true';
   // Pro-forma = estimate created via Quote Builder (has a payment_method) OR explicit override.
   const isProforma = forceProforma || (sale.is_estimate && !!sale.payment_method);
@@ -2009,6 +2009,7 @@ async function sendSaleDocumentEmail(saleId, { to, templateKey, includeMessage, 
 // endpoint can use synthetic data without touching the DB).
 async function composeAndSendInvoiceEmail({ sale, items = [], company = {}, brand, to, templateKey, includeMessage, baseUrl }) {
   brand = brand || require('../lib/brand');
+  if (sale && sale.id) company = await require('../lib/store-vat').companyForSale(sale, company);
   const recipient = String(to || sale.customer_email || '').trim();
   if (!recipient) return { ok: false, error: 'no_email_address' };
   // Same document-mode detection as the invoice.html route.

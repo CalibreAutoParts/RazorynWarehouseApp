@@ -562,6 +562,8 @@ async function importEbayOrderRow(order, store, { vatRegistered, vatRate, adjust
   }
   const brand = require('../lib/brand');
   const ukVat = require('../lib/uk-vat');
+  // Shops run by a non-VAT-registered business (Settings → per-shop VAT) record no VAT.
+  if (vatRegistered && await require('../lib/store-vat').vatOffFor(store.code, order.creationDate)) vatRegistered = false;
   let newSaleId = null;
   await withTx(async (c) => {
     const subtotal = parseFloat(order.pricingSummary?.priceSubtotal?.value || 0);

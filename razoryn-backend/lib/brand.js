@@ -27,7 +27,8 @@ const BRANDS = {
     stores: [
       {
         code: 'razoryn',
-        name: 'Razoryn',
+        // Now the sole-trader eBay account; display name env-overridable.
+        name: process.env.EBAY_STORE1_NAME || 'Razoryn',
         channelCode: 'ebay_em',
         tokenEnv: 'EBAY_AUTH_TOKEN',
         // No longer the primary — razorynecommerceltd is now the main account

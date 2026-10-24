@@ -465,6 +465,8 @@ router.get('/pricing-config', async (req, res) => {
     ebayCountryOfOrigin:    r.ebay_country_of_origin || 'China',
     ebayDefaultStoreCategoryId: r.ebay_default_store_category_id || '',
     ebayVatPercent:         r.ebay_vat_percent != null ? parseFloat(r.ebay_vat_percent) : 20,
+    // Per-shop VAT switch (non-VAT-registered shops) — the listing form uses it.
+    storeVat:               (r.data && r.data.storeVat) || {},
     priceLinkPct:           r.price_link_pct != null ? parseFloat(r.price_link_pct) : 0,
     ebayPromoteDefault:     !!r.ebay_promote_default,
     ebayPromotePercent:     r.ebay_promote_percent != null ? parseFloat(r.ebay_promote_percent) : 10,
@@ -852,6 +854,40 @@ router.get('/ebay-health', requireAdmin, async (req, res) => {
   } catch (_) {}
   await audit(req, 'ebay_health_check', null, null, { stores: results.map(r => ({ code: r.code, ok: r.ok })) });
   res.json({ stores: results, lastSync });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Per-shop VAT. A shop run by a non-VAT-registered business (e.g. a sole trader
+// eBay account) charges and records no VAT from its "since" date.
+// GET /api/settings/store-vat → [{ code, name, vatOff, since, tradingName }]
+// PUT /api/settings/store-vat { code, vatOff, since, tradingName }
+//   Turning it on also clears VAT already recorded on that shop's orders from
+//   the since date (they were imported with the company-wide VAT treatment).
+router.get('/store-vat', requireAdmin, async (req, res) => {
+  const all = await require('../lib/store-vat').getAll();
+  const stores = require('../services/ebay').listStores().map(s => ({
+    code: s.code, name: s.name, hasToken: s.hasToken, disabled: s.disabled,
+    vatOff: !!all[s.code]?.vatOff, since: all[s.code]?.since || null, tradingName: all[s.code]?.tradingName || '',
+  }));
+  res.json({ stores });
+});
+
+router.put('/store-vat', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const store = require('../lib/brand').getStore(String(b.code || ''));
+  if (!store) return res.status(404).json({ error: 'store_not_found' });
+  if (b.vatOff && b.since && !/^\d{4}-\d{2}-\d{2}$/.test(String(b.since))) return res.status(400).json({ error: 'bad_date', message: 'Pick the date the shop changed hands.' });
+  const sv = require('../lib/store-vat');
+  const saved = await sv.save({ [store.code]: { vatOff: !!b.vatOff, since: b.since, tradingName: b.tradingName } });
+  let cleared = 0;
+  if (saved[store.code]) {
+    const r = await query(
+      `UPDATE sales SET vat = 0 WHERE channel = $1 AND occurred_at >= $2::date AND COALESCE(vat, 0) <> 0`,
+      [store.channelCode, saved[store.code].since]);
+    cleared = r.rowCount || 0;
+  }
+  await audit(req, 'store_vat', null, null, { store: store.code, setting: saved[store.code] || null, cleared });
+  res.json({ ok: true, setting: saved[store.code] || null, cleared });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
