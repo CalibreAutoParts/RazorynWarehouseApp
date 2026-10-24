@@ -13639,6 +13639,7 @@ async function elOfferCreateEbay(productId, opts = {}) {
   if (opts.storeCode && el('ce-store')) {
     if (![...(el('ce-store').options || [])].some(o => o.value === opts.storeCode) && el('ce-store').tagName === 'SELECT') el('ce-store').add(new Option(opts.storeCode, opts.storeCode));
     el('ce-store').value = opts.storeCode;
+    if (typeof ceSyncShopVat === 'function') ceSyncShopVat();
   }
   if (!(el('ce-category')?.value || '').trim()) {
     toast('Pick an eBay category in the eBay panel first (search by name), then press Save again', 'warn', 9000);
@@ -18720,6 +18721,10 @@ async function openCreateEbayListing(productId, opts = {}) {
   if (el('ce-product-number')) el('ce-product-number').value = product.shopify_product_id || '';
   // VAT default (blank means "no VAT"); promoted-listings defaults.
   if (el('ce-vat')) el('ce-vat').value = (cfg.ebayVatPercent != null ? cfg.ebayVatPercent : 20);
+  State._ceShopVat = cfg.storeVat || {};
+  State._ceVatDefault = (cfg.ebayVatPercent != null ? cfg.ebayVatPercent : 20);
+  el('ce-store')?.addEventListener('change', ceSyncShopVat);
+  ceSyncShopVat();
   if (cfg.ebayPromoteDefault && el('ce-promote')) {
     el('ce-promote').checked = true;
     el('ce-promote-pct-wrap').style.display = 'block';
@@ -21469,6 +21474,12 @@ function renderSettings() {
           <div id="ebay-health-result" style="margin-bottom:12px"></div>
 
           <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px;margin-bottom:12px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">🧾 VAT per shop</div>
+            <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">For an eBay shop run by a business that is <strong>not VAT registered</strong> (e.g. a sole trader account). From the date you pick: its orders record <strong>no VAT</strong>, new eBay listings are created <strong>without VAT</strong>, and its invoices drop the VAT lines and the company VAT/registration number. Earlier orders are left as they were. Shopify and the other shops keep the normal company VAT setting.</p>
+            <div id="store-vat-box" style="font-size:13px;color:var(--ink-soft)">Loading…</div>
+          </div>
+
+          <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px;margin-bottom:12px">
             <div style="font-weight:600;font-size:14px;margin-bottom:4px">📏 Selling limits &amp; eBay quantity cap</div>
             <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">New eBay accounts get a monthly limit (items <em>and</em> £ value — every unit listed counts). Set <strong>“Show at most”</strong> on a limited account (1 is best) so each listing only uses 1 unit of the allowance — you can list many more different parts. The warehouse keeps the <strong>real</strong> stock; eBay is topped back up to the cap after each sale while stock remains.</p>
             <div id="ebay-limits-box" style="font-size:13px;color:var(--ink-soft)">Loading…</div>
@@ -22159,7 +22170,7 @@ function renderSettings() {
   loadThumbnailConfig();
   loadFitmentConfig();
   settingsMakeCollapsible();
-  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); loadAiSettings(); loadEbayLimits(); }
+  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); loadAiSettings(); loadEbayLimits(); loadStoreVat(); }
   // Re-attach to a category audit that's running (or finished) in the background.
   Api.get('/api/listings/category-audit/status?slim=1').then(s => {
     if (!s || s.state === 'idle') return;
@@ -22326,6 +22337,56 @@ async function saveVinSearchSettings(btn) {
 }
 
 // ── eBay fitment-confirmation messages ──
+// Non-VAT-registered shop picked → VAT field blank + locked (the server also
+// refuses to add VAT for that shop, so this is just making it visible).
+function ceSyncShopVat() {
+  const inp = el('ce-vat'); if (!inp) return;
+  const code = el('ce-store')?.value || '';
+  const c = (State._ceShopVat || {})[code];
+  const off = !!(c && c.vatOff);
+  let note = el('ce-vat-shop-note');
+  if (!note) { note = document.createElement('div'); note.id = 'ce-vat-shop-note'; note.style.cssText = 'font-size:11px;margin-top:2px;color:var(--amber, #b26a00)'; inp.insertAdjacentElement('afterend', note); }
+  if (off) {
+    if (!inp.disabled) inp.dataset.prev = inp.value;
+    inp.value = ''; inp.disabled = true;
+    note.textContent = 'This shop is not VAT registered — no VAT is charged.';
+  } else {
+    if (inp.disabled) inp.value = inp.dataset.prev != null && inp.dataset.prev !== '' ? inp.dataset.prev : (State._ceVatDefault ?? 20);
+    inp.disabled = false; note.textContent = '';
+  }
+}
+
+async function loadStoreVat() {
+  const box = el('store-vat-box'); if (!box) return;
+  let r;
+  try { r = await Api.get('/api/settings/store-vat'); }
+  catch (e) { box.innerHTML = `<span style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</span>`; return; }
+  const today = new Date().toISOString().slice(0, 10);
+  box.innerHTML = (r.stores || []).map(s => `
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin-bottom:8px;color:var(--ink)">
+      <div style="min-width:140px"><b>${escapeHtml(s.name)}</b><div style="font-size:11px;color:var(--ink-soft)">${s.vatOff ? '🚫 No VAT since ' + escapeHtml(String(s.since || '').split('-').reverse().join('/')) : 'Charges VAT (company setting)'}</div></div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svat-off-${escapeAttr(s.code)}" ${s.vatOff ? 'checked' : ''}> Not VAT registered</label>
+      <div class="field" style="margin:0"><label style="font-size:11px">Since (date it changed)</label><input type="date" id="svat-since-${escapeAttr(s.code)}" value="${escapeAttr(s.since || today)}"></div>
+      <div class="field" style="margin:0;flex:1;min-width:180px"><label style="font-size:11px">Name on invoices (optional)</label><input id="svat-name-${escapeAttr(s.code)}" placeholder="e.g. J Smith t/a Razoryn" value="${escapeAttr(s.tradingName || '')}"></div>
+      <button class="btn btn-sm btn-primary" onclick="saveStoreVat('${escapeAttr(s.code)}', this)">Save</button>
+    </div>`).join('') || 'No eBay shops.';
+}
+
+async function saveStoreVat(code, btn) {
+  const vatOff = !!el('svat-off-' + code)?.checked;
+  const since = el('svat-since-' + code)?.value || '';
+  const tradingName = el('svat-name-' + code)?.value || '';
+  if (vatOff && !since) { toast('Pick the date this shop stopped charging VAT', 'warn'); return; }
+  if (vatOff && !confirm(`Turn VAT off for this shop from ${since}?\n\nOrders from that date will record no VAT, new eBay listings won't add VAT, and invoices won't show VAT or the company VAT number. Orders before ${since} are not changed.`)) return;
+  btn.disabled = true;
+  try {
+    const r = await Api.put('/api/settings/store-vat', { code, vatOff, since, tradingName });
+    toast(vatOff ? `VAT off from ${since}` + (r.cleared ? ` — removed VAT from ${r.cleared} order(s) already imported` : '') : 'VAT back on for this shop (new orders only)', 'success', 6000);
+    loadStoreVat();
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+  btn.disabled = false;
+}
+
 async function loadEbayLimits(fresh) {
   const box = el('ebay-limits-box'); if (!box) return;
   box.textContent = 'Checking eBay selling limits…';

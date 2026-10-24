@@ -1409,7 +1409,7 @@ async function buildInvoicePackHtml({ from, to, basis }) {
       await salesMod.enrichSaleCustomer(sale);
       const items = (await query(`SELECT * FROM sale_items WHERE sale_id = $1`, [sale.id])).rows;
       const mode = sale.payment_method === 'cash' ? 'receipt' : 'invoice';
-      const html = salesMod.renderInvoiceHtml({ sale, items, company, mode, baseUrl: '' });
+      const html = salesMod.renderInvoiceHtml({ sale, items, company: await require('../lib/store-vat').companyForSale(sale, company), mode, baseUrl: '' });
       // Lift each invoice's page out of its standalone document (its <style>
       // is identical every time, so one copy in the pack head is enough).
       const body = (html.match(/<body[^>]*>([\s\S]*)<\/body>/i) || [])[1] || '';
@@ -1517,7 +1517,7 @@ async function streamAccountsZip(res, { from, to, accountId }) {
       try {
         const items = (await query(`SELECT * FROM sale_items WHERE sale_id = $1`, [sale.id])).rows;
         await salesMod.enrichSaleCustomer(sale);
-        const pdf = await buildInvoicePdf({ sale, items, company, brand, mode: sale.payment_method === 'cash' ? 'receipt' : 'invoice' });
+        const pdf = await buildInvoicePdf({ sale, items, company: await require('../lib/store-vat').companyForSale(sale, company), brand, mode: sale.payment_method === 'cash' ? 'receipt' : 'invoice' });
         zip.append(pdf, { name: `sales-invoices/${zipSafe((sale.invoice_number || ('invoice-' + sale.id)) + ' - ' + (sale.customer_name || ''))}.pdf` });
         invoiceCount++;
       } catch (e) { invoiceFails++; console.warn('[books] zip invoice', sale.id, ':', e.message); }
@@ -1760,7 +1760,7 @@ publicRouter.get('/:token/invoice/:saleId', pubAw(async (req, res) => {
   const items = (await query(`SELECT * FROM sale_items WHERE sale_id = $1`, [req.params.saleId])).rows;
   const company = await salesMod.getCompanySettings();
   const mode = sale.payment_method === 'cash' ? 'receipt' : 'invoice';
-  res.set('Content-Type', 'text/html').send(salesMod.renderInvoiceHtml({ sale, items, company, mode, baseUrl: '' }));
+  res.set('Content-Type', 'text/html').send(salesMod.renderInvoiceHtml({ sale, items, company: await require('../lib/store-vat').companyForSale(sale, company), mode, baseUrl: '' }));
 }));
 publicRouter.get('/:token/receipt-file/:rid', pubAw(async (req, res) => {
   const share = await shareFor(req.params.token);

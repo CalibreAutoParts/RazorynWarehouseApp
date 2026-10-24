@@ -1380,7 +1380,9 @@ async function addItem(storeArg, opts = {}) {
 
   // VAT — charge a VAT percentage on the item (business sellers). Only emitted
   // when a positive percent is supplied; eBay shows it as VAT-inclusive pricing.
-  const vatNum = vatPercent != null ? parseFloat(vatPercent) : NaN;
+  // Non-VAT-registered shops never charge VAT, whatever the form sent.
+  const shopVatOff = await require('../lib/store-vat').vatOffFor(storeCode);
+  const vatNum = (vatPercent != null && !shopVatOff) ? parseFloat(vatPercent) : NaN;
   const vatXml = (!isNaN(vatNum) && vatNum > 0)
     ? `<VATDetails><VATPercent>${vatNum.toFixed(1)}</VATPercent></VATDetails>`
     : '';
