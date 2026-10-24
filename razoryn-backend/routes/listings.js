@@ -4166,9 +4166,10 @@ router.get('/clone-to-store/candidates', requireAdmin, async (req, res) => {
 
   // The target store's shipping business policies, so the UI can offer them
   // per item. Best-effort — if the eBay call fails we still return candidates.
-  let shippingPolicies = [];
+  let shippingPolicies = [], polLists = null;
   try {
     const pols = await ebay.getBusinessPolicies('EBAY_GB', toStore);
+    polLists = pols;
     shippingPolicies = (pols.shipping || []).map(p => ({ id: String(p.id), name: p.name }));
   } catch (e) { console.warn('[clone] shipping policies load failed:', e.message); }
 
@@ -4184,6 +4185,17 @@ router.get('/clone-to-store/candidates', requireAdmin, async (req, res) => {
   // Category no longer needs to be pre-saved — the run recovers it from each
   // product's existing account-1 listing — so we only warn about missing price.
   const noPrice = rows.filter(r => r.price_ebay == null).length;
+  // Saved policy ids that don't exist on the target account (e.g. the eBay
+  // account behind this shop was swapped) — every listing would be rejected.
+  const policiesStale = [];
+  if (polLists) {
+    for (const [kind, list] of [['payment', polLists.payment], ['shipping', polLists.shipping], ['return', polLists.return]]) {
+      if (policies[kind] && Array.isArray(list) && list.length && !list.some(x => String(x.id) === String(policies[kind]))) policiesStale.push(kind);
+    }
+  }
+  // Monthly selling allowance on the target (new accounts) — best-effort.
+  let limits = null;
+  try { if (store.token) limits = await ebay.getSellingLimits(store.code); } catch (_) {}
 
   res.json({
     toStore: store.code,
@@ -4191,6 +4203,8 @@ router.get('/clone-to-store/candidates', requireAdmin, async (req, res) => {
     hasToken: !!store.token,
     policiesSet: !!(policies.payment && policies.shipping),
     policies,
+    policiesStale,
+    limits,
     defaultCategory: settings.ebay_default_category_id || null,
     total: rows.length,
     warnings: { noPrice },
@@ -4336,6 +4350,55 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
   }
   if (req) await audit(req, 'clone_to_store', 'ebay_store', toStore, { mode, count: ids.length, created: results.filter(r => r.ok && !r.preview).length });
   res.json({ toStore, mode, results, stop, stopReason });
+});
+
+// Stale links: mirror_links saying a product is on `toStore` when that eBay
+// account has no such live listing — e.g. links left over from an account that
+// was swapped for a new one. They make the copy tool think the product is
+// already listed there, so it's skipped.
+// GET  /api/listings/clone-to-store/stale?toStore=   → { linked, live, stale, sample }
+// POST /api/listings/clone-to-store/prune-stale { toStore } → removes them
+//      (a copy is kept in mirror_links_pruned).
+async function _staleLinks(store) {
+  const live = await ebay.getActiveListings(store.code);
+  const liveIds = new Set(live.map(l => String(l.itemId)));
+  const { rows } = await query(
+    `SELECT ml.*, p.sku FROM mirror_links ml
+       LEFT JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text
+      WHERE ml.store_code = $1`, [store.code]);
+  const stale = rows.filter(r => !liveIds.has(String(r.ebay_item_id)));
+  return { linked: rows.length, live: liveIds.size, stale };
+}
+
+router.get('/clone-to-store/stale', requireAdmin, async (req, res) => {
+  const store = require('../lib/brand').getStore(String(req.query.toStore || '').trim());
+  if (!store) return res.status(400).json({ error: 'unknown_store' });
+  if (!store.token) return res.json({ linked: 0, live: 0, stale: 0, sample: [] });
+  try {
+    const r = await _staleLinks(store);
+    res.json({ linked: r.linked, live: r.live, stale: r.stale.length,
+      sample: r.stale.slice(0, 8).map(x => ({ itemId: x.ebay_item_id, sku: x.sku || x.last_synced_sku || null })) });
+  } catch (e) { res.status(502).json({ error: 'ebay_failed', message: e.message }); }
+});
+
+router.post('/clone-to-store/prune-stale', requireAdmin, async (req, res) => {
+  const store = require('../lib/brand').getStore(String(req.body?.toStore || '').trim());
+  if (!store || !store.token) return res.status(400).json({ error: 'unknown_store' });
+  let r;
+  try { r = await _staleLinks(store); }
+  catch (e) { return res.status(502).json({ error: 'ebay_failed', message: 'Could not read the live listings from eBay, so nothing was removed: ' + e.message }); }
+  await query(`CREATE TABLE IF NOT EXISTS mirror_links_pruned (
+    id SERIAL PRIMARY KEY, store_code TEXT, ebay_item_id TEXT, link JSONB, pruned_at TIMESTAMPTZ DEFAULT now())`);
+  let removed = 0;
+  for (const x of r.stale) {
+    await query(`INSERT INTO mirror_links_pruned (store_code, ebay_item_id, link)
+                 SELECT ml.store_code, ml.ebay_item_id::text, to_jsonb(ml) FROM mirror_links ml WHERE ml.ebay_item_id = $1 AND ml.store_code = $2`,
+      [x.ebay_item_id, store.code]);
+    const d = await query(`DELETE FROM mirror_links WHERE ebay_item_id = $1 AND store_code = $2`, [x.ebay_item_id, store.code]);
+    removed += d.rowCount || 0;
+  }
+  await audit(req, 'clone_prune_stale', 'ebay_store', store.code, { removed, live: r.live });
+  res.json({ ok: true, removed, live: r.live });
 });
 
 // GET /api/listings/clone-to-store/listed?toStore=  — count of listings already

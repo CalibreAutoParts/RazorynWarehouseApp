@@ -1269,7 +1269,7 @@
         </button>
         <button class="nav-item admin-only multistore-only" data-page="clonestore">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          Copy to 2nd store
+          Copy between eBay shops
         </button>
         <button class="nav-item admin-only" data-page="settings">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -13188,17 +13188,24 @@ function cloneShipOptions(sel, withDefaultLabel) {
 }
 
 async function renderCloneStore() {
-  // Target = the first non-primary eBay store (the second account).
+  // Target = the shop picked on this page (remembered), else the first
+  // non-primary eBay store. Source = whichever other shop each product is on.
   const stores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
-  const target = stores.find(s => !s.primary) || stores[1];
-  if (!target) { el('content').innerHTML = `<div class="empty" style="padding:40px"><div class="t">Only one eBay store configured</div><div>This tool copies listings from your main eBay account to a second one. Add a second store to use it.</div></div>`; return; }
+  const target = stores.find(s => s.code === CloneState.pickedStore) || stores.find(s => !s.primary) || stores[1];
+  if (!target || stores.length < 2) { el('content').innerHTML = `<div class="empty" style="padding:40px"><div class="t">Only one eBay store configured</div><div>This tool copies listings from your main eBay account to a second one. Add a second store to use it.</div></div>`; return; }
   CloneState.toStore = target.code;
   CloneState.storeName = target.name;
 
   el('content').innerHTML = `
     <div style="max-width:1000px">
-      <h1 style="margin-bottom:4px">Copy catalogue to ${escapeHtml(target.name)}</h1>
-      <div style="color:var(--ink-soft);font-size:14px;margin-bottom:18px">Recreates every listing from your main eBay account onto <strong>${escapeHtml(target.name)}</strong> — same title, price, photos and item specifics. Payment &amp; return policies use your saved store defaults; set the <strong>shipping policy per item</strong> below. Safe to stop and re-run: it skips anything already copied and remembers your shipping choices.</div>
+      <h1 style="margin-bottom:4px">Copy eBay listings between shops</h1>
+      <div class="field" style="max-width:420px;margin:8px 0 10px"><label>Copy listings <strong>into</strong></label>
+        <select onchange="CloneState.pickedStore=this.value;CloneState.results=[];renderCloneStore()">
+          ${stores.map(s => `<option value="${escapeAttr(s.code)}" ${s.code === target.code ? 'selected' : ''}>${escapeHtml(s.name)}${s.primary ? ' (main)' : ''}</option>`).join('')}
+        </select>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Everything listed on your <strong>other</strong> eBay shop(s) but not yet on ${escapeHtml(target.name)} is offered below.</div></div>
+      <div id="clone-stale"></div>
+      <div style="color:var(--ink-soft);font-size:14px;margin-bottom:18px">Recreates each listing onto <strong>${escapeHtml(target.name)}</strong> — same title, price, photos and item specifics. Payment &amp; return policies use your saved store defaults; set the <strong>shipping policy per item</strong> below. Safe to stop and re-run: it skips anything already copied and remembers your shipping choices.</div>
       <div id="clone-readiness"></div>
       <div id="clone-summary" class="card" style="margin-bottom:14px"><div class="card-body" style="padding:18px">Loading candidates…</div></div>
       <div id="clone-shipcard"></div>
@@ -13208,6 +13215,34 @@ async function renderCloneStore() {
       <div id="clone-results" style="margin-top:14px"></div>
     </div>`;
   await cloneLoadCandidates();
+  cloneCheckStale();
+}
+
+// Old links (e.g. from an eBay account that was swapped for a new one) make
+// products look "already listed" on this shop so they'd never be offered.
+async function cloneCheckStale() {
+  const box = el('clone-stale'); if (!box) return;
+  box.innerHTML = `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Checking ${escapeHtml(CloneState.storeName)}'s live listings for old links…</div>`;
+  let r;
+  try { r = await Api.get('/api/listings/clone-to-store/stale?toStore=' + encodeURIComponent(CloneState.toStore)); }
+  catch (e) { box.innerHTML = `<div style="font-size:12px;color:var(--red);margin-bottom:10px">Couldn't check old links: ${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  if (!r.stale) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="card" style="margin-bottom:14px;border-left:3px solid var(--amber)"><div class="card-body" style="padding:12px 16px;font-size:13px">
+    <strong>${r.stale} old link${r.stale === 1 ? '' : 's'}</strong> say products are on ${escapeHtml(CloneState.storeName)}, but that eBay account only has <strong>${r.live}</strong> live listing${r.live === 1 ? '' : 's'} and these aren't among them (e.g. ${r.sample.map(x => escapeHtml(x.sku || x.itemId)).join(', ')}).
+    Usually they're left over from the eBay account that used to be behind this shop. Until they're removed, those products are treated as already copied and skipped.
+    <div style="margin-top:8px"><button class="btn btn-sm btn-primary" onclick="clonePruneStale(this)">Remove ${r.stale} old link${r.stale === 1 ? '' : 's'}</button>
+    <span style="font-size:11px;color:var(--ink-soft);margin-left:6px">Only the app's links are removed (a backup is kept) — nothing on eBay changes.</span></div>
+  </div></div>`;
+}
+
+async function clonePruneStale(btn) {
+  if (!confirm(`Remove the old links for ${CloneState.storeName}? Nothing on eBay is changed.`)) return;
+  btn.disabled = true; btn.textContent = 'Removing…';
+  try {
+    const r = await Api.post('/api/listings/clone-to-store/prune-stale', { toStore: CloneState.toStore });
+    toast(`Removed ${r.removed} old link(s)`, 'success');
+    await cloneLoadCandidates(); cloneCheckStale();
+  } catch (e) { toast(e.data?.message || e.message, 'error', 9000); btn.disabled = false; btn.textContent = 'Retry'; }
 }
 
 async function cloneLoadCandidates() {
@@ -13334,7 +13369,9 @@ async function cloneSaveShipping(notify) {
 
 function cloneRenderReadiness(r) {
   const issues = [];
-  if (!r.hasToken) issues.push('No eBay token set for this store — set <code>EBAY_AUTH_TOKEN_RAZORYN2</code> and redeploy.');
+  if (!r.hasToken) issues.push(`No eBay token set for ${escapeHtml(r.storeName)} — set its token in Railway and redeploy.`);
+  if (r.policiesStale?.length) issues.push(`Your saved ${r.policiesStale.join(' / ')} polic${r.policiesStale.length === 1 ? 'y doesn\u2019t' : 'ies don\u2019t'} exist on ${escapeHtml(r.storeName)}'s eBay account (it was probably swapped for a new account) — re-pick them in <a href="#" onclick="routeTo('settings');return false" style="color:var(--brand-primary);font-weight:600">Settings → eBay</a> for this shop, or every listing will be rejected.`);
+  if (r.limits?.limited) issues.push(`eBay selling limit on ${escapeHtml(r.storeName)}: <strong>${r.limits.qtyRemaining ?? '?'}</strong> more items / <strong>£${r.limits.amountRemaining != null ? Number(r.limits.amountRemaining).toFixed(2) : '?'}</strong> this month. The copy stops cleanly when it's used up — tick the items you most want first.`);
   if (!r.policiesSet) issues.push(`No business policies set for ${escapeHtml(r.storeName)} — set them in <a href="#" onclick="routeTo('settings');return false" style="color:var(--brand-primary);font-weight:600">Settings → eBay</a> (payment + postage), or listings will be rejected.`);
   if (r.warnings?.noPrice) issues.push(`${r.warnings.noPrice} product(s) have no eBay price and will be skipped.`);
   el('clone-readiness').innerHTML = issues.length
@@ -13841,7 +13878,7 @@ async function submitUnifiedUpdate(btn) {
     return;
   }
   const anyBad = ebErr || r.shopify?.error || r.images?.error;   // a store simply not listed is info, not an error
-  toast(`Saved & pushed — Warehouse ✓${bits.length ? ' · ' + bits.join(' · ') : ''}${missing.length ? ' · (to also list on the missing account, use Listing Mirror → Force match or Copy to 2nd store)' : ''}`, anyBad ? 'warn' : 'success', 9000);
+  toast(`Saved & pushed — Warehouse ✓${bits.length ? ' · ' + bits.join(' · ') : ''}${missing.length ? ' · (to also list on the missing account, use Listing Mirror → Force match or Copy between eBay shops)' : ''}`, anyBad ? 'warn' : 'success', 9000);
   await Store.refresh('products').catch(() => {});
   routeTo('inventory');
 }
