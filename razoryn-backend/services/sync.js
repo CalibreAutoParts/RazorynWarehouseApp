@@ -945,4 +945,5 @@ module.exports = {
   handleStockOutIfIncoming,
   resolveProductBySku,
   autoMarkDispatched,
+  mirrorSaleToStockGroup,
 };

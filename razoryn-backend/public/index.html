@@ -1239,6 +1239,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
           Print station <span id="nav-print-badge" style="display:none;margin-left:auto;background:var(--amber,orange);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;line-height:18px"></span>
         </button>
+        <button class="nav-item admin-only" data-page="trade">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l1.5-5h15L21 9"/><path d="M3 9h18v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9 21v-6h6v6"/></svg>
+          Trade
+        </button>
         <button class="nav-item admin-only" data-page="disputes">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Disputes
@@ -1468,6 +1472,11 @@ function adaptProduct(p) {
     locationPhoto2: p.has_location_photo_2 ? `/api/products/${p.id}/location-photo-2?v=${encodeURIComponent(p.updated_at || '')}` : null,
     primaryPhoto: p.primary_photo || 'item',
     imageUrl: p.image_url,
+    // Trade: parts linked to / stocked from another warehouse app (partner).
+    sourcePartnerId: p.source_partner_id || null,
+    partnerLinkId: p.partner_link_id || null,
+    partnerQty: p.partner_qty != null ? p.partner_qty : null,
+    partnerLocation: p.partner_location || '',
     shopifyProductId: p.shopify_product_id,
     shopifyVariantId: p.shopify_variant_id,
     shopifyHandle: p.shopify_handle || '',
@@ -3389,6 +3398,7 @@ function hasPerm(page) {
     pushes:       false,
     books:        false,
     disputes:     false,
+    trade:        false,
     printstation: true,
   };
   const v = map[page];
@@ -3446,6 +3456,7 @@ function routeTo(page) {
     pushes: renderPushQueue,
     books: renderBooks,
     disputes: renderDisputes,
+    trade: renderTrade,
     printstation: renderPrintStation
   };
   // The handheld's Home is the plain task workbench, not the money dashboard.
@@ -4896,6 +4907,9 @@ function renderInventory() {
       <div class="toolbar">
         <input type="search" class="search-input" id="inv-search" placeholder="Search by name, SKU, part #...">
         <select class="filter-select" id="inv-brand"><option value="">All brands</option>${(() => { const s2 = new Map(); for (const p2 of State.products) { const r2 = String(p2.brand || '').trim(); if (!r2 || r2.toLowerCase() === 'null') continue; const k2 = r2.toLowerCase(); if (!s2.has(k2)) s2.set(k2, r2); } return [...s2.values()].sort((a2, b2) => a2.localeCompare(b2)).map(b2 => `<option value="${escapeAttr(b2)}">${escapeHtml(b2)}</option>`).join(''); })()}</select>
+        <select class="filter-select" id="inv-source" style="${State.products.some(p2 => p2.partnerLinkId) ? '' : 'display:none'}" title="Where the stock comes from">
+          <option value="">All sources</option><option value="own">Own stock</option><option value="partner">From partner warehouses</option>
+        </select>
         <select class="filter-select" id="inv-stock">
           <option value="">All stock levels</option>
           <option value="low">Low stock</option>
@@ -5001,7 +5015,11 @@ function renderInventory() {
     const b = el('inv-brand').value;
     const s = el('inv-stock').value;
     const h = el('inv-hidden') ? el('inv-hidden').value : '';
+    const src = el('inv-source') ? el('inv-source').value : '';
     const filtered = State.products.filter(p => {
+      if (src === 'own' && p.sourcePartnerId) return false;
+      if (src === 'partner' && !p.sourcePartnerId) return false;
+      if (/^\d+$/.test(src) && String(p.sourcePartnerId) !== src) return false;
       if (h === 'active' && p.hidden) return false;
       if (h === 'hidden' && !p.hidden) return false;
       if (q && !matchesKeywords(q, p.title, p.sku, p.partNumber, p.brand, p.model, ...(p.partNumbers||[]).map(x => x.code))) return false;
@@ -5069,7 +5087,14 @@ function renderInventory() {
   // on every keystroke made typing stutter. Selects stay immediate via 'change'.
   let _invPaintT;
   el('inv-search').addEventListener('input', () => { clearTimeout(_invPaintT); _invPaintT = setTimeout(paint, 160); });
-  ['inv-brand','inv-stock','inv-hidden'].forEach(id => { const e = el(id); if (e) e.addEventListener('change', paint); });
+  ['inv-brand','inv-stock','inv-hidden','inv-source'].forEach(id => { const e = el(id); if (e) e.addEventListener('change', paint); });
+  // Name each partner warehouse in the source filter (admin only).
+  if (State.user?.role === 'admin' && State.products.some(p2 => p2.partnerLinkId)) {
+    Api.get('/api/trade/partners').then(r => {
+      const sel = el('inv-source'); if (!sel) return;
+      for (const pt of r.partners || []) sel.add(new Option('From ' + pt.name, String(pt.id)));
+    }).catch(() => {});
+  }
 }
 
 // Soft inventory repaint: refresh the LIST ONLY, preserving the toolbar (search,
@@ -22422,6 +22447,559 @@ async function saveStoreVat(code, btn) {
     loadStoreVat();
   } catch (e) { toast(e.data?.message || e.message, 'error'); }
   btn.disabled = false;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Trade / wholesale — businesses that buy from us to resell. Accounts with
+// their own prices + terms, orders that come straight off stock (and push to
+// eBay/Shopify), consolidated invoices, payments, partner warehouse apps.
+// Backend: /api/trade (staff) · /api/trade/v1 (customers' API) · /trade (portal).
+// ──────────────────────────────────────────────────────────────────────────
+const TR = { tab: 'accounts', accountId: null, partnerId: null, orderLines: [] };
+const trMoney = n => n == null || n === '' ? '—' : '£' + Number(n).toFixed(2);
+const trDate = d => d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+const trStatusPill = st => {
+  const c = st === 'dispatched' || st === 'collected' || st === 'paid' ? 'var(--green)' : st === 'cancelled' || st === 'refunded' || st === 'overdue' ? 'var(--red)' : st === 'awaiting_payment' || st === 'part_paid' ? 'var(--amber)' : 'var(--ink-soft)';
+  return `<span style="font-size:11px;font-weight:600;color:${c};border:1px solid ${c};border-radius:10px;padding:1px 7px;white-space:nowrap">${escapeHtml(String(st || '').replace('_', ' '))}</span>`;
+};
+
+function renderTrade() {
+  el('content').innerHTML = `<div style="max-width:1150px">
+    <h1 style="margin-bottom:4px">Trade &amp; wholesale</h1>
+    <div style="color:var(--ink-soft);font-size:14px;margin-bottom:14px">Businesses that buy from you to resell — their own prices, live stock through the trade portal / API, orders that come straight off stock (eBay &amp; Shopify update instantly), pay-per-order or account terms with one consolidated invoice per period.</div>
+    <div class="seg" style="margin-bottom:14px" id="tr-tabs">
+      ${[['accounts', 'Accounts'], ['orders', 'Orders'], ['invoices', 'Invoices & payments'], ['partners', 'Buy from partner apps'], ['settings', 'Settings & help']]
+        .map(([k, l]) => `<button class="${TR.tab === k ? 'active' : ''}" onclick="trGo('${k}')">${l}</button>`).join('')}
+    </div>
+    <div id="tr-body"><div style="padding:20px;color:var(--ink-soft)">Loading…</div></div>
+  </div>`;
+  ({ accounts: () => TR.accountId ? trAccountDetail(TR.accountId) : trAccounts(), orders: trOrders, invoices: trInvoices,
+     partners: () => TR.partnerId ? trPartnerDetail(TR.partnerId) : trPartners(), settings: trSettings })[TR.tab]();
+}
+function trGo(tab, extra = {}) { TR.tab = tab; TR.accountId = extra.accountId || null; TR.partnerId = extra.partnerId || null; renderTrade(); }
+
+// ── Accounts list ──
+async function trAccounts() {
+  let r;
+  try { r = await Api.get('/api/trade/accounts'); } catch (e) { el('tr-body').innerHTML = `<div class="card"><div class="card-body" style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div></div>`; return; }
+  const a = r.accounts || [];
+  const owed = a.reduce((s, x) => s + (x.summary?.balance || 0), 0), over = a.reduce((s, x) => s + (x.summary?.overdue || 0), 0);
+  el('tr-body').innerHTML = `
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+      <button class="btn btn-primary" onclick="trEditAccount(null)">+ New trade account</button>
+      <span style="font-size:13px;color:var(--ink-soft)">${a.length} account${a.length === 1 ? '' : 's'} · owed ${trMoney(owed)}${over > 0 ? ` · <b style="color:var(--red)">${trMoney(over)} overdue</b>` : ''}</span>
+    </div>
+    <div class="card"><div class="card-body" style="padding:0;overflow:auto">
+      <table class="table" style="margin:0"><thead><tr><th>Business</th><th>Type</th><th>Terms</th><th style="text-align:right">Balance</th><th style="text-align:right">This year</th><th>Last order</th><th>Access</th></tr></thead><tbody>
+      ${a.length ? a.map(x => `<tr style="cursor:pointer;${x.active ? '' : 'opacity:.5'}" onclick="trGo('accounts',{accountId:${x.id}})">
+        <td><b>${escapeHtml(x.name)}</b>${x.is_partner ? ` <span style="font-size:11px;color:var(--blue)">⇄ ${escapeHtml(x.partner_brand || 'partner app')}</span>` : ''}<div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(x.contact_name || '')} ${escapeHtml(x.email || '')}</div></td>
+        <td>${x.account_type === 'cash' ? 'Cash' : 'VAT'}</td>
+        <td style="font-size:12px">${x.terms === 'account' ? `Account · ${escapeHtml(x.invoice_period)} · ${x.due_days}d` : 'Pay per order'}</td>
+        <td style="text-align:right">${trMoney(x.summary.balance)}${x.summary.overdue > 0 ? `<div style="font-size:11px;color:var(--red)">${trMoney(x.summary.overdue)} overdue</div>` : ''}</td>
+        <td style="text-align:right">${trMoney(x.summary.ytd)}</td>
+        <td style="font-size:12px">${trDate(x.summary.lastOrderAt)}</td>
+        <td style="font-size:12px">${x.has_key ? '🔑 ' + escapeHtml(x.api_key_prefix || '') + '…' : '<span style="color:var(--ink-soft)">no key</span>'}${x.last_api_at ? `<div style="font-size:11px;color:var(--ink-soft)">used ${trDate(x.last_api_at)}</div>` : ''}</td>
+      </tr>`).join('') : `<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--ink-soft)">No trade accounts yet — add your first one.</td></tr>`}
+      </tbody></table></div></div>`;
+}
+
+// ── Account editor ──
+function trEditAccount(acc) {
+  const a = acc || { account_type: 'vat', terms: 'prepay', invoice_period: 'monthly', due_days: 30, block_when_overdue: true, delivery_charge: 0, photo_access: 'branded', active: true };
+  const f = (id, label, val, type = 'text', extra = '') => `<div class="field" style="margin:0"><label style="font-size:12px">${label}</label><input id="tra-${id}" type="${type}" value="${escapeAttr(val == null ? '' : val)}" ${extra}></div>`;
+  const sel = (id, label, val, opts) => `<div class="field" style="margin:0"><label style="font-size:12px">${label}</label><select id="tra-${id}">${opts.map(([v, l]) => `<option value="${v}" ${String(val) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
+  const chk = (id, label, val, hint = '') => `<label style="display:flex;gap:8px;align-items:flex-start;font-size:13px"><input type="checkbox" id="tra-${id}" ${val ? 'checked' : ''} style="margin-top:3px"><span>${label}${hint ? `<div style="font-size:11px;color:var(--ink-soft)">${hint}</div>` : ''}</span></label>`;
+  const g = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:12px';
+  modal({
+    title: acc ? 'Edit ' + acc.name : 'New trade account',
+    body: `
+      <div style="font-weight:600;margin-bottom:6px">Business</div>
+      <div style="${g}">${f('name', 'Business name *', a.name)}${f('contact_name', 'Contact', a.contact_name)}${f('email', 'Email (invoices + portal invite)', a.email, 'email')}${f('phone', 'Phone', a.phone)}${f('vat_number', 'Their VAT number', a.vat_number)}</div>
+      <div class="field"><label style="font-size:12px">Address (bill-to / default delivery)</label><textarea id="tra-address" rows="2">${escapeHtml(a.address || '')}</textarea></div>
+      <div style="font-weight:600;margin:6px 0">Accounts &amp; terms</div>
+      <div style="${g}">
+        ${sel('account_type', 'Account type', a.account_type, [['vat', 'VAT account (bank, VAT invoices)'], ['cash', 'Cash account (no VAT, kept separate)']])}
+        ${sel('terms', 'Payment terms', a.terms, [['prepay', 'Pay per order (before dispatch)'], ['account', 'On account (credit)']])}
+        ${sel('invoice_period', 'Invoice (account only)', a.invoice_period, [['per_order', 'Invoice every order'], ['daily', 'Consolidate daily'], ['weekly', 'Consolidate weekly'], ['monthly', 'Consolidate monthly']])}
+        ${f('due_days', 'Payment due (days after invoice)', a.due_days, 'number', 'min="0"')}
+        ${f('credit_limit', 'Credit limit £ (blank = none)', a.credit_limit, 'number', 'step="0.01"')}
+      </div>
+      ${chk('block_when_overdue', 'Stop new portal/API orders while anything is overdue', a.block_when_overdue)}
+      <div style="font-weight:600;margin:12px 0 6px">Pricing</div>
+      <div style="${g}">
+        ${f('markup_pct', 'Markup on our cost % (blank = default)', a.markup_pct, 'number', 'step="0.1"')}
+        ${f('retail_discount_pct', '% off retail when a part has no cost', a.retail_discount_pct, 'number', 'step="0.1"')}
+        ${f('delivery_charge', 'Delivery charge per order £ (ex VAT)', a.delivery_charge, 'number', 'step="0.01"')}
+        ${f('free_delivery_over', 'Free delivery over £ (ex VAT)', a.free_delivery_over, 'number', 'step="0.01"')}
+      </div>
+      ${chk('show_cost', 'Show our cost + margin to this customer', a.show_cost, 'For partner apps / cost-plus deals where cost is agreed up front.')}
+      <div style="font-weight:600;margin:12px 0 6px">Stock, photos &amp; access</div>
+      <div style="${g}">
+        ${f('stock_buffer', 'Hold back units (blank = default)', a.stock_buffer, 'number', 'min="0"')}
+        ${f('stock_cap', 'Show at most (e.g. 20 → "20+")', a.stock_cap, 'number', 'min="0"')}
+        ${sel('photo_access', 'Photos', a.photo_access, [['branded', 'Listing photos (branded)'], ['clean', 'Clean photos (no branding) where available']])}
+        ${f('webhook_url', 'Their webhook (https, optional)', a.webhook_url)}
+      </div>
+      ${chk('is_partner', 'This is another warehouse app (Razoryn / Calibre)', a.is_partner, 'Links the two apps: they can import your parts, see live stock and order straight into their Incoming.')}
+      <div style="margin:6px 0 0 26px">${f('partner_brand', 'Which app', a.partner_brand, 'text', 'placeholder="Razoryn / Calibre"')}</div>
+      ${chk('share_locations', 'Share bin locations + barcodes', a.share_locations, 'So their app can scan your labels and find parts in your warehouse.')}
+      ${acc ? chk('active', 'Account active', a.active) : ''}
+      <div class="field" style="margin-top:10px"><label style="font-size:12px">Notes (internal)</label><textarea id="tra-notes" rows="2">${escapeHtml(a.notes || '')}</textarea></div>`,
+    actions: [{ label: 'Cancel', onClick: closeModal }, { label: acc ? 'Save' : 'Create account', primary: true, onClick: () => trSaveAccount(acc ? acc.id : null) }],
+  });
+}
+async function trSaveAccount(id) {
+  const v = k => el('tra-' + k) ? el('tra-' + k).value : undefined;
+  const c = k => el('tra-' + k) ? el('tra-' + k).checked : undefined;
+  const body = {};
+  for (const k of ['name', 'contact_name', 'email', 'phone', 'vat_number', 'address', 'account_type', 'terms', 'invoice_period', 'due_days', 'credit_limit',
+    'markup_pct', 'retail_discount_pct', 'delivery_charge', 'free_delivery_over', 'stock_buffer', 'stock_cap', 'photo_access', 'webhook_url', 'partner_brand', 'notes']) if (v(k) !== undefined) body[k] = v(k);
+  for (const k of ['block_when_overdue', 'show_cost', 'is_partner', 'share_locations', 'active']) if (c(k) !== undefined) body[k] = c(k);
+  if (!String(body.name || '').trim()) return toast('Business name is required', 'warn');
+  try {
+    const r = id ? await Api.put('/api/trade/accounts/' + id, body) : await Api.post('/api/trade/accounts', body);
+    closeModal(); toast('Saved', 'success');
+    trGo('accounts', { accountId: r.account.id });
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+
+// ── Account detail ──
+async function trAccountDetail(id) {
+  let d;
+  try { d = await Api.get('/api/trade/accounts/' + id); } catch (e) { el('tr-body').innerHTML = `<div class="card"><div class="card-body" style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div></div>`; return; }
+  TR.detail = d;
+  const a = d.account, s = d.summary;
+  const stat = (v, l, color) => `<div class="card" style="margin:0"><div class="card-body" style="padding:12px"><div style="font-size:20px;font-weight:700;${color ? 'color:' + color : ''}">${v}</div><div style="font-size:12px;color:var(--ink-soft)">${l}</div></div></div>`;
+  el('tr-body').innerHTML = `
+    <div style="margin-bottom:10px"><a href="#" onclick="trGo('accounts');return false" style="font-size:13px">← All trade accounts</a></div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+      <h2 style="margin:0">${escapeHtml(a.name)}</h2>
+      <span style="font-size:12px;color:var(--ink-soft)">${a.account_type === 'cash' ? 'Cash account' : 'VAT account'} · ${a.terms === 'account' ? `on account, ${escapeHtml(a.invoice_period)} invoice, ${a.due_days} days` : 'pay per order'}${a.is_partner ? ' · ⇄ partner app' : ''}${a.active ? '' : ' · INACTIVE'}</span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <button class="btn btn-primary" onclick="trNewOrder(${a.id})">+ Take an order</button>
+      <button class="btn btn-outline" onclick="trPayment(${a.id})">£ Record payment</button>
+      ${a.terms === 'account' && a.invoice_period !== 'per_order' ? `<button class="btn btn-outline" onclick="trInvoiceNow(${a.id})">🧾 Invoice now</button>` : ''}
+      <button class="btn btn-outline" onclick="trApiKey(${a.id}, ${a.has_key})">🔑 ${a.has_key ? 'New access key' : 'Give portal / API access'}</button>
+      <button class="btn btn-outline" onclick="window.open('/api/trade/accounts/${a.id}/price-list.csv','_blank')">⬇ Price list (CSV)</button>
+      <button class="btn btn-outline" onclick='trEditAccount(TR.detail.account)'>✎ Edit</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px">
+      ${stat(trMoney(s.balance), 'Balance owed')}${stat(trMoney(s.overdue), s.overdueInvoices + ' overdue invoice(s)', s.overdue > 0 ? 'var(--red)' : '')}
+      ${stat(a.credit_limit != null ? trMoney(a.credit_limit) : '—', 'Credit limit')}${stat(trMoney(s.ytd), 'Bought this year')}
+      ${stat(trMoney(s.lifetime), s.orders + ' orders lifetime')}${s.credit > 0 ? stat(trMoney(s.credit), 'Credit on account', 'var(--green)') : ''}
+    </div>
+    ${a.has_key ? `<div class="card" style="margin-bottom:14px"><div class="card-body" style="padding:10px 14px;font-size:13px">
+      🔑 Access key <code>${escapeHtml(a.api_key_prefix || '')}…</code> · portal <a href="${escapeAttr(d.portalUrl)}" target="_blank">${escapeHtml(d.portalUrl)}</a>${a.last_api_at ? ` · last used ${trDate(a.last_api_at)}` : ' · not used yet'}
+      ${a.webhook_url ? `<br>Webhook ${escapeHtml(a.webhook_url)} ${a.last_webhook_error ? `<span style="color:var(--red)">last error: ${escapeHtml(a.last_webhook_error)}</span>` : (a.last_webhook_at ? '✓' : '')} <button class="btn btn-ghost btn-sm" onclick="trTestHook(${a.id})">Test</button>` : ''}
+      · <a href="#" onclick="trRevokeKey(${a.id});return false" style="color:var(--red)">revoke</a></div></div>` : ''}
+
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Prices for ${escapeHtml(a.name)}</h3>
+      <div class="card-desc">Default: our cost + ${a.markup_pct != null ? Number(a.markup_pct) : 'the default'}% (Settings). Rules below override it — a part beats a make, a make beats everything; quantity breaks kick in at the min qty.</div></div>
+      <div class="card-body">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
+          <div class="field" style="margin:0"><label style="font-size:12px">Price check — SKU</label><input id="trq-sku" style="width:170px" onkeydown="if(event.key==='Enter')trQuote(${a.id})"></div>
+          <div class="field" style="margin:0"><label style="font-size:12px">Qty</label><input id="trq-qty" type="number" value="1" min="1" style="width:70px"></div>
+          <button class="btn btn-outline btn-sm" onclick="trQuote(${a.id})">Check price</button><span id="trq-out" style="font-size:13px"></span>
+        </div>
+        ${trRulesTable(d.rules, a.id)}
+        ${trRuleForm(a.id)}
+      </div></div>
+
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Orders</h3></div><div class="card-body" style="padding:0;overflow:auto">${trOrdersTable(d.orders.map(o => ({ ...o, sale_id: o.id })), false)}</div></div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:14px">
+      <div class="card"><div class="card-head"><h3>Invoices</h3></div><div class="card-body" style="padding:0;overflow:auto">${trInvoicesTable(d.invoices, false)}</div></div>
+      <div class="card"><div class="card-head"><h3>Payments</h3></div><div class="card-body" style="padding:0;overflow:auto">${trPaymentsTable(d.payments, false)}</div></div>
+    </div>
+    ${d.top.length ? `<div class="card" style="margin-top:14px"><div class="card-head"><h3>What they buy most</h3></div><div class="card-body" style="padding:0">
+      <table class="table" style="margin:0"><thead><tr><th>SKU</th><th>Item</th><th style="text-align:right">Qty</th><th style="text-align:right">Spend</th></tr></thead><tbody>
+      ${d.top.map(t => `<tr><td style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(t.sku)}</td><td style="font-size:12px">${escapeHtml(t.title || '')}</td><td style="text-align:right">${t.qty}</td><td style="text-align:right">${trMoney(t.spend)}</td></tr>`).join('')}
+      </tbody></table></div></div>` : ''}`;
+}
+
+function trRulesTable(rules, accountId) {
+  if (!rules.length) return `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">No special prices yet.</div>`;
+  return `<table class="table" style="margin:0 0 10px"><thead><tr><th>Applies to</th><th>From qty</th><th>Price</th><th>Note</th><th></th></tr></thead><tbody>
+    ${rules.map(r => `<tr><td>${r.product_id ? `<b>${escapeHtml(r.product_sku || '#' + r.product_id)}</b> <span style="font-size:11px;color:var(--ink-soft)">${escapeHtml((r.product_title || '').slice(0, 50))}</span>` : r.brand ? 'All ' + escapeHtml(r.brand) + ' parts' : 'Everything'}</td>
+      <td>${r.min_qty}+</td><td>${r.kind === 'markup' ? 'cost + ' + Number(r.value) + '%' : r.kind === 'discount' ? Number(r.value) + '% off retail' : trMoney(r.value) + ' fixed'}</td>
+      <td style="font-size:12px">${escapeHtml(r.note || '')}</td><td style="text-align:right"><button class="btn btn-ghost btn-sm" onclick="trDeleteRule(${r.id}, ${accountId == null ? 'null' : accountId})">✕</button></td></tr>`).join('')}
+  </tbody></table>`;
+}
+function trRuleForm(accountId) {
+  const k = accountId == null ? 'g' : 'a';
+  return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;border-top:1px solid var(--line);padding-top:10px">
+    <div class="field" style="margin:0"><label style="font-size:12px">Applies to</label><select id="trr-${k}-scope" onchange="el('trr-${k}-target').placeholder=this.value==='sku'?'SKU':this.value==='brand'?'Make, e.g. Tesla':'';el('trr-${k}-target').style.display=this.value==='all'?'none':''">
+      <option value="all">Everything</option><option value="brand">A make</option><option value="sku">One part (SKU)</option></select></div>
+    <div class="field" style="margin:0"><label style="font-size:12px">&nbsp;</label><input id="trr-${k}-target" style="width:150px;display:none"></div>
+    <div class="field" style="margin:0"><label style="font-size:12px">From qty</label><input id="trr-${k}-min" type="number" min="1" value="1" style="width:70px"></div>
+    <div class="field" style="margin:0"><label style="font-size:12px">Price as</label><select id="trr-${k}-kind"><option value="markup">Cost + %</option><option value="discount">% off retail</option><option value="fixed">Fixed £ (ex VAT)</option></select></div>
+    <div class="field" style="margin:0"><label style="font-size:12px">Value</label><input id="trr-${k}-val" type="number" step="0.01" style="width:90px"></div>
+    <div class="field" style="margin:0"><label style="font-size:12px">Note</label><input id="trr-${k}-note" style="width:150px"></div>
+    <button class="btn btn-primary btn-sm" onclick="trAddRule(${accountId == null ? 'null' : accountId})">Add price rule</button></div>`;
+}
+async function trAddRule(accountId) {
+  const k = accountId == null ? 'g' : 'a';
+  const scope = el(`trr-${k}-scope`).value, target = el(`trr-${k}-target`).value.trim();
+  if (scope !== 'all' && !target) return toast(scope === 'sku' ? 'Enter the SKU' : 'Enter the make', 'warn');
+  try {
+    await Api.post('/api/trade/rules', { accountId, productSku: scope === 'sku' ? target : undefined, brand: scope === 'brand' ? target : undefined,
+      minQty: el(`trr-${k}-min`).value, kind: el(`trr-${k}-kind`).value, value: el(`trr-${k}-val`).value, note: el(`trr-${k}-note`).value });
+    toast('Price rule added', 'success'); renderTrade();
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+async function trDeleteRule(id) { if (!confirm('Remove this price rule?')) return; try { await Api.delete('/api/trade/rules/' + id); renderTrade(); } catch (e) { toast(e.message, 'error'); } }
+async function trQuote(accountId) {
+  const sku = el('trq-sku').value.trim(); if (!sku) return;
+  try {
+    const r = await Api.get(`/api/trade/accounts/${accountId}/quote?sku=${encodeURIComponent(sku)}&qty=${parseInt(el('trq-qty').value) || 1}`);
+    el('trq-out').innerHTML = r.net == null ? `<span style="color:var(--red)">No price — part has no cost (add a cost, a fixed price or a % off retail).</span>`
+      : `<b>${trMoney(r.net)}</b> ex VAT each${r.vatRate ? ` (${trMoney(r.net * (1 + r.vatRate / 100))} inc)` : ''} · cost ${trMoney(r.cost)}${r.cost ? ` · margin ${((r.net - r.cost) / r.net * 100).toFixed(1)}%` : ''} · ${escapeHtml(r.basis || '')}${r.clamped ? ' · <span style="color:var(--amber)">held at cost</span>' : ''} · ${r.available} available${r.breaks.length > 1 ? ' · breaks ' + r.breaks.map(b => b.min_qty + '+ ' + trMoney(b.price)).join(', ') : ''}`;
+  } catch (e) { el('trq-out').innerHTML = `<span style="color:var(--red)">${escapeHtml(e.data?.message || e.data?.error || e.message)}</span>`; }
+}
+
+// ── Tables shared by detail + tabs ──
+function trOrdersTable(orders, withAccount) {
+  if (!orders.length) return `<div style="padding:16px;color:var(--ink-soft);font-size:13px">No orders yet.</div>`;
+  return `<table class="table" style="margin:0"><thead><tr>${withAccount ? '<th>Account</th>' : ''}<th>Order</th><th>Placed</th><th>Status</th><th style="text-align:right">Total</th><th>Paid</th><th>Invoice</th><th></th></tr></thead><tbody>
+    ${orders.map(o => `<tr>${withAccount ? `<td><a href="#" onclick="trGo('accounts',{accountId:${o.account_id}});return false">${escapeHtml(o.account_name)}</a></td>` : ''}
+      <td><b>${escapeHtml(o.ref || '')}</b>${o.po_ref ? `<div style="font-size:11px;color:var(--ink-soft)">PO ${escapeHtml(o.po_ref)}</div>` : ''}<details><summary style="font-size:11px;color:var(--ink-soft)">${o.items.length} line(s)</summary>${o.items.map(i => `<div style="font-size:11px">${i.qty} × ${escapeHtml(i.sku)} — ${trMoney(i.line_total)}</div>`).join('')}</details></td>
+      <td style="font-size:12px">${trDate(o.placed_at)}</td><td>${trStatusPill(o.status)}</td>
+      <td style="text-align:right">${trMoney(o.total)}</td><td style="font-size:12px">${o.paid ? '✓' : o.amount_paid > 0 ? trMoney(o.amount_paid) : '—'}</td>
+      <td style="font-size:12px">${o.invoice ? escapeHtml(o.invoice) : o.consolidated ? '<span style="color:var(--ink-soft)">next invoice</span>' : 'per order'}</td>
+      <td style="text-align:right;white-space:nowrap"><button class="btn btn-ghost btn-sm" title="${o.consolidated ? 'Delivery note' : 'Invoice'}" onclick="window.open('/api/sales/${o.sale_id}/invoice.html','_blank')">🖨</button>
+        ${o.status !== 'cancelled' && !o.invoice && o.status !== 'dispatched' && o.status !== 'collected' && !(o.amount_paid > 0) ? `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="trCancelOrder(${o.sale_id})">Cancel</button>` : ''}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+function trInvoicesTable(invs, withAccount) {
+  if (!invs.length) return `<div style="padding:16px;color:var(--ink-soft);font-size:13px">No consolidated invoices yet.</div>`;
+  return `<table class="table" style="margin:0"><thead><tr>${withAccount ? '<th>Account</th>' : ''}<th>Invoice</th><th>Period</th><th>Due</th><th style="text-align:right">Total</th><th style="text-align:right">Balance</th><th></th></tr></thead><tbody>
+    ${invs.map(i => { const bal = Number(i.total) - Number(i.amount_paid); const over = i.status !== 'paid' && i.status !== 'void' && new Date(i.due_date) < new Date();
+      return `<tr style="${i.status === 'void' ? 'opacity:.45' : ''}">${withAccount ? `<td><a href="#" onclick="trGo('accounts',{accountId:${i.account_id}});return false">${escapeHtml(i.account_name)}</a></td>` : ''}
+      <td><b>${escapeHtml(i.number)}</b> ${trStatusPill(over ? 'overdue' : i.status)}${i.account_type === 'cash' ? ' <span style="font-size:11px;color:var(--ink-soft)">cash</span>' : ''}</td>
+      <td style="font-size:12px">${trDate(i.period_from)} – ${trDate(i.period_to)} · ${i.order_count}</td><td style="font-size:12px">${trDate(i.due_date)}</td>
+      <td style="text-align:right">${trMoney(i.total)}</td><td style="text-align:right">${trMoney(bal)}</td>
+      <td style="text-align:right;white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="window.open('/api/trade/invoices/${i.id}/view','_blank')">View</button>
+        <button class="btn btn-ghost btn-sm" onclick="window.open('/api/trade/invoices/${i.id}/pdf','_blank')">PDF</button>
+        ${i.status !== 'void' ? `<button class="btn btn-ghost btn-sm" onclick="trEmailInvoice(${i.id})">✉</button>` : ''}
+        ${i.status === 'issued' ? `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="trVoidInvoice(${i.id})">Void</button>` : ''}</td></tr>`; }).join('')}
+  </tbody></table>`;
+}
+function trPaymentsTable(pays, withAccount) {
+  if (!pays.length) return `<div style="padding:16px;color:var(--ink-soft);font-size:13px">No payments recorded.</div>`;
+  return `<table class="table" style="margin:0"><thead><tr>${withAccount ? '<th>Account</th>' : ''}<th>Date</th><th>Method / ref</th><th style="text-align:right">Amount</th><th>Applied to</th></tr></thead><tbody>
+    ${pays.map(p => `<tr>${withAccount ? `<td>${escapeHtml(p.account_name)}</td>` : ''}<td style="font-size:12px">${trDate(p.paid_at)}</td><td style="font-size:12px">${escapeHtml(p.method || '')} ${escapeHtml(p.reference || '')}</td>
+      <td style="text-align:right">${trMoney(p.amount)}${Number(p.unallocated) > 0 ? `<div style="font-size:11px;color:var(--green)">${trMoney(p.unallocated)} credit</div>` : ''}</td>
+      <td style="font-size:11px">${(p.allocations || []).map(x => `${escapeHtml(x.invoice || x.order)} ${trMoney(x.amount)}`).join('<br>')}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+
+async function trCancelOrder(saleId) {
+  if (!confirm('Cancel this trade order? The stock goes back on the shelf and eBay/Shopify are updated.')) return;
+  try { await Api.post(`/api/trade/orders/${saleId}/cancel`, {}); toast('Order cancelled — stock restored', 'success'); renderTrade(); } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+async function trInvoiceNow(accountId) {
+  if (!confirm('Issue a consolidated invoice now for every un-invoiced order on this account?')) return;
+  try { const r = await Api.post(`/api/trade/accounts/${accountId}/invoice-now`, {}); toast(r.invoice ? `Invoice ${r.invoice.number} issued — ${trMoney(r.invoice.total)}` : r.message, 'success', 6000); renderTrade(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+async function trEmailInvoice(id) { try { await Api.post(`/api/trade/invoices/${id}/email`, {}); toast('Invoice emailed', 'success'); } catch (e) { toast(e.data?.message || e.message, 'error'); } }
+async function trVoidInvoice(id) {
+  if (!confirm('Void this invoice? Its orders go back to "not yet invoiced" and will be on the next one.')) return;
+  try { await Api.post(`/api/trade/invoices/${id}/void`, {}); toast('Invoice voided', 'success'); renderTrade(); } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+async function trTestHook(id) { try { const r = await Api.post(`/api/trade/accounts/${id}/test-webhook`, {}); toast(r.ok ? 'Webhook delivered ✓' : 'Webhook failed: ' + (r.error || 'HTTP ' + r.status), r.ok ? 'success' : 'error'); } catch (e) { toast(e.data?.message || e.message, 'error'); } }
+async function trRevokeKey(id) { if (!confirm('Revoke this access key? The portal and their API stop working until you issue a new one.')) return; try { await Api.delete(`/api/trade/accounts/${id}/api-key`); renderTrade(); } catch (e) { toast(e.message, 'error'); } }
+
+async function trApiKey(id, hasKey) {
+  if (hasKey && !confirm('Issue a NEW access key? The current one stops working immediately.')) return;
+  const email = !!TR.detail?.account?.email && confirm(`Email the portal link + key to ${TR.detail.account.email}?`);
+  try {
+    const r = await Api.post(`/api/trade/accounts/${id}/api-key`, { email });
+    modal({ title: 'Trade access ready', body: `
+      <p style="font-size:13px">Shown <b>once</b> — copy it now. ${r.emailed === true ? '✅ Emailed to the customer.' : r.emailed ? `<span style="color:var(--red)">Email failed: ${escapeHtml(r.emailed)}</span>` : ''}</p>
+      <div class="field"><label>Portal link (signs them straight in)</label><input readonly value="${escapeAttr(r.portalLink)}" onclick="this.select()"></div>
+      <div class="field"><label>Access key (for their system / API)</label><input readonly value="${escapeAttr(r.key)}" onclick="this.select()"></div>
+      <div class="field"><label>API address</label><input readonly value="${escapeAttr(r.apiBase)}" onclick="this.select()"></div>
+      <p style="font-size:12px;color:var(--ink-soft)">Another warehouse app (Razoryn/Calibre)? In <b>that</b> app go to Trade → Buy from partner apps → Add, and paste this app's address + this key.</p>`,
+      actions: [{ label: 'Copy portal link', onClick: () => { navigator.clipboard?.writeText(r.portalLink); toast('Copied', 'success'); } }, { label: 'Done', primary: true, onClick: () => { closeModal(); renderTrade(); } }] });
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+
+// ── Take an order (phone / counter / email) ──
+async function trNewOrder(accountId) {
+  TR.orderLines = [];
+  let accounts = [];
+  if (!accountId) { try { accounts = (await Api.get('/api/trade/accounts')).accounts.filter(a => a.active); } catch (_) {} }
+  modal({ title: 'Take a trade order', body: `
+    ${accountId ? `<input type="hidden" id="tro-acct" value="${accountId}">` : `<div class="field"><label>Trade account</label><select id="tro-acct">${accounts.map(a => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('')}</select></div>`}
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <div class="field" style="margin:0;flex:1;min-width:160px"><label>SKU / part number (or scan)</label><input id="tro-sku" onkeydown="if(event.key==='Enter')trAddLine()"></div>
+      <div class="field" style="margin:0"><label>Qty</label><input id="tro-qty" type="number" min="1" value="1" style="width:70px"></div>
+      <button class="btn btn-outline" onclick="trAddLine()">Add</button>
+    </div>
+    <div id="tro-lines" style="margin:10px 0"></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px">
+      <div class="field" style="margin:0"><label>Their PO / ref</label><input id="tro-po"></div>
+      <div class="field" style="margin:0"><label>Delivery</label><select id="tro-del"><option value="ship">Deliver</option><option value="collect">Collect</option></select></div>
+      <div class="field" style="margin:0"><label>Delivery charge £ ex VAT (blank = account default)</label><input id="tro-ship" type="number" step="0.01"></div>
+    </div>
+    <div class="field" style="margin-top:8px"><label>Notes</label><textarea id="tro-notes" rows="2"></textarea></div>
+    <div style="font-size:12px;color:var(--ink-soft)">Prices are this customer's trade prices (ex VAT) — edit a line to override. Stock comes off as soon as you place it.</div>`,
+    actions: [{ label: 'Cancel', onClick: closeModal }, { label: 'Place order', primary: true, onClick: trPlaceOrder }] });
+  setTimeout(() => el('tro-sku')?.focus(), 50);
+}
+async function trAddLine() {
+  const acct = el('tro-acct').value, sku = el('tro-sku').value.trim(), qty = parseInt(el('tro-qty').value) || 1;
+  if (!sku) return;
+  try {
+    const r = await Api.get(`/api/trade/accounts/${acct}/quote?sku=${encodeURIComponent(sku)}&qty=${qty}`);
+    TR.orderLines.push({ productId: r.product.id, sku: r.product.sku, title: r.product.title, qty, unitPrice: r.net, cost: r.cost, onHand: r.product.qty_on_hand });
+    el('tro-sku').value = ''; el('tro-qty').value = 1; el('tro-sku').focus();
+    trPaintLines();
+  } catch (e) { toast(e.data?.error === 'unknown_sku' ? 'No product with that SKU' : (e.data?.message || e.message), 'error'); }
+}
+function trPaintLines() {
+  const L = TR.orderLines;
+  const net = L.reduce((a, l) => a + (parseFloat(l.unitPrice) || 0) * l.qty, 0);
+  el('tro-lines').innerHTML = L.length ? `<table class="table" style="margin:0"><thead><tr><th>Part</th><th>Qty</th><th>£ each ex VAT</th><th style="text-align:right">Line</th><th></th></tr></thead><tbody>
+    ${L.map((l, i) => `<tr><td><b>${escapeHtml(l.sku)}</b><div style="font-size:11px;color:var(--ink-soft)">${escapeHtml((l.title || '').slice(0, 60))} · ${l.onHand} on hand${l.cost ? ' · cost ' + trMoney(l.cost) : ''}</div></td>
+      <td><input type="number" min="1" value="${l.qty}" style="width:64px" onchange="TR.orderLines[${i}].qty=parseInt(this.value)||1;trPaintLines()"></td>
+      <td><input type="number" step="0.01" value="${l.unitPrice != null ? l.unitPrice : ''}" style="width:90px" onchange="TR.orderLines[${i}].unitPrice=this.value;trPaintLines()"></td>
+      <td style="text-align:right">${trMoney((parseFloat(l.unitPrice) || 0) * l.qty)}</td>
+      <td><button class="btn btn-ghost btn-sm" onclick="TR.orderLines.splice(${i},1);trPaintLines()">✕</button></td></tr>`).join('')}
+    </tbody></table><div style="text-align:right;font-weight:600;margin-top:6px">Goods ${trMoney(net)} ex VAT</div>` : '<div style="font-size:12px;color:var(--ink-soft)">No lines yet.</div>';
+}
+async function trPlaceOrder() {
+  if (!TR.orderLines.length) return toast('Add at least one part', 'warn');
+  if (TR.orderLines.some(l => l.unitPrice === '' || l.unitPrice == null)) return toast('Every line needs a price', 'warn');
+  try {
+    const o = await Api.post('/api/trade/orders', { accountId: el('tro-acct').value, lines: TR.orderLines.map(l => ({ productId: l.productId, qty: l.qty, unitPrice: l.unitPrice })),
+      poRef: el('tro-po').value, delivery: el('tro-del').value, shipping: el('tro-ship').value, notes: el('tro-notes').value });
+    closeModal(); toast(`Order ${o.ref} placed — ${trMoney(o.total)} · stock updated on eBay & Shopify`, 'success', 6000);
+    renderTrade();
+  } catch (e) {
+    if (e.data?.shortages) toast('Not enough stock: ' + e.data.shortages.map(s => `${s.sku} (${s.available} left)`).join(', '), 'error', 8000);
+    else toast(e.data?.message || e.message, 'error');
+  }
+}
+
+// ── Record a payment ──
+function trPayment(accountId) {
+  const invs = (TR.detail?.invoices || []).filter(i => i.status === 'issued' || i.status === 'part_paid');
+  const a = TR.detail?.account || {};
+  modal({ title: 'Record payment', body: `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="field" style="margin:0"><label>Amount £</label><input id="trp-amt" type="number" step="0.01" value="${TR.detail ? TR.detail.summary.balance.toFixed(2) : ''}"></div>
+      <div class="field" style="margin:0"><label>Method</label><select id="trp-method"><option value="bank" ${a.account_type !== 'cash' ? 'selected' : ''}>Bank transfer</option><option value="cash" ${a.account_type === 'cash' ? 'selected' : ''}>Cash</option><option value="card">Card</option></select></div>
+      <div class="field" style="margin:0"><label>Reference</label><input id="trp-ref"></div>
+      <div class="field" style="margin:0"><label>Date received</label><input id="trp-date" type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
+    </div>
+    <div class="field" style="margin-top:10px"><label>Pay off first</label><select id="trp-inv"><option value="">Oldest first (automatic)</option>${invs.map(i => `<option value="${i.id}">${escapeHtml(i.number)} — ${trMoney(Number(i.total) - Number(i.amount_paid))} due ${trDate(i.due_date)}</option>`).join('')}</select></div>
+    <div style="font-size:12px;color:var(--ink-soft)">Money is applied to invoices, then to un-invoiced orders, oldest first; anything left over is kept as credit for their next order.</div>`,
+    actions: [{ label: 'Cancel', onClick: closeModal }, { label: 'Record payment', primary: true, onClick: async () => {
+      try {
+        const r = await Api.post(`/api/trade/accounts/${accountId}/payments`, { amount: el('trp-amt').value, method: el('trp-method').value, reference: el('trp-ref').value, paidAt: el('trp-date').value, invoiceId: el('trp-inv').value || null });
+        closeModal(); toast(`Payment recorded — balance now ${trMoney(r.summary.balance)}`, 'success'); renderTrade();
+      } catch (e) { toast(e.data?.message || e.message, 'error'); }
+    } }] });
+}
+
+// ── Orders tab ──
+async function trOrders() {
+  try {
+    const r = await Api.get('/api/trade/orders' + (TR.unpaidOnly ? '?unpaid=1' : ''));
+    el('tr-body').innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn btn-primary" onclick="trNewOrder(null)">+ Take an order</button>
+      <label style="font-size:13px;display:flex;gap:6px;align-items:center"><input type="checkbox" ${TR.unpaidOnly ? 'checked' : ''} onchange="TR.unpaidOnly=this.checked;trOrders()"> Unpaid only</label>
+      <span style="font-size:12px;color:var(--ink-soft)">Trade orders also appear in Dispatch and Sales like any other order.</span></div>
+      <div class="card"><div class="card-body" style="padding:0;overflow:auto">${trOrdersTable(r.orders, true)}</div></div>`;
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+
+// ── Invoices & payments tab ──
+async function trInvoices() {
+  try {
+    const [inv, pay] = await Promise.all([Api.get('/api/trade/invoices'), Api.get('/api/trade/payments')]);
+    el('tr-body').innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn btn-outline" onclick="trRunInvoices()">🧾 Issue due invoices now</button>
+      <span style="font-size:12px;color:var(--ink-soft)">Runs automatically every morning: daily accounts get yesterday's orders, weekly on Mondays, monthly on the 1st. Emailed with a PDF when the account has an email.</span></div>
+      <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Consolidated invoices</h3></div><div class="card-body" style="padding:0;overflow:auto">${trInvoicesTable(inv.invoices, true)}</div></div>
+      <div class="card"><div class="card-head"><h3>Payments received</h3></div><div class="card-body" style="padding:0;overflow:auto">${trPaymentsTable(pay.payments, true)}</div></div>`;
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+async function trRunInvoices() {
+  try { const r = await Api.post('/api/trade/invoices/run', {}); toast(r.issued.length ? `${r.issued.length} invoice(s) issued` : 'Nothing due — every closed period is already invoiced', 'success', 6000); trInvoices(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+
+// ── Partners (other warehouse apps we BUY from) ──
+async function trPartners() {
+  let r;
+  try { r = await Api.get('/api/trade/partners'); } catch (e) { toast(e.message, 'error'); return; }
+  el('tr-body').innerHTML = `
+    <div class="card" style="margin-bottom:14px"><div class="card-body" style="font-size:13px;line-height:1.6">
+      Buy stock from another warehouse app (e.g. <b>${escapeHtml(State.brand?.code === 'calibre' ? 'Razoryn' : 'Calibre')}</b>) straight from here. In <b>their</b> app: Trade → New trade account for us → tick <i>"This is another warehouse app"</i> + <i>"Share bin locations + barcodes"</i> → <i>Give portal / API access</i>. Then add their app address + that key below.
+      Parts you import are tagged with where the stock comes from (filter in Inventory), your cost = the price they charge you (kept up to date), their barcodes scan here, and orders land in your <b>Incoming</b> — receiving them adds the stock and books the cost.</div></div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Partner apps</h3></div><div class="card-body" style="padding:0">
+      ${(r.partners || []).length ? `<table class="table" style="margin:0"><thead><tr><th>Partner</th><th>Linked parts</th><th>Last sync</th><th></th></tr></thead><tbody>
+      ${r.partners.map(p => `<tr style="cursor:pointer" onclick="trGo('partners',{partnerId:${p.id}})"><td><b>${escapeHtml(p.name)}</b><div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(p.base_url)}</div></td>
+        <td>${p.linked}</td><td style="font-size:12px">${p.last_sync_at ? trDate(p.last_sync_at) : '—'}${p.last_error ? `<div style="color:var(--red);font-size:11px">${escapeHtml(p.last_error)}</div>` : ''}</td><td style="text-align:right">›</td></tr>`).join('')}
+      </tbody></table>` : '<div style="padding:16px;color:var(--ink-soft);font-size:13px">No partner apps linked yet.</div>'}
+    </div></div>
+    <div class="card"><div class="card-head"><h3>Link a partner app</h3></div><div class="card-body">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px">
+        <div class="field" style="margin:0"><label>Name</label><input id="trpl-name" placeholder="Calibre Auto Parts"></div>
+        <div class="field" style="margin:0"><label>Their app address</label><input id="trpl-url" placeholder="https://their-warehouse.up.railway.app"></div>
+        <div class="field" style="margin:0"><label>Trade key they gave you</label><input id="trpl-key" placeholder="tk_…"></div>
+      </div>
+      <label style="display:flex;gap:8px;font-size:13px;margin:10px 0"><input type="checkbox" id="trpl-cost" checked> Keep my cost for their parts = their current price to me</label>
+      <button class="btn btn-primary" onclick="trAddPartner()">Link &amp; test</button></div></div>`;
+}
+async function trAddPartner() {
+  try {
+    const r = await Api.post('/api/trade/partners', { name: el('trpl-name').value.trim(), baseUrl: el('trpl-url').value.trim(), apiKey: el('trpl-key').value.trim(), autoUpdateCost: el('trpl-cost').checked });
+    if (r.connected?.error) toast('Saved, but the test failed: ' + r.connected.error, 'error', 9000);
+    else toast(`Connected to ${r.connected?.me?.supplier?.name || r.partner.name} ✓`, 'success');
+    trGo('partners', { partnerId: r.partner.id });
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+async function trPartnerDetail(id) {
+  let linked;
+  try { linked = (await Api.get(`/api/trade/partners/${id}/linked`)).products; } catch (e) { toast(e.message, 'error'); return; }
+  const p = ((await Api.get('/api/trade/partners').catch(() => ({ partners: [] }))).partners || []).find(x => x.id === id) || { name: 'Partner' };
+  const info = p.account_info || {};
+  TR.partnerLinked = linked;
+  el('tr-body').innerHTML = `
+    <div style="margin-bottom:10px"><a href="#" onclick="trGo('partners');return false" style="font-size:13px">← Partner apps</a></div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+      <h2 style="margin:0">${escapeHtml(p.name)}</h2>
+      <span style="font-size:12px;color:var(--ink-soft)">${info.terms ? `Your terms with them: ${escapeHtml(info.terms.kind)}${info.terms.credit_limit ? ', limit ' + trMoney(info.terms.credit_limit) : ''} · you owe them ${trMoney(info.account_summary?.balance)}` : ''}</span>
+      <button class="btn btn-outline btn-sm" onclick="trPartnerAction(${id},'connect')">Test connection</button>
+      <button class="btn btn-outline btn-sm" onclick="trPartnerAction(${id},'sync')">↻ Sync stock &amp; costs</button>
+      <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="trPartnerDelete(${id})">Unlink</button>
+    </div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Their stock</h3><div class="card-desc">Search their catalogue at your trade price, tick parts and import them — existing products with the same SKU are linked, new ones are created (0 own stock, tagged with ${escapeHtml(p.name)} as source).</div></div>
+      <div class="card-body"><div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <input id="trpc-q" placeholder="Search their parts…" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')trPartnerSearch(${id})">
+        <label style="font-size:13px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="trpc-in" checked> In stock</label>
+        <button class="btn btn-outline" onclick="trPartnerSearch(${id})">Search</button>
+        <button class="btn btn-primary" onclick="trPartnerImport(${id})">Import / link ticked</button></div>
+        <div id="trpc-res" style="max-height:420px;overflow:auto"></div></div></div>
+    <div class="card"><div class="card-head"><h3>Linked parts (${linked.length})</h3><div class="card-desc">Enter quantities and order — it's placed in ${escapeHtml(p.name)}'s app (their stock comes off live) and lands in your Incoming.</div></div>
+      <div class="card-body" style="padding:0;overflow:auto">${linked.length ? `<table class="table" style="margin:0"><thead><tr><th>Part</th><th style="text-align:right">Your stock</th><th style="text-align:right">Theirs</th><th style="text-align:right">Their price</th><th>Their location / barcode</th><th>Order qty</th></tr></thead><tbody>
+        ${linked.map(x => `<tr><td><b>${escapeHtml(x.sku)}</b>${x.sourced ? ' <span style="font-size:10px;color:var(--blue)">sourced</span>' : ''}<div style="font-size:11px;color:var(--ink-soft)">${escapeHtml((x.title || '').slice(0, 60))}</div></td>
+          <td style="text-align:right">${x.qty_on_hand}</td><td style="text-align:right">${x.partner_qty ?? '—'}</td><td style="text-align:right">${trMoney(x.partner_cost)}${x.price_ebay && x.partner_cost ? `<div style="font-size:10px;color:var(--ink-soft)">your eBay ${trMoney(x.price_ebay)}</div>` : ''}</td>
+          <td style="font-size:11px">${escapeHtml(x.partner_location || '')}${x.partner_barcode ? `<div>▮ ${escapeHtml(x.partner_barcode)}</div>` : ''}</td>
+          <td><input type="number" min="0" style="width:64px" data-trpo="${x.id}" max="${x.partner_qty || 0}"></td></tr>`).join('')}
+        </tbody></table>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;padding:12px">
+          <div class="field" style="margin:0"><label style="font-size:12px">Your PO</label><input id="trpo-po"></div>
+          <div class="field" style="margin:0"><label style="font-size:12px">Delivery</label><select id="trpo-del"><option value="ship">Deliver</option><option value="collect">We collect</option></select></div>
+          <button class="btn btn-primary" onclick="trPartnerOrder(${id})">Order from ${escapeHtml(p.name)}</button></div>` : '<div style="padding:16px;color:var(--ink-soft);font-size:13px">Nothing linked yet — search their stock above and import.</div>'}</div></div>`;
+}
+async function trPartnerAction(id, act) {
+  try {
+    const r = await Api.post(`/api/trade/partners/${id}/${act}`, {});
+    toast(act === 'sync' ? `Synced ${r.updated} part(s)${r.costChanged ? ` · ${r.costChanged} cost change(s)` : ''}` : `Connected ✓${r.hook?.ok === false ? ' (webhook not registered: ' + r.hook.error + ')' : ''}`, 'success', 6000);
+    trPartnerDetail(id);
+  } catch (e) { toast(e.data?.message || e.message, 'error', 8000); }
+}
+async function trPartnerDelete(id) { if (!confirm('Unlink this partner app? Imported products stay, but stop syncing.')) return; await Api.delete(`/api/trade/partners/${id}`).catch(() => {}); trGo('partners'); }
+async function trPartnerSearch(id) {
+  const box = el('trpc-res'); box.innerHTML = '<div style="color:var(--ink-soft);font-size:13px">Searching…</div>';
+  try {
+    const r = await Api.get(`/api/trade/partners/${id}/catalogue?q=${encodeURIComponent(el('trpc-q').value.trim())}${el('trpc-in').checked ? '&in_stock=1' : ''}`);
+    box.innerHTML = r.items.length ? `<table class="table" style="margin:0"><thead><tr><th></th><th>Part</th><th style="text-align:right">Their stock</th><th style="text-align:right">Your price</th><th>Here</th></tr></thead><tbody>
+      ${r.items.map(i => `<tr><td><input type="checkbox" data-trimp="${escapeAttr(i.sku)}" ${i.local?.linked ? 'disabled' : ''}></td>
+        <td><b>${escapeHtml(i.sku)}</b><div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(i.title)}</div></td><td style="text-align:right">${escapeHtml(i.available_display)}</td>
+        <td style="text-align:right">${trMoney(i.price)}${i.our_cost != null ? `<div style="font-size:10px;color:var(--ink-soft)">their cost ${trMoney(i.our_cost)}</div>` : ''}</td>
+        <td style="font-size:11px">${i.local ? (i.local.linked ? '✓ linked' : `same SKU (${i.local.qty} in stock) — will link`) : 'new'}</td></tr>`).join('')}</tbody></table>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">${r.total} match(es)${r.total > r.items.length ? ' — showing first ' + r.items.length : ''}</div>` : '<div style="font-size:13px;color:var(--ink-soft)">No matches.</div>';
+  } catch (e) { box.innerHTML = `<div style="color:var(--red);font-size:13px">${escapeHtml(e.data?.message || e.message)}</div>`; }
+}
+async function trPartnerImport(id) {
+  const skus = [...document.querySelectorAll('[data-trimp]:checked')].map(x => x.dataset.trimp);
+  if (!skus.length) return toast('Tick the parts to import', 'warn');
+  try { const r = await Api.post(`/api/trade/partners/${id}/import`, { skus }); toast(`${r.created} created · ${r.linked} linked${r.errors.length ? ` · ${r.errors.length} failed` : ''}`, r.errors.length ? 'warn' : 'success', 7000); await Store.refresh('products').catch(() => {}); trPartnerDetail(id); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+async function trPartnerOrder(id) {
+  const lines = [...document.querySelectorAll('[data-trpo]')].map(x => ({ productId: x.dataset.trpo, qty: parseInt(x.value) || 0 })).filter(l => l.qty > 0);
+  if (!lines.length) return toast('Enter a quantity on at least one part', 'warn');
+  if (!confirm(`Place this order with the partner (${lines.reduce((a, l) => a + l.qty, 0)} item(s))?`)) return;
+  try {
+    const r = await Api.post(`/api/trade/partners/${id}/order`, { lines, poRef: el('trpo-po').value, delivery: el('trpo-del').value });
+    toast(`Order ${r.order.ref} placed — ${trMoney(r.order.total)} · ${r.incoming.length} line(s) added to Incoming`, 'success', 8000);
+    trPartnerDetail(id);
+  } catch (e) {
+    if (e.data?.data?.shortages) toast('They don’t have enough: ' + e.data.data.shortages.map(s => `${s.sku} (${s.available})`).join(', '), 'error', 9000);
+    else toast(e.data?.message || e.message, 'error', 8000);
+  }
+}
+
+// ── Settings & help ──
+async function trSettings() {
+  let s, g;
+  try { [s, g] = await Promise.all([Api.get('/api/trade/settings'), Api.get('/api/trade/rules?accountId=global')]); } catch (e) { toast(e.message, 'error'); return; }
+  const portal = location.origin + '/trade';
+  el('tr-body').innerHTML = `
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Defaults</h3></div><div class="card-body">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px">
+        <div class="field" style="margin:0"><label>Default markup on cost %</label><input id="trs-markup" type="number" step="0.1" value="${escapeAttr(s.defaultMarkupPct)}"></div>
+        <div class="field" style="margin:0"><label>Hold back units from trade (safety buffer)</label><input id="trs-buffer" type="number" min="0" value="${escapeAttr(s.stockBuffer)}"></div>
+      </div>
+      <label style="display:flex;gap:8px;font-size:13px;margin-top:10px"><input type="checkbox" id="trs-below" ${s.allowBelowCost ? 'checked' : ''}> Allow trade prices below cost (otherwise held at cost)</label>
+      <label style="display:flex;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="trs-email" ${s.autoEmailInvoices ? 'checked' : ''}> Email consolidated invoices automatically (PDF attached)</label>
+      <div class="field" style="margin-top:10px"><label>Message shown on the trade portal</label><input id="trs-msg" value="${escapeAttr(s.portalMessage || '')}" placeholder="e.g. Orders before 2pm dispatched same day"></div>
+      <button class="btn btn-primary" onclick="trSaveSettings()">Save</button>
+      <div style="font-size:12px;color:var(--ink-soft);margin-top:8px">VAT: ${s.vatRegistered ? `you're VAT registered — VAT accounts are charged ${s.vatRate}% on top of trade prices; cash accounts follow your cash policy (no VAT) and are kept separate in the books.` : 'not VAT registered — no VAT is added to trade orders.'}</div>
+    </div></div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Price rules for every trade customer</h3><div class="card-desc">e.g. "10+ units → cost + 15%" for everyone. A customer's own rules beat these.</div></div>
+      <div class="card-body">${trRulesTable(g.rules, null)}${trRuleForm(null)}</div></div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Clean photos (no branding) for trade</h3><div class="card-desc">Customers set to "clean photos" get these instead of the listing photos. Upload the originals, or paste links (e.g. from the Thumbnail Maker).</div></div>
+      <div class="card-body"><div style="display:flex;gap:8px;flex-wrap:wrap"><input id="trci-sku" placeholder="SKU" style="width:180px" onkeydown="if(event.key==='Enter')trCleanLoad()"><button class="btn btn-outline" onclick="trCleanLoad()">Load</button></div><div id="trci-box" style="margin-top:10px"></div></div></div>
+    <div class="card"><div class="card-head"><h3>How it works</h3></div><div class="card-body" style="font-size:13px;line-height:1.65">
+      <b>Customers see stock + prices</b> in the trade portal <a href="${escapeAttr(portal)}" target="_blank">${escapeHtml(portal)}</a>, a live CSV feed (Google Sheets <code>=IMPORTDATA</code>), the API, or webhooks pushed to their system. Stock is the same number eBay/Shopify use, minus any hold-back.<br>
+      <b>Orders</b> (portal, API or taken here) come off stock immediately and the new level is pushed to eBay + Shopify — exactly like a counter sale. They show in Dispatch to pick &amp; ship; cancelling puts the stock back.<br>
+      <b>Pay per order</b>: each order is its own invoice, ship once paid. <b>On account</b>: orders are delivery notes and go on one consolidated invoice per day / week / month, due N days later. Credit limits and overdue blocks stop new portal/API orders.<br>
+      <b>Payments</b>: record a payment against the account — it pays the oldest invoice first; overpayments stay as credit. The account shows balance, overdue, spend this year and what they buy most.<br>
+      <b>VAT vs cash</b>: VAT accounts → bank sales + VAT invoices (in the VAT pack); cash accounts → cash sales + account statements in their own folder, never mixed.<br>
+      <b>Partner apps (Razoryn ↔ Calibre)</b>: tick "another warehouse app" + "share locations" on their account and give them a key. In their app they link you under "Buy from partner apps": they see your live stock + agreed prices (your cost too if allowed), import parts with your barcodes + bin locations, and order — it lands in their Incoming at the price you charged, so their costs + margins follow automatically.<br>
+      <b>API</b>: <code>${escapeHtml(location.origin)}/api/trade/v1</code> — list of endpoints at that address.</div></div>`;
+}
+async function trSaveSettings() {
+  try {
+    await Api.put('/api/trade/settings', { defaultMarkupPct: el('trs-markup').value, stockBuffer: el('trs-buffer').value, allowBelowCost: el('trs-below').checked, autoEmailInvoices: el('trs-email').checked, portalMessage: el('trs-msg').value });
+    toast('Saved', 'success');
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+async function trCleanLoad() {
+  const sku = el('trci-sku').value.trim(); if (!sku) return;
+  const p = (State.products || []).find(x => String(x.sku).toUpperCase() === sku.toUpperCase());
+  if (!p) return toast('No product with that SKU', 'warn');
+  TR.clean = { pid: p.id, sku: p.sku, refs: [] };
+  try { TR.clean.refs = (await Api.get(`/api/trade/products/${p.id}/clean-images`)).urls.map(u => u.ref); } catch (_) {}
+  trCleanPaint();
+}
+function trCleanPaint() {
+  const c = TR.clean;
+  const src = r => /^local:/.test(r) ? '/api/trade/clean-image?ref=' + encodeURIComponent(r) : r;
+  el('trci-box').innerHTML = `<div style="font-size:13px;margin-bottom:6px"><b>${escapeHtml(c.sku)}</b> — ${c.refs.length} clean photo(s)</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">${c.refs.map((r, i) => `<div style="position:relative"><img src="${escapeAttr(src(r))}" style="width:110px;height:110px;object-fit:contain;background:#fff;border:1px solid var(--line);border-radius:6px">
+      <button class="btn btn-ghost btn-sm" style="position:absolute;top:2px;right:2px" onclick="TR.clean.refs.splice(${i},1);trCleanPaint()">✕</button></div>`).join('')}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
+      <input type="file" id="trci-files" accept="image/*" multiple>
+      <input id="trci-url" placeholder="or paste https:// image link" style="flex:1;min-width:200px">
+      <button class="btn btn-primary" onclick="trCleanSave()">Save clean photos</button></div>`;
+}
+async function trCleanSave() {
+  const c = TR.clean;
+  const files = [...(el('trci-files').files || [])].slice(0, 20);
+  const uploads = await Promise.all(files.map(f => new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(f); })));
+  const add = el('trci-url').value.trim() ? [el('trci-url').value.trim()] : [];
+  try { const r = await Api.put(`/api/trade/products/${c.pid}/clean-images`, { keep: c.refs, add, uploads }); toast(`Saved — ${r.count} clean photo(s)`, 'success'); trCleanLoad(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
 }
 
 async function loadEbayLimits(fresh) {

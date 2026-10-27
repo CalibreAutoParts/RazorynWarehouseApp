@@ -60,6 +60,8 @@ async function ensurePaidColumn() {
     // Proof-of-export tracking: HMRC requires evidence within 3 months of an
     // export to keep the zero-rating — this stamps when it was filed.
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS export_evidence_at TIMESTAMPTZ`);
+    // Trade orders on account are invoiced on a consolidated invoice (lib/trade.js).
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS trade_consolidated BOOLEAN NOT NULL DEFAULT false`);
     // Explicit ship-vs-collect choice per order. NULL = legacy rows; the worklist
     // falls back to "cash = collect, everything else = ship" for those.
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS fulfillment_method TEXT`);
@@ -1344,13 +1346,15 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
     }
   }
 
-  const isCashReceipt = mode === 'receipt' || sale.payment_method === 'cash';
+  const isDeliveryNote = mode === 'delivery_note';
+  const isCashReceipt = !isDeliveryNote && (mode === 'receipt' || sale.payment_method === 'cash');
   // Pro-forma uses the FULL invoice template (1:1 with a real invoice) — just a different
   // document title and a "not yet paid" notice. Customer needs to recognise it as a
   // normal invoice they can pay against, not a casual estimate.
   const isProforma = mode === 'proforma';
   const docTitle = mode === 'estimate' ? 'ESTIMATE'
                  : isProforma ? 'PRO FORMA INVOICE'
+                 : isDeliveryNote ? 'DELIVERY NOTE'
                  : isCashReceipt ? 'RECEIPT'
                  : 'INVOICE';
   // Page <title> = the download filename the browser proposes for "Save as PDF".
@@ -1688,6 +1692,8 @@ function renderInvoiceHtml({ sale, items, company, mode, baseUrl }) {
       <div class="ref">${escapeHtml(sale.invoice_number || sale.payment_reference || '\u2014')}</div>
     </div>
   </div>
+  ${isDeliveryNote ? `<div style="margin:10px 0 4px;padding:10px 12px;border:1px solid #d6dbe1;border-radius:6px;background:#f6f7f9;font-size:13px">
+    <b>Delivery note — not a VAT invoice.</b> This order is on your trade account and is billed on your consolidated invoice for the period.</div>` : ''}
 
   ${isProforma ? `
   <div class="proforma-notice proforma-${sale.payment_method || 'unknown'}">
@@ -1937,8 +1943,11 @@ router.get('/:id/invoice.html', requireAdmin, async (req, res) => {
   const forceProforma = req.query.proforma === '1' || req.query.proforma === 'true';
   // Pro-forma = estimate created via Quote Builder (has a payment_method) OR explicit override.
   const isProforma = forceProforma || (sale.is_estimate && !!sale.payment_method);
+  // Trade orders on account are billed on a consolidated invoice — the
+  // per-order document is a delivery note, not a second invoice.
   const mode = isProforma ? 'proforma'
              : sale.is_estimate ? 'estimate'
+             : sale.trade_consolidated ? 'delivery_note'
              : (sale.payment_method === 'cash') ? 'receipt'
              : 'invoice';
   const baseUrl = `${req.protocol}://${req.get('host')}`;
@@ -2002,13 +2011,17 @@ async function composeAndSendInvoiceEmail({ sale, items = [], company = {}, bran
   if (!recipient) return { ok: false, error: 'no_email_address' };
   // Same document-mode detection as the invoice.html route.
   const isProforma = sale.is_estimate && !!sale.payment_method;
+  // Trade orders on account are billed on a consolidated invoice — the
+  // per-order document is a delivery note, not a second invoice.
   const mode = isProforma ? 'proforma'
              : sale.is_estimate ? 'estimate'
+             : sale.trade_consolidated ? 'delivery_note'
              : (sale.payment_method === 'cash') ? 'receipt'
              : 'invoice';
   const html = renderInvoiceHtml({ sale, items, company, mode, baseUrl: baseUrl || (brand.domain ? `https://${brand.domain}` : '') });
   const docLabel = mode === 'estimate' ? 'Estimate'
                  : mode === 'proforma' ? 'Pro-forma invoice'
+                 : mode === 'delivery_note' ? 'Delivery note'
                  : mode === 'receipt' ? 'Receipt'
                  : 'Invoice';
   const subject = `${docLabel} ${sale.invoice_number || sale.payment_reference || ''} — ${brand.name}`;
@@ -2550,6 +2563,7 @@ async function runPaymentFollowups() {
      WHERE is_estimate = false AND is_paid = false
        AND status NOT IN ('refunded','cancelled')
        AND payment_method IN ('cash','bank','card')
+       AND COALESCE(trade_consolidated, false) = false
        AND occurred_at >= now() - INTERVAL '120 days'
   `);
   const n = r.rows[0].n;
@@ -2577,3 +2591,5 @@ module.exports.runPaymentFollowups = runPaymentFollowups;
 module.exports.renderInvoiceHtml = renderInvoiceHtml;
 module.exports.enrichSaleCustomer = enrichSaleCustomer;
 module.exports.getCompanySettings = getCompanySettings;
+// Trade orders (lib/trade.js) share the direct-sale reference sequence.
+module.exports.buildSaleReference = buildSaleReference;

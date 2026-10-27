@@ -12,6 +12,7 @@ const money = (n) => '£' + (Number(n) || 0).toFixed(2);
 function docTitle(mode) {
   return mode === 'estimate' ? 'ESTIMATE'
        : mode === 'proforma' ? 'PRO FORMA INVOICE'
+       : mode === 'delivery_note' ? 'DELIVERY NOTE'
        : mode === 'receipt'  ? 'RECEIPT'
        : 'INVOICE';
 }

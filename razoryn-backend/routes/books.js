@@ -1391,6 +1391,9 @@ async function loadInvoiceSales({ from, to, basis }) {
   const { rows } = await query(`
     SELECT s.* FROM sales s
      WHERE s.is_estimate = false ${paidClause}
+       -- Trade orders on account are billed on a consolidated invoice (added
+       -- separately), so their per-order delivery notes aren't invoices.
+       AND COALESCE(s.trade_consolidated, false) = false
        AND ${dateCol} >= $1::date AND ${dateCol} < ($2::date + interval '1 day')
      ORDER BY ${dateCol}`, [from, to]);
   return rows;
@@ -1398,6 +1401,15 @@ async function loadInvoiceSales({ from, to, basis }) {
 
 // One print-ready document holding the FULL invoice for every order in the
 // period — page break per invoice, "Save as PDF" gives the accountant pack.
+// Consolidated trade invoices issued in the period (VAT accounts → invoices,
+// cash accounts → statements, kept apart like counter cash sales).
+async function loadTradeInvoices({ from, to }) {
+  try {
+    return (await query(`SELECT id FROM trade_invoices WHERE status <> 'void'
+      AND issued_at >= $1::date AND issued_at < ($2::date + interval '1 day') ORDER BY issued_at`, [from, to])).rows;
+  } catch (_) { return []; }   // trade tables not created yet
+}
+
 async function buildInvoicePackHtml({ from, to, basis }) {
   const salesMod = require('./sales');
   const company = await salesMod.getCompanySettings();
@@ -1417,6 +1429,16 @@ async function buildInvoicePackHtml({ from, to, basis }) {
       pages.push({ body: body.replace(/<div class="actions no-print">[\s\S]*?<\/div>/, ''), styles });
     } catch (e) { console.warn('[books] pack invoice', sale.id, e.message); }
   }
+  const trade = require('../lib/trade');
+  const tradeHtml = [];
+  for (const ti of await loadTradeInvoices({ from, to })) {
+    try {
+      const d = await trade.invoiceDetail(ti.id);
+      const html = require('../lib/trade-invoice').renderHtml(d, { company, brand });
+      tradeHtml.push(`<style>${(html.match(/<style>([\s\S]*?)<\/style>/i) || [])[1] || ''}</style>` + ((html.match(/<body[^>]*>([\s\S]*)<\/body>/i) || [])[1] || ''));
+    } catch (e) { console.warn('[books] pack trade invoice', ti.id, e.message); }
+  }
+  for (const t of tradeHtml) pages.push({ body: t, styles: null });
   const styles = pages.find(p => p.styles)?.styles || '';
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Invoices ${esc(basis)} ${esc(from)} to ${esc(to)} - ${esc(brand.name || '')}</title>
@@ -1521,6 +1543,16 @@ async function streamAccountsZip(res, { from, to, accountId }) {
         zip.append(pdf, { name: `sales-invoices/${zipSafe((sale.invoice_number || ('invoice-' + sale.id)) + ' - ' + (sale.customer_name || ''))}.pdf` });
         invoiceCount++;
       } catch (e) { invoiceFails++; console.warn('[books] zip invoice', sale.id, ':', e.message); }
+    }
+    // 2b. Consolidated trade invoices (cash-account statements in their own folder).
+    for (const ti of await loadTradeInvoices({ from, to })) {
+      try {
+        const d = await require('../lib/trade').invoiceDetail(ti.id);
+        const pdf = await require('../lib/trade-invoice').buildPdf(d, { company, brand });
+        const folder = d.invoice.account_type === 'cash' ? 'trade-cash-statements' : 'sales-invoices';
+        zip.append(pdf, { name: `${folder}/${zipSafe(d.invoice.number + ' - ' + d.account.name)}.pdf` });
+        invoiceCount++;
+      } catch (e) { invoiceFails++; console.warn('[books] zip trade invoice', ti.id, ':', e.message); }
     }
 
     // 3. Receipts / purchase invoices attached to the period's payments —

@@ -24,7 +24,10 @@ process.on('unhandledRejection', (err) => {
 app.set('trust proxy', 1); // Railway sits behind a proxy
 // 25mb so create/edit listing can carry several base64 photo uploads at once
 // (downscaled client-side, but a full set of replacements can exceed 2mb).
-app.use(express.json({ limit: '25mb' }));
+app.use(express.json({ limit: '25mb', verify: (req, res, buf) => {
+  // Partner webhooks are HMAC-signed over the exact bytes sent.
+  if (req.originalUrl.startsWith('/api/trade-partner-hook')) req.rawBody = buf.toString('utf8');
+} }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(cookieParser());
 
@@ -102,6 +105,11 @@ app.use('/api/pushes',       require('./routes/pushes'));
 // Books / VAT workspace: admin API + the accountant's tokened read-only view
 // (no login — the long random token IS the credential; links are revocable).
 app.use('/api/books',        require('./routes/books'));
+// Wholesale / trade: the customers' key-authenticated API (v1) FIRST, then the
+// staff admin API, then the public HMAC-signed receiver for partner apps.
+app.use('/api/trade/v1',     require('./routes/trade-api'));
+app.use('/api/trade',        require('./routes/trade'));
+app.use('/api/trade-partner-hook', require('./routes/trade').hookRouter);
 app.use('/api/disputes',     require('./routes/disputes'));
 app.use('/api/printing',     require('./routes/printing'));
 app.use('/api/books-shared', require('./routes/books').publicRouter);
@@ -308,6 +316,12 @@ app.get('/ebay/declined', (req, res) => {
   <h1>eBay authorisation was declined</h1>
   <p>No token was issued. Go back to the eBay developer page and try <b>Sign in to Production</b> again,
   signing in as the eBay store you want to connect.</p>`));
+});
+
+// ---------- Trade portal (public page; the customer's key authenticates its API calls) ----------
+app.get(['/trade', '/trade/'], (req, res) => {
+  res.set('Cache-Control', 'no-cache');
+  res.sendFile(path.join(__dirname, 'public', 'trade.html'));
 });
 
 // ---------- Static: PWA ----------
@@ -704,6 +718,21 @@ cron.schedule('15 3 * * *', async () => {
   } catch (e) {
     console.error('[cron notes] cleanup failed:', e.message);
   }
+});
+
+// Trade: stamp stock changes (for changed_since polling) + push webhooks to
+// trade customers every 2 min; issue consolidated invoices daily; pull partner
+// warehouse stock/costs every 30 min (webhooks normally keep it live).
+require('./lib/trade').ensureSchema().catch(e => console.warn('[trade] schema:', e.message));
+cron.schedule('*/2 * * * *', async () => {
+  try { await require('./lib/trade').detectChanges(); } catch (e) { console.warn('[cron trade] changes:', e.message); }
+});
+cron.schedule('20 6 * * *', async () => {
+  try { const r = await require('./lib/trade').runDueInvoices(); if (r.length) console.log(`[cron trade] issued ${r.length} invoice(s)`); }
+  catch (e) { console.warn('[cron trade] invoices:', e.message); }
+}, { timezone: 'Europe/London' });
+cron.schedule('*/30 * * * *', async () => {
+  try { await require('./lib/trade-partner').syncAll(); } catch (e) { console.warn('[cron trade] partner sync:', e.message); }
 });
 
 // ---------- Start ----------
