@@ -187,6 +187,10 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   }
   if (brand) { params.push(brand); where.push(`brand = $${params.length}`); }
   if (lowStock === '1') where.push('qty_on_hand <= low_stock_threshold');
+  // Stock source: 'own' = not sourced from a partner warehouse app; a number =
+  // sourced from that partner link (Trade → Partners).
+  if (req.query.source === 'own') where.push('source_partner_id IS NULL');
+  else if (/^\d+$/.test(String(req.query.source || ''))) { params.push(parseInt(req.query.source)); where.push(`source_partner_id = $${params.length}`); }
 
   const sql = `
     SELECT p.*, l.code AS location_code, l.name AS location_name,
@@ -304,7 +308,8 @@ router.get('/barcode/:code', requirePermission('scan'), async (req, res) => {
     `SELECT p.*, l.code AS location_code, l.name AS location_name
      FROM products p
      LEFT JOIN locations l ON l.id = p.location_id
-     WHERE p.barcode = $1 OR p.sku = $1
+     WHERE p.barcode = $1 OR p.sku = $1 OR p.partner_barcode = $1
+     ORDER BY (p.barcode = $1 OR p.sku = $1) DESC
      LIMIT 1`,
     [req.params.code]
   );

@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Trade Portal</title>
+<style>
+:root{--brand:#c8202d;--ink:#16191d;--soft:#5d6570;--line:#e3e6eb;--bg:#f4f5f7;--card:#fff;--green:#1a7f3e;--red:#c8202d;--amber:#b26a00}
+@media (prefers-color-scheme:dark){:root{--ink:#e8ebef;--soft:#9aa3ad;--line:#2b3138;--bg:#121518;--card:#1b1f24}}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--ink);font-size:14px}
+header{background:var(--card);border-bottom:1px solid var(--line);padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:5}
+header .logo{height:34px}
+header .who{margin-left:auto;text-align:right;font-size:12px;color:var(--soft)}
+header .who b{color:var(--ink);font-size:14px}
+nav{display:flex;gap:4px;padding:8px 16px;overflow-x:auto;background:var(--card);border-bottom:1px solid var(--line)}
+nav button{border:0;background:none;color:var(--soft);padding:8px 12px;border-radius:8px;font-weight:600;cursor:pointer;white-space:nowrap;font-size:14px}
+nav button.on{background:var(--brand);color:#fff}
+main{max-width:1150px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
+input,select,textarea{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+.btn{border:0;background:var(--brand);color:#fff;padding:8px 14px;border-radius:8px;font-weight:600;cursor:pointer;font-size:14px}
+.btn.o{background:none;border:1px solid var(--line);color:var(--ink)}
+.btn:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.grid{display:grid;gap:10px}
+.items{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+.item{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:6px}
+.item img{width:100%;height:150px;object-fit:contain;background:#fff;border-radius:6px;cursor:zoom-in}
+.item .t{font-weight:600;line-height:1.3}
+.mono{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft)}
+.price{font-size:18px;font-weight:700}
+.pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:12px;font-weight:600;background:#eef0f3;color:#444}
+.pill.g{background:#e3f5ea;color:var(--green)}.pill.r{background:#fde8e8;color:var(--red)}.pill.a{background:#fff3df;color:var(--amber)}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;color:var(--soft);font-weight:600}.n{text-align:right}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.stat .v{font-size:22px;font-weight:700}.stat .l{font-size:12px;color:var(--soft)}
+.muted{color:var(--soft);font-size:12px}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:#16191d;color:#fff;padding:10px 16px;border-radius:8px;display:none;z-index:50;max-width:90vw}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:40;padding:16px}
+.modal .box{background:var(--card);border-radius:12px;max-width:900px;width:100%;max-height:90vh;overflow:auto;padding:16px}
+.login{max-width:420px;margin:60px auto}
+code{background:rgba(127,127,127,.15);padding:1px 5px;border-radius:4px;font-size:12px;word-break:break-all}
+@media(max-width:600px){main{padding:10px}.item img{height:120px}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast"></div>
+<div class="modal" id="modal" onclick="if(event.target===this)closeModal()"><div class="box" id="modal-box"></div></div>
+<script>
+const S = { key: null, me: null, tab: 'stock', items: [], total: 0, q: '', make: '', inStock: true, basket: {}, brand: null };
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const money = n => n == null ? 'POA' : '£' + Number(n).toFixed(2);
+const ukDate = d => d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+function toast(m, ms = 3500) { const t = $('toast'); t.textContent = m; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', ms); }
+function openModal(html) { $('modal-box').innerHTML = html; $('modal').style.display = 'flex'; }
+function closeModal() { $('modal').style.display = 'none'; }
+function store(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (_) {} }
+function load(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
+
+async function api(path, opts = {}) {
+  const r = await fetch('/api/trade/v1' + path, { ...opts, headers: { 'Authorization': 'Bearer ' + S.key, 'Content-Type': 'application/json', 'X-Trade-Client': 'portal', ...(opts.headers || {}) } });
+  if (r.status === 401) { logout(); throw new Error('Your key was not accepted.'); }
+  const ct = r.headers.get('content-type') || '';
+  const data = ct.includes('json') ? await r.json() : null;
+  if (!r.ok) { const e = new Error((data && data.message) || ('Error ' + r.status)); e.data = data; throw e; }
+  return data;
+}
+async function apiBlob(path, opts = {}) {
+  const r = await fetch('/api/trade/v1' + path, { ...opts, headers: { 'Authorization': 'Bearer ' + S.key, 'Content-Type': 'application/json', ...(opts.headers || {}) } });
+  if (!r.ok) throw new Error('Download failed (' + r.status + ')');
+  return r.blob();
+}
+async function download(path, name, opts) {
+  toast('Preparing download…', 20000);
+  try { const b = await apiBlob(path, opts); const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 60000); toast('Downloaded'); }
+  catch (e) { toast(e.message); }
+}
+async function openDoc(path) {
+  const w = window.open('', '_blank');
+  try { const b = await apiBlob(path); w.location = URL.createObjectURL(b); } catch (e) { w.close(); toast(e.message); }
+}
+
+function logout() { S.key = null; store('trade_key', null); render(); }
+function saveBasket() { store('trade_basket', JSON.stringify(S.basket)); }
+
+async function boot() {
+  try { S.brand = await (await fetch('/api/brand')).json(); } catch (_) {}
+  if (S.brand?.primaryColor) document.documentElement.style.setProperty('--brand', S.brand.primaryColor);
+  document.title = (S.brand?.name ? S.brand.name + ' ' : '') + 'Trade Portal';
+  // Magic link: /trade#key=tk_… — stored, then removed from the address bar.
+  const m = location.hash.match(/key=(tk_[A-Za-z0-9_-]+)/);
+  if (m) { store('trade_key', m[1]); history.replaceState(null, '', location.pathname); }
+  S.key = load('trade_key');
+  try { S.basket = JSON.parse(load('trade_basket') || '{}') || {}; } catch (_) { S.basket = {}; }
+  if (S.key) { try { S.me = await api('/me'); } catch (_) { S.key = null; } }
+  render();
+}
+
+function render() {
+  if (!S.key || !S.me) return renderLogin();
+  const n = Object.values(S.basket).reduce((a, b) => a + b.qty, 0);
+  $('app').innerHTML = `
+  <header>
+    <img class="logo" src="${esc(S.brand?.logoUrl || '/public-logo')}" alt="" onerror="this.style.display='none'">
+    <div><b style="font-size:16px">${esc(S.me.supplier.name)}</b><div class="muted">Trade portal</div></div>
+    <div class="who"><b>${esc(S.me.account.name)}</b><br>Balance ${money(S.me.account_summary.balance)}${S.me.account_summary.overdue > 0 ? ` · <span style="color:var(--red)">${money(S.me.account_summary.overdue)} overdue</span>` : ''}
+      · <a href="#" onclick="logout();return false" style="color:var(--soft)">Sign out</a></div>
+  </header>
+  <nav>${[['stock', 'Stock & prices'], ['basket', `Basket${n ? ' (' + n + ')' : ''}`], ['orders', 'Orders'], ['account', 'Account'], ['help', 'Downloads & API']]
+    .map(([k, l]) => `<button class="${S.tab === k ? 'on' : ''}" onclick="go('${k}')">${l}</button>`).join('')}</nav>
+  <main id="main"></main>`;
+  ({ stock: renderStock, basket: renderBasket, orders: renderOrders, account: renderAccount, help: renderHelp })[S.tab]();
+}
+function go(t) { S.tab = t; render(); }
+
+function renderLogin() {
+  $('app').innerHTML = `<div class="login card">
+    <h2 style="margin-top:0">${esc(S.brand?.name || '')} Trade Portal</h2>
+    <p class="muted">Sign in with the trade access key we sent you (starts with <code>tk_</code>).</p>
+    <input id="k" placeholder="tk_…" style="width:100%" onkeydown="if(event.key==='Enter')doLogin()">
+    <div style="margin-top:10px"><button class="btn" onclick="doLogin()">Sign in</button></div>
+    <p class="muted" style="margin-top:14px">No key yet? Contact us to open a trade account.</p></div>`;
+}
+async function doLogin() {
+  S.key = $('k').value.trim();
+  try { S.me = await api('/me'); store('trade_key', S.key); render(); }
+  catch (e) { S.key = null; toast(e.message); }
+}
+
+// ── Stock ──
+async function renderStock() {
+  const vat = S.me.pricing.vat_rate;
+  $('main').innerHTML = `
+  ${S.me.message ? `<div class="card" style="border-left:3px solid var(--brand)">${esc(S.me.message)}</div>` : ''}
+  <div class="card row">
+    <input id="q" placeholder="Search part number, SKU or name…" value="${esc(S.q)}" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')searchStock()">
+    <input id="mk" placeholder="Make (e.g. Tesla)" value="${esc(S.make)}" style="width:150px" onkeydown="if(event.key==='Enter')searchStock()">
+    <label class="row" style="gap:4px"><input type="checkbox" id="ins" ${S.inStock ? 'checked' : ''} onchange="searchStock()"> In stock only</label>
+    <button class="btn" onclick="searchStock()">Search</button>
+  </div>
+  <div class="muted" style="margin:0 2px 8px">Prices are ${vat ? `ex VAT (+${vat}% VAT)` : 'net'} · stock is live — it updates the moment anything sells on any of our channels.</div>
+  <div id="items" class="items"></div>
+  <div style="text-align:center;margin:14px"><button class="btn o" id="more" style="display:none" onclick="searchStock(true)">Load more</button></div>`;
+  if (!S.items.length) searchStock(); else paintItems();
+}
+async function searchStock(more) {
+  if (!more) { S.q = $('q')?.value.trim() || ''; S.make = $('mk')?.value.trim() || ''; S.inStock = !!$('ins')?.checked; S.items = []; }
+  try {
+    const p = new URLSearchParams({ q: S.q, make: S.make, limit: 60, offset: S.items.length });
+    if (S.inStock) p.set('in_stock', '1');
+    const r = await api('/stock?' + p);
+    S.items = S.items.concat(r.items); S.total = r.total; paintItems();
+  } catch (e) { toast(e.message); }
+}
+function paintItems() {
+  const box = $('items'); if (!box) return;
+  box.innerHTML = S.items.length ? S.items.map((it, i) => `
+    <div class="item">
+      ${it.image ? `<img src="${esc(it.image)}" loading="lazy" onclick="showPhotos('${esc(it.sku)}')" alt="">` : '<div style="height:60px" class="muted">No photo</div>'}
+      <div class="t">${esc(it.title)}</div>
+      <div class="mono">${esc(it.sku)}${it.part_number && it.part_number !== it.sku ? ' · ' + esc(it.part_number) : ''}</div>
+      <div class="row" style="justify-content:space-between">
+        <span class="price">${money(it.price)}</span>
+        <span class="pill ${it.available > 0 ? 'g' : 'r'}">${it.available > 0 ? esc(it.available_display) + ' in stock' : 'Out of stock'}</span>
+      </div>
+      ${it.price_breaks && it.price_breaks.length > 1 ? `<div class="muted">${it.price_breaks.map(b => `${b.min_qty}+ ${money(b.price)}`).join(' · ')}</div>` : ''}
+      ${it.our_cost != null ? `<div class="muted">Our cost ${money(it.our_cost)} · margin ${it.margin_pct}%</div>` : ''}
+      ${it.location ? `<div class="muted">📍 ${esc(it.location.code || '')} ${esc(it.location.name || it.location.note || '')}${it.barcode ? ' · ▮ ' + esc(it.barcode) : ''}</div>` : ''}
+      <div class="row">
+        <input type="number" min="1" value="1" id="qty-${i}" style="width:70px" ${it.available > 0 && it.price != null ? '' : 'disabled'}>
+        <button class="btn" ${it.available > 0 && it.price != null ? '' : 'disabled'} onclick="addToBasket(${i})">Add</button>
+        <button class="btn o" onclick="showPhotos('${esc(it.sku)}')">Photos</button>
+      </div>
+    </div>`).join('') : '<div class="card muted">Nothing found.</div>';
+  const more = $('more'); if (more) more.style.display = S.items.length < S.total ? '' : 'none';
+}
+function addToBasket(i) {
+  const it = S.items[i]; const q = Math.max(1, parseInt($('qty-' + i).value) || 1);
+  const cur = S.basket[it.sku] ? S.basket[it.sku].qty : 0;
+  if (cur + q > it.available) return toast(`Only ${it.available} available`);
+  S.basket[it.sku] = { sku: it.sku, title: it.title, price: it.price, breaks: it.price_breaks, qty: cur + q, available: it.available };
+  saveBasket(); toast(`Added ${q} × ${it.sku}`); render(); S.tab === 'stock' && paintItems();
+}
+async function showPhotos(sku) {
+  openModal(`<div class="row" style="justify-content:space-between"><b>${esc(sku)}</b><button class="btn o" onclick="closeModal()">Close</button></div><div class="muted" style="margin:6px 0">Loading photos…</div>`);
+  try {
+    const r = await api('/images/' + encodeURIComponent(sku));
+    $('modal-box').innerHTML = `<div class="row" style="justify-content:space-between"><b>${esc(sku)} — ${r.images.length} photo(s)${r.clean ? ' · clean (no branding)' : ''}</b>
+      <span class="row"><button class="btn" onclick="download('/images/${encodeURIComponent(sku)}.zip','${esc(sku)}-photos.zip')">⬇ Download all (ZIP)</button><button class="btn o" onclick="closeModal()">Close</button></span></div>
+      <div class="items" style="margin-top:10px">${r.images.map(im => `<div class="item">${im.url ? `<img src="${esc(im.url)}" style="height:200px">` : ''}
+        <button class="btn o" onclick="download('/images/${encodeURIComponent(sku)}/${im.n}','${esc(sku)}-${im.n}.jpg')">⬇ Photo ${im.n}</button></div>`).join('')}</div>`;
+  } catch (e) { toast(e.message); }
+}
+
+// ── Basket ──
+function unitFor(line) { let p = line.price; for (const b of line.breaks || []) if (line.qty >= b.min_qty) p = b.price; return p; }
+function renderBasket() {
+  const lines = Object.values(S.basket);
+  const vat = S.me.pricing.vat_rate;
+  const net = lines.reduce((a, l) => a + unitFor(l) * l.qty, 0);
+  const del = S.me.delivery;
+  const ship = (del.free_over != null && net >= del.free_over) ? 0 : (del.charge || 0);
+  $('main').innerHTML = !lines.length ? '<div class="card muted">Your basket is empty — add parts from Stock & prices.</div>' : `
+  <div class="card"><table><thead><tr><th>Part</th><th class="n">Qty</th><th class="n">Unit</th><th class="n">Line</th><th></th></tr></thead><tbody>
+  ${lines.map(l => `<tr><td><b>${esc(l.title)}</b><div class="mono">${esc(l.sku)}</div></td>
+    <td class="n"><input type="number" min="1" max="${l.available}" value="${l.qty}" style="width:70px" onchange="setQty('${esc(l.sku)}',this.value)"></td>
+    <td class="n">${money(unitFor(l))}</td><td class="n">${money(unitFor(l) * l.qty)}</td>
+    <td class="n"><button class="btn o" onclick="setQty('${esc(l.sku)}',0)">✕</button></td></tr>`).join('')}
+  </tbody></table>
+  <div style="margin-top:10px;text-align:right;line-height:1.7">
+    Goods ${money(net)}<br>Delivery <span id="shipv">${money(ship)}</span>${vat ? `<br>VAT ${vat}% ≈ <span id="vatv">${money((net + ship) * vat / 100)}</span>` : ''}
+    <br><b style="font-size:17px">Total ≈ <span id="totv">${money((net + ship) * (1 + vat / 100))}</span></b>
+    <div class="muted">Final prices are confirmed on the order.</div></div></div>
+  <div class="card grid">
+    <div class="row"><label style="width:150px">Your PO / reference</label><input id="po" style="flex:1"></div>
+    <div class="row"><label style="width:150px">Delivery</label><select id="del" onchange="renderBasketTotals()"><option value="ship">Deliver to us</option><option value="collect">We'll collect</option></select></div>
+    <div class="row"><label style="width:150px">Delivery address</label><textarea id="addr" rows="2" style="flex:1" placeholder="Leave blank to use your account address"></textarea></div>
+    <div class="row"><label style="width:150px">Notes</label><textarea id="notes" rows="2" style="flex:1"></textarea></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn o" onclick="S.basket={};saveBasket();render()">Empty basket</button><button class="btn" id="place" onclick="placeOrder()">Place order</button></div>
+    ${S.me.terms.kind === 'prepay' ? '<div class="muted">Your account is pay-per-order — we dispatch once payment is received. Bank details are on your order document.</div>'
+      : `<div class="muted">Goes on your account — invoiced ${esc(S.me.terms.invoice_period)}, payment due within ${S.me.terms.due_days} days.</div>`}
+  </div>`;
+}
+function renderBasketTotals() {
+  const lines = Object.values(S.basket); const vat = S.me.pricing.vat_rate; const del = S.me.delivery;
+  const net = lines.reduce((a, l) => a + unitFor(l) * l.qty, 0);
+  const ship = $('del').value === 'collect' ? 0 : ((del.free_over != null && net >= del.free_over) ? 0 : (del.charge || 0));
+  $('shipv').textContent = money(ship); if ($('vatv')) $('vatv').textContent = money((net + ship) * vat / 100);
+  $('totv').textContent = money((net + ship) * (1 + vat / 100));
+}
+function setQty(sku, v) { const q = parseInt(v) || 0; if (q <= 0) delete S.basket[sku]; else S.basket[sku].qty = Math.min(q, S.basket[sku].available); saveBasket(); render(); }
+async function placeOrder() {
+  const btn = $('place'); btn.disabled = true;
+  if (!S.idem) S.idem = 'portal-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+  try {
+    const o = await api('/orders', { method: 'POST', body: JSON.stringify({
+      lines: Object.values(S.basket).map(l => ({ sku: l.sku, qty: l.qty })), po_ref: $('po').value, delivery: $('del').value,
+      shipping_address: $('addr').value || undefined, notes: $('notes').value, idempotency_key: S.idem }) });
+    S.basket = {}; saveBasket(); S.idem = null; S.items = [];
+    S.me = await api('/me');
+    openModal(`<h3 style="margin-top:0">✅ Order ${esc(o.ref)} placed</h3><p>${o.items.length} line(s) · total ${money(o.total)}. The stock is reserved for you now.</p>
+      <div class="row"><button class="btn" onclick="closeModal();go('orders')">View orders</button><button class="btn o" onclick="closeModal();go('stock')">Keep shopping</button></div>`);
+  } catch (e) {
+    btn.disabled = false;
+    if (e.data?.shortages) { toast('Some items no longer have enough stock — basket updated'); for (const s of e.data.shortages) { if (S.basket[s.sku]) { S.basket[s.sku].available = s.available; S.basket[s.sku].qty = Math.min(S.basket[s.sku].qty, s.available); if (!S.basket[s.sku].qty) delete S.basket[s.sku]; } } saveBasket(); S.idem = null; render(); }
+    else toast(e.message, 6000);
+  }
+}
+
+// ── Orders ──
+const statusPill = s => `<span class="pill ${s === 'dispatched' || s === 'collected' ? 'g' : s === 'cancelled' || s === 'refunded' ? 'r' : s === 'awaiting_payment' ? 'a' : ''}">${esc(s.replace('_', ' '))}</span>`;
+async function renderOrders() {
+  $('main').innerHTML = '<div class="card muted">Loading…</div>';
+  try {
+    const r = await api('/orders?limit=100');
+    $('main').innerHTML = r.orders.length ? `<div class="card"><table><thead><tr><th>Order</th><th>Placed</th><th>Status</th><th class="n">Total</th><th></th></tr></thead><tbody>
+    ${r.orders.map(o => `<tr><td><b>${esc(o.ref)}</b>${o.po_ref ? `<div class="muted">PO ${esc(o.po_ref)}</div>` : ''}
+      <details><summary class="muted">${o.items.length} line(s)</summary>${o.items.map(i => `<div class="muted">${i.qty} × ${esc(i.sku)} ${esc(i.title)} — ${money(i.line_total)}</div>`).join('')}</details></td>
+      <td>${ukDate(o.placed_at)}</td>
+      <td>${statusPill(o.status)}${o.tracking ? `<div class="muted">${o.tracking.url ? `<a href="${esc(o.tracking.url)}" target="_blank">${esc(o.tracking.number)}</a>` : esc(o.tracking.number)}</div>` : ''}${o.invoice ? `<div class="muted">Invoice ${esc(o.invoice)}</div>` : ''}</td>
+      <td class="n">${money(o.total)}${o.paid ? '<div class="muted">paid</div>' : ''}</td>
+      <td class="n"><button class="btn o" onclick="reorder(${o.id})">Reorder</button></td></tr>`).join('')}
+    </tbody></table></div>` : '<div class="card muted">No orders yet.</div>';
+    S._orders = r.orders;
+  } catch (e) { toast(e.message); }
+}
+async function reorder(id) {
+  const o = (S._orders || []).find(x => x.id === id); if (!o) return;
+  let added = 0;
+  for (const i of o.items) {
+    if (!i.sku) continue;
+    try { const p = await api('/stock/' + encodeURIComponent(i.sku)); if (p.available > 0 && p.price != null) { S.basket[p.sku] = { sku: p.sku, title: p.title, price: p.price, breaks: p.price_breaks, qty: Math.min(i.qty, p.available), available: p.available }; added++; } } catch (_) {}
+  }
+  saveBasket(); toast(`${added} line(s) added to your basket`); go('basket');
+}
+
+// ── Account ──
+async function renderAccount() {
+  $('main').innerHTML = '<div class="card muted">Loading…</div>';
+  try {
+    const [st, inv] = await Promise.all([api('/statement'), api('/invoices')]);
+    const s = st.summary, t = S.me.terms;
+    $('main').innerHTML = `
+    <div class="stats">
+      <div class="card stat"><div class="v">${money(s.balance)}</div><div class="l">Balance owed</div></div>
+      <div class="card stat"><div class="v" style="color:${s.overdue > 0 ? 'var(--red)' : 'inherit'}">${money(s.overdue)}</div><div class="l">Overdue</div></div>
+      <div class="card stat"><div class="v">${t.credit_limit != null ? money(t.credit_limit) : '—'}</div><div class="l">Credit limit</div></div>
+      <div class="card stat"><div class="v">${money(s.ytd)}</div><div class="l">Bought this year</div></div>
+      <div class="card stat"><div class="v">${s.orders}</div><div class="l">Orders · ${money(s.lifetime)} lifetime</div></div>
+    </div>
+    <div class="card"><b>Terms:</b> ${t.kind === 'account' ? `on account — consolidated invoice ${esc(t.invoice_period)}, due ${t.due_days} days after issue` : 'pay per order'}${s.credit > 0 ? ` · credit on account ${money(s.credit)}` : ''}</div>
+    <div class="card"><h3 style="margin-top:0">Invoices</h3>${inv.invoices.length ? `<table><thead><tr><th>Invoice</th><th>Period</th><th>Due</th><th class="n">Total</th><th class="n">Balance</th><th></th></tr></thead><tbody>
+      ${inv.invoices.map(i => `<tr><td><b>${esc(i.number)}</b> ${i.status === 'paid' ? '<span class="pill g">paid</span>' : i.overdue ? '<span class="pill r">overdue</span>' : ''}</td>
+        <td>${ukDate(i.period_from)} – ${ukDate(i.period_to)}</td><td>${ukDate(i.due_date)}</td><td class="n">${money(i.total)}</td><td class="n">${money(i.balance)}</td>
+        <td class="n"><button class="btn o" onclick="openDoc('/invoices/${encodeURIComponent(i.number)}.html')">View</button>
+        <button class="btn o" onclick="download('/invoices/${encodeURIComponent(i.number)}.pdf','${esc(i.number)}.pdf')">PDF</button></td></tr>`).join('')}</tbody></table>` : '<div class="muted">No consolidated invoices yet.</div>'}</div>
+    ${st.not_yet_invoiced.length ? `<div class="card"><h3 style="margin-top:0">Not yet invoiced / unpaid orders</h3><table><tbody>${st.not_yet_invoiced.map(o => `<tr><td>${esc(o.ref)}</td><td>${ukDate(o.occurred_at)}</td><td class="n">${money(o.total - o.amount_paid)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+    <div class="card"><h3 style="margin-top:0">Payments received</h3>${st.payments.length ? `<table><tbody>${st.payments.map(p => `<tr><td>${ukDate(p.paid_at)}</td><td>${esc(p.method || '')} ${esc(p.reference || '')}</td><td class="n">${money(p.amount)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">None recorded yet.</div>'}</div>`;
+  } catch (e) { toast(e.message); }
+}
+
+// ── Downloads & API ──
+async function renderHelp() {
+  const base = location.origin + '/api/trade/v1';
+  let eps = {};
+  try { eps = (await (await fetch('/api/trade/v1')).json()).endpoints || {}; } catch (_) {}
+  $('main').innerHTML = `
+  <div class="card"><h3 style="margin-top:0">Price & stock list</h3>
+    <div class="row"><button class="btn" onclick="download('/feed.csv','price-list.csv')">⬇ Download CSV (all parts)</button>
+    <button class="btn o" onclick="download('/feed.csv?in_stock=1','price-list-in-stock.csv')">⬇ In-stock only</button></div>
+    <p class="muted">Keep a spreadsheet always up to date: in Google Sheets use <code>=IMPORTDATA("${esc(base)}/feed.csv?key=${esc(S.key)}")</code> — it refreshes about every hour. Keep this formula private: it contains your key.</p></div>
+  <div class="card"><h3 style="margin-top:0">Photos</h3><p class="muted">Open any part's Photos to download them one by one or as a ZIP. ${S.me.photos === 'clean' ? 'Your account gets clean photos (no branding) where we have them.' : 'Photos are our listing photos. Ask us if you need clean, unbranded photos.'}</p></div>
+  <div class="card"><h3 style="margin-top:0">API for your own system</h3>
+    <p class="muted">Base URL <code>${esc(base)}</code> · send <code>Authorization: Bearer YOUR_KEY</code>. Prices are ex VAT. Stock is live.</p>
+    <table><tbody>${Object.entries(eps).map(([k, v]) => `<tr><td><code>${esc(k)}</code></td><td class="muted">${esc(v)}</td></tr>`).join('')}</tbody></table></div>
+  <div class="card"><h3 style="margin-top:0">Instant updates (webhook)</h3>
+    <p class="muted">Give us an https address and we'll POST every stock change, order update and new invoice to it, signed with HMAC-SHA256 (header <code>X-Trade-Signature</code>).</p>
+    <div class="row"><input id="wh" placeholder="https://your-system.example/hooks/stock" value="${esc(S.me.webhook?.url || '')}" style="flex:1;min-width:240px"><button class="btn" onclick="saveHook()">Save</button>${S.me.webhook ? '<button class="btn o" onclick="delHook()">Remove</button>' : ''}</div>
+    ${S.me.webhook?.last_error ? `<div class="muted" style="color:var(--red)">Last delivery failed: ${esc(S.me.webhook.last_error)}</div>` : ''}
+    <div id="whres" class="muted"></div></div>`;
+}
+async function saveHook() {
+  try { const r = await api('/webhook', { method: 'PUT', body: JSON.stringify({ url: $('wh').value.trim() }) }); $('whres').innerHTML = `Saved. Signing secret: <code>${esc(r.secret)}</code> (copy it now). Test delivery: ${r.test.ok ? '✅' : '❌ ' + esc(r.test.error || r.test.status)}`; S.me = await api('/me'); }
+  catch (e) { toast(e.message); }
+}
+async function delHook() { try { await api('/webhook', { method: 'DELETE' }); S.me = await api('/me'); renderHelp(); } catch (e) { toast(e.message); } }
+
+boot();
+</script>
+</body>
+</html>
