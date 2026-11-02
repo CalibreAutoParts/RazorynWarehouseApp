@@ -13525,9 +13525,9 @@ function cloneApplyToShown() {
 }
 
 // Match quantities of listings already on the target store to warehouse stock.
-async function cloneSyncQuantities() {
+async function cloneSyncQuantities(skipConfirm) {
   if (CloneState.running) return;
-  if (!confirm(`Update the quantity of every listing already on ${CloneState.storeName} to match current warehouse stock?`)) return;
+  if (!skipConfirm && !confirm(`Update the quantity of every listing already on ${CloneState.storeName} to match current warehouse stock?${CloneState.meta?.qtyCap ? `\n\nNote: this shop is capped at ${CloneState.meta.qtyCap} per listing — use "Raise to full stock" to lift that.` : ''}`)) return;
   CloneState.running = true;
   const taskId = Task.start('Syncing quantities…');
   let after = 0, done = false, ok = 0, fail = 0;
@@ -13594,14 +13594,41 @@ function cloneRenderControls(r) {
     </div>
     <div class="field" style="margin:0">
       <label style="font-size:12px">Quantity per listing</label>
-      <select id="clone-qtymode" onchange="clonePlanHint()"><option value="one" ${r.limits?.limited ? 'selected' : ''}>1 each — most listings in the £ limit</option><option value="stock" ${r.limits?.limited ? '' : 'selected'}>Full stock (trimmed to allowance left)</option></select>
+      <select id="clone-qtymode" onchange="clonePlanHint()"><option value="one" ${cloneFullStockFits(r) ? '' : 'selected'}>1 each — most listings in the £ limit</option><option value="stock" ${cloneFullStockFits(r) ? 'selected' : ''}>Full stock (trimmed to allowance left)</option></select>
     </div>
     <label style="font-size:12px;display:flex;gap:6px;align-items:center;align-self:center"><input type="checkbox" id="clone-cheap" ${r.limits?.limited ? 'checked' : ''} onchange="clonePlanHint()"> Cheapest first</label>
     <button class="btn btn-outline btn-sm" onclick="cloneSyncQuantities()" title="Update the quantity of listings already on this store to match current warehouse stock">🔄 Sync quantities on ${escapeHtml(r.storeName)}</button>
+    ${r.qtyCap ? `<button class="btn btn-primary btn-sm" onclick="cloneRaiseToStock()" title="Remove the 'show at most ${r.qtyCap}' cap on ${escapeAttr(r.storeName)} and push full warehouse stock to every listing already there (only as far as the eBay allowance covers)">⬆ Raise existing to full stock</button>` : ''}
     ${r.limits?.limited ? `<button class="btn btn-outline btn-sm" onclick="cloneFreeAllowance()" title="Lower the listings already on ${escapeAttr(r.storeName)} to 1 each so the £ allowance they hold is freed for parts not listed yet. Warehouse stock is not changed.">🔓 Free up allowance (existing → 1 each)</button>` : ''}
     <div id="clone-plan" style="flex-basis:100%;font-size:12px"></div>
     <div style="flex-basis:100%;font-size:11px;color:var(--ink-soft)">Only <strong id="clone-selcount2">${sel}</strong> selected item(s) are listed. Preview first (no live listings). "List at 0 stock" needs eBay's out-of-stock setting on the account. Each listing's quantity is fitted to the £ / item allowance left — a part that won't fit even at 1 is skipped and cheaper ones carry on.</div>`;
   clonePlanHint();
+}
+
+// True when every ticked in-stock part fits the allowance at FULL stock — then
+// there's no reason to list 1 each.
+function cloneFullStockFits(r) {
+  const L = r?.limits;
+  if (!L || !L.limited) return true;
+  let left = L.amountRemaining != null ? L.amountRemaining : Infinity, slots = L.qtyRemaining != null ? L.qtyRemaining : Infinity;
+  for (const c of CloneState.candidates.filter(c => CloneState.selected[c.id] && (c.qty || 0) > 0 && c.price != null)) {
+    left -= c.qty * c.price; slots -= c.qty;
+    if (left < -0.001 || slots < 0) return false;
+  }
+  return true;
+}
+
+// Lift the shop's "show at most N" cap and push full warehouse stock to every
+// listing already on it (each raise only goes as far as the allowance covers).
+async function cloneRaiseToStock() {
+  const cap = CloneState.meta?.qtyCap;
+  if (!confirm(`Raise every listing on ${CloneState.storeName} back to full warehouse stock?\n\nThis removes the "show at most ${cap}" cap on this shop, then updates each listing's quantity to your current stock (only as far as the eBay allowance left covers).`)) return;
+  try {
+    await Api.put('/api/settings/ebay-limits', { caps: { [CloneState.toStore]: null } });
+    if (CloneState.meta) CloneState.meta.qtyCap = null;
+  } catch (e) { toast(e.data?.message || e.message, 'error'); return; }
+  await cloneSyncQuantities(true);
+  await cloneLoadCandidates();
 }
 
 // How far the £ allowance goes for the ticked parts (at 1 each or full stock).
@@ -13620,7 +13647,9 @@ function clonePlanHint() {
   }
   box.innerHTML = `💷 Allowance left on ${escapeHtml(CloneState.storeName)}: <b>${L.amountRemaining != null ? '£' + Number(L.amountRemaining).toFixed(2) : 'no £ cap'}</b> · <b>${L.qtyRemaining ?? '∞'}</b> items. `
     + `At ${one ? '1 each' : 'full stock'}${el('clone-cheap')?.checked ? ', cheapest first' : ''}: about <b>${fit}</b> of ${items.length} ticked in-stock part(s) fit (${units} unit${units === 1 ? '' : 's'}).`
-    + (fit < items.length ? ` <span style="color:var(--amber, #b26a00)">Not enough for all — use “Free up allowance” to lower existing listings to 1 each, or request higher limits on eBay.</span>` : '');
+    + (fit < items.length ? ` <span style="color:var(--amber, #b26a00)">Not enough for all — use “Free up allowance” to lower existing listings to 1 each, or request higher limits on eBay.</span>` : '')
+    + (one && cloneFullStockFits(CloneState.meta) ? ` <span style="color:var(--green)">Your allowance covers full stock for all of them — pick “Full stock”.</span>` : '')
+    + (CloneState.meta?.qtyCap ? `<div style="margin-top:4px;color:var(--amber, #b26a00)">⚠ This shop is capped at <b>${CloneState.meta.qtyCap}</b> per listing, so every listing on it (new and existing) shows at most ${CloneState.meta.qtyCap}. Click <b>⬆ Raise existing to full stock</b> to lift it.</div>` : '');
 }
 
 // Lower everything already on this shop to 1 each (cap = 1) in batches, then
