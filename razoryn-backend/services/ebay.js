@@ -564,11 +564,26 @@ async function pushStockForProduct(product) {
 // ReviseInventoryStatus is the lightweight quantity/price-only revise call:
 // it doesn't count as heavily against revision limits and can update up to 4
 // items per call. We update by ItemID (looked up from mirror_links).
-async function setQuantityTradingAPI(itemId, quantity, storeArg) {
+async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
   if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
   if (!itemId) throw new Error('missing_item_id');
   // Limited accounts show at most their cap; the warehouse keeps the real count.
-  const qty = await require('../lib/ebay-qty-cap').applyCap(quantity, resolveStore(storeArg)?.code);
+  let qty = await require('../lib/ebay-qty-cap').applyCap(quantity, resolveStore(storeArg)?.code);
+  // Accounts with monthly selling limits: raising a listing's quantity uses up
+  // allowance too — only raise it as far as the allowance left covers.
+  const lim = opts.lowering ? null : await getSellingLimits(storeArg).catch(() => null);
+  if (lim && lim.limited && qty > 0) {
+    try {
+      const gx = await tradingCall('GetItem', `<ItemID>${escapeXml(String(itemId))}</ItemID>`, storeArg);
+      const curQty = (parseInt(extractOne(gx, 'Quantity') || '0') || 0) - (parseInt(extractOne(extractOne(gx, 'SellingStatus') || '', 'QuantitySold') || '0') || 0);
+      const unit = parseFloat(extractOne(extractOne(gx, 'SellingStatus') || '', 'CurrentPrice') || extractOne(gx, 'StartPrice') || '0') || 0;
+      if (qty > curQty) {
+        const byQty = lim.qtyRemaining != null ? lim.qtyRemaining : Infinity;
+        const byAmt = (lim.amountRemaining != null && unit > 0) ? Math.floor((lim.amountRemaining + 0.001) / unit) : Infinity;
+        qty = curQty + Math.max(0, Math.min(qty - curQty, byQty, byAmt));
+      }
+    } catch (_) { /* can't read the listing — push as asked */ }
+  }
   const body = `<InventoryStatus><ItemID>${escapeXml(String(itemId))}</ItemID><Quantity>${qty}</Quantity></InventoryStatus>`;
   const xml = await tradingCall('ReviseInventoryStatus', body, storeArg);
   if (xml.includes('<Ack>Failure</Ack>')) {
@@ -1295,21 +1310,30 @@ async function addItem(storeArg, opts = {}) {
   if (price == null || isNaN(parseFloat(price))) throw new Error('valid price required');
 
   // Per-account quantity cap (limited accounts) — then, for accounts eBay puts
-  // monthly selling limits on, refuse up front with a plain message rather than
-  // a cryptic AddItem failure.
+  // monthly selling limits on (items AND £ value), FIT the quantity to what's
+  // left: 14 × £112.95 with £300 left lists 2, not fail. Only when not even one
+  // unit fits is it refused, with a plain message instead of a cryptic AddItem
+  // failure. err.limitExhausted = nothing more can be listed this month at all.
   const storeCode = resolveStore(storeArg)?.code;
-  const listQty = await require('../lib/ebay-qty-cap').applyCap(
+  const requestedQty = await require('../lib/ebay-qty-cap').applyCap(
     (() => { const q = parseInt(quantity); return Number.isFinite(q) && q >= 0 ? q : 1; })(), storeCode);
+  let listQty = requestedQty;
   if (!verify && listQty > 0) {
     const lim = await getSellingLimits(storeArg).catch(() => null);
     if (lim && lim.limited) {
-      const value = listQty * parseFloat(price);
-      if (lim.qtyRemaining != null && listQty > lim.qtyRemaining) {
-        throw new Error(`eBay selling limit: this account can only list ${lim.qtyRemaining} more item${lim.qtyRemaining === 1 ? '' : 's'} this month (you tried ${listQty}). Lower the quantity or request higher limits on eBay.`);
+      const unit = parseFloat(price);
+      const byQty = lim.qtyRemaining != null ? lim.qtyRemaining : Infinity;
+      const byAmt = lim.amountRemaining != null ? Math.floor((lim.amountRemaining + 0.001) / unit) : Infinity;
+      const fits = Math.min(listQty, byQty, byAmt);
+      if (fits < 1) {
+        const e = new Error(byQty < 1
+          ? `eBay selling limit: this account can't list any more items this month. Request higher limits on eBay.`
+          : `eBay selling limit: only £${lim.amountRemaining.toFixed(2)} of listing value left this month — not enough for one at £${unit.toFixed(2)}. Cheaper parts can still go up; request higher limits on eBay for this one.`);
+        e.code = 'selling_limit';
+        e.limitExhausted = byQty < 1 || (lim.amountRemaining != null && lim.amountRemaining < 1);
+        throw e;
       }
-      if (lim.amountRemaining != null && value > lim.amountRemaining + 0.001) {
-        throw new Error(`eBay selling limit: this account has £${lim.amountRemaining.toFixed(2)} of listing value left this month — this listing is £${value.toFixed(2)} (${listQty} × £${parseFloat(price).toFixed(2)}). Request higher limits on eBay or list a cheaper item.`);
-      }
+      listQty = fits;
     }
   }
 
@@ -1445,9 +1469,17 @@ async function addItem(storeArg, opts = {}) {
   const ack = extractOne(xml, 'Ack') || '';
   if (ack === 'Success' || ack === 'Warning') {
     const itemId = extractOne(xml, 'ItemID');
-    if (!verify) delete _sellingLimitsCache[storeCode];   // allowance just changed
+    if (!verify) {
+      // Allowance just changed — count it down locally (no extra eBay call per item).
+      const hit = _sellingLimitsCache[storeCode];
+      if (hit && hit.value && hit.value.limited) {
+        if (hit.value.qtyRemaining != null) hit.value.qtyRemaining = Math.max(0, hit.value.qtyRemaining - listQty);
+        if (hit.value.amountRemaining != null) hit.value.amountRemaining = Math.max(0, +(hit.value.amountRemaining - listQty * parseFloat(price)).toFixed(2));
+      }
+    }
     // VerifyAddItem returns no real ItemID (it's a validation), but does return fees.
-    return { ok: true, verified: verify, ack, itemId: verify ? null : itemId, fees: extractOne(xml, 'Fee') };
+    return { ok: true, verified: verify, ack, itemId: verify ? null : itemId, fees: extractOne(xml, 'Fee'),
+      listedQty: listQty, requestedQty, trimmedForLimit: listQty < requestedQty };
   }
   // Failure — return the most useful error code + message
   const errCode = extractOne(xml, 'ErrorCode') || 'unknown';
