@@ -4069,6 +4069,7 @@ async function doCreateEbay(b, { req } = {}) {
   return { photosUsed,
     ok: true,
     itemId: result.itemId,
+    listedQty: result.listedQty, trimmedForLimit: !!result.trimmedForLimit,
     url: `https://www.ebay.co.uk/itm/${result.itemId}`,
     fees: result.fees,
     ack: result.ack,
@@ -4300,6 +4301,16 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
   // 'zero' lists them at quantity 0 (needs eBay out-of-stock control on the
   // account, else eBay rejects the item and it's reported as failed).
   const oosMode = b.oosMode === 'zero' ? 'zero' : 'skip';
+  // Quantity per new listing: 'one' = 1 each, so a £ selling limit covers as
+  // many different parts as possible; 'stock' = full warehouse stock (still
+  // trimmed to whatever allowance is left). 'one' also sets this shop's
+  // "show at most 1" cap so later stock updates don't use the allowance up.
+  const qtyMode = b.qtyMode === 'one' ? 'one' : 'stock';
+  let capSet = false;
+  if (qtyMode === 'one' && mode === 'publish') {
+    const caps = require('../lib/ebay-qty-cap');
+    if (!(await caps.capFor(toStore))) { await caps.saveCaps({ [toStore]: 1 }); capSet = true; }
+  }
 
   const results = [];
   let stop = false, stopReason = null;
@@ -4354,7 +4365,7 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
         price: parseFloat(p.price_ebay),               // faithful mirror of the source price
         categoryId: categoryId || undefined,           // else doCreateEbay uses the Settings default
         conditionId: p.ebay_condition_id || undefined,
-        quantity: qty,                                  // real stock (0 allowed when oosMode='zero')
+        quantity: qtyMode === 'one' ? Math.min(qty, 1) : qty,   // real stock (0 allowed when oosMode='zero')
         itemSpecifics,
         // Payment + return come from the store default; shipping is per-item.
         businessPolicies: shippingId ? { shippingId } : undefined,
@@ -4364,21 +4375,30 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
         productId: pid, sku: p.sku, title: p.title, ok: true,
         preview: mode === 'preview',
         itemId: out.itemId || null, url: out.url || null, fees: out.fees || null,
+        listedQty: out.listedQty ?? null, trimmedForLimit: !!out.trimmedForLimit,
       });
     } catch (e) {
       const message = e.body?.message || e.message || 'failed';
-      const errCode = e.body?.error || 'failed';
-      results.push({ productId: pid, sku: p.sku, title: p.title, error: errCode, message, missing: e.body?.missing || null });
-      // eBay returns a "listing limit / selling limit reached" error on new
-      // accounts once the cap is hit — halt so we don't hammer failures.
-      if (/\blimit(s)?\b/i.test(message) && /(sell|listing|reach|exceed|allow)/i.test(message)) {
+      const errCode = e.body?.error || e.code || 'failed';
+      if (e.code === 'selling_limit' && !e.limitExhausted) {
+        // Too dear for the allowance left — skip it, cheaper parts can still go up.
+        results.push({ productId: pid, sku: p.sku, title: p.title, skipped: true, reason: 'over_allowance', message });
+      } else {
+        results.push({ productId: pid, sku: p.sku, title: p.title, error: errCode, message, missing: e.body?.missing || null });
+      }
+      // Allowance used up (our check), or eBay itself says a selling/listing
+      // limit was reached — halt so we don't hammer failures.
+      if ((e.code === 'selling_limit' && e.limitExhausted)
+          || (e.code !== 'selling_limit' && /\blimit(s)?\b/i.test(message) && /(sell|listing|reach|exceed|allow)/i.test(message))) {
         stop = true; stopReason = 'selling_limit';
       }
     }
     await _sleep(350);  // gentle throttle between items
   }
   if (req) await audit(req, 'clone_to_store', 'ebay_store', toStore, { mode, count: ids.length, created: results.filter(r => r.ok && !r.preview).length });
-  res.json({ toStore, mode, results, stop, stopReason });
+  let limits = null;
+  try { limits = await ebay.getSellingLimits(toStore); } catch (_) {}
+  res.json({ toStore, mode, results, stop, stopReason, capSet, limits });
 });
 
 // Stale links: mirror_links saying a product is on `toStore` when that eBay
@@ -4428,6 +4448,41 @@ router.post('/clone-to-store/prune-stale', requireAdmin, async (req, res) => {
   }
   await audit(req, 'clone_prune_stale', 'ebay_store', store.code, { removed, live: r.live });
   res.json({ ok: true, removed, live: r.live });
+});
+
+// POST /api/listings/clone-to-store/free-allowance { toStore, keep = 1, after }
+// Lower every listing already on a limited shop to `keep` (or its stock if
+// less) so the monthly £/item allowance it was using is freed for parts not
+// listed yet. Warehouse stock is untouched; the shop's "show at most" cap is
+// set to `keep` so stock updates don't raise them again. One throttled batch per
+// call — the caller loops on nextAfter until done, then re-checks the limits.
+router.post('/clone-to-store/free-allowance', requireAdmin, async (req, res) => {
+  const brand = require('../lib/brand');
+  const b = req.body || {};
+  const store = brand.getStore(String(b.toStore || '').trim());
+  if (!store || !store.token) return res.status(400).json({ error: 'unknown_store' });
+  const keep = Math.max(1, parseInt(b.keep) || 1);
+  const after = parseInt(b.after) || 0;
+  const BATCH = 20;
+  if (!after) await require('../lib/ebay-qty-cap').saveCaps({ [store.code]: keep });
+  const { rows } = await query(
+    `SELECT ml.ebay_item_id, p.sku, p.qty_on_hand
+       FROM mirror_links ml JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text
+      WHERE ml.store_code = $1 ORDER BY ml.ebay_item_id OFFSET $2 LIMIT $3`, [store.code, after, BATCH]);
+  const results = [];
+  for (const r of rows) {
+    const target = Math.min(keep, Math.max(0, parseInt(r.qty_on_hand) || 0));
+    try { await ebay.setQuantityTradingAPI(r.ebay_item_id, target, store.code, { lowering: true }); results.push({ itemId: r.ebay_item_id, sku: r.sku, ok: true, qty: target }); }
+    catch (e) { results.push({ itemId: r.ebay_item_id, sku: r.sku, error: e.message }); }
+    await _sleep(250);
+  }
+  const done = rows.length < BATCH;
+  let limits = null;
+  if (done) {
+    try { limits = await ebay.getSellingLimits(store.code, { fresh: true }); } catch (_) {}
+    if (req) await audit(req, 'free_selling_allowance', 'ebay_store', store.code, { keep, limits });
+  }
+  res.json({ results, nextAfter: after + rows.length, done, limits });
 });
 
 // GET /api/listings/clone-to-store/listed?toStore=  — count of listings already

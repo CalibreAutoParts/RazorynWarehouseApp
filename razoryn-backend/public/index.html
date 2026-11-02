@@ -13592,8 +13592,61 @@ function cloneRenderControls(r) {
       <label style="font-size:12px">Out-of-stock items</label>
       <select id="clone-oos"><option value="skip">Skip (don't list)</option><option value="zero">List at 0 stock</option></select>
     </div>
+    <div class="field" style="margin:0">
+      <label style="font-size:12px">Quantity per listing</label>
+      <select id="clone-qtymode" onchange="clonePlanHint()"><option value="one" ${r.limits?.limited ? 'selected' : ''}>1 each — most listings in the £ limit</option><option value="stock" ${r.limits?.limited ? '' : 'selected'}>Full stock (trimmed to allowance left)</option></select>
+    </div>
+    <label style="font-size:12px;display:flex;gap:6px;align-items:center;align-self:center"><input type="checkbox" id="clone-cheap" ${r.limits?.limited ? 'checked' : ''} onchange="clonePlanHint()"> Cheapest first</label>
     <button class="btn btn-outline btn-sm" onclick="cloneSyncQuantities()" title="Update the quantity of listings already on this store to match current warehouse stock">🔄 Sync quantities on ${escapeHtml(r.storeName)}</button>
-    <div style="flex-basis:100%;font-size:11px;color:var(--ink-soft)">Only <strong id="clone-selcount2">${sel}</strong> selected item(s) are listed. Preview first (no live listings). "List at 0 stock" needs eBay's out-of-stock setting on the account. Publishing respects your selling limit.</div>`;
+    ${r.limits?.limited ? `<button class="btn btn-outline btn-sm" onclick="cloneFreeAllowance()" title="Lower the listings already on ${escapeAttr(r.storeName)} to 1 each so the £ allowance they hold is freed for parts not listed yet. Warehouse stock is not changed.">🔓 Free up allowance (existing → 1 each)</button>` : ''}
+    <div id="clone-plan" style="flex-basis:100%;font-size:12px"></div>
+    <div style="flex-basis:100%;font-size:11px;color:var(--ink-soft)">Only <strong id="clone-selcount2">${sel}</strong> selected item(s) are listed. Preview first (no live listings). "List at 0 stock" needs eBay's out-of-stock setting on the account. Each listing's quantity is fitted to the £ / item allowance left — a part that won't fit even at 1 is skipped and cheaper ones carry on.</div>`;
+  clonePlanHint();
+}
+
+// How far the £ allowance goes for the ticked parts (at 1 each or full stock).
+function clonePlanHint() {
+  const box = el('clone-plan'); if (!box) return;
+  const L = CloneState.meta?.limits;
+  if (!L || !L.limited) { box.innerHTML = ''; return; }
+  const one = el('clone-qtymode')?.value !== 'stock';
+  let items = CloneState.candidates.filter(c => CloneState.selected[c.id] && (c.qty || 0) > 0 && c.price != null);
+  if (el('clone-cheap')?.checked) items = items.slice().sort((a, b) => a.price - b.price);
+  let left = L.amountRemaining != null ? L.amountRemaining : Infinity, slots = L.qtyRemaining != null ? L.qtyRemaining : Infinity, fit = 0, units = 0;
+  for (const c of items) {
+    const want = one ? 1 : c.qty;
+    const n = Math.min(want, slots, Math.floor((left + 0.001) / c.price));
+    if (n >= 1) { fit++; units += n; left -= n * c.price; slots -= n; }
+  }
+  box.innerHTML = `💷 Allowance left on ${escapeHtml(CloneState.storeName)}: <b>${L.amountRemaining != null ? '£' + Number(L.amountRemaining).toFixed(2) : 'no £ cap'}</b> · <b>${L.qtyRemaining ?? '∞'}</b> items. `
+    + `At ${one ? '1 each' : 'full stock'}${el('clone-cheap')?.checked ? ', cheapest first' : ''}: about <b>${fit}</b> of ${items.length} ticked in-stock part(s) fit (${units} unit${units === 1 ? '' : 's'}).`
+    + (fit < items.length ? ` <span style="color:var(--amber, #b26a00)">Not enough for all — use “Free up allowance” to lower existing listings to 1 each, or request higher limits on eBay.</span>` : '');
+}
+
+// Lower everything already on this shop to 1 each (cap = 1) in batches, then
+// re-read eBay's allowance so the rest can be listed.
+async function cloneFreeAllowance() {
+  if (CloneState.running) return;
+  if (!confirm(`Lower every listing already on ${CloneState.storeName} to 1 each?\n\nThis frees the £ allowance their extra quantity holds so more different parts can be listed. Warehouse stock is NOT changed, and the shop is set to "show at most 1" so stock updates keep it that way. (You can raise it later in Settings → Selling limits.)`)) return;
+  CloneState.running = true;
+  const before = CloneState.meta?.limits?.amountRemaining;
+  let after = 0, done = false, changed = 0, failed = 0, limits = null;
+  el('clone-progress').style.display = 'block';
+  try {
+    while (!done) {
+      const r = await Api.post('/api/listings/clone-to-store/free-allowance', { toStore: CloneState.toStore, keep: 1, after });
+      for (const x of r.results || []) { if (x.ok) changed++; else failed++; }
+      after = r.nextAfter; done = r.done; limits = r.limits;
+      el('clone-progress').innerHTML = `<div style="font-size:13px">Lowering existing listings to 1 each… <b>${changed}</b> done${failed ? `, <span style="color:var(--red)">${failed} failed</span>` : ''}</div>`;
+    }
+    if (limits && CloneState.meta) CloneState.meta.limits = limits;
+    const freed = (limits && limits.amountRemaining != null && before != null) ? limits.amountRemaining - before : null;
+    el('clone-progress').innerHTML = `<div style="font-size:13px">✅ ${changed} listing(s) lowered to 1${failed ? `, ${failed} failed (usually listings that no longer exist)` : ''}. Allowance now <b>${limits?.amountRemaining != null ? '£' + Number(limits.amountRemaining).toFixed(2) : '—'}</b> / ${limits?.qtyRemaining ?? '—'} items${freed != null ? ` (${freed >= 0 ? '+' : ''}£${freed.toFixed(2)})` : ''}.</div>`;
+    if (freed != null && freed <= 0.005) toast('eBay hasn’t freed any allowance yet — it can take a little while to update, or this account counts quantity already listed this month. Re-check shortly.', 'warn', 12000);
+    else toast('Allowance freed — publish the rest now', 'success', 8000);
+    cloneRenderReadiness(CloneState.meta); clonePlanHint();
+  } catch (e) { toast(e.data?.message || e.message, 'error', 8000); }
+  CloneState.running = false;
 }
 
 function cloneRefreshCounts() {
@@ -13614,8 +13667,10 @@ async function cloneRun(mode) {
   await cloneSaveShipping(false);
   const defaultShippingId = el('clone-default-ship')?.value || '';
   const oosMode = el('clone-oos')?.value || 'skip';
+  const qtyMode = el('clone-qtymode')?.value || 'stock';
   const maxItems = mode === 'publish' ? Math.max(1, parseInt(el('clone-max')?.value) || selectedItems.length) : Infinity;
-  const pending = selectedItems.slice();
+  // Cheapest first = the £ allowance covers the most different parts.
+  const pending = el('clone-cheap')?.checked ? selectedItems.slice().sort((a, b) => (a.price ?? 1e9) - (b.price ?? 1e9)) : selectedItems.slice();
   let ok = 0, fail = 0, skip = 0, publishedThisRun = 0, processed = 0;
   const total = mode === 'publish' ? Math.min(maxItems, pending.length) : pending.length;
 
@@ -13638,8 +13693,10 @@ async function cloneRun(mode) {
     const batch = pending.splice(0, room);
     let r;
     try {
-      r = await Api.post('/api/listings/clone-to-store/run', { toStore: CloneState.toStore, productIds: batch.map(c => c.id), mode, defaultShippingId, oosMode });
+      r = await Api.post('/api/listings/clone-to-store/run', { toStore: CloneState.toStore, productIds: batch.map(c => c.id), mode, defaultShippingId, oosMode, qtyMode });
     } catch (e) { toast('Run failed: ' + (e.data?.message || e.message), 'error', 8000); break; }
+    if (r.capSet) toast(`${CloneState.storeName} set to show at most 1 per listing, so stock updates don't use the allowance up (Settings → Selling limits).`, 'success', 8000);
+    if (r.limits && CloneState.meta) { CloneState.meta.limits = r.limits; clonePlanHint(); }
     for (const res of (r.results || [])) {
       CloneState.results.push(res);
       processed++;
@@ -13668,9 +13725,9 @@ function cloneRenderResults() {
     <table class="table" style="margin:0"><thead><tr><th>SKU</th><th>Result</th></tr></thead><tbody>
     ${rows.map(r => {
       let badge, detail = '';
-      if (r.skipped) { badge = `<span class="pill" style="background:var(--line);color:var(--ink-soft)">skipped</span>`; detail = r.reason === 'out_of_stock' ? 'out of stock' : 'already on this store'; }
+      if (r.skipped) { badge = `<span class="pill" style="background:var(--line);color:var(--ink-soft)">skipped</span>`; detail = r.reason === 'out_of_stock' ? 'out of stock' : r.reason === 'over_allowance' ? escapeHtml(r.message || 'over the allowance left') : 'already on this store'; }
       else if (r.ok && r.preview) { badge = `<span class="pill" style="background:var(--blue-light);color:var(--blue)">preview ok</span>`; detail = r.fees != null ? `fees £${escapeHtml(String(r.fees))}` : 'validated'; }
-      else if (r.ok) { badge = `<span class="pill" style="background:var(--green-light);color:var(--green)">listed</span>`; detail = r.itemId ? `<a href="${escapeAttr(r.url || '#')}" target="_blank" style="color:var(--brand-primary)">${escapeHtml(String(r.itemId))}</a>` : ''; }
+      else if (r.ok) { badge = `<span class="pill" style="background:var(--green-light);color:var(--green)">listed${r.listedQty != null ? ' ×' + r.listedQty : ''}</span>`; detail = (r.itemId ? `<a href="${escapeAttr(r.url || '#')}" target="_blank" style="color:var(--brand-primary)">${escapeHtml(String(r.itemId))}</a>` : '') + (r.trimmedForLimit ? ' · quantity trimmed to fit the allowance' : ''); }
       else { badge = `<span class="pill" style="background:var(--red-light);color:var(--red)">failed</span>`; detail = escapeHtml(r.message || r.error || '') + (r.missing ? ' — missing: ' + escapeHtml((r.missing || []).join(', ')) : ''); }
       return `<tr><td style="font-family:ui-monospace,monospace;font-size:11px">${escapeHtml(r.sku || String(r.productId || ''))}</td><td>${badge} <span style="font-size:12px;color:var(--ink-soft)">${detail}</span></td></tr>`;
     }).join('')}
