@@ -4235,6 +4235,7 @@ router.get('/clone-to-store/candidates', requireAdmin, async (req, res) => {
     policies,
     policiesStale,
     limits,
+    qtyCap: await require('../lib/ebay-qty-cap').capFor(store.code),
     defaultCategory: settings.ebay_default_category_id || null,
     total: rows.length,
     warnings: { noPrice },
