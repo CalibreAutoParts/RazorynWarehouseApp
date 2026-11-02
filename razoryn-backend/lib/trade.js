@@ -360,6 +360,20 @@ async function cleanImages(productId) {
   const r = (await query(`SELECT urls FROM product_clean_images WHERE product_id = $1`, [productId])).rows[0];
   return Array.isArray(r?.urls) ? r.urls : [];
 }
+// Public, signed links for clean photos stored on our volume — so eBay can
+// fetch them when a shop is set to list with clean photos. External https
+// links pass through unchanged.
+function cleanSig(ref) {
+  return crypto.createHmac('sha256', process.env.JWT_SECRET || 'warehouse-clean-img').update(String(ref)).digest('hex').slice(0, 32);
+}
+async function publicCleanImageUrls(productId, baseUrl) {
+  const refs = await cleanImages(productId);
+  return refs.map(r => {
+    if (!/^local:trade-clean\//.test(r)) return /^https:\/\//.test(r) ? r : null;
+    return baseUrl ? `${baseUrl}/api/clean-img/${r.slice('local:trade-clean/'.length)}?sig=${cleanSig(r)}` : null;
+  }).filter(Boolean);
+}
+
 async function imagesFor(account, p) {
   if (account.photo_access === 'clean') {
     const clean = await cleanImages(p.id);
@@ -919,7 +933,7 @@ module.exports = {
   ensureSchema, getSettings, saveSettings, vatRateFor,
   issueApiKey, accountByKey, hashKey, sign,
   costOf, priceFor, priceBreaks, loadRules, pickRule, availableFor, present, stockList, productBySku,
-  imagesFor, brandedImages, cleanImages,
+  imagesFor, brandedImages, cleanImages, publicCleanImageUrls, cleanSig,
   accountSummary, topProducts,
   createOrder, getOrder, listOrders, cancelOrder, formatOrder, publicOrderStatus, TradeError,
   periodEnd, londonToday, issueInvoice, runDueInvoices, voidInvoice, invoiceDetail, emailInvoice, emailInvite,

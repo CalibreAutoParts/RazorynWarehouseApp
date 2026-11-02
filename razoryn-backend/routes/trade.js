@@ -414,3 +414,18 @@ hookRouter.post('/:id', aw(async (req, res) => {
   res.json(await partner.handleEvent(l, req.body || {}));
 }));
 module.exports.hookRouter = hookRouter;
+
+// Public signed clean-photo links (eBay fetches these when a shop lists with
+// clean photos). Mounted at /api/clean-img in server.js.
+const cleanImgRouter = express.Router();
+cleanImgRouter.get('/:pid/:file', (req, res) => {
+  const { pid, file } = req.params;
+  if (!/^\d+$/.test(pid) || !/^[\w.-]+$/.test(file)) return res.status(400).end();
+  const ref = `local:trade-clean/${pid}/${file}`;
+  const sig = String(req.query.sig || '');
+  const want = trade.cleanSig(ref);
+  if (sig.length !== want.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want))) return res.status(403).end();
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.sendFile(path.join(path.resolve(UPLOAD_DIR), 'trade-clean', pid, file), err => { if (err && !res.headersSent) res.status(404).end(); });
+});
+module.exports.cleanImgRouter = cleanImgRouter;

@@ -26,6 +26,9 @@ router.get('/', (req, res) => {
       name: s.name,
       channelCode: s.channelCode,
       primary: !!s.primary,
+      // A shop with no token (e.g. a newly added account not set up yet) or one
+      // switched off stays out of pickers/filters; its name still labels old orders.
+      connected: !!s.token && !s.disabled,
     })),
   });
 });
