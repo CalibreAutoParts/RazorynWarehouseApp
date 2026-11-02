@@ -2057,13 +2057,19 @@ function dismissInstallPill() {
 
 /* ==================== THEME ==================== */
 // Fetch brand config from /api/brand and apply: page title, logo srcs, brand colour CSS vars.
+// stores = connected eBay shops only (what every picker/filter offers);
+// allStores = every configured shop (to name old orders from any of them).
+function brandWithConnectedStores(b) {
+  const all = b.stores || [];
+  return { ...b, allStores: all, stores: all.filter(s => s.connected !== false) };
+}
 // Runs before login so the login screen already shows the correct brand.
 async function loadBrand() {
   try {
     const r = await fetch('/api/brand', { cache: 'no-cache' });
     if (!r.ok) throw new Error('http_' + r.status);
     const b = await r.json();
-    State.brand = b;
+    State.brand = brandWithConnectedStores(b);
     // Reveal the "Copy to 2nd store" nav only when the brand runs >1 eBay store.
     const ebayStores = (b.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
     document.body.classList.toggle('is-multistore', ebayStores.length > 1);
@@ -4350,7 +4356,7 @@ function channelPill(ch) {
   // Map raw channel codes to (colour, label) pairs. eBay store codes look up
   // the human-readable store name from the brand config so e.g. ebay_em →
   // "EVBODYPARTS" for Calibre or "eBay" for Razoryn.
-  const stores = (State.brand?.stores || []);
+  const stores = (State.brand?.allStores || State.brand?.stores || []);
   // Try to find a store whose channelCode matches
   if (ch && ch.startsWith('ebay')) {
     const store = stores.find(s => s.channelCode === ch);
@@ -8840,7 +8846,7 @@ function renderCustomers() {
   loadCustomers();
 }
 
-const CUST_CH_LABEL = { shopify: 'Store', ebay_em: 'eBay', ebay_cl: 'eBay', direct_cash: 'Cash', direct_bank: 'Bank' };
+const CUST_CH_LABEL = { shopify: 'Store', ebay_em: 'eBay', ebay_cl: 'eBay', ebay_r3: 'eBay', direct_cash: 'Cash', direct_bank: 'Bank' };
 function custDateShort(x) { return x ? new Date(x).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : ''; }
 
 async function loadCustomers() {
@@ -9776,7 +9782,7 @@ async function openSaleDetail(id) {
     if (pm === 'card') return 'Card (Stripe)';
     // Fallback for old rows where payment_method was never set
     if (s.channel === 'shopify') return 'Shopify Payment';
-    if (s.channel === 'ebay_em' || s.channel === 'ebay_cl') return 'eBay Payment';
+    if (String(s.channel || '').startsWith('ebay_')) return 'eBay Payment';
     if (s.channel === 'direct_cash') return 'Cash';
     if (s.channel === 'direct_bank') return 'Bank Transfer';
     return '—';
@@ -21712,8 +21718,8 @@ function renderSettings() {
           <div id="ebay-health-result" style="margin-bottom:12px"></div>
 
           <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px;margin-bottom:12px">
-            <div style="font-weight:600;font-size:14px;margin-bottom:4px">🧾 VAT per shop</div>
-            <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">For an eBay shop run by a business that is <strong>not VAT registered</strong> (e.g. a sole trader account). From the date you pick: its orders record <strong>no VAT</strong>, new eBay listings are created <strong>without VAT</strong>, and its invoices drop the VAT lines and the company VAT/registration number. Earlier orders are left as they were. Shopify and the other shops keep the normal company VAT setting.</p>
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">🏪 eBay shops — business setup</div>
+            <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">Each eBay account can be run by a different business. Set whether it's a <strong>limited company</strong> or a <strong>sole trader</strong>, whether it's <strong>VAT registered</strong>, the name on its invoices, how its listings are branded and which photos it uses — the app then handles VAT on orders, listings and invoices for that shop automatically. Shopify keeps the company settings. To add another eBay account, add its token in Railway (shown on the shop below) and redeploy.</p>
             <div id="store-vat-box" style="font-size:13px;color:var(--ink-soft)">Loading…</div>
           </div>
 
@@ -22599,27 +22605,68 @@ async function loadStoreVat() {
   let r;
   try { r = await Api.get('/api/settings/store-vat'); }
   catch (e) { box.innerHTML = `<span style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</span>`; return; }
+  State._shops = r.stores || [];
   const today = new Date().toISOString().slice(0, 10);
-  box.innerHTML = (r.stores || []).map(s => `
-    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin-bottom:8px;color:var(--ink)">
-      <div style="min-width:140px"><b>${escapeHtml(s.name)}</b><div style="font-size:11px;color:var(--ink-soft)">${s.vatOff ? '🚫 No VAT since ' + escapeHtml(String(s.since || '').split('-').reverse().join('/')) : 'Charges VAT (company setting)'}</div></div>
-      <label style="display:flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svat-off-${escapeAttr(s.code)}" ${s.vatOff ? 'checked' : ''}> Not VAT registered</label>
-      <div class="field" style="margin:0"><label style="font-size:11px">Since (date it changed)</label><input type="date" id="svat-since-${escapeAttr(s.code)}" value="${escapeAttr(s.since || today)}"></div>
-      <div class="field" style="margin:0;flex:1;min-width:180px"><label style="font-size:11px">Name on invoices (optional)</label><input id="svat-name-${escapeAttr(s.code)}" placeholder="e.g. J Smith t/a Razoryn" value="${escapeAttr(s.tradingName || '')}"></div>
-      <button class="btn btn-sm btn-primary" onclick="saveStoreVat('${escapeAttr(s.code)}', this)">Save</button>
-    </div>`).join('') || 'No eBay shops.';
+  const sel = (id, val, opts) => `<select id="${id}" onchange="shopProfileHints('${id.split('-').pop()}')">${opts.map(([v, l]) => `<option value="${v}" ${String(val) === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+  box.innerHTML = State._shops.map(s => { const c = escapeAttr(s.code); return `
+    <div style="padding:12px;border:1px solid var(--line);border-radius:8px;margin-bottom:10px;color:var(--ink);${s.hasToken || s.disabled ? '' : 'border-style:dashed'}">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <b style="font-size:14px">${escapeHtml(s.name)}</b>${s.primary ? ' <span style="font-size:11px;color:var(--ink-soft)">(main)</span>' : ''}
+        <span style="font-size:11px;${s.hasToken ? 'color:var(--green)' : 'color:var(--amber, #b26a00)'}">${s.disabled ? '⏸ switched off' : s.hasToken ? '✓ connected' : `not connected — add <code>${escapeHtml(s.tokenEnv || '')}</code> in Railway and redeploy`}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px">
+        <div class="field" style="margin:0"><label style="font-size:11px">Shop name in the app</label><input id="shp-name-${c}" value="${escapeAttr(s.displayName || '')}" placeholder="${escapeAttr(s.name)}"></div>
+        <div class="field" style="margin:0"><label style="font-size:11px">Business</label>${sel('shp-type-' + c, s.businessType, [['company', 'Limited company / business'], ['sole_trader', 'Sole trader']])}</div>
+        <div class="field" style="margin:0"><label style="font-size:11px">VAT registered?</label>${sel('shp-vat-' + c, s.vatOff ? 'no' : 'yes', [['yes', 'Yes — charge VAT'], ['no', 'No — no VAT']])}</div>
+        <div class="field" style="margin:0" id="shp-sincewrap-${c}"><label style="font-size:11px">No VAT from (date it changed)</label><input type="date" id="shp-since-${c}" value="${escapeAttr(s.since || today)}"></div>
+        <div class="field" style="margin:0"><label style="font-size:11px">Name on invoices</label><input id="shp-inv-${c}" value="${escapeAttr(s.tradingName || '')}" placeholder="e.g. J Smith t/a Razoryn" oninput="shopProfileHints('${c}')"></div>
+        <div class="field" style="margin:0"><label style="font-size:11px">eBay listing branding</label>${sel('shp-brand-' + c, s.listingBranding, [['company', 'Company logo + name'], ['shop', "Shop's own name (no company logo)"]])}</div>
+        <div class="field" style="margin:0"><label style="font-size:11px">Photos on new listings</label>${sel('shp-photos-' + c, s.photos, [['branded', 'Listing photos (as on Shopify)'], ['clean', 'Clean photos (no branding) where available']])}</div>
+      </div>
+      <div id="shp-hint-${c}" style="font-size:12px;color:var(--ink-soft);margin:8px 0;line-height:1.5"></div>
+      <button class="btn btn-sm btn-primary" onclick="saveStoreVat('${c}', this)">Save</button>
+    </div>`; }).join('') || 'No eBay shops.';
+  for (const s of State._shops) shopProfileHints(s.code, true);
+}
+
+// Live "what this means" line; changing the business type suggests the usual
+// VAT + branding for it (still editable).
+function shopProfileHints(code, initial) {
+  const v = id => el(`shp-${id}-${code}`)?.value;
+  const shop = (State._shops || []).find(x => x.code === code) || {};
+  if (!initial && document.activeElement && document.activeElement.id === `shp-type-${code}`) {
+    const st = v('type') === 'sole_trader';
+    if (el(`shp-vat-${code}`)) el(`shp-vat-${code}`).value = st ? 'no' : 'yes';
+    if (el(`shp-brand-${code}`)) el(`shp-brand-${code}`).value = st ? 'shop' : 'company';
+  }
+  const noVat = v('vat') === 'no';
+  const wrap = el(`shp-sincewrap-${code}`); if (wrap) wrap.style.display = noVat ? '' : 'none';
+  const shopName = (v('name') || '').trim() || shop.name || '';
+  const invName = (v('inv') || '').trim();
+  const sinceTxt = String(v('since') || '').split('-').reverse().join('/');
+  const bits = [
+    noVat ? `<b>VAT:</b> orders from ${escapeHtml(sinceTxt)} record no VAT and new listings are created without VAT` : `<b>VAT:</b> charged on orders and listings at the company rate`,
+    `<b>Invoices:</b> ${invName ? `issued as “${escapeHtml(invName)}”` : 'issued under the company name'}${noVat ? ', no VAT lines or VAT number' : ''}${v('type') === 'sole_trader' ? ', no company registration number' : ''}`,
+    `<b>Listings:</b> ${v('brand') === 'shop' ? `description shows “${escapeHtml(invName || shopName)}”, no company logo` : 'description shows the company logo + name'}`,
+    `<b>Photos:</b> ${v('photos') === 'clean' ? 'clean photos where you’ve added them (Trade → Settings → Clean photos), otherwise the listing photos' : 'the listing photos, as on Shopify'}`,
+  ];
+  const h = el(`shp-hint-${code}`); if (h) h.innerHTML = bits.join(' · ');
 }
 
 async function saveStoreVat(code, btn) {
-  const vatOff = !!el('svat-off-' + code)?.checked;
-  const since = el('svat-since-' + code)?.value || '';
-  const tradingName = el('svat-name-' + code)?.value || '';
+  const v = id => el(`shp-${id}-${code}`)?.value;
+  const vatOff = v('vat') === 'no';
+  const since = v('since') || '';
+  const shop = (State._shops || []).find(x => x.code === code) || {};
   if (vatOff && !since) { toast('Pick the date this shop stopped charging VAT', 'warn'); return; }
-  if (vatOff && !confirm(`Turn VAT off for this shop from ${since}?\n\nOrders from that date will record no VAT, new eBay listings won't add VAT, and invoices won't show VAT or the company VAT number. Orders before ${since} are not changed.`)) return;
+  if (vatOff && (!shop.vatOff || shop.since !== since) && !confirm(`Turn VAT off for this shop from ${since}?\n\nOrders from that date will record no VAT, new eBay listings won't add VAT, and invoices won't show VAT or the company VAT number. Orders before ${since} are not changed.`)) return;
   btn.disabled = true;
   try {
-    const r = await Api.put('/api/settings/store-vat', { code, vatOff, since, tradingName });
-    toast(vatOff ? `VAT off from ${since}` + (r.cleared ? ` — removed VAT from ${r.cleared} order(s) already imported` : '') : 'VAT back on for this shop (new orders only)', 'success', 6000);
+    const r = await Api.put('/api/settings/store-vat', { code, vatOff, since, tradingName: v('inv') || '', displayName: v('name') || '',
+      businessType: v('type'), listingBranding: v('brand'), photos: v('photos') });
+    toast('Shop saved' + (r.cleared ? ` — removed VAT from ${r.cleared} order(s) already imported` : ''), 'success', 6000);
+    // Shop names show across the app — refresh the brand info.
+    try { State.brand = brandWithConnectedStores(await Api.get('/api/brand')); } catch (_) {}
     loadStoreVat();
   } catch (e) { toast(e.data?.message || e.message, 'error'); }
   btn.disabled = false;

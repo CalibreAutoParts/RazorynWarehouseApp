@@ -110,6 +110,7 @@ app.use('/api/books',        require('./routes/books'));
 app.use('/api/trade/v1',     require('./routes/trade-api'));
 app.use('/api/trade',        require('./routes/trade'));
 app.use('/api/trade-partner-hook', require('./routes/trade').hookRouter);
+app.use('/api/clean-img',    require('./routes/trade').cleanImgRouter);
 app.use('/api/disputes',     require('./routes/disputes'));
 app.use('/api/printing',     require('./routes/printing'));
 app.use('/api/books-shared', require('./routes/books').publicRouter);
@@ -741,6 +742,8 @@ cron.schedule('15 3 * * *', async () => {
 // trade customers every 2 min; issue consolidated invoices daily; pull partner
 // warehouse stock/costs every 30 min (webhooks normally keep it live).
 require('./lib/trade').ensureSchema().catch(e => console.warn('[trade] schema:', e.message));
+// eBay shop names set in the app (Settings → eBay shops) override the defaults.
+require('./lib/store-vat').applyNames().catch(e => console.warn('[shops] names:', e.message));
 cron.schedule('*/2 * * * *', async () => {
   try { await require('./lib/trade').detectChanges(); } catch (e) { console.warn('[cron trade] changes:', e.message); }
 });

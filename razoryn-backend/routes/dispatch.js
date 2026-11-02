@@ -784,7 +784,7 @@ async function syncEbayDispatchCore({ days = 14 } = {}) {
   // Undispatched eBay sales whose order is now fulfilled on eBay.
   const { rows } = await query(
     `SELECT id, external_order_id FROM sales
-      WHERE channel IN ('ebay_em','ebay_cl') AND is_estimate = false
+      WHERE channel LIKE 'ebay\_%' AND is_estimate = false
         AND dispatched_at IS NULL AND collected_at IS NULL
         AND external_order_id = ANY($1)`,
     [[...fulfilledIds]]
@@ -853,7 +853,7 @@ async function syncEbayCancellationsCore({ days = 14 } = {}) {
 
   const { rows } = await query(
     `SELECT id, external_order_id, total FROM sales
-      WHERE channel IN ('ebay_em','ebay_cl') AND is_estimate = false
+      WHERE channel LIKE 'ebay\_%' AND is_estimate = false
         AND dispatched_at IS NULL AND collected_at IS NULL
         AND status NOT IN ('refunded','cancelled')
         AND external_order_id = ANY($1)`,

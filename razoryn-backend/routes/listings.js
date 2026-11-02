@@ -3169,7 +3169,7 @@ function wrapDesc(body, tpl, ctx) {
   const returns = ctx.returns || 'Returns accepted';
   const delivery = ctx.delivery || 'Fast UK dispatch';
   const fill = (s) => String(s || '').replace(/\{\{(\w+)\}\}/g, (_, k) => {
-    const map = { brand: brand.name || 'Our Store', tagline: brand.tagline || '',
+    const map = { brand: ctx.brandName || brand.name || 'Our Store', tagline: ctx.tagline != null ? ctx.tagline : (brand.tagline || ''),
       domain, title: ctx.title || '', sku: ctx.sku || '', partno: ctx.partno || '',
       vehicle: vehicle || 'vehicle', related, logo, returns, delivery };
     return map[k] != null ? map[k] : '';
@@ -3288,9 +3288,21 @@ async function composeEbayDescription(product, { specifics, storeCode, rawBody, 
   try { row = (await query(`SELECT logo_data_url, data FROM app_settings WHERE id = 1`)).rows[0] || {}; } catch (_) {}
   const s = row.data || {};
   const logoUrl = listingLogoUrl(!!row.logo_data_url);
-  const logoHtml = logoUrl
+  let logoHtml = logoUrl
     ? `<img src="${escapeHtmlServer(logoUrl)}" alt="${escapeHtmlServer(brand.name || '')}" style="height:48px;max-width:240px;object-fit:contain;display:block">`
     : `<div style="font-size:26px;font-weight:800;color:${color}">${escapeHtmlServer(brand.name || 'Our Store')}</div>`;
+  // A shop run by another business (e.g. a sole trader) shows its OWN name —
+  // never the company's logo / name (Settings → eBay shops).
+  let brandName = null, tagline = null;
+  if (storeCode) {
+    const prof = await require('../lib/store-vat').getProfile(storeCode).catch(() => null);
+    if (prof && prof.listingBranding === 'shop') {
+      const st = brand.getStore(storeCode);
+      brandName = prof.tradingName || prof.displayName || (st && st.name) || 'Our Store';
+      tagline = '';
+      logoHtml = `<div style="font-size:26px;font-weight:800;color:${color}">${escapeHtmlServer(brandName)}</div>`;
+    }
+  }
 
   // Returns line: real per-listing days > Settings default days/blurb > generic.
   const realDays = terms && terms.returnsWithinDays ? terms.returnsWithinDays : null;
@@ -3305,7 +3317,7 @@ async function composeEbayDescription(product, { specifics, storeCode, rawBody, 
   const tpl = await getDescTemplate();
   return wrapDesc(body, tpl, {
     title: product.title, sku: product.sku, partno: mpnFromProduct(product), vehicle, related,
-    logo: logoHtml, returns: returnsText, delivery: deliveryText,
+    logo: logoHtml, returns: returnsText, delivery: deliveryText, brandName, tagline,
   });
 }
 
@@ -3857,6 +3869,17 @@ async function doCreateEbay(b, { req } = {}) {
       console.warn('[create-ebay] Shopify fetch failed (continuing with warehouse data):', e.message);
     }
   }
+  // Shop set to clean photos → use the part's clean (unbranded) photos when it
+  // has any (Trade → Settings → Clean photos); otherwise keep the listing photos.
+  let photosUsed = 'listing';
+  try {
+    const prof = await require('../lib/store-vat').getProfile(store.code);
+    if (prof.photos === 'clean') {
+      const base = req ? `${req.protocol}://${req.get('host')}` : appBaseUrl();
+      const clean = await require('../lib/trade').publicCleanImageUrls(product.id, base);
+      if (clean.length) { imageUrls = clean; photosUsed = 'clean'; } else photosUsed = 'listing (no clean photos yet)';
+    }
+  } catch (e) { console.warn('[create-ebay] clean photos:', e.message); }
   // `description` now holds the RAW body (from the form override or Shopify).
   // If none, we build a styled spec-table body below (after specifics are known).
   // Either way it gets wrapped in the branded template before listing.
@@ -3958,7 +3981,7 @@ async function doCreateEbay(b, { req } = {}) {
   // Preview mode (VerifyAddItem) — validated only, no live listing, nothing
   // persisted. Returns the fees + ack so the user can review before listing.
   if (b.preview) {
-    return { ok: true, preview: true, ack: result.ack, fees: result.fees,
+    return { ok: true, preview: true, ack: result.ack, fees: result.fees, photosUsed,
       message: 'Validated successfully — no live listing was created. Untick Preview to publish.' };
   }
 
@@ -4043,7 +4066,7 @@ async function doCreateEbay(b, { req } = {}) {
     }
   }
 
-  return {
+  return { photosUsed,
     ok: true,
     itemId: result.itemId,
     url: `https://www.ebay.co.uk/itm/${result.itemId}`,

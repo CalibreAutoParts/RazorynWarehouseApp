@@ -40,7 +40,7 @@ async function notifyEvent({ type, title, body = '', severity = 'info', relatedT
 // A sync pulling six orders sends ONE push ("6 new orders — £412"), not six.
 // Admins get the £ version; warehouse staff get a "to pack" version with no
 // money in it (the app hides £ from staff).
-const CHANNEL_NAME = { ebay_em: 'eBay', ebay_cl: 'eBay', shopify: 'Shopify', direct_cash: 'Cash', direct_bank: 'Bank transfer', direct_card: 'Card' };
+const CHANNEL_NAME = { ebay_em: 'eBay', ebay_cl: 'eBay', ebay_r3: 'eBay', shopify: 'Shopify', direct_cash: 'Cash', direct_bank: 'Bank transfer', direct_card: 'Card' };
 const _pendingSales = [];
 let _salesTimer = null;
 function saleSold({ saleId, channel, ref, customer, total, items = [], occurredAt }) {

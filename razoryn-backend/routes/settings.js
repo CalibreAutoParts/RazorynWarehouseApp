@@ -857,37 +857,46 @@ router.get('/ebay-health', requireAdmin, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
-// Per-shop VAT. A shop run by a non-VAT-registered business (e.g. a sole trader
-// eBay account) charges and records no VAT from its "since" date.
-// GET /api/settings/store-vat → [{ code, name, vatOff, since, tradingName }]
-// PUT /api/settings/store-vat { code, vatOff, since, tradingName }
-//   Turning it on also clears VAT already recorded on that shop's orders from
-//   the since date (they were imported with the company-wide VAT treatment).
+// eBay shops — business setup (lib/store-vat.js). Per shop: display name, Ltd
+// or sole trader, VAT registered (or not, since a date), name on invoices,
+// listing branding and photo style.
+// GET /api/settings/store-vat → every configured shop, connected or not
+// PUT /api/settings/store-vat { code, displayName, businessType, vatOff, since,
+//                               tradingName, listingBranding, photos }
 router.get('/store-vat', requireAdmin, async (req, res) => {
-  const all = await require('../lib/store-vat').getAll();
-  const stores = require('../services/ebay').listStores().map(s => ({
-    code: s.code, name: s.name, hasToken: s.hasToken, disabled: s.disabled,
-    vatOff: !!all[s.code]?.vatOff, since: all[s.code]?.since || null, tradingName: all[s.code]?.tradingName || '',
-  }));
-  res.json({ stores });
+  const sv = require('../lib/store-vat');
+  const out = [];
+  for (const s of require('../services/ebay').listStores()) {
+    const prof = await sv.getProfile(s.code);
+    out.push({ code: s.code, name: s.name, hasToken: s.hasToken, disabled: s.disabled, primary: s.primary,
+      tokenEnv: (require('../lib/brand').getStore(s.code) || {}).tokenEnv || null, ...prof });
+  }
+  res.json({ stores: out });
 });
 
+// Body: { code, displayName, businessType, vatOff, since, tradingName, listingBranding, photos }
 router.put('/store-vat', requireAdmin, async (req, res) => {
   const b = req.body || {};
   const store = require('../lib/brand').getStore(String(b.code || ''));
   if (!store) return res.status(404).json({ error: 'store_not_found' });
   if (b.vatOff && b.since && !/^\d{4}-\d{2}-\d{2}$/.test(String(b.since))) return res.status(400).json({ error: 'bad_date', message: 'Pick the date the shop changed hands.' });
   const sv = require('../lib/store-vat');
+  const before = await sv.getProfile(store.code);
   const saved = await sv.save({ [store.code]: { vatOff: !!b.vatOff, since: b.since, tradingName: b.tradingName } });
+  const profile = await sv.saveProfile(store.code, b);
+  // Turning VAT off clears VAT already recorded on that shop's orders from the
+  // since date (they were imported with the company-wide treatment). Only when
+  // VAT was just switched off or its date moved — not on every save.
   let cleared = 0;
-  if (saved[store.code]) {
+  const cur = saved[store.code];
+  if (cur && cur.vatOff && (!before.vatOff || before.since !== cur.since)) {
     const r = await query(
       `UPDATE sales SET vat = 0 WHERE channel = $1 AND occurred_at >= $2::date AND COALESCE(vat, 0) <> 0`,
-      [store.channelCode, saved[store.code].since]);
+      [store.channelCode, cur.since]);
     cleared = r.rowCount || 0;
   }
-  await audit(req, 'store_vat', null, null, { store: store.code, setting: saved[store.code] || null, cleared });
-  res.json({ ok: true, setting: saved[store.code] || null, cleared });
+  await audit(req, 'store_vat', null, null, { store: store.code, profile, cleared });
+  res.json({ ok: true, setting: cur || null, profile, cleared });
 });
 
 // ──────────────────────────────────────────────────────────────────────────

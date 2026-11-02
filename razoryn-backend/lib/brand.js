@@ -55,6 +55,16 @@ const BRANDS = {
         tokenEnv: 'EBAY_AUTH_TOKEN_RAZORYN2',
         primary: true,                    // MAIN account — default for new listings + cross-listing source
       },
+      // Third Razoryn eBay account. Hidden everywhere until EBAY_AUTH_TOKEN_RAZORYN3
+      // is set. Its own channel code (ebay_r3) keeps its orders separate. Whether
+      // it's a Ltd or a sole trader (VAT, invoice name, listing branding, photos)
+      // is set in the app: Settings → eBay integration → eBay shops.
+      {
+        code: 'razoryn3',
+        name: process.env.EBAY_STORE3_NAME || 'Razoryn 3',
+        channelCode: 'ebay_r3',
+        tokenEnv: 'EBAY_AUTH_TOKEN_RAZORYN3',
+      },
     ],
   },
 
@@ -146,5 +156,9 @@ module.exports.getStore = function (code) {
 };
 // Helper: get the primary store (used by cross-listing — content flows FROM here)
 module.exports.getPrimaryStore = function () {
-  return active.stores.find(s => s.primary) || active.stores[0];
+  // The flagged main shop — unless it's switched off / has no token, then the
+  // first connected shop, so new listings never default to a dead account.
+  return active.stores.find(s => s.primary && s.token)
+    || active.stores.find(s => s.token)
+    || active.stores.find(s => s.primary) || active.stores[0];
 };
