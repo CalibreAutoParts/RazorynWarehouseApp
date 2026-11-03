@@ -4669,6 +4669,7 @@ router.post('/backfill-preorder-presentation', requireAdmin, async (req, res) =>
 });
 
 router.publishDuePrelistings = publishDuePrelistings;
+router.publishPrelisting = publishPrelisting;   // Incoming → Go live
 
 // Helper: minimal HTML-escape for server-side description fallback strings
 function escapeHtmlServer(s) {

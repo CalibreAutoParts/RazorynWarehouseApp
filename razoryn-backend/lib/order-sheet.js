@@ -29,6 +29,8 @@ const FIELDS = {
   make: 'Make', model: 'Model', year: 'Year', remark: 'Remark',
   lengthCm: 'Carton length (cm)', widthCm: 'Carton width (cm)', heightCm: 'Carton height (cm)', weightKg: 'Weight (kg)',
   cartons: 'Cartons',
+  postage: 'Postage / shipping rate (per item)', packaged: 'Packaged? (yes/no)', packagingCost: 'Packaging cost (per item)',
+  sellPrice: 'Selling price',
 };
 const CORE = ['photo', 'title', 'partNumber', 'supplierSku', 'unitPrice', 'qty', 'total', 'cbm'];
 
@@ -43,6 +45,11 @@ const num = (v) => {
 
 // ── Built-in header rules (tested on real supplier sheets) ────────────────
 const RULES = [
+  // Our own extras first (else "shipping price" would read as the unit price).
+  ['postage', (h) => /\b(postage|shipping|delivery|courier)\b/.test(h) && !/\b(date|time|mark|marks|address|port)\b/.test(h)],
+  ['packagingCost', (h) => /\b(packaging|box|boxing) (cost|price|fee)\b/.test(h)],
+  ['packaged', (h) => /\b(packaged|packaging|boxed|retail box|package)\b/.test(h) && !/\b(cost|price|fee|size|dim|qty|weight)\b/.test(h)],
+  ['sellPrice', (h) => /\b(sell price|selling price|retail price|rrp|our price|list price|sale price)\b/.test(h)],
   ['photo', (h) => /\b(photo|picture|pic|image|img|图片|照片)\b/.test(h)],
   ['total', (h) => /\b(total|amount|line total|subtotal|金额)\b/.test(h) && !/\b(qty|quantity|cbm|weight|ctn|carton|kg)\b/.test(h)],
   ['cbm', (h) => /\b(cbm|m3|volume|体积)\b/.test(h)],
@@ -253,6 +260,8 @@ function buildLines(rows, headerIdx, map, extras, photos, rowOffset) {
       make: cell('make') || null, model: cell('model') || null, year: cell('year') || null,
       remark: cell('remark') || null, cartons: num(cell('cartons')),
       lengthCm: dims[0], widthCm: dims[1], heightCm: dims[2], weightKg: num(cell('weightKg')),
+      postage: num(cell('postage')), packaged: cell('packaged') || null,
+      packagingCost: num(cell('packagingCost')), sellPrice: num(cell('sellPrice')),
       extras: ext,
     });
   }
@@ -286,7 +295,8 @@ function locateTable(rows, saved) {
 // ── Our template (download) ────────────────────────────────────────────────
 function buildTemplate({ supplier = '', currency = 'CNY' } = {}) {
   const head = ['Photo', 'Name', 'Part Number', 'Supplier Number', 'Price', 'Quantity', 'Total', 'CBM',
-    'Make', 'Model', 'Year', 'Carton L (cm)', 'Carton W (cm)', 'Carton H (cm)', 'Weight (kg)', 'Remark'];
+    'Make', 'Model', 'Year', 'Carton L (cm)', 'Carton W (cm)', 'Carton H (cm)', 'Weight (kg)', 'Remark',
+    'Packaged (yes/no)', 'Shipping rate (£ per item)', 'Selling price (£)'];
   const aoa = [
     ['ORDER LIST'],
     ['Supplier:', supplier, '', 'Order no:', ''],
@@ -309,7 +319,7 @@ function buildTemplate({ supplier = '', currency = 'CNY' } = {}) {
   ws['F' + tr] = { t: 'n', f: `SUM(F${firstData}:F${lastData})` };
   ws['G' + tr] = { t: 'n', f: `SUM(G${firstData}:G${lastData})` };
   ws['H' + tr] = { t: 'n', f: `SUM(H${firstData}:H${lastData})` };
-  ws['!cols'] = [12, 38, 18, 18, 10, 10, 12, 8, 12, 14, 10, 12, 12, 12, 11, 24].map(w => ({ wch: w }));
+  ws['!cols'] = [12, 38, 18, 18, 10, 10, 12, 8, 12, 14, 10, 12, 12, 12, 11, 24, 14, 16, 14].map(w => ({ wch: w }));
   ws['!rows'] = Array.from({ length: tr }, (_, i) => (i >= firstData - 1 && i < lastData ? { hpt: 60 } : {}));
   const guide = XLSX.utils.aoa_to_sheet([
     ['How to fill in this order list'],

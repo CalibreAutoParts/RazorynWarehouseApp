@@ -154,7 +154,7 @@ async function handlePreorderStockArrival(productId) {
   let pr;
   try {
     pr = await query(
-      `SELECT id, sku, title, qty_on_hand, is_prelisted, preorder_active, shopify_product_id
+      `SELECT id, sku, title, qty_on_hand, is_prelisted, preorder_active, shopify_product_id, ebay_prelist_status
          FROM products WHERE id = $1`, [productId]);
   } catch (e) { return; }
   const p = pr.rows[0];
@@ -176,6 +176,16 @@ async function handlePreorderStockArrival(productId) {
         });
       } catch (e) { console.warn('[preorder] Shopify revert failed for', p.sku, '-', e.message); }
     }
+  }
+
+  // 1b. Went live from Incoming with "list on eBay when stock arrives" → list it now.
+  if (p.ebay_prelist_status === 'on_arrival') {
+    try {
+      const full = (await query(`SELECT * FROM products WHERE id = $1`, [p.id])).rows[0];
+      const out = await require('../routes/listings').publishPrelisting(full);
+      require('../lib/notify').notifyEvent({ type: 'ebay_go_live', title: `🚀 Now on eBay: ${p.title || p.sku}`,
+        body: `Stock arrived — listed (item ${out.itemId}).`, relatedType: 'product', relatedId: p.id, audience: 'admin', url: '/#inventory' }).catch(() => {});
+    } catch (e) { console.warn('[preorder] eBay go-live on arrival failed for', p.sku, '-', e.message); }
   }
 
   // 2. Flip open pre-order sales for this product to pending + notify.
