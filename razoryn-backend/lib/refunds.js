@@ -48,7 +48,7 @@ async function reconcileSaleRefund(saleId, opts = {}) {
   if (opts.channelRefund != null) {
     const cr = Math.max(0, round2(opts.channelRefund));
     await query(
-      `UPDATE sales SET channel_refunded_amount = GREATEST(COALESCE(channel_refunded_amount, 0), $2) WHERE id = $1`,
+      `UPDATE sales SET channel_refunded_amount = GREATEST(COALESCE(channel_refunded_amount, 0), $2::numeric) WHERE id = $1`,
       [saleId, cr]);
   }
   const r = await query(
@@ -67,10 +67,10 @@ async function reconcileSaleRefund(saleId, opts = {}) {
   const fully = refunded > 0 && refunded >= total - 0.005;
   await query(
     `UPDATE sales SET
-        refunded_amount = $2,
-        refunded_at = CASE WHEN $2 > 0 AND refunded_at IS NULL THEN now()
-                           WHEN $2 = 0 THEN NULL ELSE refunded_at END,
-        status = CASE WHEN $3 AND status NOT IN ('refunded','cancelled') THEN 'refunded'
+        refunded_amount = $2::numeric,
+        refunded_at = CASE WHEN $2::numeric > 0 AND refunded_at IS NULL THEN now()
+                           WHEN $2::numeric = 0 THEN NULL ELSE refunded_at END,
+        status = CASE WHEN $3::boolean AND status NOT IN ('refunded','cancelled') THEN 'refunded'
                       ELSE status END
       WHERE id = $1`,
     [saleId, refunded, fully]);

@@ -6,8 +6,16 @@ const brand = require('../lib/brand');
 
 const router = express.Router();
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
+  // Colours staff picked per sales channel (Settings → Sales channel colours).
+  let channelColors = {};
+  try {
+    const { query } = require('../db');
+    channelColors = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data?.channelColors || {};
+  } catch (_) {}
   res.json({
+    channelColors,
+    onbuy: require('../services/onbuy').isConfigured(),
     code: brand.code,
     name: brand.name,
     fullName: brand.fullName,

@@ -108,7 +108,7 @@ async function sendCustomerShippingEmail(saleId, kind) {
     const sr = await query(`SELECT * FROM sales WHERE id = $1`, [saleId]);
     const sale = sr.rows[0];
     if (!sale || !sale.customer_email) return { ok: false, error: 'no_email_address' };
-    if ((sale.channel || '').match(/^(shopify|ebay_)/)) return { ok: false, error: 'channel_handles_email' };
+    if ((sale.channel || '').match(/^(shopify|ebay_|onbuy)/)) return { ok: false, error: 'channel_handles_email' };
     const items = (await query(`SELECT title, qty FROM sale_items WHERE sale_id = $1 ORDER BY id`, [saleId])).rows;
     const company = await getCompany();
     const tmpl = require('../lib/dispatch-emails');
@@ -280,7 +280,7 @@ router.post('/bulk-mark-dispatched', requireAdmin, async (req, res) => {
             pushToChannel ? 'pending' : 'na', id]);
         dispatched++;
         // Fire-and-forget channel push only if explicitly requested
-        if (pushToChannel && (row.channel || '').match(/^(shopify|ebay_)/)) {
+        if (pushToChannel && (row.channel || '').match(/^(shopify|ebay_|onbuy)/)) {
           const updated = await query(`SELECT * FROM sales WHERE id = $1`, [id]);
           setImmediate(() => pushDispatchToChannel(updated.rows[0]).catch(e => console.warn('[dispatch.bulkPush]', e.message)));
         }
@@ -357,7 +357,7 @@ router.post('/:saleId/mark-dispatched', requirePermission('dispatch'), async (re
   }
 
   // Async push to source channel. Don't block the response on this.
-  if (pushToChannel !== false && (result.sale.channel || '').match(/^(shopify|ebay_)/)) {
+  if (pushToChannel !== false && (result.sale.channel || '').match(/^(shopify|ebay_|onbuy)/)) {
     setImmediate(() => pushDispatchToChannel(result.sale).catch(e => {
       console.warn('[dispatch.push]', e.message);
     }));
@@ -460,6 +460,7 @@ function channelGroup(channel) {
   const c = (channel || '').toLowerCase();
   if (c.startsWith('ebay')) return 'ebay';
   if (c === 'shopify') return 'store';
+  if (c === 'onbuy') return 'onbuy';
   if (c === 'direct_bank') return 'bank';
   if (c === 'direct_cash') return 'cash';
   if (c === 'direct_card') return 'card';
@@ -653,7 +654,7 @@ router.post('/:saleId/edit-tracking', requireAdmin, async (req, res) => {
 
   await audit(req, 'edit_tracking', 'sale', updated.rows[0].id, { carrier, trackingNumber, repush: !!repushToChannel });
 
-  if (repushToChannel && (updated.rows[0].channel || '').match(/^(shopify|ebay_)/)) {
+  if (repushToChannel && (updated.rows[0].channel || '').match(/^(shopify|ebay_|onbuy)/)) {
     setImmediate(() => pushDispatchToChannel(updated.rows[0]).catch(e => console.warn('[dispatch.repush]', e.message)));
   }
 
@@ -719,6 +720,8 @@ async function pushDispatchToChannel(sale) {
         carrier: sale.carrier,
         trackingNumber: sale.tracking_number,
       });
+    } else if (channel === 'onbuy') {
+      await require('../lib/onbuy-sync').pushDispatch(sale);
     } else {
       // Direct sales — nothing to push.
       await query(`UPDATE sales SET channel_push_state = 'na' WHERE id = $1`, [sale.id]);

@@ -80,7 +80,7 @@ async function ensurePaidColumn() {
     // 'direct_card' is accepted without losing the guard on bad values.
     try {
       await query(`ALTER TABLE sales DROP CONSTRAINT IF EXISTS sales_channel_check`);
-      await query(`ALTER TABLE sales ADD CONSTRAINT sales_channel_check CHECK (channel IN ('shopify','ebay_em','ebay_cl','ebay_r3','direct_cash','direct_bank','direct_card'))`);
+      await query(`ALTER TABLE sales ADD CONSTRAINT sales_channel_check CHECK (channel IN ('shopify','ebay_em','ebay_cl','ebay_r3','onbuy','direct_cash','direct_bank','direct_card'))`);
     } catch (e) { console.warn('[sales] channel constraint widen:', e.message); }
     // When a CHANNEL order is deleted, remember its external order id so the
     // eBay/Shopify sync doesn't silently re-import it (the "deleted but it came
@@ -103,7 +103,7 @@ require('../lib/refunds').ensureRefundColumns();
 // these responses.
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
-const CHANNELS = ['shopify', 'ebay_em', 'ebay_cl', 'ebay_r3', 'direct_cash', 'direct_bank', 'direct_card'];
+const CHANNELS = ['shopify', 'ebay_em', 'ebay_cl', 'ebay_r3', 'onbuy', 'direct_cash', 'direct_bank', 'direct_card'];
 
 // ----- helpers -----
 // Build the single customer-facing reference for a sale. One unified value used
@@ -428,6 +428,7 @@ router.get('/export.xlsx', requireAdmin, async (req, res) => {
   const allChannels = [
     { key: 'shopify', label: 'Store (Shopify)', sheetName: 'Store',  match: ['shopify'] },
     { key: 'ebay',    label: 'eBay',            sheetName: 'eBay',     match: ['ebay_em', 'ebay_cl', 'ebay_r3'] },
+    { key: 'onbuy',   label: 'OnBuy',           sheetName: 'OnBuy',    match: ['onbuy'] },
     { key: 'cash',    label: 'Cash',            sheetName: 'Cash',     match: ['direct_cash'] },
     { key: 'bank',    label: 'Bank transfer',   sheetName: 'Bank',     match: ['direct_bank'] },
   ];
