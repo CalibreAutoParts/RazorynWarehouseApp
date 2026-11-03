@@ -132,6 +132,29 @@ ensureTable();
 // eBay price × qty less VAT, eBay fees (+ VAT on fees), ads, postage, packaging
 // and landed cost — the same model as Costs & margins. Lines without an eBay
 // price yet are counted as unpriced (add the price later; this updates).
+// A saved listing DRAFT for a line (linked by incoming id, or by SKU while the
+// line has no product yet) — its price / postage / packaging count toward the
+// container's value until the listing is created.
+const NUM = (x) => `CASE WHEN (${x}) ~ '^[0-9]+(\\.[0-9]+)?$' THEN (${x})::numeric END`;
+const DRAFT_JOIN = `LEFT JOIN LATERAL (
+    SELECT d.id AS draft_id,
+           ${NUM("d.payload->'snapshot'->'fields'->>'ce-price'")} AS d_price,
+           NULLIF(d.payload->'snapshot'->'fields'->>'cl-ship-band', '') AS d_band,
+           ${NUM("d.payload->'snapshot'->'fields'->>'cl-ship-cost'")} AS d_ship_cost,
+           (d.payload->'snapshot'->'checks'->>'cl-pack-inc')::boolean AS d_pack_inc,
+           ${NUM("d.payload->'snapshot'->'fields'->>'cl-pack-cost'")} AS d_pack_cost
+      FROM listing_drafts d
+     WHERE to_regclass('listing_drafts') IS NOT NULL
+       AND (d.incoming_id = i.id OR (i.product_id IS NULL AND COALESCE(i.sku, '') <> '' AND LOWER(d.sku) = LOWER(i.sku)))
+     ORDER BY (d.incoming_id = i.id) DESC, d.updated_at DESC LIMIT 1) dr ON true`;
+const EFF_PRICE = `COALESCE(NULLIF(p.price_ebay, 0), dr.d_price)`;
+async function ensureDraftsTable() {
+  await query(`CREATE TABLE IF NOT EXISTS listing_drafts (
+      id SERIAL PRIMARY KEY, title TEXT, sku TEXT, part_number TEXT, vehicle TEXT, image_count INTEGER NOT NULL DEFAULT 0,
+      incoming_id INTEGER REFERENCES incoming_stock(id) ON DELETE SET NULL, payload JSONB NOT NULL, created_by INTEGER,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`).catch(() => {});
+}
+
 async function ebayPotential(lines) {
   const PF = require('../lib/pricing-floor');
   const row = (await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {};
@@ -145,16 +168,20 @@ async function ebayPotential(lines) {
     const landed = l.landed_unit_cost_gbp != null ? parseFloat(l.landed_unit_cost_gbp) : (l.unit_cost_gbp != null ? parseFloat(l.unit_cost_gbp) : null);
     if (!(price > 0)) { t.unpriced++; t.unpricedUnits += qty; out.push({ ...l, ebay: null }); continue; }
     const item = { band: l.shipping_band, isLarge: !!l.large_panel, shippingCost: l.shipping_cost };
+    // Per-item packaging: came packaged → £0; bought separately → its own £.
+    const pack = l.packaging_included === true ? 0
+      : (l.packaging_included === false && l.packaging_cost != null ? parseFloat(l.packaging_cost) || 0 : s.packagingCost);
+    const SI = pack === s.packagingCost ? s : { ...s, packagingCost: pack };
     const ch = PF.channelParams('ebay', item, s);
     const inPrice = l.postage_in_price == null ? !l.large_panel : !!l.postage_in_price;
     const fees = price * ((ch.feePct + ch.adRatePct) / 100) * ch.feeVatMult + ch.fixedFee * ch.feeVatMult + price * (Number(s.externalAdPct) || 0) / 100;
     const postage = inPrice ? ch.postage : 0;
     const cost = PF.effectiveCost(landed, l.landed_unit_cost_gbp, s);
     const m = PF.marginAtPrice({ price, costPrice: landed, landedCost: l.landed_unit_cost_gbp, isLarge: !!l.large_panel, band: l.shipping_band,
-      shippingCost: l.shipping_cost, postageInPrice: l.postage_in_price, channel: 'ebay', settings: s });
-    const e = { price, perUnit: { vat: +(price * v).toFixed(2), fees: +fees.toFixed(2), postage: +postage.toFixed(2), packaging: s.packagingCost, cost: +cost.toFixed(2), net: m.net, marginPct: m.marginPct } };
+      shippingCost: l.shipping_cost, postageInPrice: l.postage_in_price, channel: 'ebay', settings: SI });
+    const e = { price, fromDraft: !!l.price_from_draft, perUnit: { vat: +(price * v).toFixed(2), fees: +fees.toFixed(2), postage: +postage.toFixed(2), packaging: pack, cost: +cost.toFixed(2), net: m.net, marginPct: m.marginPct } };
     t.revenue += price * qty; t.vat += price * v * qty; t.fees += fees * qty; t.postage += postage * qty;
-    t.packaging += s.packagingCost * qty; t.cost += cost * qty; t.net += (m.net || 0) * qty; t.units += qty;
+    t.packaging += pack * qty; t.cost += cost * qty; t.net += (m.net || 0) * qty; t.units += qty;
     out.push({ ...l, ebay: e });
   }
   for (const k of ['revenue', 'vat', 'fees', 'postage', 'packaging', 'cost', 'net']) t[k] = +t[k].toFixed(2);
@@ -224,7 +251,7 @@ async function reapportionContainer(ref) {
 // Returns incoming rows joined to the live product (current on-hand) + a small
 // summary so the UI can show "what's coming" at a glance.
 router.get('/', requirePermission('inventory'), async (req, res) => {
-  await ensureTable();
+  await ensureTable(); await ensureDraftsTable();
   await linkUnmatchedLines();
   const { status, container, q } = req.query;
   const where = ["i.status <> 'cancelled'"], params = [];
@@ -238,10 +265,12 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   const { rows } = await query(`
     SELECT i.*, p.qty_on_hand AS product_qty_on_hand, p.title AS product_title, p.sku AS product_sku,
            p.is_placeholder AS product_is_placeholder, p.is_prelisted AS product_is_prelisted,
-           p.ebay_prelist_status AS product_ebay_status, p.price_ebay AS product_price_ebay,
+           p.ebay_prelist_status AS product_ebay_status, ${EFF_PRICE} AS product_price_ebay,
+           (NULLIF(p.price_ebay, 0) IS NULL AND dr.d_price IS NOT NULL) AS price_from_draft, dr.draft_id,
            p.shopify_product_id AS product_shopify_id
     FROM incoming_stock i
     LEFT JOIN products p ON p.id = i.product_id
+    ${DRAFT_JOIN}
     WHERE ${where.join(' AND ')}
     ORDER BY (i.status = 'received'), i.expected_date NULLS LAST, i.created_at DESC
     LIMIT 1000`, params);
@@ -257,7 +286,7 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
 // GET /api/incoming/containers — distinct open container refs (for the filter),
 // joined to the container header so the UI can show which ones still need freight/duty.
 router.get('/containers', requirePermission('inventory'), async (req, res) => {
-  await ensureTable();
+  await ensureTable(); await ensureDraftsTable();
   const archived = req.query.archived === '1';
   const { rows } = await query(`
     SELECT i.container_ref AS ref, COUNT(*)::int AS lines,
@@ -267,13 +296,15 @@ router.get('/containers', requirePermission('inventory'), async (req, res) => {
            c.freight_total, c.duty, c.freight_currency, c.freight_total_gbp, c.duty_gbp, c.archived_at,
            ROUND(COALESCE(SUM(i.unit_cost_gbp * i.qty_ordered), 0)::numeric, 2) AS goods_gbp,
            ROUND(COALESCE(SUM(COALESCE(i.landed_unit_cost_gbp, i.unit_cost_gbp) * i.qty_ordered), 0)::numeric, 2) AS landed_gbp,
-           ROUND(COALESCE(SUM(p.price_ebay * i.qty_ordered) FILTER (WHERE p.price_ebay > 0), 0)::numeric, 2) AS potential_ebay,
-           COUNT(*) FILTER (WHERE p.price_ebay IS NULL OR p.price_ebay <= 0)::int AS unpriced,
+           ROUND(COALESCE(SUM(${EFF_PRICE} * i.qty_ordered) FILTER (WHERE ${EFF_PRICE} > 0), 0)::numeric, 2) AS potential_ebay,
+           COUNT(*) FILTER (WHERE ${EFF_PRICE} IS NULL OR ${EFF_PRICE} <= 0)::int AS unpriced,
+           COUNT(*) FILTER (WHERE NULLIF(p.price_ebay, 0) IS NULL AND dr.d_price > 0)::int AS priced_from_draft,
            COUNT(*) FILTER (WHERE i.product_id IS NULL)::int AS unlisted,
            COUNT(*) FILTER (WHERE p.is_placeholder)::int AS placeholders
     FROM incoming_stock i
     LEFT JOIN incoming_containers c ON c.container_ref = i.container_ref
     LEFT JOIN products p ON p.id = i.product_id
+    ${DRAFT_JOIN}
     WHERE i.container_ref IS NOT NULL AND i.container_ref <> '' AND i.status <> 'cancelled'
       AND ${archived ? 'c.archived_at IS NOT NULL' : 'c.archived_at IS NULL'}
     GROUP BY i.container_ref, c.freight_total, c.duty, c.freight_currency, c.freight_total_gbp, c.duty_gbp, c.archived_at
@@ -296,13 +327,17 @@ router.post('/containers/:ref/archive', requirePermission('inventory'), async (r
 // GET /api/incoming/containers/:ref — one container: header (freight/duty) + its lines
 // with the live landed cost per unit + a totals summary.
 router.get('/containers/:ref', requirePermission('inventory'), async (req, res) => {
-  await ensureTable();
+  await ensureTable(); await ensureDraftsTable();
   const ref = req.params.ref;
   const header = (await query(`SELECT * FROM incoming_containers WHERE container_ref = $1`, [ref])).rows[0] || { container_ref: ref };
   const lines = (await query(`
-    SELECT i.*, p.qty_on_hand AS product_qty_on_hand, p.price_ebay, p.large_panel, p.shipping_band, p.shipping_cost,
+    SELECT i.*, p.qty_on_hand AS product_qty_on_hand, ${EFF_PRICE} AS price_ebay,
+           (NULLIF(p.price_ebay, 0) IS NULL AND dr.d_price IS NOT NULL) AS price_from_draft, dr.draft_id,
+           p.large_panel, COALESCE(p.shipping_band, dr.d_band) AS shipping_band, COALESCE(p.shipping_cost, dr.d_ship_cost) AS shipping_cost,
+           COALESCE(p.packaging_included, dr.d_pack_inc) AS packaging_included, COALESCE(p.packaging_cost, dr.d_pack_cost) AS packaging_cost,
            p.postage_in_price, p.title AS product_title, p.is_placeholder
     FROM incoming_stock i LEFT JOIN products p ON p.id = i.product_id
+    ${DRAFT_JOIN}
     WHERE i.container_ref = $1 AND i.status <> 'cancelled'
     ORDER BY i.title NULLS LAST, i.id`, [ref])).rows;
   const goods = lines.reduce((a, l) => a + (parseFloat(l.unit_cost_gbp) || 0) * (parseInt(l.qty_ordered) || 0), 0);
@@ -394,6 +429,7 @@ router.post('/', requirePermission('inventory'), async (req, res) => {
   await audit(req, 'incoming_create', 'incoming', rows[0].id, { qty, container: b.containerRef });
   if (b.supplier) { try { await require('./suppliers').ensureSupplierByName(b.supplier, { currency }); } catch (_) {} }
   if (b.containerRef) await reapportionContainer(b.containerRef).catch(() => {});
+  if (productId) await applyIncomingToProduct(productId).catch(() => {});
 
   // If staff linked this line to an existing product AND typed a part number that
   // isn't already the product's master SKU/part number, capture it as a searchable
@@ -526,12 +562,8 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
   for (const ref of refs) { await reapportionContainer(ref).catch(() => {}); await syncPlaceholderCosts(ref); }
   // Supplier codes: each matched line's code at THIS supplier is remembered
   // (every supplier can have its own code for the same part).
-  if (b.supplier) {
-    const sup = require('./suppliers');
-    for (const c of created) {
-      const l = lineById[c.id];
-      if (c.productId && l && l.supplierSku) await sup.upsertSupplierCode(c.productId, b.supplier, l.supplierSku, { unitCost: l.unitCostForeign, currency: l.currency || b.currency }).catch(() => {});
-    }
+  for (const pid of new Set(created.map(c => c.productId).filter(Boolean))) {
+    await applyIncomingToProduct(pid).catch(e => console.warn('[incoming] apply to product:', e.message));
   }
   // Not listed yet → placeholder products (Thumbnail Maker can find them by SKU /
   // part number; Shopify pre-order or draft; eBay held until Go live).
@@ -603,6 +635,71 @@ function lineExtras(l) {
   return Object.keys(e).length ? JSON.stringify(e) : null;
 }
 
+// Everything an incoming line knows about a part, carried onto its product —
+// supplier + their code + unit cost, postage, packaging, parcel size, make/model,
+// photo, ETA, sell price. Only EMPTY product fields are filled (never overwrites
+// what someone set on the listing). Called whenever a line and a product meet:
+// placeholder creation, a listing created later, a line added for an existing
+// product, and every time Edit listing opens.
+async function applyIncomingToProduct(productId) {
+  if (!productId) return null;
+  await ensureTable(); await ensurePlaceholderCols();
+  const lines = (await query(`SELECT * FROM incoming_stock WHERE product_id = $1 AND status <> 'cancelled'
+                               ORDER BY (status = 'received'), created_at DESC`, [productId])).rows;
+  if (!lines.length) return null;
+  const filled = { suppliers: 0 };
+  // Suppliers: one link per supplier (their code + unit cost), even with no code yet.
+  const sup = require('./suppliers');
+  const seen = new Set();
+  for (const l of lines) {
+    const key = String(l.supplier || '').trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const got = await sup.upsertSupplierCode(productId, l.supplier, l.supplier_sku || null,
+      { unitCost: l.unit_cost_foreign, currency: l.currency }).catch(() => null);
+    if (got) filled.suppliers++;
+  }
+  // Listing details: newest line that has each one.
+  const pick = (fn) => { for (const l of lines) { const v = fn(l); if (v != null && v !== '') return v; } return null; };
+  const li = (l) => (l.extras && l.extras.listing) || {};
+  let band = pick(l => li(l).shippingBand), postage = num(pick(l => li(l).postage));
+  if (!band && postage != null) band = 'custom';
+  if (band && band !== 'custom') {
+    const PF = require('../lib/pricing-floor');
+    const st = PF.resolveCostSettings((await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {});
+    if (!st.shippingBands.some(z => z.code === band)) band = postage != null ? 'custom' : null;
+  }
+  const kg = num(pick(l => li(l).weightKg));
+  const photo = pick(l => (l.photo_url && /^https:\/\//.test(l.photo_url)) ? l.photo_url : null);
+  const r = (await query(`UPDATE products SET
+       shipping_band      = COALESCE(shipping_band, $2),
+       shipping_cost      = CASE WHEN shipping_band IS NULL AND $2 = 'custom' THEN $3 ELSE shipping_cost END,
+       packaging_included = COALESCE(packaging_included, $4),
+       packaging_cost     = COALESCE(packaging_cost, $5),
+       pkg_length_cm      = COALESCE(pkg_length_cm, $6), pkg_width_cm = COALESCE(pkg_width_cm, $7),
+       pkg_height_cm      = COALESCE(pkg_height_cm, $8), pkg_weight_g = COALESCE(pkg_weight_g, $9),
+       brand              = COALESCE(NULLIF(brand, ''), $10), model = COALESCE(NULLIF(model, ''), $11),
+       image_url          = COALESCE(NULLIF(image_url, ''), $12),
+       price_ebay         = COALESCE(NULLIF(price_ebay, 0), $13),
+       part_number        = COALESCE(NULLIF(part_number, ''), $14),
+       preorder_eta       = CASE WHEN COALESCE(is_placeholder, false) OR (is_prelisted AND qty_on_hand <= 0) THEN COALESCE(preorder_eta, $15) ELSE preorder_eta END,
+       updated_at = now()
+     WHERE id = $1 RETURNING id`,
+    [productId, band, postage, yesNo(pick(l => li(l).packaged)), num(pick(l => li(l).packagingCost)),
+     num(pick(l => li(l).lengthCm)), num(pick(l => li(l).widthCm)), num(pick(l => li(l).heightCm)), kg != null ? Math.round(kg * 1000) : null,
+     pick(l => li(l).make) || null, pick(l => li(l).model) || null, photo, num(pick(l => li(l).sellPrice)),
+     pick(l => l.part_number) || null, pick(l => l.status !== 'received' ? l.expected_date : null)])).rows[0];
+  filled.product = !!r;
+  // Cost: the landed cost of goods still on the water when the product has none yet.
+  await query(`UPDATE products p SET cost_price = COALESCE(p.cost_price, x.c), landed_cost = COALESCE(p.landed_cost, x.c), updated_at = now()
+                 FROM (SELECT COALESCE(landed_unit_cost_gbp, unit_cost_gbp) AS c FROM incoming_stock
+                        WHERE product_id = $1 AND status <> 'cancelled' AND COALESCE(landed_unit_cost_gbp, unit_cost_gbp) IS NOT NULL
+                        ORDER BY (status = 'received'), created_at DESC LIMIT 1) x
+                WHERE p.id = $1 AND (p.cost_price IS NULL OR p.landed_cost IS NULL)`, [productId]).catch(() => {});
+  return filled;
+}
+router.applyIncomingToProduct = applyIncomingToProduct;
+
 async function createPlaceholders(lineIds, { shopifyMode = 'draft', userId = null, perLine = {} } = {}) {
   await ensureTable(); await ensurePlaceholderCols();
   const shopify = require('../services/shopify');
@@ -617,6 +714,7 @@ async function createPlaceholders(lineIds, { shopifyMode = 'draft', userId = nul
       const dup = code ? (await query(`SELECT id, sku FROM products WHERE active = true AND (LOWER(sku) = LOWER($1) OR LOWER(part_number) = LOWER($1)) LIMIT 1`, [code])).rows[0] : null;
       if (dup) {
         await query(`UPDATE incoming_stock SET product_id = $1, sku = $2, updated_at = now() WHERE id = $3`, [dup.id, dup.sku, r.id]);
+        await applyIncomingToProduct(dup.id).catch(() => {});
         out.linked++; continue;
       }
       const sku = await uniqueSku(r.sku || r.part_number || r.supplier_sku || r.title);
@@ -640,13 +738,11 @@ async function createPlaceholders(lineIds, { shopifyMode = 'draft', userId = nul
           VALUES ($1,$2,$3,$4,$5,0,$6,$6,$7,true, true,true,$8,true,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
         [sku, title, r.part_number || null, x.make || null, x.model || null, cost, photo, r.expected_date || null, sell,
          postage, band, yesNo(x.packaged), num(x.packagingCost), L, W, H, kg != null ? Math.round(kg * 1000) : null])).rows[0];
-      if (r.supplier && r.supplier_sku) {
-        await require('./suppliers').upsertSupplierCode(ins.id, r.supplier, r.supplier_sku, { unitCost: r.unit_cost_foreign, currency: r.currency }).catch(() => {});
-      }
       if (r.supplier_sku && r.supplier_sku !== r.part_number) {
         await query(`INSERT INTO product_part_numbers (product_id, code, note) VALUES ($1,$2,$3)`, [ins.id, r.supplier_sku, `${r.supplier || 'Supplier'} code`]).catch(() => {});
       }
       await query(`UPDATE incoming_stock SET product_id = $1, sku = $2, title = COALESCE(title, $3), updated_at = now() WHERE id = $4`, [ins.id, sku, title, r.id]);
+      await applyIncomingToProduct(ins.id).catch(e => console.warn('[incoming] apply to placeholder:', e.message));
       // Shopify: draft (finish title/photos first) or a live pre-order now.
       let shop = null;
       if (shopifyMode !== 'none' && shopify.isConfigured()) {
@@ -941,6 +1037,7 @@ router.linkProductToIncoming = async (productId) => {
   await ensureTable();
   const rows = await linkUnmatchedLines(null, productId);
   for (const ref of new Set(rows.map(r => r.container_ref).filter(Boolean))) await reapportionContainer(ref).catch(() => {});
+  await applyIncomingToProduct(productId).catch(e => console.warn('[incoming] apply to listing:', e.message));
   // Brand-new listing for goods still on the water: its cost IS the landed cost.
   await query(`UPDATE products p SET landed_cost = x.landed, cost_price = COALESCE(p.cost_price, x.landed), updated_at = now()
                  FROM (SELECT COALESCE(landed_unit_cost_gbp, unit_cost_gbp) AS landed FROM incoming_stock

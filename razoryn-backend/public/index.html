@@ -4671,7 +4671,9 @@ async function renderContainerDetail() {
               <td><div style="font-weight:600;font-size:13px">${escapeHtml(l.product_title || l.title || '(unnamed)')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || '')}${l.is_placeholder ? ' · placeholder' : ''}</div></td>
               <td class="num">${l.qty_ordered}</td>
               <td class="num">${landed != null ? m(landed) : '—'}</td>
-              <td class="num">${l.product_id ? `<input type="number" step="0.01" min="0" value="${l.price_ebay != null ? escapeAttr(l.price_ebay) : ''}" placeholder="£" style="width:90px;text-align:right" onchange="ctnSetPrice(${l.product_id}, this.value)" ${l.is_placeholder || l.price_ebay == null ? '' : 'title="Live listing — change its price from Edit listing"'}>` : '<span style="font-size:11px;color:var(--ink-soft)">make placeholder first</span>'}</td>
+              <td class="num">${l.product_id && !l.price_from_draft ? `<input type="number" step="0.01" min="0" value="${l.price_ebay != null ? escapeAttr(l.price_ebay) : ''}" placeholder="£" style="width:90px;text-align:right" onchange="ctnSetPrice(${l.product_id}, this.value)" ${l.is_placeholder || l.price_ebay == null ? '' : 'title="Live listing — change its price from Edit listing"'}>`
+                : l.price_from_draft ? `<span title="From the saved listing draft — counts toward the container value">£${(+l.price_ebay).toFixed(2)} <span style="font-size:10.5px;color:var(--ink-soft)">draft</span></span>`
+                : '<span style="font-size:11px;color:var(--ink-soft)">make placeholder first</span>'}</td>
               <td class="num">${pu ? `<span style="color:${pu.net >= 0 ? 'var(--green)' : 'var(--red)'}">${m(pu.net)}</span><div style="font-size:10px;color:var(--ink-soft)">${pu.marginPct}% · fees ${m(pu.fees)}</div>` : '—'}</td>
               <td class="num"><strong>${pu ? m(pu.net * l.qty_ordered) : '—'}</strong></td>
             </tr>`;
@@ -5103,10 +5105,10 @@ async function submitBulkIncoming(andNext) {
       supplierSku: l.supplierSku || undefined,
       unitCostForeign: (l.unitCostForeign != null && l.unitCostForeign !== '') ? parseFloat(l.unitCostForeign) : undefined,
       currency: header.currency,
+      shippingBand: l.shippingBand || (l.postage != null && l.postage !== '' ? 'custom' : undefined),
+      postage: l.postage, packaged: l.packaged, sellPrice: l.sellPrice, packagingCost: l.packagingCost, make: l.make, model: l.model,
       ...(l.productId ? {} : { sku: l.sku || undefined, partNumber: l.partNumber || undefined,
-        shippingBand: l.shippingBand || (l.postage != null && l.postage !== '' ? 'custom' : undefined),
-        title: l.title || undefined, postage: l.postage, packaged: l.packaged, sellPrice: l.sellPrice, packagingCost: l.packagingCost,
-        cbm: l.cbm != null && l.cbm !== '' ? l.cbm : undefined, make: l.make, model: l.model }),
+        title: l.title || undefined, cbm: l.cbm != null && l.cbm !== '' ? l.cbm : undefined }),
     })),
     freightPerCbm: el('incb-frcbm')?.value || undefined,
     containerFreight: el('incb-frtotal')?.value || undefined,
@@ -5171,12 +5173,19 @@ function incDraftListing(id) {
       'cl-cost-foreign': (it.landed_unit_cost_gbp ?? it.unit_cost_gbp) != null ? (+(it.landed_unit_cost_gbp ?? it.unit_cost_gbp)).toFixed(2) : '',
       // Postage + packaging + size entered on the incoming line.
       ...incLineListingFields(it),
+      // Supplier + their code for this part.
+      'cl-sup-name': it.supplier || '', 'cl-sup-code': it.supplier_sku || '',
     },
-    checks: incLineListingChecks(it), specs: {}, placements: [], metafields: [],
-    ebayCategoryId: '', clCategoryId: '', clCategoryName: '', images: [],
+    checks: incLineListingChecks(it),
+    specs: Object.fromEntries([['Make', it.extras?.listing?.make], ['Model', it.extras?.listing?.model], ['Manufacturer Part Number', it.part_number]].filter(x => x[1])),
+    placements: [], metafields: [],
+    ebayCategoryId: '', clCategoryId: '', clCategoryName: '',
+    // Supplier's photo from their sheet, if any.
+    images: it.photo_url && /^https?:/i.test(it.photo_url) ? [it.photo_url] : [],
   };
   routeTo('createlisting');
   if (State.page !== 'createlisting') { CL_REPEAT = null; return; }
+  CL._incomingId = it.id;   // a "Save as draft" stays tied to this line (container value)
   // Suggest the incoming SKU (must stay unique — staff can adjust).
   setTimeout(() => { const s = el('cl-sku'); if (s && !s.value && it.sku) s.value = it.sku; }, 150);
   toast('Pre-filled from the incoming line — set the SKU/price, add photos, then create (or Save as draft).', 'info', 8000);
@@ -14313,6 +14322,7 @@ async function renderCreateListing() {
   CL.categoryId = ''; CL.categoryName = ''; CL.categoryAuto = false; CL._catResults = []; CL.images = []; CL.studio = null;
   CL.editProductId = null; CL.imagesReadonly = false;   // create mode (not edit)
   CL.draftId = null;   // set when resuming a saved draft
+  if (!CL_REPEAT) CL._incomingId = null;
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
   if (el('cl-core')) { el('cl-core').innerHTML = clCoreHtml(); clRenderPhotos(); }
   clFillShipBands(CL_REPEAT?.fields?.['cl-ship-band'] ?? '', CL_REPEAT?.fields?.['cl-ship-cost'] ?? null).then(() => {
@@ -15319,6 +15329,7 @@ async function clSaveDraft(btn) {
       draftId: CL.draftId || undefined,
       title, sku, partNumber, vehicle, imageCount: (CL.images || []).length,
       payload: { snapshot: snap, v: 1 },
+      incomingId: CL._incomingId || undefined,
     });
     CL.draftId = r.draftId;
     toast('💾 Draft saved — find it under Drafts', 'success', 5000);
@@ -18126,7 +18137,11 @@ async function simpImport(btn) {
     const lines = picked.map(l => {
       const base = { containerRef: l.containerRef || undefined, qty: l.qty, unitCostForeign: l.unitPrice != null ? l.unitPrice : undefined, notes: l.remark || undefined,
         photoUrl: l.photo || undefined, cbm: l.cbm != null ? l.cbm : undefined, lineTotal: l.total != null ? l.total : undefined,
-        supplierSku: l.supplierSku || undefined, extras: l.extras && Object.keys(l.extras).length ? l.extras : undefined };
+        supplierSku: l.supplierSku || undefined, extras: l.extras && Object.keys(l.extras).length ? l.extras : undefined,
+        // Listing details ride along for matched parts too — they only fill the product's empty fields.
+        postage: l.postage ?? undefined, packaged: l.packaged ?? undefined, packagingCost: l.packagingCost ?? undefined,
+        sellPrice: l.sellPrice ?? undefined, lengthCm: l.lengthCm ?? undefined, widthCm: l.widthCm ?? undefined,
+        heightCm: l.heightCm ?? undefined, weightKg: l.weightKg ?? undefined };
       if (l.choice !== 'new') return { ...base, productId: l.choice };
       // New/unlisted: keep their description + OEM part number; OUR sku is
       // assigned later when the listing is drafted (their code is NOT our code).
@@ -19570,7 +19585,8 @@ async function openCreateEbayListing(productId, opts = {}) {
 
   // Suggest price: use the row's shopify_price if available, else current price.
   // Strip currency symbols if the row already has gbp-formatted text.
-  const suggestedPrice = (product.shopify_price || product.price_shopify || 0).toString().replace(/[^\d.]/g, '') || '';
+  const suggestedPrice = (+String(product.shopify_price || product.price_shopify || '').replace(/[^\d.]/g, '') > 0)
+    ? String(product.shopify_price || product.price_shopify).replace(/[^\d.]/g, '') : '';
 
   const ceBodyHtml = `
       ${opts.draft ? '' : `<div style="font-size:13px;background:var(--bg-soft);padding:10px 12px;border-radius:6px;margin-bottom:12px">
@@ -24242,8 +24258,13 @@ async function clLoadSupplierCodes(productId) {
   const box = el('cl-sup-list'); if (!box || !productId) return;
   try {
     const r = await Api.get('/api/suppliers/links/' + productId);
-    box.innerHTML = (r.links || []).filter(l => l.supplier_sku).map(l => `<span class="pill" style="font-size:11px">${escapeHtml(l.supplier_name)}: <b>${escapeHtml(l.supplier_sku)}</b>
+    const links = r.links || [];
+    box.innerHTML = links.map(l => `<span class="pill" style="font-size:11px">${escapeHtml(l.supplier_name)}: ${l.supplier_sku ? `<b>${escapeHtml(l.supplier_sku)}</b>` : '<i style="opacity:.75">no code yet</i>'}${l.unit_cost != null && canSeeMoney() ? ` · ${escapeHtml(l.currency || '')} ${(+l.unit_cost).toFixed(2)}` : ''}
       <a href="#" style="margin-left:4px;color:var(--red)" title="Remove" onclick="clDelSupplierCode(${l.id}, ${productId});return false">×</a></span>`).join('');
+    // Supplier already known (e.g. from Incoming) but no code → pre-pick it so only the code needs typing.
+    const nm = el('cl-sup-name');
+    const noCode = links.find(l => !l.supplier_sku);
+    if (nm && !nm.value.trim() && (noCode || links[0])) nm.value = (noCode || links[0]).supplier_name;
   } catch (_) {}
 }
 async function clDelSupplierCode(linkId, productId) {
@@ -24251,9 +24272,9 @@ async function clDelSupplierCode(linkId, productId) {
 }
 async function clSaveSupplierCode(productId) {
   const name = (el('cl-sup-name')?.value || '').trim(), code = (el('cl-sup-code')?.value || '').trim();
-  if (!productId || !name || !code) return;
+  if (!productId || !name) return;   // a supplier without a code is still worth saving
   try {
-    await Api.post('/api/suppliers/links', { productId, supplierName: name, supplierSku: code });
+    await Api.post('/api/suppliers/links', { productId, supplierName: name, supplierSku: code || null, merge: true });
     if (el('cl-sup-code')) el('cl-sup-code').value = '';
     clLoadSupplierCodes(productId);
   } catch (e) { toast('Supplier code not saved: ' + (e.data?.message || e.message), 'warn'); }

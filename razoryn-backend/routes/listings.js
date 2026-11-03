@@ -2090,6 +2090,9 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
 // product (title/desc/price/tags/images), and the live eBay listing (title/
 // price/qty/description/item specifics). Best-effort per channel.
 router.get('/listing-detail/:productId', requireAdmin, async (req, res) => {
+  // Pull anything Incoming knows (supplier, cost, postage, packaging, size…) into
+  // the product's empty fields before showing it.
+  try { await require('./incoming').applyIncomingToProduct(parseInt(req.params.productId)); } catch (_) {}
   const pr = await query(
     `SELECT p.*, sg.code AS stock_group_code, l.name AS location_name
      FROM products p
@@ -2102,7 +2105,7 @@ router.get('/listing-detail/:productId', requireAdmin, async (req, res) => {
   const out = { product };
   // Goods still on order for this product (Incoming) — shown as the pre-order quantity.
   try {
-    out.incoming = (await query(`SELECT container_ref, expected_date, GREATEST(qty_ordered - qty_received, 0)::int AS qty
+    out.incoming = (await query(`SELECT id, container_ref, expected_date, supplier, supplier_sku, GREATEST(qty_ordered - qty_received, 0)::int AS qty
         FROM incoming_stock WHERE product_id = $1 AND status NOT IN ('received','cancelled') AND qty_ordered > qty_received
         ORDER BY expected_date NULLS LAST`, [product.id])).rows;
   } catch (_) { out.incoming = []; }
@@ -4986,7 +4989,15 @@ router.post('/drafts', requireAdmin, async (req, res) => {
   const partNumber = (b.partNumber != null ? String(b.partNumber) : '').trim() || null;
   const vehicle = (b.vehicle != null ? String(b.vehicle) : '').trim() || null;
   const imageCount = parseInt(b.imageCount) || 0;
-  const incomingId = b.incomingId != null ? (parseInt(b.incomingId) || null) : null;
+  let incomingId = b.incomingId != null ? (parseInt(b.incomingId) || null) : null;
+  // No explicit link: an unlisted incoming line with the same SKU / part number.
+  if (!incomingId && (sku || partNumber)) {
+    try {
+      incomingId = (await query(`SELECT id FROM incoming_stock WHERE product_id IS NULL AND status NOT IN ('received','cancelled')
+          AND (($1 <> '' AND LOWER(sku) = LOWER($1)) OR ($2 <> '' AND LOWER(part_number) = LOWER($2))) ORDER BY created_at DESC LIMIT 1`,
+        [sku || '', partNumber || ''])).rows[0]?.id || null;
+    } catch (_) {}
+  }
   try {
     if (b.draftId) {
       const r = await query(
