@@ -498,7 +498,7 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
        (l.cbm != null && l.cbm !== '') ? parseFloat(l.cbm) : null,
        (l.lineTotal != null && l.lineTotal !== '') ? parseFloat(l.lineTotal) : null,
        l.supplierSku ? String(l.supplierSku).slice(0, 80) : null,
-       l.extras && Object.keys(l.extras).length ? JSON.stringify(l.extras) : null]);
+       lineExtras(l)]);
     created.push({ id: ins.rows[0].id, productId: prod.id, sku: prod.sku, qty });
     if (!prod.id) newLineInfo[ins.rows[0].id] = l;
     lineById[ins.rows[0].id] = l;
@@ -592,6 +592,17 @@ async function uniqueSku(base) {
 
 // lineIds: incoming_stock ids with no product yet. perLine: id → extra details
 // { title, postage, packaged, packagingCost, sellPrice, make, model, lengthCm… }.
+// Listing details typed/uploaded with a line (postage, packaging, sell price,
+// size…) are kept on the line so a placeholder or draft made LATER still gets them.
+const LISTING_KEYS = ['shippingBand', 'postage', 'packaged', 'packagingCost', 'sellPrice', 'make', 'model', 'lengthCm', 'widthCm', 'heightCm', 'weightKg'];
+function lineExtras(l) {
+  const e = { ...(l.extras && typeof l.extras === 'object' ? l.extras : {}) };
+  const li = {};
+  for (const k of LISTING_KEYS) if (l[k] != null && l[k] !== '') li[k] = l[k];
+  if (Object.keys(li).length) e.listing = li;
+  return Object.keys(e).length ? JSON.stringify(e) : null;
+}
+
 async function createPlaceholders(lineIds, { shopifyMode = 'draft', userId = null, perLine = {} } = {}) {
   await ensureTable(); await ensurePlaceholderCols();
   const shopify = require('../services/shopify');
@@ -600,7 +611,7 @@ async function createPlaceholders(lineIds, { shopifyMode = 'draft', userId = nul
   const out = { created: [], linked: 0, errors: [] };
   for (const r of rows) {
     try {
-      const x = perLine[r.id] || {};
+      const x = { ...((r.extras && r.extras.listing) || {}), ...(perLine[r.id] || {}) };
       const code = (r.sku || r.part_number || r.supplier_sku || '').trim();
       // Same part already created by an earlier line/container → just link it.
       const dup = code ? (await query(`SELECT id, sku FROM products WHERE active = true AND (LOWER(sku) = LOWER($1) OR LOWER(part_number) = LOWER($1)) LIMIT 1`, [code])).rows[0] : null;
