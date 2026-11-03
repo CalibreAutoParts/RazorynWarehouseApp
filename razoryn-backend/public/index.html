@@ -4457,6 +4457,8 @@ async function loadIncomingContainers() {
             ${c.note ? `<div style="font-size:11px;color:var(--ink-soft)">📝 ${escapeHtml(c.note)}</div>` : ''}
           </div>
           <button class="btn btn-outline btn-sm" onclick="openContainerDetail('${escapeAttr(c.ref)}')" title="Open this container — see what's inside and enter freight + duty">🔎 Open</button>
+          <button class="btn btn-outline btn-sm" onclick="incMakePlaceholders({ containerRef: '${escapeAttr(c.ref)}' })" title="Create placeholder products for every line in this container that isn't listed yet">🧩 Placeholders</button>
+          <button class="btn btn-outline btn-sm" onclick="incGoLiveContainer('${escapeAttr(c.ref)}')" title="Go live with every placeholder in this container">🚀 Go live</button>
           <button class="btn btn-primary btn-sm" onclick="receiveContainer('${escapeAttr(c.ref)}')" title="Receive every remaining line on this container and push to Shopify + eBay">📦 Receive all</button>
         </div>`).join('') + `</div>`;
   } catch (e) { wrap.innerHTML = ''; }
@@ -4536,6 +4538,85 @@ async function saveContainerCosts() {
   } catch (e) { Task.fail(taskId, 'Failed'); toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
+// ── Placeholders + Go live ─────────────────────────────────────────────────
+// Goods ordered but not listed yet → placeholder products (SKU / part number,
+// supplier code, cost, name, photo, postage, packaging). The Thumbnail Maker
+// finds them by SKU / part number; Shopify gets a draft or a live pre-order;
+// eBay waits for Go live (and then lists the moment stock is received).
+async function incMakePlaceholders(target) {
+  const mode = await incShopifyModePick(target.containerRef ? `every unlisted line in ${target.containerRef}` : 'this line');
+  if (!mode) return;
+  const taskId = Task.start('Creating placeholders…');
+  try {
+    const r = await Api.post('/api/incoming/placeholders', { ...target, shopifyMode: mode });
+    Task.done(taskId, 'Done');
+    toast(`🧩 ${r.created.length} placeholder(s) created${r.linked ? ` · ${r.linked} linked to existing` : ''}${r.errors.length ? ` · ${r.errors.length} failed: ${r.errors[0].error}` : ''}`, r.errors.length ? 'warn' : 'success', 8000);
+    Store.refresh('products').catch(() => {});
+    loadIncoming();
+  } catch (e) { Task.fail(taskId, 'Failed'); toast(e.data?.message || e.message, 'error'); }
+}
+function incShopifyModePick(what) {
+  return new Promise(resolve => {
+    modal({ title: '🧩 Create placeholder products', body: `
+      <p style="font-size:13px">For ${escapeHtml(what)}: a product is created with the SKU / part number, supplier code, cost, name and photo from the line, at 0 stock. The Thumbnail Maker can then pull it by SKU / part number to make the title + photos. <b>eBay isn't touched</b> until you press 🚀 Go live.</p>
+      <div class="field"><label>On Shopify</label><select id="ph-shop">
+        <option value="draft">Draft — hidden until it's finished (recommended)</option>
+        <option value="preorder">Pre-order now — live and taking orders (needs a selling price + name)</option>
+        <option value="none">Not on Shopify yet</option></select></div>`,
+      actions: [{ label: 'Cancel', onClick: () => { closeModal(); resolve(null); } }, { label: 'Create', primary: true, onClick: () => { const v = el('ph-shop').value; closeModal(); resolve(v); } }] });
+  });
+}
+function incGoLiveContainer(ref) {
+  const ids = [...new Set((State.incoming || []).filter(i => i.container_ref === ref && i.product_id && i.product_is_placeholder).map(i => i.product_id))];
+  if (!ids.length) return toast('No placeholders in this container yet — create them with 🧩 Placeholders first.', 'warn', 6000);
+  incGoLive(ids);
+}
+function incGoLive(productIds) {
+  const prods = productIds.map(id => {
+    const line = (State.incoming || []).find(i => i.product_id === id) || {};
+    const p = (State.products || []).find(x => x.id === id) || {};
+    return { id, sku: line.product_sku || p.sku || line.sku, title: line.product_title || p.title || line.title || '', price: line.product_price_ebay ?? (p.priceEbay || ''),
+      cost: line.landed_unit_cost_gbp ?? line.unit_cost_gbp, onHand: line.product_qty_on_hand ?? 0 };
+  });
+  const stores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
+  const anyStock = prods.some(p => p.onHand > 0);
+  modal({ title: `🚀 Go live — ${prods.length} item(s)`, body: `
+    <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Check the title and set the selling price (eBay; Shopify follows your price link %). Items still in transit go live on Shopify as a <b>pre-order</b>; eBay lists them <b>automatically the moment the stock is received</b> (or now, if already in stock).</div>
+    <div style="max-height:46vh;overflow:auto;border:1px solid var(--line);border-radius:8px">
+      ${prods.map((p, i) => `<div style="display:flex;gap:8px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--line-2)">
+        <div style="flex:1;min-width:0"><input id="gl-title-${i}" value="${escapeAttr(/\(incoming — add title\)$/.test(p.title) ? '' : p.title)}" placeholder="Listing title (required)" style="width:100%">
+          <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace;margin-top:2px">${escapeHtml(p.sku || '')} · ${p.onHand} in stock${p.cost != null && canSeeMoney() ? ' · cost £' + (+p.cost).toFixed(2) : ''}</div></div>
+        <div><input id="gl-price-${i}" type="number" step="0.01" min="0" value="${escapeAttr(p.price || '')}" placeholder="£ price" style="width:96px"></div>
+      </div>`).join('')}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+      <div class="field" style="margin:0"><label>eBay shop</label><select id="gl-store">${stores.map(s => `<option value="${escapeAttr(s.code)}" ${s.primary ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}<option value="">— not on eBay —</option></select></div>
+      <div class="field" style="margin:0"><label>eBay timing</label><select id="gl-when">
+        <option value="on_arrival">When stock is received (recommended)</option>
+        ${anyStock ? '<option value="now">Now for items already in stock</option>' : ''}</select></div>
+    </div>
+    <label style="display:flex;gap:8px;font-size:13px;margin-top:10px"><input type="checkbox" id="gl-shopify" checked> Make live on Shopify (pre-order while in transit)</label>
+    <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Tip: use ✎ Complete first to add photos (or let the Thumbnail Maker push them), the eBay category and item specifics.</div>`,
+    actions: [{ label: 'Cancel', onClick: closeModal }, { label: '🚀 Go live', primary: true, onClick: async () => {
+      const items = prods.map((p, i) => ({ productId: p.id, title: el('gl-title-' + i).value.trim(), price: el('gl-price-' + i).value }));
+      if (items.some(x => !x.title || !x.price)) return toast('Every item needs a title and a price', 'warn');
+      const storeCode = el('gl-store').value;
+      const taskId = Task.start('Going live…');
+      try {
+        const r = await Api.post('/api/incoming/go-live', { items, storeCode: storeCode || undefined, ebay: storeCode ? el('gl-when').value : 'skip', shopify: el('gl-shopify').checked });
+        Task.done(taskId, 'Done');
+        const bad = r.results.filter(x => !x.ok);
+        closeModal();
+        modal({ title: 'Go live — results', body: `<div style="max-height:50vh;overflow:auto">${r.results.map(x => `<div style="padding:6px 0;border-bottom:1px solid var(--line-2);font-size:12px">
+          <b>${escapeHtml(x.sku || '#' + x.productId)}</b> ${x.ok ? '✅' : '❌ ' + escapeHtml(x.error || '')}
+          ${x.shopify ? `<div>Shopify: ${escapeHtml(x.shopify)}</div>` : ''}${x.ebay ? `<div>eBay: ${x.url ? `<a href="${escapeAttr(x.url)}" target="_blank">${escapeHtml(x.ebay)}</a>` : escapeHtml(x.ebay)}</div>` : ''}</div>`).join('')}</div>`,
+          actions: [{ label: 'Done', primary: true, onClick: closeModal }] });
+        if (bad.length) toast(`${bad.length} item(s) need attention`, 'warn');
+        Store.refresh('products').catch(() => {}); loadIncoming();
+      } catch (e) { Task.fail(taskId, 'Failed'); toast(e.data?.message || e.message, 'error'); }
+    } }] });
+}
+
 function paintIncomingStats(s) {
   const wrap = el('incoming-stats'); if (!wrap) return;
   wrap.innerHTML = `
@@ -4557,7 +4638,9 @@ function paintIncoming(items) {
     const exp = i.expected_date ? new Date(i.expected_date).toLocaleDateString('en-GB') : '—';
     const linked = !!i.product_id;
     return `<tr>
-      <td><div style="font-weight:600">${escapeHtml(i.title || i.product_title || '(unnamed)')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(i.sku || i.part_number || '')}${linked ? '' : ' · <span style="color:var(--amber)">not linked</span>'}</div></td>
+      <td><div style="font-weight:600">${escapeHtml(i.product_title || i.title || '(unnamed)')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(i.sku || i.part_number || '')}${linked ? '' : ' · <span style="color:var(--amber)">not listed yet</span>'}</div>
+        ${linked && i.product_is_placeholder ? `<div style="font-size:11px;margin-top:2px"><span class="pill amber" style="font-size:10px">🧩 placeholder — not live</span>${i.product_shopify_id ? ' <span style="color:var(--ink-soft)">Shopify draft/pre-order</span>' : ''}</div>`
+          : linked && i.product_ebay_status === 'on_arrival' ? `<div style="font-size:11px;margin-top:2px;color:var(--green)">🚀 live — eBay lists when stock arrives</div>` : ''}</td>
       <td class="num">${onHand}</td>
       <td class="num">${i.qty_ordered}</td>
       <td class="num">${i.qty_received}</td>
@@ -4568,6 +4651,9 @@ function paintIncoming(items) {
       <td>${statusPill(i.status)}</td>
       <td style="white-space:nowrap">
         ${remaining > 0 ? `<button class="btn btn-primary btn-sm" onclick="openReceiveIncoming(${i.id})" title="Receive units — adds to stock & pushes to channels">📦 Receive</button>` : ''}
+        ${linked && i.product_is_placeholder ? `<button class="btn btn-primary btn-sm" onclick="incGoLive([${i.product_id}])" title="Make it live: Shopify (pre-order until stock lands) and eBay (now if in stock, or automatically when it's received)">🚀 Go live</button>
+          <button class="btn btn-outline btn-sm" onclick="openEditListing(${i.product_id})" title="Finish the title, photos, category and specifics before going live">✎ Complete</button>` : ''}
+        ${!linked ? `<button class="btn btn-outline btn-sm" onclick="incMakePlaceholders({ ids: [${i.id}] })" title="Create a placeholder product from this line (SKU / part number, cost, name, photo) so the Thumbnail Maker can find it and Shopify can take pre-orders. eBay waits for Go live.">🧩 Placeholder</button>` : ''}
         ${!linked ? `<button class="btn btn-outline btn-sm" onclick="incDraftListing(${i.id})" title="This item isn't listed yet — start its listing pre-filled from this line (SKU, title, part number, qty, cost). Save as draft or push live; the line links up automatically via the SKU.">📝 Draft listing</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="printIncomingLabels(${i.id})" title="Print labels for this item (to apply when the goods arrive)">🏷</button>
         <button class="btn btn-ghost btn-sm" onclick="openEditIncoming(${i.id})" title="Edit">✏️</button>
@@ -4619,6 +4705,12 @@ function openAddIncoming(prefill) {
         <div class="field"><label>Cost currency</label><select id="incb-currency">${curOpts}</select></div>
       </div>
       <div class="field" style="margin-bottom:6px"><label>Container note <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— what's in it / which suppliers</span></label><input id="incb-note" placeholder="e.g. MG + Tesla body panels — suppliers T&T and ABC" value="${escapeAttr(prefill.notes||'')}"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 0.7fr;gap:10px;margin-bottom:6px">
+        <div class="field" style="margin:0"><label>Sea freight rate per CBM <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(if you have it)</span></label><input id="incb-frcbm" type="number" step="0.01" min="0" placeholder="e.g. 45"></div>
+        <div class="field" style="margin:0"><label>…or freight total for the container</label><input id="incb-frtotal" type="number" step="0.01" min="0" placeholder="e.g. 1800"></div>
+        <div class="field" style="margin:0"><label>Freight currency</label><select id="incb-frcur"><option>GBP</option><option>USD</option><option>CNY</option><option>EUR</option></select></div>
+      </div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Freight is split into every line's landed cost (per CBM × each line's CBM, by value otherwise). Duty can be added later from the container.</div>
       <div style="border-top:1px solid var(--line);margin:12px 0;padding-top:10px">
         <div style="font-weight:600;font-size:13px;margin-bottom:6px">Add products</div>
         <div style="position:relative">
@@ -4626,15 +4718,21 @@ function openAddIncoming(prefill) {
           <div id="incb-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:240px;overflow:auto"></div>
         </div>
         <details style="margin-top:8px">
-          <summary style="cursor:pointer;font-size:12px;color:var(--brand-primary)">📋 Paste from a packing list (SKU/part + quantity, optional unit cost per line)</summary>
+          <summary style="cursor:pointer;font-size:12px;color:var(--brand-primary)">📋 Paste from a packing list / spreadsheet (part number, qty, unit cost, name, postage, packaged…)</summary>
           <div style="margin-top:8px">
-            <textarea id="incb-paste" rows="5" placeholder="One per line: code, qty[, unit cost], e.g.&#10;11192455, 120, 8.50&#10;10788797 60&#10;EB-277027050399,200,12" style="width:100%;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+            <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Copy rows straight from Excel <b>with the header row</b> (columns like Part Number, Supplier Number, Name, Qty, Price, CBM, Shipping rate, Packaged, Selling price), or one per line: <code>code, qty, unit cost, name</code>. Codes that aren't listed yet come in as <b>new items</b>.</div>
+            <textarea id="incb-paste" rows="5" placeholder="Part Number	Name	Qty	Price	Shipping rate	Packaged&#10;9829310980	Peugeot 2008 front bumper	20	85	12.99	yes&#10;— or —&#10;11192455, 120, 8.50, Tesla Model 3 headlight" style="width:100%;font-family:ui-monospace,monospace;font-size:12px"></textarea>
             <button type="button" class="btn btn-outline btn-sm" onclick="incbParsePaste()" style="margin-top:6px">Add pasted lines</button>
             <div id="incb-paste-result" style="font-size:11px;color:var(--ink-soft);margin-top:6px"></div>
           </div>
         </details>
       </div>
       <div id="incb-lines-wrap" style="margin-top:8px"></div>
+      <div id="incb-newopts" style="display:none;border-top:1px solid var(--line);margin-top:10px;padding-top:10px">
+        <label style="display:flex;gap:8px;font-size:13px;align-items:flex-start"><input type="checkbox" id="incb-ph" checked style="margin-top:3px"><span><b>Create placeholder products for the new items</b><div style="font-size:11px;color:var(--ink-soft)">SKU = their part number. The Thumbnail Maker can find them to make the title + photos; eBay waits for 🚀 Go live.</div></span></label>
+        <div class="field" style="margin:6px 0 0 26px;max-width:380px"><label style="font-size:12px">On Shopify</label><select id="incb-phshop">
+          <option value="draft">Draft until it's finished (recommended)</option><option value="preorder">Pre-order now (needs name + selling price)</option><option value="none">Not on Shopify yet</option></select></div>
+      </div>
     `,
     actions: [
       { label: 'Cancel', onClick: closeModal },
@@ -4652,12 +4750,21 @@ function incbRenderLines() {
   const cur = (el('incb-currency')?.value) || 'CNY';
   wrap.innerHTML = `<div style="font-size:12px;font-weight:600;margin-bottom:6px">${_incLines.length} line(s) · ${units} units</div>` +
     `<div style="display:flex;gap:8px;font-size:10px;color:var(--ink-soft);padding:0 28px 0 0"><div style="flex:1">Product</div><div style="width:80px;text-align:center">Qty</div><div style="width:90px;text-align:center">Unit cost (${escapeHtml(cur)})</div></div>` +
-    _incLines.map((l, i) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
-      <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(l.title)}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || '')}</div></div>
+    _incLines.map((l, i) => `<div style="margin-bottom:6px;${l.productId ? '' : 'border-left:3px solid var(--amber, #b26a00);padding-left:6px'}"><div style="display:flex;gap:8px;align-items:center">
+      <div style="flex:1;min-width:0">${l.productId
+        ? `<div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(l.title)}</div>`
+        : `<input value="${escapeAttr(l.title || '')}" placeholder="Name (optional — Thumbnail Maker / you can add it later)" onchange="_incLines[${i}].title=this.value" style="width:100%;font-size:12px">`}
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || l.partNumber || '')}${l.productId ? '' : ' · <span style="color:var(--amber, #b26a00)">NEW — not listed yet</span>'}${l.supplierSku ? ' · their code ' + escapeHtml(l.supplierSku) : ''}${l.cbm != null ? ' · ' + l.cbm + ' CBM' : ''}</div></div>
       <input type="number" min="1" value="${escapeAttr(l.qty)}" onchange="_incLines[${i}].qty=parseInt(this.value)||0" style="width:80px">
       <input type="number" min="0" step="0.01" value="${l.unitCostForeign != null ? escapeAttr(l.unitCostForeign) : ''}" placeholder="cost" onchange="_incLines[${i}].unitCostForeign=this.value" style="width:90px">
       <button class="btn btn-ghost btn-sm" onclick="_incLines.splice(${i},1);incbRenderLines()" style="color:var(--red)">×</button>
-    </div>`).join('');
+    </div>${l.productId ? '' : `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;font-size:11px;align-items:center">
+      <input type="number" step="0.01" min="0" value="${l.postage != null ? escapeAttr(l.postage) : ''}" placeholder="postage £/item" title="What it costs to post one to a customer" onchange="_incLines[${i}].postage=this.value" style="width:120px;font-size:11px">
+      <select onchange="_incLines[${i}].packaged=this.value" style="font-size:11px" title="Does it arrive packaged, ready to send?"><option value="">Packaged?</option><option value="yes" ${String(l.packaged).match(/^(y|yes|true)/i) ? 'selected' : ''}>Comes packaged</option><option value="no" ${String(l.packaged).match(/^(n|no|false)/i) ? 'selected' : ''}>Needs packaging</option></select>
+      <input type="number" step="0.01" min="0" value="${l.sellPrice != null ? escapeAttr(l.sellPrice) : ''}" placeholder="selling £ (optional)" onchange="_incLines[${i}].sellPrice=this.value" style="width:120px;font-size:11px">
+      <input type="number" step="0.001" min="0" value="${l.cbm != null ? escapeAttr(l.cbm) : ''}" placeholder="CBM (line)" onchange="_incLines[${i}].cbm=this.value" style="width:90px;font-size:11px">
+    </div>`}</div>`).join('');
+  if (el('incb-newopts')) el('incb-newopts').style.display = _incLines.some(l => !l.productId) ? '' : 'none';
 }
 function incbAddProduct(p, qty, unitCost) {
   if (!p) return;
@@ -4684,26 +4791,57 @@ function incbPick(id) {
   const box = el('incb-suggest'); if (box) box.style.display = 'none';
   incbRenderLines();
 }
+// Paste parser. With a header row (copied from Excel) columns are matched by
+// name; without one each line is "code, qty[, unit cost][, name]". Codes that
+// match a product link to it; anything else becomes a NEW line (placeholder).
+const INC_PASTE_COLS = [
+  ['postage', /\b(postage|shipping|delivery|courier)\b/], ['packagingCost', /\b(packaging|box) (cost|price)\b/],
+  ['packaged', /\b(packaged|packaging|boxed|package)\b/], ['sellPrice', /\b(sell|selling|retail|rrp|sale|our) ?price\b|\brrp\b/],
+  ['supplierSku', /\b(supplier|factory|item) ?(no|number|code)\b/], ['partNumber', /\b(oem|oe|part ?(no|number)|pn|sku|code)\b/],
+  ['title', /\b(name|description|product|title)\b/], ['qty', /\b(qty|quantity|pcs)\b/], ['cbm', /\b(cbm|m3|volume)\b/],
+  ['unitCost', /\b(price|unit ?(price|cost)|cost)\b/], ['make', /^(make|brand)$/], ['model', /^model$/],
+];
 function incbParsePaste() {
   const text = el('incb-paste')?.value || '';
-  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  let added = 0; const unmatched = [];
-  for (const line of lines) {
-    const m = line.split(/[,\t;]+|\s{2,}|\s+(?=\d)/).map(s => s.trim()).filter(Boolean);
-    // Format: code, qty[, unit cost]. A trailing decimal token (e.g. 8.50) is the
-    // optional unit cost; the integer before it is the qty; the rest is the code.
-    let qty = NaN, code = '', cost = null;
-    if (m.length >= 3 && /^\d+(\.\d+)?$/.test(m[m.length - 1]) && /^\d+$/.test(m[m.length - 2])) {
-      cost = m[m.length - 1]; qty = parseInt(m[m.length - 2]); code = m.slice(0, -2).join(' ');
-    } else if (m.length >= 2) { qty = parseInt(m[m.length - 1]); code = m.slice(0, -1).join(' '); }
-    else { const parts = line.split(/\s+/); qty = parseInt(parts[parts.length - 1]); code = parts.slice(0, -1).join(' '); }
-    if (!code || !Number.isInteger(qty) || qty <= 0) { unmatched.push(line); continue; }
-    const cl = code.toLowerCase();
-    const p = (State.products || []).find(x => (x.sku || '').toLowerCase() === cl || (x.part_number || '').toLowerCase() === cl);
-    if (p) { incbAddProduct(p, qty, cost); added++; } else unmatched.push(code + ' (no match)');
+  const raw = text.split(/\r?\n/).filter(s => s.trim());
+  let added = 0, created = 0; const bad = [];
+  const split = line => line.includes('\t') ? line.split('\t').map(s => s.trim()) : line.split(/[,;]+/).map(s => s.trim());
+  const first = split(raw[0] || '');
+  const headerMap = {};
+  first.forEach((h, idx) => {
+    const n = h.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').trim();
+    for (const [f, re] of INC_PASTE_COLS) if (headerMap[f] === undefined && re.test(n) && !Object.values(headerMap).includes(idx)) { headerMap[f] = idx; break; }
+  });
+  const hasHeader = headerMap.qty !== undefined && (headerMap.partNumber !== undefined || headerMap.supplierSku !== undefined || headerMap.title !== undefined);
+  const rows = hasHeader ? raw.slice(1) : raw;
+  for (const line of rows) {
+    let rec;
+    if (hasHeader) {
+      const c = split(line); const g = f => headerMap[f] !== undefined ? (c[headerMap[f]] || '').trim() : '';
+      rec = { code: g('partNumber') || g('supplierSku'), supplierSku: g('supplierSku') || null, qty: parseInt(String(g('qty')).replace(/[^\d]/g, '')), cost: g('unitCost') || null,
+        title: g('title') || null, postage: g('postage') || null, packaged: g('packaged') || null, sellPrice: g('sellPrice') || null, cbm: g('cbm') || null,
+        make: g('make') || null, model: g('model') || null, packagingCost: g('packagingCost') || null };
+    } else {
+      const m = line.includes('\t') || line.includes(',') || line.includes(';') ? split(line) : line.trim().split(/\s+/);
+      // code, qty[, cost][, name…]
+      const qi = m.findIndex((x, k) => k > 0 && /^\d+$/.test(x));
+      if (qi < 1) { bad.push(line.trim()); continue; }
+      const after = m.slice(qi + 1);
+      const cost = after.length && /^\d+(\.\d+)?$/.test(after[0]) ? after.shift() : null;
+      rec = { code: m.slice(0, qi).join(' '), qty: parseInt(m[qi]), cost, title: after.join(' ') || null };
+    }
+    if (!rec.code && rec.title) rec.code = '';
+    if ((!rec.code && !rec.title) || !Number.isInteger(rec.qty) || rec.qty <= 0) { bad.push(line.trim()); continue; }
+    const cl = (rec.code || '').toLowerCase();
+    const p = cl ? (State.products || []).find(x => (x.sku || '').toLowerCase() === cl || (x.partNumber || x.part_number || '').toLowerCase() === cl) : null;
+    if (p) { incbAddProduct(p, rec.qty, rec.cost); added++; continue; }
+    _incLines.push({ productId: null, sku: rec.code || null, partNumber: rec.code || null, supplierSku: rec.supplierSku || null, title: rec.title || '',
+      qty: rec.qty, unitCostForeign: rec.cost, postage: rec.postage, packaged: rec.packaged, sellPrice: rec.sellPrice,
+      cbm: rec.cbm, make: rec.make, model: rec.model, packagingCost: rec.packagingCost });
+    created++;
   }
   const res = el('incb-paste-result');
-  if (res) res.innerHTML = `Added ${added} line(s).` + (unmatched.length ? ` <span style="color:var(--amber)">Couldn't match ${unmatched.length}:</span> ${unmatched.slice(0, 8).map(escapeHtml).join(', ')}${unmatched.length > 8 ? '…' : ''}` : '');
+  if (res) res.innerHTML = `Added ${added} listed item(s)${created ? ` · <b>${created} new item(s)</b> not listed yet` : ''}.` + (bad.length ? ` <span style="color:var(--amber)">Skipped ${bad.length} line(s) without a code/qty:</span> ${bad.slice(0, 5).map(escapeHtml).join(', ')}${bad.length > 5 ? '…' : ''}` : '');
   if (el('incb-paste')) el('incb-paste').value = '';
   incbRenderLines();
 }
@@ -4722,17 +4860,28 @@ async function submitBulkIncoming(andNext) {
     supplier: el('incb-supplier')?.value || null,
     status: 'on_order',
     lines: _incLines.filter(l => (parseInt(l.qty) || 0) > 0).map(l => ({
-      productId: l.productId, qty: parseInt(l.qty),
+      productId: l.productId || undefined, qty: parseInt(l.qty),
       unitCostForeign: (l.unitCostForeign != null && l.unitCostForeign !== '') ? parseFloat(l.unitCostForeign) : undefined,
       currency: header.currency,
+      ...(l.productId ? {} : { sku: l.sku || undefined, partNumber: l.partNumber || undefined, supplierSku: l.supplierSku || undefined,
+        title: l.title || undefined, postage: l.postage, packaged: l.packaged, sellPrice: l.sellPrice, packagingCost: l.packagingCost,
+        cbm: l.cbm != null && l.cbm !== '' ? l.cbm : undefined, make: l.make, model: l.model }),
     })),
+    freightPerCbm: el('incb-frcbm')?.value || undefined,
+    containerFreight: el('incb-frtotal')?.value || undefined,
+    freightCurrency: el('incb-frcur')?.value || 'GBP',
+    createPlaceholders: !!el('incb-ph')?.checked,
+    shopifyMode: el('incb-phshop')?.value || 'draft',
   };
+  if ((payload.freightPerCbm || payload.containerFreight) && !header.containerRef) { toast('Enter the container number to add freight to it', 'warn'); return; }
   const taskId = Task.start('Adding incoming stock…');
   try {
     const r = await Api.post('/api/incoming/bulk', payload);
     Task.done(taskId, 'Added');
-    const newMsg = r.newItems?.length ? ` · ${r.newItems.length} NEW unlisted item(s) — use 📝 Draft listing on those lines` : '';
-    toast(`Added ${r.created} line(s) · ${r.createdUnits} units${newMsg}` + (r.unmatched?.length ? ` · ${r.unmatched.length} skipped (no qty/sku)` : ''), 'success', newMsg ? 9000 : 5000);
+    const newMsg = r.placeholders ? ` · 🧩 ${r.placeholders.created.length} placeholder product(s) created${r.placeholders.errors.length ? ` (${r.placeholders.errors.length} failed)` : ''} — 🚀 Go live when ready`
+      : (r.newItems?.length ? ` · ${r.newItems.length} NEW unlisted item(s) — use 🧩 Placeholder or 📝 Draft listing on those lines` : '');
+    const frMsg = r.freight && !r.freight.error ? ` · freight ${r.freight.currency} ${r.freight.freight}${r.freight.cbm != null ? ` (${r.freight.cbm} CBM × ${r.freight.perCbm})` : ''}` : '';
+    toast(`Added ${r.created} line(s) · ${r.createdUnits} units${newMsg}${frMsg}` + (r.unmatched?.length ? ` · ${r.unmatched.length} skipped (no qty/sku)` : ''), 'success', newMsg ? 9000 : 5000);
     State._suppliersLoaded = false;   // a new supplier name may have been typed — refresh dropdowns
     if (andNext) {
       // Re-open with the shared container header pre-filled; supplier + lines clear.
@@ -17372,6 +17521,17 @@ function simpRenderReview(meta) {
         <div class="field"><label>Rough ETA</label><input id="simp-eta" type="date"></div>
       </div>
       ${simpFormatHtml()}
+      <div style="display:grid;grid-template-columns:1fr 1fr 0.6fr;gap:8px;margin-bottom:8px">
+        <div class="field" style="margin:0"><label>Sea freight per CBM <span style="font-weight:400;font-size:11px;color:var(--ink-soft)">(optional)</span></label><input id="simp-frcbm" type="number" step="0.01" min="0" placeholder="e.g. 45"></div>
+        <div class="field" style="margin:0"><label>…or freight total</label><input id="simp-frtotal" type="number" step="0.01" min="0"></div>
+        <div class="field" style="margin:0"><label>Currency</label><select id="simp-frcur"><option>GBP</option><option>USD</option><option>CNY</option><option>EUR</option></select></div>
+      </div>
+      ${SIMP.lines.length - matched ? `<div style="background:var(--bg-soft);border-radius:8px;padding:8px 10px;margin-bottom:8px">
+        <label style="display:flex;gap:8px;font-size:13px;align-items:flex-start"><input type="checkbox" id="simp-ph" checked style="margin-top:3px"><span><b>Create placeholder products for the ${SIMP.lines.length - matched} new item(s)</b>
+          <div style="font-size:11px;color:var(--ink-soft)">SKU = their part number; name, photo, cost, postage and packaging from the sheet. The Thumbnail Maker can find them straight away; eBay waits for 🚀 Go live.</div></span></label>
+        <div class="field" style="margin:6px 0 0 26px;max-width:380px"><label style="font-size:12px">On Shopify</label><select id="simp-phshop">
+          <option value="draft">Draft until finished (recommended)</option><option value="preorder">Pre-order now (needs name + selling price)</option><option value="none">Not on Shopify yet</option></select></div>
+      </div>` : ''}
       <div style="font-size:11px;color:var(--ink-soft);margin-bottom:8px">Prices import in <strong>CNY</strong> for cost history + supplier price tracking only — they never touch listing prices. ⚠ rows = the part number matches a listing for a <em>different make/model</em> (shared part) — confirm it's genuinely the same part, or switch it to “New item”.</div>
       <div style="max-height:44vh;overflow-y:auto;border:1px solid var(--line);border-radius:8px">
         ${SIMP.lines.map((l, i) => simpLineHtml(l, i)).join('')}
@@ -17437,7 +17597,7 @@ function simpLineHtml(l, i) {
       <div style="flex:1;min-width:0;font-size:12px">
         <div style="font-weight:600">${escapeHtml(l.title || '(no description)')}${l.make || l.model ? ` <span style="font-weight:400;color:var(--ink-soft)">· ${escapeHtml([l.make, l.model, l.year].filter(Boolean).join(' '))}</span>` : ''}</div>
         <div style="color:var(--ink-soft);font-family:ui-monospace,monospace;font-size:11px">
-          ${l.partNumber ? 'PN ' + escapeHtml(l.partNumber) : ''}${l.supplierSku ? ' · their SKU ' + escapeHtml(l.supplierSku) : ''}${l.unitPrice != null && canSeeMoney() ? ' · ¥' + l.unitPrice : ''}${l.total != null && canSeeMoney() ? ' = ¥' + l.total : ''}${l.cbm != null ? ' · ' + l.cbm + ' CBM' : ''}${l.cartons != null ? ' · ' + l.cartons + ' ctn' : ''}${l.lengthCm ? ` · 📦 ${l.lengthCm}×${l.widthCm ?? '?'}×${l.heightCm ?? '?'}cm` : ''}${l.weightKg ? ' ' + l.weightKg + 'kg' : ''}
+          ${l.partNumber ? 'PN ' + escapeHtml(l.partNumber) : ''}${l.supplierSku ? ' · their SKU ' + escapeHtml(l.supplierSku) : ''}${l.unitPrice != null && canSeeMoney() ? ' · ¥' + l.unitPrice : ''}${l.total != null && canSeeMoney() ? ' = ¥' + l.total : ''}${l.cbm != null ? ' · ' + l.cbm + ' CBM' : ''}${l.cartons != null ? ' · ' + l.cartons + ' ctn' : ''}${l.lengthCm ? ` · 📦 ${l.lengthCm}×${l.widthCm ?? '?'}×${l.heightCm ?? '?'}cm` : ''}${l.weightKg ? ' ' + l.weightKg + 'kg' : ''}${l.postage != null ? ' · 🚚 £' + l.postage + '/item' : ''}${l.packaged ? ' · 📦 packaged: ' + escapeHtml(l.packaged) : ''}${l.sellPrice != null && canSeeMoney() ? ' · sell £' + l.sellPrice : ''}
         </div>
         ${l.totalMismatch && canSeeMoney() ? `<div style="color:var(--red);font-size:11px">⚠ Their total ¥${l.total} ≠ price × qty (¥${(l.unitPrice * l.qty).toFixed(2)}) — check with the supplier</div>` : ''}
         ${l.extras && Object.keys(l.extras).length ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:3px">${Object.entries(l.extras).map(([k, v]) => `<span class="pill" style="font-size:10px;background:var(--bg-soft)">${escapeHtml(k)}: <strong>${escapeHtml(v)}</strong></span>`).join('')}</div>` : ''}
@@ -17492,14 +17652,23 @@ async function simpImport(btn) {
       if (l.choice !== 'new') return { ...base, productId: l.choice };
       // New/unlisted: keep their description + OEM part number; OUR sku is
       // assigned later when the listing is drafted (their code is NOT our code).
-      return { ...base, title: l.title || l.partNumber || l.supplierSku, partNumber: l.partNumber || undefined };
+      return { ...base, title: l.title || l.partNumber || l.supplierSku, partNumber: l.partNumber || undefined,
+        sku: l.partNumber || l.supplierSku || undefined,
+        postage: l.postage ?? undefined, packaged: l.packaged ?? undefined, packagingCost: l.packagingCost ?? undefined,
+        sellPrice: l.sellPrice ?? undefined, make: l.make || undefined, model: l.model || undefined,
+        lengthCm: l.lengthCm ?? undefined, widthCm: l.widthCm ?? undefined, heightCm: l.heightCm ?? undefined, weightKg: l.weightKg ?? undefined };
     });
+    const containerRef = (el('simp-container')?.value || '').trim() || null;
+    if ((el('simp-frcbm')?.value || el('simp-frtotal')?.value) && !containerRef) { toast('Enter the container / invoice ref to add freight to it', 'warn'); if (btn) btn.disabled = false; Task.fail(taskId); return; }
     const r = await Api.post('/api/incoming/bulk', {
-      supplier, containerRef: (el('simp-container')?.value || '').trim() || null,
+      supplier, containerRef,
       expectedDate: el('simp-eta')?.value || null,
       currency: 'CNY', status: 'on_order',
       notes: 'Imported from ' + SIMP.fileName,
       lines,
+      freightPerCbm: el('simp-frcbm')?.value || undefined, containerFreight: el('simp-frtotal')?.value || undefined,
+      freightCurrency: el('simp-frcur')?.value || 'GBP',
+      createPlaceholders: !!el('simp-ph')?.checked, shopifyMode: el('simp-phshop')?.value || 'draft',
     });
     // Supplier-SKU memory: remember THEIR code + price against each matched
     // product, so future restocks find the supplier + track price over time.
@@ -17531,7 +17700,8 @@ async function simpImport(btn) {
     closeModal();
     if (formatSaved) toast(`📐 ${supplier}'s sheet layout remembered — their next list reads instantly`, 'info', 6000);
     const newN = (r.newItems || []).length;
-    toast(`📦 Imported ${(r.created || []).length || picked.length} lines into Incoming${newN ? ` · ${newN} new item${newN > 1 ? 's' : ''} to draft listings for` : ''}${remembered ? ` · ${remembered} supplier SKU${remembered > 1 ? 's' : ''} remembered` : ''}`, 'success', 9000);
+    const phN = r.placeholders ? r.placeholders.created.length : 0;
+    toast(`📦 Imported ${r.created || picked.length} lines into Incoming${phN ? ` · 🧩 ${phN} placeholder product${phN > 1 ? 's' : ''} created — 🚀 Go live when ready` : (newN ? ` · ${newN} new item${newN > 1 ? 's' : ''} to draft listings for` : '')}${r.freight && !r.freight.error ? ` · freight ${r.freight.currency} ${r.freight.freight}` : ''}${remembered ? ` · ${remembered} supplier SKU${remembered > 1 ? 's' : ''} remembered` : ''}`, 'success', 9000);
     if (State.page === 'incoming' && typeof loadIncoming === 'function') loadIncoming();
     State._suppliersLoaded = false;
   } catch (e) { Task.fail(taskId); toast('Import failed: ' + (e.data?.message || e.message), 'error', 9000); }

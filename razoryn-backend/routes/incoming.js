@@ -119,6 +119,7 @@ async function ensureTable() {
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
+  await ensurePlaceholderCols();   // the list reads products.is_placeholder
   _ready = true;
 }
 ensureTable();
@@ -163,7 +164,10 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
   if (container) { params.push(container); where.push(`i.container_ref = $${params.length}`); }
   if (q) { params.push(`%${q}%`); const n = params.length; where.push(`(i.sku ILIKE $${n} OR i.title ILIKE $${n} OR i.part_number ILIKE $${n} OR i.container_ref ILIKE $${n} OR i.supplier ILIKE $${n})`); }
   const { rows } = await query(`
-    SELECT i.*, p.qty_on_hand AS product_qty_on_hand, p.title AS product_title, p.sku AS product_sku
+    SELECT i.*, p.qty_on_hand AS product_qty_on_hand, p.title AS product_title, p.sku AS product_sku,
+           p.is_placeholder AS product_is_placeholder, p.is_prelisted AS product_is_prelisted,
+           p.ebay_prelist_status AS product_ebay_status, p.price_ebay AS product_price_ebay,
+           p.shopify_product_id AS product_shopify_id
     FROM incoming_stock i
     LEFT JOIN products p ON p.id = i.product_id
     WHERE ${where.join(' AND ')}
@@ -349,6 +353,7 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
   }
 
   const created = [], unmatched = [], newItems = [];
+  const newLineInfo = {};   // incoming id → the uploaded line (for placeholders)
   for (const l of lines) {
     const qty = parseInt(l.qty);
     if (!Number.isInteger(qty) || qty <= 0) { unmatched.push({ ...l, reason: 'bad qty' }); continue; }
@@ -386,12 +391,228 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
        l.supplierSku ? String(l.supplierSku).slice(0, 80) : null,
        l.extras && Object.keys(l.extras).length ? JSON.stringify(l.extras) : null]);
     created.push({ id: ins.rows[0].id, productId: prod.id, sku: prod.sku, qty });
+    if (!prod.id) newLineInfo[ins.rows[0].id] = l;
   }
   await audit(req, 'incoming_bulk_add', 'incoming', null, { created: created.length, unmatched: unmatched.length, container: b.containerRef });
   if (b.supplier) { try { await require('./suppliers').ensureSupplierByName(b.supplier); } catch (_) {} }
+  // Sea freight quoted per CBM (or one total) → the container's freight, so it's
+  // apportioned into every line's landed cost. Duty already on file is kept.
+  let freight = null;
+  if (b.containerRef && (num(b.freightPerCbm) != null || num(b.containerFreight) != null)) {
+    try { freight = await setContainerFreight(b.containerRef, { perCbm: num(b.freightPerCbm), total: num(b.containerFreight), currency: b.freightCurrency, date: b.expectedDate }); }
+    catch (e) { freight = { error: e.message }; }
+  }
   if (b.containerRef) await reapportionContainer(b.containerRef).catch(() => {});
-  res.json({ ok: true, created: created.length, createdUnits: created.reduce((a, c) => a + c.qty, 0), unmatched, newItems });
+  // Not listed yet → placeholder products (Thumbnail Maker can find them by SKU /
+  // part number; Shopify pre-order or draft; eBay held until Go live).
+  let placeholders = null;
+  if (b.createPlaceholders && Object.keys(newLineInfo).length) {
+    placeholders = await createPlaceholders(Object.keys(newLineInfo).map(Number), {
+      shopifyMode: b.shopifyMode, userId: req.user.id, perLine: newLineInfo });
+  }
+  res.json({ ok: true, created: created.length, createdUnits: created.reduce((a, c) => a + c.qty, 0), unmatched, newItems, placeholders, freight });
 });
+
+const num = (v) => { if (v == null || v === '') return null; const n = parseFloat(String(v).replace(/[£$¥,\s]/g, '')); return Number.isFinite(n) ? n : null; };
+const yesNo = (v) => { if (v == null || v === '') return null; if (typeof v === 'boolean') return v; return /^(y|yes|true|1|boxed|packaged|included)$/i.test(String(v).trim()) ? true : (/^(n|no|false|0|loose|not|none)/i.test(String(v).trim()) ? false : null); };
+
+// Container freight from a per-CBM rate (× the container's total CBM) or a total.
+async function setContainerFreight(ref, { perCbm = null, total = null, currency = 'GBP', date = null } = {}) {
+  let freight = total;
+  let cbm = null;
+  if (perCbm != null) {
+    cbm = parseFloat((await query(`SELECT COALESCE(SUM(cbm),0) AS c FROM incoming_stock WHERE container_ref = $1 AND status <> 'cancelled'`, [ref])).rows[0].c) || 0;
+    freight = +(perCbm * cbm).toFixed(2);
+  }
+  if (freight == null) return null;
+  const cur = String(currency || 'GBP').toUpperCase();
+  const conv = await costToGbp(freight, cur, date, null);
+  await query(`INSERT INTO incoming_containers (container_ref, freight_total, freight_currency, freight_fx_rate, freight_total_gbp, expected_date, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6, now())
+      ON CONFLICT (container_ref) DO UPDATE SET freight_total = EXCLUDED.freight_total, freight_currency = EXCLUDED.freight_currency,
+        freight_fx_rate = EXCLUDED.freight_fx_rate, freight_total_gbp = EXCLUDED.freight_total_gbp,
+        expected_date = COALESCE(EXCLUDED.expected_date, incoming_containers.expected_date), updated_at = now()`,
+    [ref, freight, cur, conv.rate, conv.gbp, date || null]);
+  return { freight, currency: cur, gbp: conv.gbp, cbm, perCbm };
+}
+
+// ── Placeholder products for incoming goods that aren't listed yet ─────────
+// Enough to exist everywhere before the stock lands: SKU / part number (the
+// Thumbnail Maker looks them up by these), supplier code, cost, name, photo,
+// postage + packaging. Qty 0, flagged pre-listed: Shopify gets a draft or a
+// live pre-order; eBay waits for "Go live".
+let _phReady = false;
+async function ensurePlaceholderCols() {
+  if (_phReady) return;
+  for (const col of ['is_placeholder BOOLEAN NOT NULL DEFAULT false', 'is_prelisted BOOLEAN NOT NULL DEFAULT false',
+    'preorder_active BOOLEAN NOT NULL DEFAULT false', 'preorder_eta DATE', 'ebay_prelist_payload JSONB', 'ebay_prelist_status TEXT',
+    'shipping_cost NUMERIC(10,2)', 'packaging_included BOOLEAN', 'packaging_cost NUMERIC(10,2)', 'landed_cost NUMERIC(12,4)',
+    'pkg_length_cm NUMERIC(7,1)', 'pkg_width_cm NUMERIC(7,1)', 'pkg_height_cm NUMERIC(7,1)', 'pkg_weight_g INTEGER']) {
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ${col}`);
+  }
+  _phReady = true;
+}
+
+async function uniqueSku(base) {
+  const clean = String(base || '').trim().replace(/\s+/g, ' ').slice(0, 80) || ('INC-' + Date.now().toString(36).toUpperCase());
+  let sku = clean, n = 2;
+  while ((await query(`SELECT 1 FROM products WHERE LOWER(sku) = LOWER($1)`, [sku])).rows.length) sku = `${clean}-${n++}`;
+  return sku;
+}
+
+// lineIds: incoming_stock ids with no product yet. perLine: id → extra details
+// { title, postage, packaged, packagingCost, sellPrice, make, model, lengthCm… }.
+async function createPlaceholders(lineIds, { shopifyMode = 'draft', userId = null, perLine = {} } = {}) {
+  await ensureTable(); await ensurePlaceholderCols();
+  const shopify = require('../services/shopify');
+  const preorder = require('../lib/preorder');
+  const rows = (await query(`SELECT * FROM incoming_stock WHERE id = ANY($1) AND product_id IS NULL AND status <> 'cancelled'`, [lineIds])).rows;
+  const out = { created: [], linked: 0, errors: [] };
+  for (const r of rows) {
+    try {
+      const x = perLine[r.id] || {};
+      const code = (r.sku || r.part_number || r.supplier_sku || '').trim();
+      // Same part already created by an earlier line/container → just link it.
+      const dup = code ? (await query(`SELECT id, sku FROM products WHERE active = true AND (LOWER(sku) = LOWER($1) OR LOWER(part_number) = LOWER($1)) LIMIT 1`, [code])).rows[0] : null;
+      if (dup) {
+        await query(`UPDATE incoming_stock SET product_id = $1, sku = $2, updated_at = now() WHERE id = $3`, [dup.id, dup.sku, r.id]);
+        out.linked++; continue;
+      }
+      const sku = await uniqueSku(r.sku || r.part_number || r.supplier_sku || r.title);
+      const title = String(x.title || r.title || '').trim() || `${r.part_number || r.supplier_sku || sku} (incoming — add title)`;
+      const cost = r.landed_unit_cost_gbp != null ? Number(r.landed_unit_cost_gbp) : (r.unit_cost_gbp != null ? Number(r.unit_cost_gbp) : null);
+      const sell = num(x.sellPrice);
+      const L = num(x.lengthCm), W = num(x.widthCm), H = num(x.heightCm);
+      const kg = num(x.weightKg);
+      const photo = r.photo_url && /^https:\/\//.test(r.photo_url) ? r.photo_url : (r.photo_url || null);
+      const ins = (await query(`INSERT INTO products (sku, title, part_number, brand, model, qty_on_hand, cost_price, landed_cost, image_url, active,
+            is_prelisted, preorder_active, preorder_eta, is_placeholder, price_ebay, shipping_cost, packaging_included, packaging_cost,
+            pkg_length_cm, pkg_width_cm, pkg_height_cm, pkg_weight_g)
+          VALUES ($1,$2,$3,$4,$5,0,$6,$6,$7,true, true,true,$8,true,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+        [sku, title, r.part_number || null, x.make || null, x.model || null, cost, photo, r.expected_date || null, sell,
+         num(x.postage), yesNo(x.packaged), num(x.packagingCost), L, W, H, kg != null ? Math.round(kg * 1000) : null])).rows[0];
+      if (r.supplier_sku && r.supplier_sku !== r.part_number) {
+        await query(`INSERT INTO product_part_numbers (product_id, code, note) VALUES ($1,$2,$3)`, [ins.id, r.supplier_sku, `${r.supplier || 'Supplier'} code`]).catch(() => {});
+      }
+      await query(`UPDATE incoming_stock SET product_id = $1, sku = $2, title = COALESCE(title, $3), updated_at = now() WHERE id = $4`, [ins.id, sku, title, r.id]);
+      // Shopify: draft (finish title/photos first) or a live pre-order now.
+      let shop = null;
+      if (shopifyMode !== 'none' && shopify.isConfigured()) {
+        try {
+          const live = shopifyMode === 'preorder' && sell != null && !/\(incoming — add title\)$/.test(title);
+          const sp = await shopify.createProduct({
+            title, sku, price: sell != null ? sell : undefined, status: live ? 'active' : 'draft',
+            imageUrls: photo && /^https:\/\//.test(photo) ? [photo] : [],
+            tags: preorder.addPreorderTag(''), inventoryPolicy: 'continue', qty: 0,
+            metafields: [
+              { namespace: 'custom', key: 'preorder_eta', type: 'date', value: r.expected_date ? new Date(r.expected_date).toISOString().slice(0, 10) : '' },
+              { namespace: 'custom', key: 'preorder_ships_note', type: 'single_line_text_field', value: preorder.shipsNote(r.expected_date) },
+            ].filter(m => m.value),
+          });
+          const v = sp?.variants?.[0];
+          await query(`UPDATE products SET shopify_product_id = $2, shopify_variant_id = $3, shopify_inventory_id = $4 WHERE id = $1`,
+            [ins.id, sp?.id ? String(sp.id) : null, v?.id ? String(v.id) : null, v?.inventory_item_id ? String(v.inventory_item_id) : null]);
+          shop = live ? 'preorder' : 'draft';
+        } catch (e) { shop = 'failed: ' + e.message; }
+      }
+      out.created.push({ productId: ins.id, sku, title, lineId: r.id, shopify: shop });
+    } catch (e) { out.errors.push({ lineId: r.id, error: e.message }); }
+  }
+  return out;
+}
+
+// POST /api/incoming/placeholders { ids?: [incoming ids], containerRef?, shopifyMode }
+// Turn not-yet-listed incoming lines into placeholder products.
+const safe = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(e => {
+  console.error('[incoming]', e.message);
+  if (!res.headersSent) res.status(500).json({ error: 'server_error', message: e.message });
+});
+router.post('/placeholders', requirePermission('inventory'), safe(async (req, res) => {
+  await ensureTable();
+  const b = req.body || {};
+  let ids = Array.isArray(b.ids) ? b.ids.map(Number).filter(Boolean) : [];
+  if (!ids.length && b.containerRef) {
+    ids = (await query(`SELECT id FROM incoming_stock WHERE container_ref = $1 AND product_id IS NULL AND status <> 'cancelled'`, [b.containerRef])).rows.map(r => r.id);
+  }
+  if (!ids.length) return res.status(400).json({ error: 'nothing_to_create', message: 'No unlisted lines to create placeholders for.' });
+  const out = await createPlaceholders(ids, { shopifyMode: b.shopifyMode || 'draft', userId: req.user.id, perLine: b.perLine || {} });
+  await audit(req, 'incoming_placeholders', 'incoming', null, { created: out.created.length, linked: out.linked });
+  res.json({ ok: true, ...out });
+}));
+
+// POST /api/incoming/go-live
+//   { items: [{ productId, title?, price? }], storeCode?, shopify: true|false, ebay: 'now'|'on_arrival'|'skip' }
+// Placeholder / pre-listed products → live. Shopify: active (still a pre-order
+// while there's no stock). eBay: listed now if there's stock, else held and
+// published automatically the moment stock is received.
+router.post('/go-live', requireAdmin, safe(async (req, res) => {
+  await ensureTable(); await ensurePlaceholderCols();
+  const b = req.body || {};
+  const items = Array.isArray(b.items) ? b.items : [];
+  if (!items.length) return res.status(400).json({ error: 'no_items' });
+  const shopify = require('../services/shopify');
+  const preorder = require('../lib/preorder');
+  const brand = require('../lib/brand');
+  const ebayMode = ['now', 'on_arrival', 'skip'].includes(b.ebay) ? b.ebay : 'on_arrival';
+  const store = b.storeCode ? brand.getStore(b.storeCode) : brand.getPrimaryStore();
+  const st = (await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {};
+  const shopPct = st.price_link_pct != null ? parseFloat(st.price_link_pct) : (st.bank_transfer_pct != null ? parseFloat(st.bank_transfer_pct) : 10);
+  const results = [];
+  for (const it of items) {
+    const r = { productId: it.productId };
+    try {
+      let p = (await query(`SELECT * FROM products WHERE id = $1`, [it.productId])).rows[0];
+      if (!p) throw new Error('product not found');
+      const title = String(it.title || p.title || '').trim();
+      const price = num(it.price) ?? num(p.price_ebay);
+      if (!title || /\(incoming — add title\)$/.test(title)) throw new Error('needs a proper title first');
+      if (price == null || price <= 0) throw new Error('needs a selling price');
+      const shopPrice = +(price * (1 - shopPct / 100)).toFixed(2);
+      p = (await query(`UPDATE products SET title = $2, price_ebay = $3, price_shopify = $4, is_placeholder = false, updated_at = now() WHERE id = $1 RETURNING *`,
+        [p.id, title, price, shopPrice])).rows[0];
+      r.sku = p.sku;
+      const inStock = (parseInt(p.qty_on_hand) || 0) > 0;
+      // Shopify
+      if (b.shopify !== false && shopify.isConfigured()) {
+        try {
+          if (p.shopify_product_id) {
+            const full = await shopify.getShopifyProductFull(p.shopify_product_id).catch(() => ({}));
+            await shopify.updateProduct(p.shopify_product_id, {
+              title, price: shopPrice, status: 'active',
+              tags: inStock ? preorder.removePreorderTag(full.tags || '') : preorder.addPreorderTag(full.tags || ''),
+              inventoryPolicy: inStock ? 'deny' : 'continue',
+            });
+          } else {
+            const sp = await shopify.createProduct({ title, sku: p.sku, price: shopPrice, status: 'active',
+              imageUrls: p.image_url && /^https:\/\//.test(p.image_url) ? [p.image_url] : [],
+              tags: inStock ? '' : preorder.addPreorderTag(''), inventoryPolicy: inStock ? 'deny' : 'continue', qty: p.qty_on_hand || 0 });
+            const v = sp?.variants?.[0];
+            await query(`UPDATE products SET shopify_product_id = $2, shopify_variant_id = $3, shopify_inventory_id = $4 WHERE id = $1`,
+              [p.id, sp?.id ? String(sp.id) : null, v?.id ? String(v.id) : null, v?.inventory_item_id ? String(v.inventory_item_id) : null]);
+          }
+          r.shopify = inStock ? 'live' : 'live (pre-order)';
+        } catch (e) { r.shopify = 'failed: ' + e.message; }
+      }
+      // eBay
+      if (ebayMode !== 'skip' && store && store.token) {
+        const payload = { storeCode: store.code, price, categoryId: p.ebay_category_id || undefined };
+        await query(`UPDATE products SET ebay_prelist_payload = $2::jsonb, ebay_prelist_status = $3 WHERE id = $1`,
+          [p.id, JSON.stringify(payload), inStock && ebayMode === 'now' ? 'scheduled' : 'on_arrival']);
+        if (inStock && ebayMode === 'now') {
+          try {
+            const fresh = (await query(`SELECT * FROM products WHERE id = $1`, [p.id])).rows[0];
+            const out = await require('./listings').publishPrelisting(fresh, { req });
+            r.ebay = 'listed'; r.itemId = out.itemId; r.url = out.url;
+          } catch (e) { r.ebay = 'failed: ' + e.message; }
+        } else r.ebay = `goes live on ${store.name} when stock is received`;
+      }
+      r.ok = true;
+    } catch (e) { r.ok = false; r.error = e.message; }
+    results.push(r);
+  }
+  await audit(req, 'incoming_go_live', 'incoming', null, { count: results.filter(x => x.ok).length, ebay: ebayMode, store: store?.code });
+  res.json({ ok: true, results });
+}));
 
 // POST /api/incoming/receive-container  { containerRef, push }
 // Receive EVERY remaining line on a container in one action (when it's unloaded)
