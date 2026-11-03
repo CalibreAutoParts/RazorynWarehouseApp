@@ -679,6 +679,73 @@ router.get('/reconcile', requireAdmin, async (req, res) => {
   res.json({ summary, groups: out });
 });
 
+// POST /api/listings/rematch-store { storeCode, preview? }
+// One eBay account came back from a review / suspension with every listing
+// relisted under NEW item numbers. Re-link that account only, by exact SKU
+// (all listings were created by this app, so the SKU on eBay = ours):
+//   • a live listing whose SKU matches a product → linked to it,
+//   • the product's OLD (dead) item number on this account is replaced, so
+//     stock / price / edits go to the new listing (old link kept in a backup),
+//   • nothing is guessed from titles; prices are not touched.
+router.post('/rematch-store', requireAdmin, async (req, res) => {
+  try {
+    await ensureMirrorLinksColumns();
+    const b = req.body || {};
+    const store = ebay.listStores().find(s => s.code === String(b.storeCode || '') && s.hasToken && !s.disabled);
+    if (!store) return res.status(400).json({ error: 'unknown_store', message: 'Pick a connected eBay account.' });
+    const preview = !!b.preview;
+    const live = await ebay.getActiveListings(store.code);
+    const liveIds = new Set(live.map(l => String(l.itemId)));
+    await query(`CREATE TABLE IF NOT EXISTS mirror_links_pruned (
+      id SERIAL PRIMARY KEY, store_code TEXT, ebay_item_id TEXT, link JSONB, pruned_at TIMESTAMPTZ DEFAULT now())`);
+    const out = { store: store.name, live: live.length, linked: 0, relinked: 0, already: 0, noSku: 0, noMatch: [], noShopify: [], conflicts: [], samples: [] };
+    for (const l of live) {
+      const id = String(l.itemId);
+      const sku = String(l.sku || '').trim();
+      if (!sku) { out.noSku++; continue; }
+      const cur = (await query(`SELECT * FROM mirror_links WHERE ebay_item_id = $1`, [id])).rows[0];
+      let p = (await query(`SELECT id, sku, shopify_product_id FROM products WHERE sku = $1 LIMIT 1`, [sku])).rows[0]
+           || (await query(`SELECT id, sku, shopify_product_id FROM products WHERE LOWER(sku) = LOWER($1) ORDER BY active DESC LIMIT 1`, [sku])).rows[0];
+      if (!p) { if (out.noMatch.length < 300) out.noMatch.push({ itemId: id, sku, title: l.title }); continue; }
+      if (!p.shopify_product_id) { if (out.noShopify.length < 100) out.noShopify.push({ itemId: id, sku }); continue; }
+      if (cur) {
+        if (String(cur.shopify_product_id) === String(p.shopify_product_id)) {
+          out.already++;
+          if (!cur.store_code && !preview) await query(`UPDATE mirror_links SET store_code = $1 WHERE ebay_item_id = $2`, [store.code, id]);
+          continue;
+        }
+        // Linked to a different product — don't silently move it; report it.
+        out.conflicts.push({ itemId: id, sku, linkedTo: String(cur.shopify_product_id) }); continue;
+      }
+      // Old item numbers for this product on THIS account that are no longer live.
+      const old = (await query(`SELECT * FROM mirror_links WHERE shopify_product_id::text = $1 AND store_code = $2`,
+        [String(p.shopify_product_id), store.code])).rows.filter(o => !liveIds.has(String(o.ebay_item_id)));
+      if (!preview) {
+        for (const o of old) {
+          await query(`INSERT INTO mirror_links_pruned (store_code, ebay_item_id, link) VALUES ($1, $2, $3::jsonb)`, [store.code, String(o.ebay_item_id), JSON.stringify(o)]).catch(() => {});
+          await query(`DELETE FROM mirror_links WHERE ebay_item_id = $1`, [o.ebay_item_id]);
+        }
+        await query(`INSERT INTO mirror_links (ebay_item_id, shopify_product_id, store_code, last_mirrored_at, last_synced_sku, last_synced_title)
+                     VALUES ($1, $2, $3, now(), $4, $5) ON CONFLICT (ebay_item_id) DO NOTHING`,
+          [id, p.shopify_product_id, store.code, sku, l.title || null]);
+      }
+      if (old.length) out.relinked++; else out.linked++;
+      if (out.samples.length < 15) out.samples.push({ sku, newItemId: id, oldItemIds: old.map(o => String(o.ebay_item_id)) });
+    }
+    // Links on this account still pointing at dead item numbers (no live listing with that SKU).
+    const stale = (await query(`SELECT ml.ebay_item_id, ml.last_synced_sku, p.sku FROM mirror_links ml
+        LEFT JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text WHERE ml.store_code = $1`, [store.code])).rows
+      .filter(r => !liveIds.has(String(r.ebay_item_id)));
+    out.staleLeft = stale.length;
+    out.staleSample = stale.slice(0, 10).map(r => r.sku || r.last_synced_sku || r.ebay_item_id);
+    out.preview = preview;
+    if (!preview) await audit(req, 'ebay_rematch_store', 'ebay_store', null, { store: store.code, live: out.live, linked: out.linked, relinked: out.relinked, noMatch: out.noMatch.length });
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: 'rematch_failed', message: e.message });
+  }
+});
+
 // POST /api/listings/link-status/force-match
 // Auto-link by SKU + part-number + title-token fuzzy matching. Pulls listings from
 // every eBay store the brand has configured and aggregates the results. Each
@@ -4448,7 +4515,7 @@ router.post('/clone-to-store/prune-stale', requireAdmin, async (req, res) => {
     const d = await query(`DELETE FROM mirror_links WHERE ebay_item_id = $1 AND store_code = $2`, [x.ebay_item_id, store.code]);
     removed += d.rowCount || 0;
   }
-  await audit(req, 'clone_prune_stale', 'ebay_store', store.code, { removed, live: r.live });
+  await audit(req, 'clone_prune_stale', 'ebay_store', null, { store: store.code, removed, live: r.live });
   res.json({ ok: true, removed, live: r.live });
 });
 
@@ -4482,7 +4549,7 @@ router.post('/clone-to-store/free-allowance', requireAdmin, async (req, res) => 
   let limits = null;
   if (done) {
     try { limits = await ebay.getSellingLimits(store.code, { fresh: true }); } catch (_) {}
-    if (req) await audit(req, 'free_selling_allowance', 'ebay_store', store.code, { keep, limits });
+    if (req) await audit(req, 'free_selling_allowance', 'ebay_store', null, { store: store.code, keep, limits });
   }
   res.json({ results, nextAfter: after + rows.length, done, limits });
 });

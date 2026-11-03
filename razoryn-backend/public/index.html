@@ -23184,7 +23184,10 @@ async function loadStoreVat() {
         <div class="field" style="margin:0"><label style="font-size:11px">Photos on new listings</label>${sel('shp-photos-' + c, s.photos, [['branded', 'Listing photos (as on Shopify)'], ['clean', 'Clean photos (no branding) where available']])}</div>
       </div>
       <div id="shp-hint-${c}" style="font-size:12px;color:var(--ink-soft);margin:8px 0;line-height:1.5"></div>
-      <button class="btn btn-sm btn-primary" onclick="saveStoreVat('${c}', this)">Save</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn btn-sm btn-primary" onclick="saveStoreVat('${c}', this)">Save</button>
+        ${s.hasToken && !s.disabled ? `<button class="btn btn-sm btn-outline" onclick="rematchStore('${c}')" title="After a review/suspension eBay relists everything under NEW item numbers — this re-links every listing on ${escapeAttr(s.name)} to its product by SKU and replaces the old item numbers">🔗 Re-match listings</button>` : ''}
+      </div>
     </div>`; }).join('') || 'No eBay shops.';
   for (const s of State._shops) shopProfileHints(s.code, true);
 }
@@ -23211,6 +23214,66 @@ function shopProfileHints(code, initial) {
     `<b>Photos:</b> ${v('photos') === 'clean' ? 'clean photos where you’ve added them (Trade → Settings → Clean photos), otherwise the listing photos' : 'the listing photos, as on Shopify'}`,
   ];
   const h = el(`shp-hint-${code}`); if (h) h.innerHTML = bits.join(' · ');
+}
+
+// One click: re-link an eBay account's listings by SKU after eBay relisted them
+// under new item numbers (account review / suspension). Preview first.
+async function rematchStore(code) {
+  const shop = (State._shops || []).find(x => x.code === code) || { name: code };
+  const taskId = Task.start(`Reading ${shop.name}'s live listings…`);
+  let r;
+  try { r = await Api.post('/api/listings/rematch-store', { storeCode: code, preview: true }); Task.done(taskId, 'Read'); }
+  catch (e) { Task.fail(taskId, 'Failed'); return toast(e.data?.message || e.message, 'error', 9000); }
+  const toDo = r.linked + r.relinked;
+  const list = (arr, f) => arr.slice(0, 40).map(f).join('');
+  modal({ title: `🔗 Re-match ${escapeHtml(r.store)}`, size: 'lg', body: `
+    <div class="ctn-stats" style="grid-template-columns:repeat(4,1fr);margin-bottom:12px">
+      <div class="ctn-stat"><div class="v">${r.live}</div><div class="l">live on eBay</div></div>
+      <div class="ctn-stat"><div class="v" style="color:var(--green)">${toDo}</div><div class="l">to link${r.relinked ? ` · ${r.relinked} replace old numbers` : ''}</div></div>
+      <div class="ctn-stat"><div class="v">${r.already}</div><div class="l">already linked</div></div>
+      <div class="ctn-stat"><div class="v" style="color:${r.noMatch.length ? 'var(--amber,#b26a00)' : 'inherit'}">${r.noMatch.length + r.noSku}</div><div class="l">no SKU match</div></div>
+    </div>
+    <div class="ui-hint" style="margin:0 0 10px">Matches by <b>exact SKU</b> only (your listings were made by the app, so the eBay SKU is the warehouse SKU). Each product's old, dead item number on this account is swapped for the new one, so stock, prices and edits reach the live listing. Prices aren't changed. Nothing is changed until you press <b>Re-match now</b>.</div>
+    ${r.samples.length ? `<details open><summary style="font-size:12px;font-weight:600;cursor:pointer">Examples</summary><div style="font-size:12px;margin:6px 0 10px">${list(r.samples, x => `<div style="font-family:ui-monospace,monospace">${escapeHtml(x.sku)} → <b>${escapeHtml(x.newItemId)}</b>${x.oldItemIds.length ? ` <span style="color:var(--ink-soft)">(was ${x.oldItemIds.map(escapeHtml).join(', ')})</span>` : ''}</div>`)}</div></details>` : ''}
+    ${r.noMatch.length ? `<details><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--amber,#b26a00)">${r.noMatch.length} listing(s) whose SKU isn't in the warehouse</summary><div style="font-size:12px;margin:6px 0 10px;max-height:200px;overflow:auto">${list(r.noMatch, x => `<div><span style="font-family:ui-monospace,monospace">${escapeHtml(x.sku)}</span> · ${escapeHtml((x.title || '').slice(0, 70))} · ${escapeHtml(x.itemId)}</div>`)}</div></details>` : ''}
+    ${r.noSku ? `<div class="ui-hint">${r.noSku} live listing(s) have no SKU on eBay — link those from Listing Mirror.</div>` : ''}
+    ${r.noShopify.length ? `<div class="ui-hint">${r.noShopify.length} matched product(s) aren't on Shopify yet, so they can't be linked: ${r.noShopify.slice(0, 8).map(x => escapeHtml(x.sku)).join(', ')}</div>` : ''}
+    ${r.conflicts.length ? `<div class="ui-hint" style="color:var(--amber,#b26a00)">${r.conflicts.length} listing(s) are already linked to a different product — left alone: ${r.conflicts.slice(0, 8).map(x => escapeHtml(x.sku)).join(', ')}</div>` : ''}`,
+    actions: [{ label: 'Cancel', onClick: closeModal }, { label: toDo ? `🔗 Re-match now (${toDo})` : 'Close', primary: true, onClick: async () => {
+      if (!toDo) return closeModal();
+      const t2 = Task.start('Re-matching…');
+      try {
+        const d = await Api.post('/api/listings/rematch-store', { storeCode: code });
+        Task.done(t2, 'Done');
+        modal({ title: `✅ ${escapeHtml(d.store)} re-matched`, body: `
+          <p style="font-size:13px"><b>${d.linked + d.relinked}</b> listing(s) linked${d.relinked ? ` (${d.relinked} replaced an old item number)` : ''} · ${d.already} already linked${d.noMatch.length ? ` · ${d.noMatch.length} SKU(s) not in the warehouse` : ''}.</p>
+          <p style="font-size:13px">Next, push your warehouse stock to the relisted items — eBay may have brought them back with old quantities.</p>
+          ${d.staleLeft ? `<p class="ui-hint">${d.staleLeft} old link(s) on this account still point at item numbers that aren't live (no relisted item with that SKU): ${d.staleSample.map(escapeHtml).join(', ')}. You can remove them.</p>` : ''}`,
+          actions: [
+            ...(d.staleLeft ? [{ label: `Remove ${d.staleLeft} old link(s)`, onClick: async () => {
+              try { const p = await Api.post('/api/listings/clone-to-store/prune-stale', { toStore: code }); toast(`Removed ${p.removed} old link(s) (backup kept)`, 'success'); } catch (e) { toast(e.data?.message || e.message, 'error'); }
+            } }] : []),
+            { label: 'Close', onClick: closeModal },
+            { label: '📦 Push warehouse stock', primary: true, onClick: async () => { closeModal(); await pushStoreStock(code, d.store); } },
+          ] });
+        Store.refresh('products').catch(() => {});
+      } catch (e) { Task.fail(t2, 'Failed'); toast(e.data?.message || e.message, 'error', 9000); }
+    } }] });
+}
+// Push warehouse stock to every listing linked on one eBay account (batched).
+async function pushStoreStock(code, name) {
+  const taskId = Task.start(`Pushing stock to ${name}…`);
+  let after = 0, done = false, ok = 0, fail = 0;
+  try {
+    while (!done) {
+      const r = await Api.post('/api/listings/clone-to-store/sync-quantities', { toStore: code, after });
+      for (const x of r.results || []) { if (x.ok) ok++; else fail++; }
+      after = r.nextAfter; done = r.done;
+      Task.update?.(taskId, `${ok + fail} done…`);
+    }
+    Task.done(taskId, 'Stock pushed');
+    toast(`📦 Stock pushed to ${ok} listing(s) on ${name}${fail ? ` · ${fail} failed` : ''}`, fail ? 'warn' : 'success', 8000);
+  } catch (e) { Task.fail(taskId, 'Failed'); toast(e.data?.message || e.message, 'error'); }
 }
 
 async function saveStoreVat(code, btn) {
