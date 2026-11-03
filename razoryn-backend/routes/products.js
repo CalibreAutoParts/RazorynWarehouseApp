@@ -122,6 +122,8 @@ async function ensurePartNumbersTable() {
     await query(`CREATE INDEX IF NOT EXISTS ppn_product_idx ON product_part_numbers (product_id)`);
     await query(`CREATE INDEX IF NOT EXISTS ppn_code_idx ON product_part_numbers (upper(code))`);
     await query(`CREATE UNIQUE INDEX IF NOT EXISTS ppn_product_code_uq ON product_part_numbers (product_id, upper(code))`);
+    // The product list reports which eBay account(s) each product is listed on.
+    await query(`ALTER TABLE mirror_links ADD COLUMN IF NOT EXISTS store_code TEXT`);
     _ppnMigrated = true;
   } catch (e) { console.warn('[products] part-numbers migration warning:', e.message); }
 }
@@ -194,7 +196,9 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
 
   const sql = `
     SELECT p.*, l.code AS location_code, l.name AS location_name,
-           sg.code AS stock_group_code, sg.note AS stock_group_note
+           sg.code AS stock_group_code, sg.note AS stock_group_note,
+           (SELECT array_agg(DISTINCT COALESCE(ml.store_code, '')) FROM mirror_links ml
+             WHERE p.shopify_product_id IS NOT NULL AND ml.shopify_product_id::text = p.shopify_product_id) AS ebay_stores
     FROM products p
     LEFT JOIN locations l ON l.id = p.location_id
     LEFT JOIN stock_groups sg ON sg.id = p.stock_group_id

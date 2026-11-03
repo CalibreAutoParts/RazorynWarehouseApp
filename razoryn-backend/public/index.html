@@ -1526,6 +1526,9 @@ function adaptProduct(p) {
     imageUrl: p.image_url,
     // Trade: parts linked to / stocked from another warehouse app (partner).
     sourcePartnerId: p.source_partner_id || null,
+    // eBay accounts this product is listed on ('' = an old link from before accounts were tracked).
+    ebayStores: Array.isArray(p.ebay_stores) ? p.ebay_stores.filter(x => x != null) : [],
+    isPlaceholder: !!p.is_placeholder,
     partnerLinkId: p.partner_link_id || null,
     partnerQty: p.partner_qty != null ? p.partner_qty : null,
     partnerLocation: p.partner_location || '',
@@ -5364,7 +5367,12 @@ function renderInventory() {
           <option value="low">Low stock</option>
           <option value="ok">In stock</option>
           <option value="out">Out of stock</option>
+          <option value="placeholder">Incoming placeholders</option>
         </select>
+        ${(() => { const st = (State.brand?.stores || []).filter(x => x.channelCode && x.channelCode.startsWith('ebay_')); return st.length ? `<select class="filter-select" id="inv-acct" title="Which eBay account(s) a product is listed on">
+          <option value="">All eBay accounts</option>
+          ${st.map(x => `<option value="on:${escapeAttr(x.code)}">On ${escapeHtml(x.name)}</option><option value="off:${escapeAttr(x.code)}">Not on ${escapeHtml(x.name)}</option>`).join('')}
+          <option value="none">Not on eBay at all</option></select>` : ''; })()}
         <select class="filter-select" id="inv-hidden" title="Hidden (parked) listings are excluded from stock-checks and channel pushes">
           <option value="">Show all</option>
           <option value="active">Active only</option>
@@ -5465,7 +5473,11 @@ function renderInventory() {
     const s = el('inv-stock').value;
     const h = el('inv-hidden') ? el('inv-hidden').value : '';
     const src = el('inv-source') ? el('inv-source').value : '';
+    const acct = el('inv-acct') ? el('inv-acct').value : '';
     const filtered = State.products.filter(p => {
+      if (acct === 'none' && (p.ebayStores || []).length) return false;
+      if (acct.startsWith('on:') && !(p.ebayStores || []).includes(acct.slice(3))) return false;
+      if (acct.startsWith('off:') && (p.ebayStores || []).includes(acct.slice(4))) return false;
       if (src === 'own' && p.sourcePartnerId) return false;
       if (src === 'partner' && !p.sourcePartnerId) return false;
       if (/^\d+$/.test(src) && String(p.sourcePartnerId) !== src) return false;
@@ -5477,6 +5489,7 @@ function renderInventory() {
       if (s === 'low' && tq > p.lowThresh) return false;
       if (s === 'ok' && tq <= p.lowThresh) return false;
       if (s === 'out' && tq !== 0) return false;
+      if (s === 'placeholder' && !p.isPlaceholder) return false;
       return true;
     });
     State._invFiltered = filtered;
@@ -5536,7 +5549,7 @@ function renderInventory() {
   // on every keystroke made typing stutter. Selects stay immediate via 'change'.
   let _invPaintT;
   el('inv-search').addEventListener('input', () => { clearTimeout(_invPaintT); _invPaintT = setTimeout(paint, 160); });
-  ['inv-brand','inv-stock','inv-hidden','inv-source'].forEach(id => { const e = el(id); if (e) e.addEventListener('change', paint); });
+  ['inv-brand','inv-stock','inv-hidden','inv-source','inv-acct'].forEach(id => { const e = el(id); if (e) e.addEventListener('change', paint); });
   // Name each partner warehouse in the source filter (admin only).
   if (State.user?.role === 'admin' && State.products.some(p2 => p2.partnerLinkId)) {
     Api.get('/api/trade/partners').then(r => {
@@ -13699,6 +13712,8 @@ function renderBulkEditor() {
 
       <div class="toolbar" id="bulk-toolbar" style="display:none;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
         <input type="search" id="bulk-filter" class="search-input" placeholder="Filter by title, SKU, item ID…" style="flex:1;min-width:220px" oninput="bulkFilter(this.value)">
+        ${(() => { const st = (State.brand?.stores || []).filter(x => x.channelCode && x.channelCode.startsWith('ebay_')); return st.length > 1 ? `<select class="filter-select" title="eBay account" onchange="MirrorState.storeFilter=this.value;MirrorState.page=1;paintMirrorList()">
+          <option value="">All eBay accounts</option>${st.map(x => `<option value="${escapeAttr(x.code)}" ${MirrorState.storeFilter === x.code ? 'selected' : ''}>${escapeHtml(x.name)}</option>`).join('')}</select>` : ''; })()}
         <div class="seg" style="margin:0">
           <button class="${(MirrorState.statusFilter||'all')==='all'?'active':''}" onclick="bulkStatus('all')">All</button>
           <button class="${MirrorState.statusFilter==='new'?'active':''}" onclick="bulkStatus('new')">Not on Shopify</button>
@@ -21476,6 +21491,7 @@ function mirrorFilteredListings() {
   const statusFilter = MirrorState.statusFilter;
   return MirrorState.listings.filter(l => {
     if (filter && !matchesKeywords(filter, l.title, l.sku, String(l.itemId || ''))) return false;
+    if (MirrorState.storeFilter && l.storeCode !== MirrorState.storeFilter) return false;
     if (statusFilter === 'new' && l.existsOnShopify) return false;
     if (statusFilter === 'mirrored' && !l.existsOnShopify) return false;
     return true;
