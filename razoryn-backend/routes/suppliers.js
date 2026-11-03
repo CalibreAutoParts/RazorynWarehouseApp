@@ -231,6 +231,12 @@ router.post('/links', requireAdmin, async (req, res) => {
     const b = req.body || {};
     const productId = parseInt(b.productId);
     if (!productId) return res.status(400).json({ error: 'product_required' });
+    // merge: only add/replace what was sent (keeps the saved unit cost etc.).
+    if (b.merge) {
+      const link = await upsertSupplierCode(productId, b.supplierName, b.supplierSku || null, { unitCost: b.unitCost, currency: b.currency });
+      if (!link) return res.status(400).json({ error: 'supplier_required', message: 'Enter a supplier name.' });
+      return res.json({ ok: true, link });
+    }
     const supplierId = await ensureSupplierByName(b.supplierName, { currency: b.currency });
     if (!supplierId) return res.status(400).json({ error: 'supplier_required', message: 'Enter a supplier name.' });
     const cost = (b.unitCost === '' || b.unitCost == null) ? null : parseFloat(b.unitCost);
