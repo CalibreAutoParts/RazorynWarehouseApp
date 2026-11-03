@@ -1986,6 +1986,11 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
      b.packagingIncluded === undefined ? null : !!b.packagingIncluded,
      (b.packagingCost != null && b.packagingCost !== '') ? parseFloat(b.packagingCost) : null]);
   const productId = ins.rows[0].id;
+  // Postage (a Costs & margins shipping band, or a custom £).
+  if (b.shippingBand) {
+    await query(`UPDATE products SET shipping_band = $2, shipping_cost = $3 WHERE id = $1`,
+      [productId, String(b.shippingBand).slice(0, 40), b.shippingBand === 'custom' && b.shippingCost != null && b.shippingCost !== '' ? parseFloat(b.shippingCost) : null]).catch(() => {});
+  }
 
   // Storefront info metafields on the fresh Shopify product: part number +
   // carton dims (+ position when the form carried one). Resolved against the
@@ -2095,6 +2100,12 @@ router.get('/listing-detail/:productId', requireAdmin, async (req, res) => {
   if (!product) return res.status(404).json({ error: 'not_found' });
 
   const out = { product };
+  // Goods still on order for this product (Incoming) — shown as the pre-order quantity.
+  try {
+    out.incoming = (await query(`SELECT container_ref, expected_date, GREATEST(qty_ordered - qty_received, 0)::int AS qty
+        FROM incoming_stock WHERE product_id = $1 AND status NOT IN ('received','cancelled') AND qty_ordered > qty_received
+        ORDER BY expected_date NULLS LAST`, [product.id])).rows;
+  } catch (_) { out.incoming = []; }
   try {
     const spn = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [product.id]);
     out.subPartNumbers = spn.rows.map(r => r.code);
@@ -2175,7 +2186,10 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
   const ebayTitle = String(b.ebayTitle || '').trim() || shopTitle;
   const partNumber = String(b.partNumber || '').trim() || product.part_number || sku;
   const ebayPrice = b.ebayPrice != null && b.ebayPrice !== '' ? parseFloat(b.ebayPrice) : (product.price_ebay != null ? parseFloat(product.price_ebay) : null);
-  const qty = b.qty != null && b.qty !== '' ? (parseInt(b.qty) || 0) : product.qty_on_hand;
+  // Incoming placeholders hold NO stock yet — units are added when the container
+  // is received, so the form's quantity must never be written as warehouse stock.
+  const qty = product.is_placeholder ? product.qty_on_hand
+    : (b.qty != null && b.qty !== '' ? (parseInt(b.qty) || 0) : product.qty_on_hand);
 
   // SKU change must not collide with another product.
   if (sku.toLowerCase() !== String(product.sku || '').toLowerCase()) {
@@ -2207,6 +2221,10 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
     put('pkg_height_cm', numOr(b.pkgHeightCm)); put('pkg_weight_g', numOr(b.pkgWeightG) != null ? Math.round(numOr(b.pkgWeightG)) : undefined);
     if (b.packagingIncluded !== undefined) put('packaging_included', !!b.packagingIncluded);
     put('packaging_cost', numOr(b.packagingCost));
+    if (b.shippingBand !== undefined) {
+      put('shipping_band', b.shippingBand ? String(b.shippingBand).slice(0, 40) : null);
+      put('shipping_cost', b.shippingBand === 'custom' ? (numOr(b.shippingCost) ?? null) : null);
+    }
     const newCost = numOr(b.costPrice);
     const wasCost = product.landed_cost != null ? parseFloat(product.landed_cost) : (product.cost_price != null ? parseFloat(product.cost_price) : null);
     const costChanged = newCost !== undefined && newCost >= 0 && (wasCost == null || Math.abs(newCost - wasCost) >= 0.005);

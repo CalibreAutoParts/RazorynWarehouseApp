@@ -5141,6 +5141,21 @@ async function submitBulkIncoming(andNext) {
 // jumps to Create-listing pre-filled with the line's SKU/title/part number, qty
 // and per-unit cost. Save as draft or push live — the incoming line links up via
 // the SKU once the product exists.
+function incLineListingFields(it) {
+  const li = (it.extras && it.extras.listing) || {};
+  const f = {};
+  const band = li.shippingBand || (li.postage != null && li.postage !== '' ? 'custom' : '');
+  if (band) { f['cl-ship-band'] = band; if (band === 'custom' && li.postage != null) f['cl-ship-cost'] = li.postage; }
+  if (li.packagingCost != null && li.packagingCost !== '') f['cl-pack-cost'] = li.packagingCost;
+  if (li.lengthCm) f['cl-pkg-l'] = li.lengthCm; if (li.widthCm) f['cl-pkg-w'] = li.widthCm;
+  if (li.heightCm) f['cl-pkg-h'] = li.heightCm; if (li.weightKg) f['cl-pkg-g'] = li.weightKg;
+  if (li.sellPrice) f['ce-price'] = li.sellPrice;
+  return f;
+}
+function incLineListingChecks(it) {
+  const pk = String(((it.extras && it.extras.listing) || {}).packaged || '');
+  return /^(y|yes|true|1|packaged)/i.test(pk) ? { 'cl-pack-inc': true } : /^(n|no|false|0|needs)/i.test(pk) ? { 'cl-pack-inc': false } : {};
+}
 function incDraftListing(id) {
   const it = (State.incoming || []).find(x => x.id === id);
   if (!it) return;
@@ -5154,8 +5169,10 @@ function incDraftListing(id) {
       'cl-cost': (it.landed_unit_cost_gbp ?? it.unit_cost_gbp) != null ? (+(it.landed_unit_cost_gbp ?? it.unit_cost_gbp)).toFixed(2) : '',
       'cl-cost-cur': 'GBP',
       'cl-cost-foreign': (it.landed_unit_cost_gbp ?? it.unit_cost_gbp) != null ? (+(it.landed_unit_cost_gbp ?? it.unit_cost_gbp)).toFixed(2) : '',
+      // Postage + packaging + size entered on the incoming line.
+      ...incLineListingFields(it),
     },
-    checks: {}, specs: {}, placements: [], metafields: [],
+    checks: incLineListingChecks(it), specs: {}, placements: [], metafields: [],
     ebayCategoryId: '', clCategoryId: '', clCategoryName: '', images: [],
   };
   routeTo('createlisting');
@@ -14298,6 +14315,10 @@ async function renderCreateListing() {
   CL.draftId = null;   // set when resuming a saved draft
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
   if (el('cl-core')) { el('cl-core').innerHTML = clCoreHtml(); clRenderPhotos(); }
+  clFillShipBands(CL_REPEAT?.fields?.['cl-ship-band'] ?? '', CL_REPEAT?.fields?.['cl-ship-cost'] ?? null).then(() => {
+    const pi = el('cl-pack-inc'); if (pi && el('cl-pack-cost-wrap')) el('cl-pack-cost-wrap').style.display = pi.checked ? 'none' : '';
+    clRenderEstProfit();
+  });
   // Populate the Shopify delivery (shipping) profile dropdown.
   Api.get('/api/listings/delivery-profiles').then(r => {
     const sel = el('cl-shipprofile'); if (!sel) return;
@@ -14412,6 +14433,7 @@ async function renderEditListing() {
     if (el('cl-pack-cost-wrap')) el('cl-pack-cost-wrap').style.display = p.packaging_included ? 'none' : '';
   }
   set('cl-pack-cost', p.packaging_cost ?? '');
+  clFillShipBands(p.shipping_band || '', p.shipping_cost ?? null).then(() => clRenderEstProfit());
   // Shopify price is derived display only.
   Api.get('/api/listings/delivery-profiles').then(r => {
     const sel = el('cl-shipprofile'); if (!sel) return;
@@ -14436,6 +14458,27 @@ async function renderEditListing() {
   if (el('ce-title-count') && el('ce-title')) el('ce-title-count').textContent = el('ce-title').value.length + '/80';
   if (eb.price != null) set('ce-price', eb.price); else if (p.price_ebay != null) set('ce-price', p.price_ebay);
   set('ce-qty', draftProduct.qty_on_hand);
+  // Goods still on order (Incoming). A placeholder has no stock yet: show the
+  // on-order quantity and lock the box — units are added when the container is
+  // received (typing them here would count them twice).
+  {
+    const inc = detail.incoming || [];
+    const onOrder = inc.reduce((a, x) => a + (x.qty || 0), 0);
+    const q = el('ce-qty');
+    if (q && onOrder > 0) {
+      const where = inc.map(x => `<b>${x.qty}</b> in ${escapeHtml(x.container_ref || 'no container')}${x.expected_date ? ' (due ' + escapeHtml(String(x.expected_date).slice(0, 10)) + ')' : ''}`).join(', ');
+      const note = document.createElement('div');
+      note.style.cssText = 'font-size:11.5px;margin-top:4px;padding:6px 8px;border-radius:6px;background:var(--bg-soft)';
+      if (p.is_placeholder || !(+p.qty_on_hand > 0)) {
+        q.value = onOrder; q.disabled = true; q.title = 'On order — added to stock when the container is received';
+        CL._qtyFromIncoming = true;
+        note.innerHTML = `📦 <b>${onOrder} on order</b> — ${where}. Stock is added when the container is received, then eBay goes live with it.`;
+      } else {
+        note.innerHTML = `📦 Plus <b>${onOrder} on order</b> — ${where}.`;
+      }
+      q.insertAdjacentElement('afterend', note);
+    } else CL._qtyFromIncoming = false;
+  }
   {
     const caps = detail.qtyCaps || {};
     const capped = (detail.ebayStores || []).filter(s2 => caps[s2.code]);
@@ -14626,7 +14669,8 @@ async function submitUnifiedUpdate(btn) {
       ebayTitle,
       partNumber: (el('cl-partnumber')?.value || '').trim() || null,
       ebayPrice,
-      qty: parseInt(el('ce-qty')?.value) || 0,
+      // On-order quantity is display only — never sent as warehouse stock.
+      qty: CL._qtyFromIncoming ? undefined : (parseInt(el('ce-qty')?.value) || 0),
       description: (el('cl-desc')?.value || '').trim(),
       ebayDescription: (el('ce-desc')?.value || '').trim() || null,
       tags: (el('cl-tags')?.value || '').trim(),
@@ -14652,6 +14696,8 @@ async function submitUnifiedUpdate(btn) {
       pkgWeightG: (el('cl-pkg-g')?.value || '') !== '' ? Math.round(parseFloat(el('cl-pkg-g').value) * 1000) : undefined,
       packagingIncluded: el('cl-pack-inc') ? !!el('cl-pack-inc').checked : undefined,
       packagingCost: (el('cl-pack-cost')?.value || '') !== '' ? parseFloat(el('cl-pack-cost').value) : undefined,
+      shippingBand: el('cl-ship-band') ? (el('cl-ship-band').value || null) : undefined,
+      shippingCost: (el('cl-ship-cost')?.value || '') !== '' ? parseFloat(el('cl-ship-cost').value) : undefined,
     });
     Task.done(taskId, 'Saved');
   } catch (e) {
@@ -14744,11 +14790,18 @@ function clCoreHtml() {
         <div><input type="number" step="0.1" min="0" id="cl-pkg-g" placeholder="kg"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Weight (kg)</div></div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><label class="switch"><input type="checkbox" id="cl-pack-inc" checked onchange="el('cl-pack-cost-wrap').style.display=this.checked?'none':''"><span></span></label> Comes pre-packaged (packaging in the purchase cost)</label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><label class="switch"><input type="checkbox" id="cl-pack-inc" checked onchange="el('cl-pack-cost-wrap').style.display=this.checked?'none':'';clRenderEstProfit()"><span></span></label> Comes pre-packaged (packaging in the purchase cost)</label>
         <span id="cl-pack-cost-wrap" style="display:none;align-items:center;gap:6px">
-          <input type="number" step="0.01" min="0" id="cl-pack-cost" placeholder="£ packaging/item" style="width:130px">
+          <input type="number" step="0.01" min="0" id="cl-pack-cost" placeholder="£ packaging/item" style="width:130px" oninput="clRenderEstProfit()">
           <span style="font-size:11px;color:var(--ink-soft)">bought separately — goes into the cost maths</span>
         </span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <span style="font-size:13px;font-weight:600">🚚 Postage</span>
+        <select id="cl-ship-band" onchange="el('cl-ship-cost').style.display=this.value==='custom'?'':'none';clRenderEstProfit()" style="min-width:220px;flex:1">
+          <option value="">Standard (Costs &amp; margins default)</option><option value="custom">Other £…</option></select>
+        <input type="number" step="0.01" min="0" id="cl-ship-cost" placeholder="£ per item" style="width:110px;display:none" oninput="clRenderEstProfit()">
+        <span style="font-size:11px;color:var(--ink-soft);flex-basis:100%">What it costs you to send one — pulled from Incoming when it was entered there. Used for the margin + recommended price.</span>
       </div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -14885,6 +14938,8 @@ async function submitUnifiedCreate(btn, overrides = {}) {
       costForeign: (el('cl-cost-foreign')?.value || '') !== '' ? parseFloat(el('cl-cost-foreign').value) : null,
       packagingIncluded: el('cl-pack-inc') ? !!el('cl-pack-inc').checked : undefined,
       packagingCost: (el('cl-pack-cost')?.value || '') !== '' ? parseFloat(el('cl-pack-cost').value) : null,
+      shippingBand: el('cl-ship-band')?.value || undefined,
+      shippingCost: (el('cl-ship-cost')?.value || '') !== '' ? parseFloat(el('cl-ship-cost').value) : undefined,
       taxable: el('cl-taxable') ? el('cl-taxable').checked : true,
       templateSuffix: el('cl-template')?.value || null,
       shippingProfileId: el('cl-shipprofile')?.value || null,
@@ -15028,12 +15083,30 @@ function clCostRecalc() {
 // same fee model as the live estimate, then add the configured target on top
 // (floor = breakeven × (1 + target%) — the target is a markup over breakeven,
 // NOT a margin-of-price, which is why the old solver ran away to a huge number).
-// The item's own postage (shipping band / large panel) when editing a saved product.
+// Postage choices = the shipping bands saved in Costs & margins.
+async function clFillShipBands(selected, cost) {
+  const sel = el('cl-ship-band'); if (!sel) return;
+  if (!CT.settings || !Object.keys(CT.settings).length) { try { CT.settings = (await Api.get('/api/costs/settings')).settings || {}; } catch (_) { CT.settings = CT.settings || {}; } }
+  const bands = CT.settings.shippingBands || [];
+  const cur = selected !== undefined ? selected : sel.value;
+  sel.innerHTML = '<option value="">Standard (Costs &amp; margins default)</option>'
+    + bands.map(b => `<option value="${escapeAttr(b.code)}">${escapeHtml(b.label || b.code)} · £${(+b.cost).toFixed(2)}</option>`).join('')
+    + '<option value="custom">Other £…</option>';
+  sel.value = [...sel.options].some(o => o.value === cur) ? cur : (cur ? 'custom' : '');
+  if (cost != null && el('cl-ship-cost')) el('cl-ship-cost').value = cost;
+  if (el('cl-ship-cost')) el('cl-ship-cost').style.display = sel.value === 'custom' ? '' : 'none';
+}
+// The item's postage + packaging as set on the form (falls back to the saved product).
 function clPseudoItem(cost) {
   const ep = CL.editProductId ? (CL._editDetail?.product || null) : null;
   const large = !!ep?.large_panel;
+  const bandSel = el('cl-ship-band');
+  const band = bandSel ? (bandSel.value || null) : (ep?.shipping_band || null);
+  const shipCost = band === 'custom' ? (parseFloat(el('cl-ship-cost')?.value) >= 0 ? parseFloat(el('cl-ship-cost').value) : (ep?.shipping_cost ?? null)) : null;
+  const packInc = el('cl-pack-inc') ? !!el('cl-pack-inc').checked : (ep?.packaging_included ?? null);
+  const packCost = (el('cl-pack-cost')?.value || '') !== '' ? parseFloat(el('cl-pack-cost').value) : (ep?.packaging_cost ?? null);
   return { costPrice: cost, postageInPrice: ep?.postage_in_price != null ? !!ep.postage_in_price : !large, largePanel: large,
-    shippingBand: ep?.shipping_band || null, shippingCost: ep?.shipping_cost ?? null,
+    shippingBand: band, shippingCost: shipCost, packagingIncluded: packInc, packagingCost: packCost,
     // A known landed cost already includes freight/duty — don't add the estimate on top.
     landedKnown: ep?.landed_cost != null, landedCost: ep?.landed_cost != null ? cost : null };
 }
@@ -15076,7 +15149,7 @@ async function clRenderEstProfit() {
     const sh = ctComputeBreakdown(sp, pseudo, 'shopify');
     const line = (n, b2) => `<div style="display:flex;justify-content:space-between"><span>${n}</span><span style="font-weight:700;color:${b2.marginPct < 0 ? 'var(--red)' : b2.marginPct < 10 ? 'var(--amber)' : 'var(--green)'}">${ctMoney(b2.net)} net · ${ctPct(b2.marginPct)}</span></div>`;
     html += `
-      <div style="font-weight:700;margin-bottom:4px">Estimated profit at these prices <span style="font-weight:400;color:var(--ink-soft)">— incl. fees, VAT, standard postage. Change the price above to play with profitability; refine per-item postage in Costs &amp; margins after listing.</span></div>
+      <div style="font-weight:700;margin-bottom:4px">Estimated profit at these prices <span style="font-weight:400;color:var(--ink-soft)">— incl. fees, VAT, and the postage + packaging set on this form. Change the price above to play with profitability.</span></div>
       ${line('eBay @ £' + price.toFixed(2), eb)}
       ${line('Shopify @ £' + sp.toFixed(2), sh)}`;
   } else {
@@ -18784,7 +18857,9 @@ function ctComputeBreakdown(price, p, channel = 'ebay', opts = {}) {
   const v = s.vatRegistered ? (s.vatRate / 100) / (1 + s.vatRate / 100) : 0;
   const inPrice = (p.postageInPrice == null) ? !p.largePanel : !!p.postageInPrice;
   const postage = inPrice ? ctPostageFor(p) : 0;
-  const packaging = s.packagingCost || 0;
+  // Per-item packaging: came packaged → £0; bought separately → its own £ (else the default).
+  const packaging = p.packagingIncluded === true ? 0
+    : (p.packagingIncluded === false && p.packagingCost != null && p.packagingCost !== '' ? parseFloat(p.packagingCost) || 0 : (s.packagingCost || 0));
   const overhead = s.overheadPerUnit || 0;
   const extAd = B * (s.externalAdPct || 0) / 100;
   const rows = [];
@@ -18799,7 +18874,7 @@ function ctComputeBreakdown(price, p, channel = 'ebay', opts = {}) {
     if (uplift > 0) rows.push([`Freight/duty (est. +${uplift}%)`, freight]);
   }
   rows.push(inPrice ? ['Postage', postage] : ['Postage (buyer pays separately)', 0, false, true]);
-  rows.push(['Packaging', packaging]);
+  rows.push(p.packagingIncluded === true ? ['Packaging (came packaged)', 0, false, true] : ['Packaging', packaging]);
   // Channel-specific marketplace fees.
   let feeBase = 0, feeVat = 0;
   if (channel === 'ebay') {
@@ -21591,7 +21666,7 @@ async function pushToEbay(itemId) {
 }
 
 function escapeHtml(s) { return String(s||'').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
-function escapeAttr(s) { return String(s||'').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+function escapeAttr(s) { return (s === 0 ? '0' : String(s||'')).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
 function toggleListing(itemId, on) {
   if (on) MirrorState.selected.add(itemId);
