@@ -30,7 +30,7 @@ const FIELDS = {
   lengthCm: 'Carton length (cm)', widthCm: 'Carton width (cm)', heightCm: 'Carton height (cm)', weightKg: 'Weight (kg)',
   cartons: 'Cartons',
   postage: 'Postage / shipping rate (per item)', packaged: 'Packaged? (yes/no)', packagingCost: 'Packaging cost (per item)',
-  sellPrice: 'Selling price',
+  sellPrice: 'Selling price', containerRef: 'Container / reference',
 };
 const CORE = ['photo', 'title', 'partNumber', 'supplierSku', 'unitPrice', 'qty', 'total', 'cbm'];
 
@@ -50,6 +50,8 @@ const RULES = [
   ['packagingCost', (h) => /\b(packaging|box|boxing) (cost|price|fee)\b/.test(h)],
   ['packaged', (h) => /\b(packaged|packaging|boxed|retail box|package)\b/.test(h) && !/\b(cost|price|fee|size|dim|qty|weight)\b/.test(h)],
   ['sellPrice', (h) => /\b(sell price|selling price|retail price|rrp|our price|list price|sale price)\b/.test(h)],
+  // Several containers in one list (e.g. loaded the same day) told apart by a column.
+  ['containerRef', (h) => /^(container|container no|container number|cntr|cntr no|shipment|shipment no|reference|ref|ref no|load|load no|batch)$/.test(h)],
   ['photo', (h) => /\b(photo|picture|pic|image|img|图片|照片)\b/.test(h)],
   ['total', (h) => /\b(total|amount|line total|subtotal|金额)\b/.test(h) && !/\b(qty|quantity|cbm|weight|ctn|carton|kg)\b/.test(h)],
   ['cbm', (h) => /\b(cbm|m3|volume|体积)\b/.test(h)],
@@ -260,7 +262,7 @@ function buildLines(rows, headerIdx, map, extras, photos, rowOffset) {
       make: cell('make') || null, model: cell('model') || null, year: cell('year') || null,
       remark: cell('remark') || null, cartons: num(cell('cartons')),
       lengthCm: dims[0], widthCm: dims[1], heightCm: dims[2], weightKg: num(cell('weightKg')),
-      postage: num(cell('postage')), packaged: cell('packaged') || null,
+      postage: num(cell('postage')), packaged: cell('packaged') || null, containerRef: cell('containerRef') || null,
       packagingCost: num(cell('packagingCost')), sellPrice: num(cell('sellPrice')),
       extras: ext,
     });
