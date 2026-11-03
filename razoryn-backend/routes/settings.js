@@ -899,6 +899,22 @@ router.put('/store-vat', requireAdmin, async (req, res) => {
   res.json({ ok: true, setting: cur || null, profile, cleared });
 });
 
+// PUT /api/settings/channel-colors { colors: { <channel>: '#rrggbb' | '' } }
+// One colour per sales channel (each eBay account, Store, Cash, Bank, Card,
+// OnBuy…) so orders are easy to tell apart at a glance. '' = default colour.
+router.put('/channel-colors', requireAdmin, async (req, res) => {
+  const colors = (req.body && req.body.colors) || {};
+  const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+  const next = { ...(cur.channelColors || {}) };
+  for (const [k, v] of Object.entries(colors)) {
+    if (!/^[a-z0-9_]{2,30}$/.test(k)) continue;
+    if (/^#[0-9a-fA-F]{6}$/.test(String(v || ''))) next[k] = String(v).toLowerCase(); else delete next[k];
+  }
+  await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify({ ...cur, channelColors: next })]);
+  await audit(req, 'channel_colors', null, null, next);
+  res.json({ ok: true, channelColors: next });
+});
+
 // ──────────────────────────────────────────────────────────────────────────
 // eBay selling limits + per-account quantity cap.
 // GET  /api/settings/ebay-limits           → each store's cap + eBay's live monthly allowance

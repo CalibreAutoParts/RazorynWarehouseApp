@@ -288,7 +288,7 @@ CREATE INDEX IF NOT EXISTS stock_checks_product_idx ON stock_checks (product_id,
 -- ---------- Sales (feature 1, 7) ----------
 CREATE TABLE IF NOT EXISTS sales (
   id              SERIAL PRIMARY KEY,
-  channel         TEXT NOT NULL CHECK (channel IN ('shopify','ebay_em','ebay_cl','ebay_r3','direct_cash','direct_bank','direct_card')),
+  channel         TEXT NOT NULL CHECK (channel IN ('shopify','ebay_em','ebay_cl','ebay_r3','onbuy','direct_cash','direct_bank','direct_card')),
   external_order_id TEXT,                    -- Shopify order ID or eBay order ID
   customer_name   TEXT,
   customer_phone  TEXT,

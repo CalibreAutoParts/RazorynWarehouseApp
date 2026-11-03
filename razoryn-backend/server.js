@@ -91,6 +91,7 @@ app.use('/api/usage',        require('./routes/usage'));
 app.use('/api/devices',      require('./routes/devices'));
 app.use('/api/pricing',      require('./routes/pricing'));
 app.use('/api/settings',     require('./routes/settings'));
+app.use('/api/onbuy',        require('./routes/onbuy'));
 app.use('/api/costs',        require('./routes/costs'));
 app.use('/api/listings',     require('./routes/listings'));
 app.use('/api/bundles',      require('./routes/bundles'));
@@ -753,6 +754,14 @@ cron.schedule('20 6 * * *', async () => {
 }, { timezone: 'Europe/London' });
 cron.schedule('*/30 * * * *', async () => {
   try { await require('./lib/trade-partner').syncAll(); } catch (e) { console.warn('[cron trade] partner sync:', e.message); }
+});
+
+// OnBuy: import orders, pick up new-product results, push stock + prices — every
+// 10 min (does nothing until the keys are set and OnBuy is switched on).
+require('./lib/onbuy-sync').ensureSchema().catch(e => console.warn('[onbuy] schema:', e.message));
+cron.schedule('*/10 * * * *', async () => {
+  try { const r = await require('./lib/onbuy-sync').runAll(); if (r?.orders?.inserted) console.log(`[cron onbuy] ${r.orders.inserted} new order(s)`); }
+  catch (e) { console.warn('[cron onbuy]', e.message); }
 });
 
 // ---------- Start ----------

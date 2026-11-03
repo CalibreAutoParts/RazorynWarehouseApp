@@ -2035,6 +2035,10 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
     } catch (e) { console.warn('[create-listing] cost record warning:', e.message); }
   }
 
+  // Incoming lines for this SKU (entered before the listing existed) link up now
+  // and hand over their landed cost.
+  try { await require('./incoming').linkProductToIncoming(productId); } catch (e) { console.warn('[create-listing] incoming link:', e.message); }
+
   // Storefront "Part no" = the REAL part number (the SKU carries per-model
   // suffixes and must never show there). Best-effort.
   if (shopifyProduct?.id) {
@@ -2193,6 +2197,33 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
     `UPDATE products SET sku = $1, title = $2, part_number = $3, price_ebay = $4, price_shopify = $5, qty_on_hand = $6, updated_at = now() WHERE id = $7`,
     [sku, shopTitle, partNumber, ebayPrice, shopifyPrice, qty, productId]);
   result.warehouse = { ok: true };
+
+  // Cost, parcel size + packaging from the edit form (only what was sent).
+  try {
+    const numOr = (v) => (v != null && v !== '' && Number.isFinite(parseFloat(v))) ? parseFloat(v) : undefined;
+    const sets = [], vals = [];
+    const put = (col, v) => { if (v !== undefined) { vals.push(v); sets.push(`${col} = $${vals.length}`); } };
+    put('pkg_length_cm', numOr(b.pkgLengthCm)); put('pkg_width_cm', numOr(b.pkgWidthCm));
+    put('pkg_height_cm', numOr(b.pkgHeightCm)); put('pkg_weight_g', numOr(b.pkgWeightG) != null ? Math.round(numOr(b.pkgWeightG)) : undefined);
+    if (b.packagingIncluded !== undefined) put('packaging_included', !!b.packagingIncluded);
+    put('packaging_cost', numOr(b.packagingCost));
+    const newCost = numOr(b.costPrice);
+    const wasCost = product.landed_cost != null ? parseFloat(product.landed_cost) : (product.cost_price != null ? parseFloat(product.cost_price) : null);
+    const costChanged = newCost !== undefined && newCost >= 0 && (wasCost == null || Math.abs(newCost - wasCost) >= 0.005);
+    if (costChanged) { put('cost_price', newCost); put('landed_cost', newCost); }
+    if (sets.length) {
+      vals.push(productId);
+      await query(`UPDATE products SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length}`, vals);
+    }
+    if (costChanged) {
+      const costCur = String(b.costCurrency || 'GBP').toUpperCase();
+      const costForeign = (costCur !== 'GBP' && numOr(b.costForeign) !== undefined) ? numOr(b.costForeign) : null;
+      await query(`INSERT INTO product_cost_history (product_id, purchase_date, currency, unit_cost_foreign, unit_cost_gbp, qty, note, created_by)
+         VALUES ($1, CURRENT_DATE, $2, $3, $4, NULL, 'Set on Edit listing', $5)`, [productId, costCur, costForeign, newCost, req.user.id]).catch(() => {});
+      await require('./costs').shareCostWithSiblings(productId, { gbp: newCost, currency: costCur, foreign: costForeign, qty: null, userId: req.user.id, sourceSku: sku }).catch(() => {});
+      result.cost = { ok: true, gbp: newCost };
+    }
+  } catch (e) { result.cost = { error: e.message }; console.warn('[update-listing] cost/parcel:', e.message); }
 
   // Keep sub / alternate part numbers in sync (replace the set if provided).
   if (Array.isArray(b.subPartNumbers)) {

@@ -135,6 +135,11 @@ function channelParams(channel, item, s) {
       feeVatMult: s.feesVatOnShopify ? (1 + s.feesVatPct / 100) : 1,
     };
   }
+  // OnBuy: one commission % (set on the OnBuy page), VAT charged on it like eBay's.
+  if (channel === 'onbuy') {
+    return { postage, feePct: num(s.onbuyFeePct, 9), fixedFee: 0, adRatePct: 0,
+      feeVatMult: s.feesVatOnEbay ? (1 + s.feesVatPct / 100) : 1 };
+  }
   // eBay: sum the percentage components; ads run on eBay only.
   const feePct = s.ebayFvfPct + s.ebayRegulatoryPct + s.ebayHighReturnPct;
   return {

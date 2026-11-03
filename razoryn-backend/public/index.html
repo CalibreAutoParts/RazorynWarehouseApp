@@ -1291,6 +1291,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
           Print station <span id="nav-print-badge" style="display:none;margin-left:auto;background:var(--amber,orange);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;line-height:18px"></span>
         </button>
+        <button class="nav-item admin-only" data-page="onbuy">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.7 13.4a2 2 0 0 0 2 1.6h9.7a2 2 0 0 0 2-1.6L23 6H6"/></svg>
+          OnBuy
+        </button>
         <button class="nav-item admin-only" data-page="trade">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l1.5-5h15L21 9"/><path d="M3 9h18v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9 21v-6h6v6"/></svg>
           Trade
@@ -3460,6 +3464,7 @@ function hasPerm(page) {
     books:        false,
     disputes:     false,
     trade:        false,
+    onbuy:        false,
     printstation: true,
   };
   const v = map[page];
@@ -3518,6 +3523,7 @@ function routeTo(page) {
     books: renderBooks,
     disputes: renderDisputes,
     trade: renderTrade,
+    onbuy: renderOnBuy,
     printstation: renderPrintStation
   };
   // The handheld's Home is the plain task workbench, not the money dashboard.
@@ -4408,21 +4414,67 @@ function channelPill(ch) {
   // the human-readable store name from the brand config so e.g. ebay_em →
   // "EVBODYPARTS" for Calibre or "eBay" for Razoryn.
   const stores = (State.brand?.allStores || State.brand?.stores || []);
+  // A colour picked for this channel in Settings wins over the default.
+  const key = ch === 'cash' ? 'direct_cash' : ch === 'bank' ? 'direct_bank' : ch;
+  const custom = (State.brand?.channelColors || {})[key] || (key === 'onbuy' ? '#0d9488' : '');
+  const style = custom ? ` style="background:${custom}26;color:${custom};border:1px solid ${custom}66"` : '';
   // Try to find a store whose channelCode matches
   if (ch && ch.startsWith('ebay')) {
     const store = stores.find(s => s.channelCode === ch);
     const label = store ? store.name : 'eBay';
-    return `<span class="pill blue"><span class="dot"></span>${escapeHtml(label)}</span>`;
+    return `<span class="pill blue"${style}><span class="dot"></span>${escapeHtml(label)}</span>`;
   }
-  const map = {
-    shopify:      ['green', 'Store'],
-    direct_cash:  ['amber', 'Cash'],
-    direct_bank:  ['amber', 'Bank'],
-    cash:         ['amber', 'Cash'],
-    bank:         ['amber', 'Bank'],
-  };
-  const [c, l] = map[ch] || ['', ch];
-  return `<span class="pill ${c}"><span class="dot"></span>${escapeHtml(l)}</span>`;
+  const [c, l] = CHANNEL_DEFAULTS[ch] || ['', ch];
+  return `<span class="pill ${c}"${style}><span class="dot"></span>${escapeHtml(l)}</span>`;
+}
+const CHANNEL_DEFAULTS = {
+  shopify:      ['green', 'Store'],
+  direct_cash:  ['amber', 'Cash'],
+  direct_bank:  ['amber', 'Bank'],
+  direct_card:  ['amber', 'Card'],
+  onbuy:        ['', 'OnBuy'],
+  cash:         ['amber', 'Cash'],
+  bank:         ['amber', 'Bank'],
+};
+// The channels a colour can be set for: every eBay account + the others.
+function colorableChannels() {
+  const st = (State.brand?.allStores || State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
+  return [...st.map(s => ({ key: s.channelCode, label: `eBay — ${s.name}` })),
+    { key: 'shopify', label: 'Store (Shopify)' }, { key: 'onbuy', label: 'OnBuy' },
+    { key: 'direct_bank', label: 'Bank' }, { key: 'direct_cash', label: 'Cash' }, { key: 'direct_card', label: 'Card' }];
+}
+async function loadChannelColors() {
+  const box = el('chan-colors-box'); if (!box) return;
+  const cur = State.brand?.channelColors || {};
+  const palette = ['#2563eb', '#7c3aed', '#db2777', '#dc2626', '#ea580c', '#ca8a04', '#16a34a', '#0d9488', '#0891b2', '#475569'];
+  box.innerHTML = colorableChannels().map(c => `
+    <div style="display:flex;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line-2);flex-wrap:wrap">
+      <div style="min-width:200px;font-size:13px">${escapeHtml(c.label)}</div>
+      <input type="color" id="chc-${escapeAttr(c.key)}" value="${escapeAttr(cur[c.key] || '#2563eb')}" data-set="${cur[c.key] ? '1' : ''}" oninput="this.dataset.set='1';chcPreview('${escapeAttr(c.key)}')" style="width:44px;height:30px;padding:0;border:0;background:none">
+      <div style="display:flex;gap:4px">${palette.map(p => `<button type="button" title="${p}" onclick="el('chc-${escapeAttr(c.key)}').value='${p}';el('chc-${escapeAttr(c.key)}').dataset.set='1';chcPreview('${escapeAttr(c.key)}')" style="width:18px;height:18px;border-radius:50%;border:1px solid var(--line);background:${p};cursor:pointer;padding:0"></button>`).join('')}</div>
+      <span id="chc-prev-${escapeAttr(c.key)}">${channelPill(c.key)}</span>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="el('chc-${escapeAttr(c.key)}').dataset.set='';chcPreview('${escapeAttr(c.key)}', true)">Default</button>
+    </div>`).join('') + `<div style="margin-top:10px"><button class="btn btn-primary btn-sm" onclick="saveChannelColors(this)">Save colours</button></div>`;
+}
+function chcPreview(key, reset) {
+  const inp = el('chc-' + key), box = el('chc-prev-' + key); if (!inp || !box) return;
+  const saved = { ...(State.brand.channelColors || {}) };
+  State.brand.channelColors = { ...saved, [key]: reset ? undefined : inp.value };
+  if (reset) delete State.brand.channelColors[key];
+  box.innerHTML = channelPill(key);
+  State.brand.channelColors = saved;
+}
+async function saveChannelColors(btn) {
+  const colors = {};
+  for (const c of colorableChannels()) { const inp = el('chc-' + c.key); if (inp) colors[c.key] = inp.dataset.set ? inp.value : ''; }
+  btn.disabled = true;
+  try {
+    const r = await Api.put('/api/settings/channel-colors', { colors });
+    State.brand.channelColors = r.channelColors;
+    toast('Channel colours saved', 'success');
+    loadChannelColors();
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+  btn.disabled = false;
 }
 
 /* ==========================================================
@@ -5098,9 +5150,10 @@ function incDraftListing(id) {
       'cl-partnumber': it.part_number || '',
       'ce-title': it.title || '',
       'ce-qty': Math.max(1, (it.qty_ordered || 1) - (it.qty_received || 0)),
-      'cl-cost': it.unit_cost_gbp != null ? (+it.unit_cost_gbp).toFixed(2) : '',
+      // Landed (goods + freight/duty share) when the container costs are in.
+      'cl-cost': (it.landed_unit_cost_gbp ?? it.unit_cost_gbp) != null ? (+(it.landed_unit_cost_gbp ?? it.unit_cost_gbp)).toFixed(2) : '',
       'cl-cost-cur': 'GBP',
-      'cl-cost-foreign': it.unit_cost_gbp != null ? (+it.unit_cost_gbp).toFixed(2) : '',
+      'cl-cost-foreign': (it.landed_unit_cost_gbp ?? it.unit_cost_gbp) != null ? (+(it.landed_unit_cost_gbp ?? it.unit_cost_gbp)).toFixed(2) : '',
     },
     checks: {}, specs: {}, placements: [], metafields: [],
     ebayCategoryId: '', clCategoryId: '', clCategoryName: '', images: [],
@@ -9300,7 +9353,7 @@ function renderCustomers() {
   loadCustomers();
 }
 
-const CUST_CH_LABEL = { shopify: 'Store', ebay_em: 'eBay', ebay_cl: 'eBay', ebay_r3: 'eBay', direct_cash: 'Cash', direct_bank: 'Bank' };
+const CUST_CH_LABEL = { shopify: 'Store', ebay_em: 'eBay', ebay_cl: 'eBay', ebay_r3: 'eBay', onbuy: 'OnBuy', direct_cash: 'Cash', direct_bank: 'Bank', direct_card: 'Card' };
 function custDateShort(x) { return x ? new Date(x).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : ''; }
 
 async function loadCustomers() {
@@ -9535,6 +9588,7 @@ function renderSales() {
         ${(State.brand?.stores || []).length > 1
           ? (State.brand.stores.map(s => `<button data-sf="${escapeAttr(s.channelCode)}">${escapeHtml(s.name)}</button>`).join(''))
           : `<button data-sf="ebay">eBay</button>`}
+        ${State.brand?.onbuy || (State.sales || []).some(x => x.channel === 'onbuy') ? '<button data-sf="onbuy">OnBuy</button>' : ''}
         <button data-sf="cash">Cash</button>
         <button data-sf="bank">Bank</button>
         <button data-sf="card">Card</button>
@@ -14344,6 +14398,20 @@ async function renderEditListing() {
   set('cl-title', sh.title || p.title || '');
   set('cl-desc', sh.description || '');
   set('cl-subpn', (detail.subPartNumbers || []).join('\n'));
+  // Cost: the landed cost (goods + freight/duty) when known, else the goods cost.
+  {
+    const c = p.landed_cost != null ? +p.landed_cost : (p.cost_price != null ? +p.cost_price : null);
+    CL._editCostWas = c != null ? +c.toFixed(2) : null;
+    if (c != null) { set('cl-cost-cur', 'GBP'); set('cl-cost-foreign', c.toFixed(2)); set('cl-cost', c.toFixed(2)); if (el('cl-cost-gbp')) el('cl-cost-gbp').textContent = '= £' + c.toFixed(2); }
+    if (p.landed_cost != null && el('cl-cost-rate-note')) el('cl-cost-rate-note').innerHTML = 'Landed cost (goods + freight/duty) — used for the margin and price floor. Change it here to override.';
+  }
+  set('cl-pkg-l', p.pkg_length_cm ?? ''); set('cl-pkg-w', p.pkg_width_cm ?? ''); set('cl-pkg-h', p.pkg_height_cm ?? '');
+  set('cl-pkg-g', p.pkg_weight_g != null ? +(p.pkg_weight_g / 1000).toFixed(2) : '');
+  if (el('cl-pack-inc') && p.packaging_included != null) {
+    el('cl-pack-inc').checked = !!p.packaging_included;
+    if (el('cl-pack-cost-wrap')) el('cl-pack-cost-wrap').style.display = p.packaging_included ? 'none' : '';
+  }
+  set('cl-pack-cost', p.packaging_cost ?? '');
   // Shopify price is derived display only.
   Api.get('/api/listings/delivery-profiles').then(r => {
     const sel = el('cl-shipprofile'); if (!sel) return;
@@ -14390,6 +14458,7 @@ async function renderEditListing() {
     if (pr && !el('ce-floor-warn')) { const d = document.createElement('div'); d.id = 'ce-floor-warn'; pr.insertAdjacentElement('afterend', d); }
     if (pr) pr.addEventListener('input', clUpdateDerivedFromEbay);
     clUpdateDerivedFromEbay();
+    clRenderEstProfit();   // cost is pre-filled → show the recommended price / margin
   }, 150);
 }
 
@@ -14573,6 +14642,16 @@ async function submitUnifiedUpdate(btn) {
       images: CL.imagesDirty ? (CL.images || []) : undefined,
       ebayImages: CL.imagesDirty ? (clStudioEbayImages() || undefined) : undefined,
       imagesChanged: !!CL.imagesDirty,
+      // Cost + parcel: only sent when filled, so a blank box never wipes a saved figure.
+      costPrice: (el('cl-cost')?.value || '') !== '' ? parseFloat(el('cl-cost').value) : undefined,
+      costCurrency: el('cl-cost-cur')?.value || 'GBP',
+      costForeign: (el('cl-cost-foreign')?.value || '') !== '' ? parseFloat(el('cl-cost-foreign').value) : null,
+      pkgLengthCm: (el('cl-pkg-l')?.value || '') !== '' ? parseFloat(el('cl-pkg-l').value) : undefined,
+      pkgWidthCm: (el('cl-pkg-w')?.value || '') !== '' ? parseFloat(el('cl-pkg-w').value) : undefined,
+      pkgHeightCm: (el('cl-pkg-h')?.value || '') !== '' ? parseFloat(el('cl-pkg-h').value) : undefined,
+      pkgWeightG: (el('cl-pkg-g')?.value || '') !== '' ? Math.round(parseFloat(el('cl-pkg-g').value) * 1000) : undefined,
+      packagingIncluded: el('cl-pack-inc') ? !!el('cl-pack-inc').checked : undefined,
+      packagingCost: (el('cl-pack-cost')?.value || '') !== '' ? parseFloat(el('cl-pack-cost').value) : undefined,
     });
     Task.done(taskId, 'Saved');
   } catch (e) {
@@ -14949,8 +15028,17 @@ function clCostRecalc() {
 // same fee model as the live estimate, then add the configured target on top
 // (floor = breakeven × (1 + target%) — the target is a markup over breakeven,
 // NOT a margin-of-price, which is why the old solver ran away to a huge number).
+// The item's own postage (shipping band / large panel) when editing a saved product.
+function clPseudoItem(cost) {
+  const ep = CL.editProductId ? (CL._editDetail?.product || null) : null;
+  const large = !!ep?.large_panel;
+  return { costPrice: cost, postageInPrice: ep?.postage_in_price != null ? !!ep.postage_in_price : !large, largePanel: large,
+    shippingBand: ep?.shipping_band || null, shippingCost: ep?.shipping_cost ?? null,
+    // A known landed cost already includes freight/duty — don't add the estimate on top.
+    landedKnown: ep?.landed_cost != null, landedCost: ep?.landed_cost != null ? cost : null };
+}
 function clRecommendPrice(cost, channel, targetPct) {
-  const pseudo = { costPrice: cost, postageInPrice: true, largePanel: false, shippingBand: null, shippingCost: null, landedKnown: false, landedCost: null };
+  const pseudo = clPseudoItem(cost);
   let lo = 0.01, hi = Math.max(cost * 3, 30);
   for (let g = 0; g < 25 && ctComputeBreakdown(hi, pseudo, channel).net < 0; g++) hi *= 1.5;
   if (ctComputeBreakdown(hi, pseudo, channel).net < 0) return null;   // fees ≥ 100% — infeasible
@@ -14981,7 +15069,7 @@ async function clRenderEstProfit() {
       <button type="button" class="btn btn-outline btn-sm" onclick="if(el('ce-price')){el('ce-price').value='${rec.reco.toFixed(2)}';el('ce-price').dispatchEvent(new Event('input',{bubbles:true}))}">Use £${rec.reco.toFixed(2)}</button>
     </div>`;
   }
-  const pseudo = { costPrice: cost, postageInPrice: true, largePanel: false, shippingBand: null, shippingCost: null, landedKnown: false, landedCost: null };
+  const pseudo = clPseudoItem(cost);
   if (price > 0) {
     const eb = ctComputeBreakdown(price, pseudo, 'ebay');
     const sp = parseFloat(el('cl-shop')?.value) || +(price * 0.95).toFixed(2);
@@ -19391,11 +19479,17 @@ async function openCreateEbayListing(productId, opts = {}) {
   const policies = cfg.ebayPerStorePolicies?.[defaultStoreCode] || {};
   const policiesConfigured = !!(policies.payment || cfg.ebayPolicyPayment) || !!(policies.shipping || cfg.ebayPolicyShipping);
 
+  const alsoStores = stores.filter(s => s.connected !== false);
   const storeSelector = stores.length > 1 ? `
     <div class="field"><label>eBay store</label>
-      <select id="ce-store">
+      <select id="ce-store" onchange="ceSyncAlsoStores()">
         ${stores.map(s => `<option value="${escapeAttr(s.code)}" ${s.code === defaultStoreCode ? 'selected' : ''}>${escapeHtml(s.name)}${s.primary ? ' (primary)' : ''}</option>`).join('')}
       </select>
+      ${!opts.edit && alsoStores.length > 1 ? `<div id="ce-also-wrap" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:6px;font-size:12.5px">
+        <span style="color:var(--ink-soft)">Also list on:</span>
+        ${alsoStores.map(s => `<label class="ce-also-lbl" data-code="${escapeAttr(s.code)}" style="display:${s.code === defaultStoreCode ? 'none' : 'flex'};align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="ce-also-store" value="${escapeAttr(s.code)}"> ${escapeHtml(s.name)}</label>`).join('')}
+        <span style="font-size:11px;color:var(--ink-soft);flex-basis:100%">Same title, price, specifics &amp; photos — each shop uses its own saved business policies, VAT setting, branding and selling limit.</span>
+      </div>` : ''}
     </div>
   ` : `<input type="hidden" id="ce-store" value="${escapeAttr(defaultStoreCode)}">`;
 
@@ -19968,6 +20062,39 @@ function ceCollectListingInput() {
   };
 }
 
+function ceSyncAlsoStores() {
+  const cur = el('ce-store')?.value;
+  document.querySelectorAll('.ce-also-lbl').forEach(l => {
+    const me = l.getAttribute('data-code') === cur;
+    l.style.display = me ? 'none' : 'flex';
+    if (me) { const cb = l.querySelector('input'); if (cb) cb.checked = false; }
+  });
+}
+async function ceListOnOtherShops(productId, codes, inp, title, opts = {}) {
+  const name = (c) => (State.brand?.stores || []).find(s => s.code === c)?.name || c;
+  const bits = []; let bad = 0;
+  for (const code of codes) {
+    const t = Task.start(`Listing on ${name(code)}…`);
+    try {
+      const r2 = await Api.post('/api/listings/create-ebay', {
+        productId, storeCode: code, categoryId: inp.categoryId, conditionId: inp.conditionId,
+        price: inp.price, quantity: inp.quantity, titleOverride: title,
+        useShopifyDescription: inp.useShopifyDescription, descriptionOverride: inp.descriptionOverride,
+        itemSpecifics: inp.itemSpecifics, countryOfOrigin: inp.countryOfOrigin, vatPercent: inp.vatPercent,
+        promote: inp.promote,
+        // Business policies + shop categories are per account → that shop's saved defaults.
+        imageUrls: (opts.imageUrls && opts.imageUrls.length) ? opts.imageUrls : undefined,
+      });
+      Task.done(t, 'Listed');
+      bits.push(`${name(code)} ✓ ${r2.itemId || ''}${r2.trimmedForLimit ? ` (qty ${r2.listedQty} — selling limit)` : ''}`);
+    } catch (e) {
+      Task.fail(t, 'Failed'); bad++;
+      bits.push(`${name(code)} ✗ ${String(e.data?.message || e.message).slice(0, 120)}`);
+    }
+  }
+  toast('Other shops: ' + bits.join(' · '), bad ? 'warn' : 'success', bad ? 14000 : 8000);
+}
+
 async function submitCreateEbayListing(productId, opts = {}) {
   const inp = ceCollectListingInput();
   const { storeCode, categoryId, price, promote } = inp;
@@ -20001,6 +20128,9 @@ async function submitCreateEbayListing(productId, opts = {}) {
     }
     Task.done(taskId, 'Listed');
     toast(`✓ Created on eBay — ItemID ${r.itemId}`, 'success', 8000);
+    // "Also list on" — the same listing on the other ticked eBay shops.
+    const also = [...document.querySelectorAll('.ce-also-store:checked')].map(c => c.value).filter(c => c && c !== storeCode);
+    if (also.length) await ceListOnOtherShops(productId, also, inp, title, opts);
     // Surface promoted-listing outcome (best-effort on the server).
     if (r.promotion) {
       if (r.promotion.ok) toast(`✓ Promoted at ${r.promotion.bidPercent}% ad rate`, 'success', 6000);
@@ -22294,6 +22424,9 @@ function renderSettings() {
           <div id="ebay-health-result" style="margin-bottom:12px"></div>
 
           <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px;margin-bottom:12px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px">🎨 Sales channel colours</div>
+            <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">Give each channel its own colour — every eBay account, the Store, OnBuy, bank, cash, card — so orders are easy to tell apart on the dashboard, Sales and Dispatch.</p>
+            <div id="chan-colors-box" style="margin-bottom:18px"></div>
             <div style="font-weight:600;font-size:14px;margin-bottom:4px">🏪 eBay shops — business setup</div>
             <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">Each eBay account can be run by a different business. Set whether it's a <strong>limited company</strong> or a <strong>sole trader</strong>, whether it's <strong>VAT registered</strong>, the name on its invoices, how its listings are branded and which photos it uses — the app then handles VAT on orders, listings and invoices for that shop automatically. Shopify keeps the company settings. To add another eBay account, add its token in Railway (shown on the shop below) and redeploy.</p>
             <div id="store-vat-box" style="font-size:13px;color:var(--ink-soft)">Loading…</div>
@@ -22990,7 +23123,7 @@ function renderSettings() {
   loadThumbnailConfig();
   loadFitmentConfig();
   settingsMakeCollapsible();
-  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); loadAiSettings(); loadEbayLimits(); loadStoreVat(); }
+  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); loadAiSettings(); loadEbayLimits(); loadStoreVat(); loadChannelColors(); }
   // Re-attach to a category audit that's running (or finished) in the background.
   Api.get('/api/listings/category-audit/status?slim=1').then(s => {
     if (!s || s.state === 'idle') return;
@@ -23324,6 +23457,171 @@ const trStatusPill = st => {
   const c = st === 'dispatched' || st === 'collected' || st === 'paid' ? 'var(--green)' : st === 'cancelled' || st === 'refunded' || st === 'overdue' ? 'var(--red)' : st === 'awaiting_payment' || st === 'part_paid' ? 'var(--amber)' : 'var(--ink-soft)';
   return `<span style="font-size:11px;font-weight:600;color:${c};border:1px solid ${c};border-radius:10px;padding:1px 7px;white-space:nowrap">${escapeHtml(String(st || '').replace('_', ' '))}</span>`;
 };
+
+// ── OnBuy marketplace ──────────────────────────────────────────────────────
+const OB = { filter: 'all', q: '', items: [], sel: new Set(), status: null };
+async function renderOnBuy() {
+  el('content').innerHTML = `<div class="page">
+    <div class="page-head"><div><h1>OnBuy</h1><div class="desc">Sell on OnBuy alongside eBay &amp; Shopify — one warehouse stock, prices set from your eBay price (never below your margin floor), orders land in Sales &amp; Dispatch like any other channel.</div></div>
+      <div class="actions"><button class="btn btn-outline" onclick="obAction('import-orders','Importing OnBuy orders…')">⬇ Import orders</button>
+        <button class="btn btn-outline" onclick="obAction('push','Pushing stock &amp; prices…',{all:true})">⇅ Push stock &amp; prices</button></div></div>
+    <div id="ob-status"><div class="card"><div class="card-body" style="color:var(--ink-soft)">Loading…</div></div></div>
+    <div class="grid-2" style="align-items:start;gap:16px;margin-top:14px">
+      <div class="card"><div class="card-head"><h3>Settings</h3></div><div class="card-body" id="ob-settings"></div></div>
+      <div class="card"><div class="card-head"><h3>How it works</h3></div><div class="card-body" style="font-size:13px;line-height:1.55">
+        <ol style="margin:0;padding-left:18px">
+          <li><b>Listing</b> — OnBuy is a catalogue: each part is matched to an existing OnBuy product by <b>barcode (EAN)</b>, then by <b>part number (MPN)</b>, and your offer is added to it (SKU = warehouse SKU). Not in the catalogue? With an EAN-13 the app creates the product (title, description, photos, brand, category); without one it's flagged <i>needs EAN</i>.</li>
+          <li><b>Price</b> — eBay price ${'±'} your %, rounded to .99, and <b>never below the Costs &amp; margins floor</b> for OnBuy's fee (when protect margin is on and the part has a cost).</li>
+          <li><b>Stock</b> — warehouse stock minus the hold-back, pushed every 10 minutes (and straight after any sale on any channel).</li>
+          <li><b>Orders</b> — imported every 10 minutes as sales on the <b>OnBuy</b> channel: stock comes off and eBay/Shopify update; cancellations/refunds net off; marking dispatched sends the tracking to OnBuy.</li>
+        </ol></div></div>
+    </div>
+    <div class="card" style="margin-top:16px"><div class="card-head" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h3>Products</h3>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" onclick="obListSelected()">List selected</button>
+        <button class="btn btn-outline btn-sm" onclick="obListAll()">List everything in stock</button>
+        <button class="btn btn-outline btn-sm" onclick="obAction('check-queues','Checking new products…')">Check new products</button>
+      </div></div>
+      <div class="card-body">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+          <div class="seg" id="ob-filter">${[['all','All'],['listed','On OnBuy'],['unlisted','Not listed (in stock)'],['problems','Needs attention']].map(([k,l]) => `<button class="${OB.filter===k?'active':''}" onclick="OB.filter='${k}';obLoadProducts()">${l}</button>`).join('')}</div>
+          <input type="search" class="search-input" placeholder="Search SKU, title, part number, barcode…" value="${escapeAttr(OB.q)}" oninput="clearTimeout(OB._t);OB._t=setTimeout(()=>{OB.q=this.value;obLoadProducts()},300)" style="flex:1;min-width:200px">
+        </div>
+        <div id="ob-products" style="overflow-x:auto"></div>
+      </div></div>
+  </div>`;
+  obLoadStatus();
+  obLoadProducts();
+}
+async function obLoadStatus() {
+  let r;
+  try { r = await Api.get('/api/onbuy/status'); OB.status = r; }
+  catch (e) { el('ob-status').innerHTML = `<div class="card"><div class="card-body" style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div></div>`; return; }
+  const c = r.counts || {}, s = r.settings || {};
+  el('ob-status').innerHTML = !r.configured ? `<div class="card" style="border-left:3px solid var(--amber)"><div class="card-body" style="font-size:13px;line-height:1.6">
+      <b>🔌 Connect your OnBuy seller account</b><br>
+      1. In OnBuy's Seller Control Panel go to <b>Inventory → Integrations → OnBuy API</b> and copy the <b>Consumer key</b> and <b>Secret key</b> (use the <i>Test</i> keys while you try it, then the <i>Live</i> keys).<br>
+      2. In Railway add the variables <code>ONBUY_CONSUMER_KEY</code> and <code>ONBUY_SECRET_KEY</code> (optional <code>ONBUY_SITE_ID</code>, default 2000 = OnBuy UK) and redeploy.<br>
+      3. Come back here, press <b>Test connection</b>, pick your delivery template + default category, then switch OnBuy <b>on</b>.</div></div>`
+    : `<div class="grid-4">
+      ${[['Connection', s.enabled ? '<span style="color:var(--green)">● On</span>' : '<span style="color:var(--ink-soft)">● Paused</span>', `<a href="#" onclick="obTest();return false">Test connection</a>`],
+         ['Listed', (c.listed || 0), `${c.queued ? c.queued + ' being created' : 'live offers'}`],
+         ['Needs attention', (c.error || 0) + (c.needs_ean || 0), `${c.needs_ean || 0} need an EAN`],
+         ['Orders (30 days)', r.orders30d?.count || 0, ctMoney(r.orders30d?.total || 0)]]
+        .map(([k, v, sub]) => `<div class="card"><div class="card-body"><div style="font-size:12px;color:var(--ink-soft)">${k}</div><div style="font-size:22px;font-weight:700">${v}</div><div style="font-size:11.5px;color:var(--ink-soft)">${sub}</div></div></div>`).join('')}
+    </div>`;
+  obPaintSettings(s, r.configured);
+}
+function obPaintSettings(s, configured) {
+  const num = (id, label, v, hint, step = '1') => `<div class="field"><label>${label}</label><input id="${id}" type="number" step="${step}" value="${escapeAttr(String(v ?? ''))}">${hint ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:3px">${hint}</div>` : ''}</div>`;
+  const tog = (id, label, v) => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:8px"><label class="switch"><input type="checkbox" id="${id}" ${v ? 'checked' : ''}><span></span></label> ${label}</label>`;
+  el('ob-settings').innerHTML = `
+    ${tog('ob-enabled', '<b>OnBuy on</b> — import orders + sync stock/prices every 10 minutes', s.enabled)}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      ${num('ob-pct', 'Price vs eBay (%)', s.pricePct, 'e.g. −5 = 5% cheaper than eBay (OnBuy fees are lower).', '0.5')}
+      ${num('ob-fee', 'OnBuy commission (%)', s.feePct, 'Used for the margin floor + profit figures.', '0.1')}
+      ${num('ob-buffer', 'Stock hold-back', s.stockBuffer, 'Units kept back from OnBuy.')}
+      ${num('ob-handling', 'Handling time (days)', s.handlingTime, 'Days to dispatch.')}
+    </div>
+    ${tog('ob-99', 'Round prices to .99', s.roundTo99)}
+    ${tog('ob-protect', 'Protect margin — never price below the Costs &amp; margins floor', s.protectMargin)}
+    ${tog('ob-auto', 'Import OnBuy orders automatically', s.autoImportOrders)}
+    ${tog('ob-vatoff', 'This OnBuy account is not VAT-registered (record no VAT on its sales)', s.vatOff)}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="field"><label>Delivery template</label><select id="ob-delivery"><option value="${escapeAttr(s.deliveryTemplateId || '')}">${s.deliveryTemplateId ? 'Template ' + escapeHtml(s.deliveryTemplateId) : 'OnBuy default'}</option></select></div>
+      <div class="field"><label>Condition</label><select id="ob-cond">${['new','excellent','very_good','good','average','refurbished'].map(x => `<option value="${x}" ${s.condition===x?'selected':''}>${x.replace('_',' ')}</option>`).join('')}</select></div>
+      <div class="field"><label>Default category <span style="font-weight:400;color:var(--ink-soft)">— for new products</span></label>
+        <div style="display:flex;gap:6px"><input id="ob-cat" value="${escapeAttr(s.categoryId || '')}" placeholder="category id" style="width:110px"><input id="ob-cat-q" placeholder="search e.g. wing" onkeydown="if(event.key==='Enter'){obCatSearch();event.preventDefault()}" style="flex:1"></div>
+        <div id="ob-cat-results" style="font-size:12px;margin-top:4px"></div></div>
+      <div class="field"><label>Brand name <span style="font-weight:400;color:var(--ink-soft)">— for new products</span></label><input id="ob-brand" value="${escapeAttr(s.brandName || '')}" placeholder="blank = the part's make / Unbranded"></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end"><button class="btn btn-primary" onclick="obSaveSettings()">Save settings</button></div>`;
+  if (configured) Api.get('/api/onbuy/delivery-templates').then(r => {
+    const sel = el('ob-delivery'); if (!sel) return;
+    sel.innerHTML = '<option value="">OnBuy default</option>' + (r.templates || []).map(t => `<option value="${escapeAttr(t.id)}" ${String(s.deliveryTemplateId) === t.id ? 'selected' : ''}>${escapeHtml(t.name)}${t.isDefault ? ' (default)' : ''}</option>`).join('');
+  }).catch(() => {});
+}
+async function obCatSearch() {
+  const q = (el('ob-cat-q')?.value || '').trim(); if (!q) return;
+  el('ob-cat-results').textContent = 'Searching…';
+  try {
+    const r = await Api.get('/api/onbuy/categories?q=' + encodeURIComponent(q));
+    el('ob-cat-results').innerHTML = (r.categories || []).slice(0, 12).map(c => `<a href="#" onclick="el('ob-cat').value='${escapeAttr(c.id)}';el('ob-cat-results').innerHTML='✓ ${escapeAttr(c.name)}';return false" style="display:block">${escapeHtml(c.path || c.name)} <span style="color:var(--ink-soft)">#${escapeHtml(c.id)}</span></a>`).join('') || 'No categories found.';
+  } catch (e) { el('ob-cat-results').textContent = e.data?.message || e.message; }
+}
+async function obSaveSettings() {
+  const v = id => el(id)?.value, c = id => !!el(id)?.checked;
+  try {
+    await Api.put('/api/onbuy/settings', { enabled: c('ob-enabled'), pricePct: v('ob-pct'), feePct: v('ob-fee'), stockBuffer: v('ob-buffer'),
+      handlingTime: v('ob-handling'), roundTo99: c('ob-99'), protectMargin: c('ob-protect'), autoImportOrders: c('ob-auto'), vatOff: c('ob-vatoff'),
+      deliveryTemplateId: v('ob-delivery') || '', condition: v('ob-cond'), categoryId: v('ob-cat') || '', brandName: v('ob-brand') || '' });
+    toast('OnBuy settings saved', 'success');
+    obLoadStatus(); obLoadProducts();
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+}
+async function obTest() {
+  const t = Task.start('Testing OnBuy connection…');
+  try { const r = await Api.post('/api/onbuy/test', {}); Task.done(t, 'Connected'); toast(`✓ Connected to OnBuy (site ${r.siteId}) · ${r.deliveryTemplates} delivery template(s)`, 'success', 7000); }
+  catch (e) { Task.fail(t, 'Failed'); toast('OnBuy: ' + (e.data?.message || e.message), 'error', 10000); }
+}
+async function obAction(path, label, body = {}) {
+  const t = Task.start(label.replace(/&amp;/g, '&'));
+  try {
+    const r = await Api.post('/api/onbuy/' + path, body);
+    Task.done(t, 'Done');
+    const msg = path === 'import-orders' ? `${r.inserted} new order(s), ${r.reconciled} refund/cancel update(s)`
+      : path === 'push' ? `${r.pushed} listing(s) updated on OnBuy`
+      : path === 'check-queues' ? `${r.done} created, ${r.failed} rejected, ${r.checked - r.done - r.failed} still processing` : 'Done';
+    toast('OnBuy: ' + msg, 'success', 7000);
+    obLoadStatus(); obLoadProducts();
+  } catch (e) { Task.fail(t, 'Failed'); toast('OnBuy: ' + (e.data?.message || e.message), 'error', 10000); }
+}
+async function obLoadProducts() {
+  document.querySelectorAll('#ob-filter button').forEach((b, i) => b.classList.toggle('active', ['all','listed','unlisted','problems'][i] === OB.filter));
+  const box = el('ob-products'); if (!box) return;
+  try { OB.items = (await Api.get(`/api/onbuy/products?filter=${OB.filter}&q=${encodeURIComponent(OB.q)}`)).items || []; }
+  catch (e) { box.innerHTML = `<div style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  const st = (x) => x.status === 'listed' ? '<span class="pill green"><span class="dot"></span>Listed</span>'
+    : x.status === 'queued' ? '<span class="pill blue"><span class="dot"></span>Creating</span>'
+    : x.status === 'needs_ean' ? '<span class="pill amber"><span class="dot"></span>Needs EAN</span>'
+    : x.status === 'error' ? '<span class="pill red"><span class="dot"></span>Error</span>' : '<span style="color:var(--ink-soft);font-size:12px">—</span>';
+  const mc = m => m == null ? 'var(--ink-soft)' : m < 0 ? 'var(--red)' : m < 10 ? 'var(--amber)' : 'var(--green)';
+  box.innerHTML = OB.items.length ? `<table class="table" style="font-size:13px"><thead><tr>
+      <th style="width:28px"><input type="checkbox" onchange="OB.items.forEach(x=>this.checked?OB.sel.add(x.id):OB.sel.delete(x.id));obLoadProductsPaintChecks()"></th>
+      <th>Part</th><th style="text-align:right">Stock</th><th style="text-align:right">eBay £</th><th style="text-align:right">OnBuy £</th><th style="text-align:right">Margin</th><th>EAN</th><th>OnBuy</th><th></th></tr></thead><tbody>
+    ${OB.items.slice(0, 500).map(x => `<tr>
+      <td><input type="checkbox" class="ob-cb" data-id="${x.id}" ${OB.sel.has(x.id) ? 'checked' : ''} onchange="this.checked?OB.sel.add(${x.id}):OB.sel.delete(${x.id})"></td>
+      <td><div style="font-weight:600;max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(x.title || '')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(x.sku || '')}${x.partNumber && x.partNumber !== x.sku ? ' · ' + escapeHtml(x.partNumber) : ''}</div>
+        ${x.error ? `<div style="font-size:11px;color:var(--red);max-width:420px">${escapeHtml(x.error)}</div>` : ''}</td>
+      <td style="text-align:right">${x.stock}${x.qty !== x.stock ? `<span style="color:var(--ink-soft);font-size:11px"> /${x.qty}</span>` : ''}</td>
+      <td style="text-align:right">${x.priceEbay != null ? ctMoney(x.priceEbay) : '—'}</td>
+      <td style="text-align:right;font-weight:600">${x.price != null ? ctMoney(x.price) : '—'}${x.floor && x.price != null && x.price <= x.floor + 1 ? '<div style="font-size:10.5px;color:var(--amber)">at margin floor</div>' : ''}</td>
+      <td style="text-align:right;color:${mc(x.marginPct)}">${x.marginPct != null ? x.marginPct.toFixed(1) + '%' : '—'}${x.net != null ? `<div style="font-size:10.5px">${ctMoney(x.net)}</div>` : ''}</td>
+      <td>${x.hasEan ? '✓' : '<span style="color:var(--ink-soft)">—</span>'}</td>
+      <td>${st(x)}</td>
+      <td style="white-space:nowrap">${['listed','queued'].includes(x.status) ? `<button class="btn btn-outline btn-sm" onclick="obRemove(${x.id})">Remove</button>` : `<button class="btn btn-outline btn-sm" onclick="obList([${x.id}])">List</button>`}</td>
+    </tr>`).join('')}</tbody></table>${OB.items.length > 500 ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Showing 500 of ${OB.items.length} — search to narrow down.</div>` : ''}`
+    : '<div class="empty" style="padding:18px"><div class="t">Nothing here</div></div>';
+}
+function obLoadProductsPaintChecks() { document.querySelectorAll('.ob-cb').forEach(c => { c.checked = OB.sel.has(+c.dataset.id); }); }
+async function obList(ids, all = false) {
+  if (!OB.status?.configured) { toast('Connect OnBuy first (keys in Railway) — see the box at the top', 'warn', 8000); return; }
+  const t = Task.start(all ? 'Listing everything in stock on OnBuy…' : `Listing ${ids.length} on OnBuy…`);
+  try {
+    const r = await Api.post('/api/onbuy/list', all ? { allInStock: true } : { productIds: ids });
+    Task.done(t, 'Done');
+    const sm = r.summary || {};
+    toast(`OnBuy: ${sm.listed || 0} listed · ${sm.queued || 0} new products being created · ${sm.needs_ean || 0} need an EAN · ${sm.error || 0} errors${sm.already ? ` · ${sm.already} already on` : ''}${r.more ? ' — more to go, press again' : ''}`, (sm.error || sm.needs_ean) ? 'warn' : 'success', 11000);
+    OB.sel.clear(); obLoadStatus(); obLoadProducts();
+  } catch (e) { Task.fail(t, 'Failed'); toast('OnBuy: ' + (e.data?.message || e.message), 'error', 10000); }
+}
+function obListSelected() { if (!OB.sel.size) { toast('Tick some products first', 'warn'); return; } obList([...OB.sel]); }
+function obListAll() { if (confirm('List every in-stock, priced product that isn\'t on OnBuy yet (200 per press)?')) obList([], true); }
+async function obRemove(id) {
+  if (!confirm('Remove this listing from OnBuy?')) return;
+  try { await Api.post('/api/onbuy/remove', { productId: id }); toast('Removed from OnBuy', 'success'); obLoadStatus(); obLoadProducts(); }
+  catch (e) { toast('OnBuy: ' + (e.data?.message || e.message), 'error'); }
+}
 
 function renderTrade() {
   el('content').innerHTML = `<div style="max-width:1150px">

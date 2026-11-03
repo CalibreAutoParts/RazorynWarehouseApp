@@ -166,13 +166,26 @@ async function ebayPotential(lines) {
 // Freight/duty often arrive after the goods are booked (when the container
 // lands). When they change, placeholder / not-yet-received products in that
 // container take the new landed cost so their margins stay right.
+// Incoming lines entered before the product existed (e.g. listed later via
+// "Draft listing" or Create listing) link up by SKU once it does.
+async function linkUnmatchedLines(ref = null, productId = null) {
+  return query(`UPDATE incoming_stock i SET product_id = p.id, updated_at = now()
+                  FROM products p
+                 WHERE i.product_id IS NULL AND i.status <> 'cancelled' AND COALESCE(TRIM(i.sku), '') <> ''
+                   AND p.active = true AND LOWER(TRIM(p.sku)) = LOWER(TRIM(i.sku))
+                   AND ($1::text IS NULL OR i.container_ref = $1) AND ($2::int IS NULL OR p.id = $2)
+               RETURNING i.container_ref`, [ref, productId]).then(r => r.rows).catch(() => []);
+}
+
 async function syncPlaceholderCosts(ref) {
+  await linkUnmatchedLines(ref);
   await query(`UPDATE products p SET cost_price = COALESCE(i.landed_unit_cost_gbp, i.unit_cost_gbp),
                  landed_cost = COALESCE(i.landed_unit_cost_gbp, i.unit_cost_gbp), updated_at = now()
                FROM incoming_stock i
               WHERE i.product_id = p.id AND i.container_ref = $1 AND i.qty_received = 0
                 AND COALESCE(i.landed_unit_cost_gbp, i.unit_cost_gbp) IS NOT NULL
-                AND (p.is_placeholder = true OR (p.is_prelisted = true AND p.qty_on_hand = 0))`, [ref]).catch(() => {});
+                AND (p.is_placeholder = true OR (p.is_prelisted = true AND p.qty_on_hand = 0)
+                     OR p.cost_price IS NULL OR p.qty_on_hand <= 0)`, [ref]).catch(() => {});
 }
 
 // Apportion a container's freight + duty (GBP) across its lines BY VALUE
@@ -202,6 +215,9 @@ async function reapportionContainer(ref) {
                  : (share > 0 ? +share.toFixed(4) : null);
     await query(`UPDATE incoming_stock SET landed_unit_cost_gbp = $1 WHERE id = $2`, [landed, l.id]);
   }
+  // Landed cost changed → carry it onto the products (placeholders / drafts, and
+  // any product with no cost yet) so their margins + price floors use it.
+  await syncPlaceholderCosts(ref);
 }
 
 // GET /api/incoming?status=&container=&q=
@@ -209,6 +225,7 @@ async function reapportionContainer(ref) {
 // summary so the UI can show "what's coming" at a glance.
 router.get('/', requirePermission('inventory'), async (req, res) => {
   await ensureTable();
+  await linkUnmatchedLines();
   const { status, container, q } = req.query;
   const where = ["i.status <> 'cancelled'"], params = [];
   // Archived containers drop out of the everyday list (search still finds them).
@@ -908,4 +925,18 @@ router.delete('/:id', requirePermission('inventory'), async (req, res) => {
 router.costToGbp = costToGbp;
 router.ensureIncomingTable = ensureTable;
 
+// Called after a listing is created: link its incoming lines + take their landed cost.
+router.linkProductToIncoming = async (productId) => {
+  await ensureTable();
+  const rows = await linkUnmatchedLines(null, productId);
+  for (const ref of new Set(rows.map(r => r.container_ref).filter(Boolean))) await reapportionContainer(ref).catch(() => {});
+  // Brand-new listing for goods still on the water: its cost IS the landed cost.
+  await query(`UPDATE products p SET landed_cost = x.landed, cost_price = COALESCE(p.cost_price, x.landed), updated_at = now()
+                 FROM (SELECT COALESCE(landed_unit_cost_gbp, unit_cost_gbp) AS landed FROM incoming_stock
+                        WHERE product_id = $1 AND qty_received = 0 AND status <> 'cancelled'
+                          AND COALESCE(landed_unit_cost_gbp, unit_cost_gbp) IS NOT NULL
+                        ORDER BY created_at DESC LIMIT 1) x
+                WHERE p.id = $1`, [productId]).catch(() => {});
+  return rows.length;
+};
 module.exports = router;
