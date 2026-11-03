@@ -4699,7 +4699,7 @@ function openAddIncoming(prefill) {
     body: `
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Add a whole container at once. Each line links to a product in your inventory — no need to retype SKUs. Adding goods from several suppliers? Use <strong>Save &amp; add another supplier</strong> to keep the container details and just change the supplier + lines.</div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 0.7fr;gap:10px;margin-bottom:6px">
-        <div class="field"><label>Container number / name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— unique, e.g. MSKU1234567</span></label><input id="incb-container" placeholder="Container no. (trackable) or a name" value="${escapeAttr(prefill.containerRef||'')}"></div>
+        <div class="field"><label>Container number / name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— unique, e.g. MSKU1234567 · two containers in one list? set it per line</span></label><input id="incb-container" placeholder="Container no. (trackable) or a name" value="${escapeAttr(prefill.containerRef||'')}"></div>
         <div class="field"><label>Supplier</label>${supplierComboHtml('incb-supplier', prefill.supplier || '', "This supplier's name")}</div>
         <div class="field"><label>Rough ETA <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(sea freight, approx.)</span></label><input id="incb-expected" type="date" value="${escapeAttr(prefill.expectedDate||'')}"></div>
         <div class="field"><label>Cost currency</label><select id="incb-currency">${curOpts}</select></div>
@@ -4714,7 +4714,7 @@ function openAddIncoming(prefill) {
       <div style="border-top:1px solid var(--line);margin:12px 0;padding-top:10px">
         <div style="font-weight:600;font-size:13px;margin-bottom:6px">Add products</div>
         <div style="position:relative">
-          <input id="incb-search" placeholder="Search a product by title / SKU / part, then pick to add a line…" autocomplete="off" oninput="incbSearch(this.value)">
+          <input id="incb-search" placeholder="Search a product by title / SKU / part — or type a new part number and press Enter" autocomplete="off" oninput="incbSearch(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();incbSearchEnter(this.value)}">
           <div id="incb-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:240px;overflow:auto"></div>
         </div>
         <details style="margin-top:8px">
@@ -4749,12 +4749,15 @@ function incbRenderLines() {
   const units = _incLines.reduce((a, l) => a + (parseInt(l.qty) || 0), 0);
   const cur = (el('incb-currency')?.value) || 'CNY';
   wrap.innerHTML = `<div style="font-size:12px;font-weight:600;margin-bottom:6px">${_incLines.length} line(s) · ${units} units</div>` +
-    `<div style="display:flex;gap:8px;font-size:10px;color:var(--ink-soft);padding:0 28px 0 0"><div style="flex:1">Product</div><div style="width:80px;text-align:center">Qty</div><div style="width:90px;text-align:center">Unit cost (${escapeHtml(cur)})</div></div>` +
+    (() => { const hdr = el('incb-container')?.value?.trim() || '(no container)'; const refOf = l => l.containerRef || hdr; const refs = [...new Set(_incLines.map(refOf))];
+      return refs.length > 1 ? `<div style="font-size:11px;margin-bottom:6px">📦 ${refs.length} containers: ${refs.map(r => `<b>${escapeHtml(r)}</b> (${_incLines.filter(l => refOf(l) === r).length})`).join(' · ')}</div>` : ''; })() +
+    `<div style="display:flex;gap:8px;font-size:10px;color:var(--ink-soft);padding:0 28px 0 0"><div style="flex:1">Product</div><div style="width:110px;text-align:center">Container</div><div style="width:80px;text-align:center">Qty</div><div style="width:90px;text-align:center">Unit cost (${escapeHtml(cur)})</div></div>` +
     _incLines.map((l, i) => `<div style="margin-bottom:6px;${l.productId ? '' : 'border-left:3px solid var(--amber, #b26a00);padding-left:6px'}"><div style="display:flex;gap:8px;align-items:center">
       <div style="flex:1;min-width:0">${l.productId
         ? `<div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(l.title)}</div>`
         : `<input value="${escapeAttr(l.title || '')}" placeholder="Name (optional — Thumbnail Maker / you can add it later)" onchange="_incLines[${i}].title=this.value" style="width:100%;font-size:12px">`}
         <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || l.partNumber || '')}${l.productId ? '' : ' · <span style="color:var(--amber, #b26a00)">NEW — not listed yet</span>'}${l.supplierSku ? ' · their code ' + escapeHtml(l.supplierSku) : ''}${l.cbm != null ? ' · ' + l.cbm + ' CBM' : ''}</div></div>
+      <input value="${escapeAttr(l.containerRef || '')}" placeholder="container" title="Which container this line is in — leave blank to use the container number above" onchange="_incLines[${i}].containerRef=this.value.trim();incbRenderLines()" style="width:110px;font-size:12px">
       <input type="number" min="1" value="${escapeAttr(l.qty)}" onchange="_incLines[${i}].qty=parseInt(this.value)||0" style="width:80px">
       <input type="number" min="0" step="0.01" value="${l.unitCostForeign != null ? escapeAttr(l.unitCostForeign) : ''}" placeholder="cost" onchange="_incLines[${i}].unitCostForeign=this.value" style="width:90px">
       <button class="btn btn-ghost btn-sm" onclick="_incLines.splice(${i},1);incbRenderLines()" style="color:var(--red)">×</button>
@@ -4774,15 +4777,39 @@ function incbAddProduct(p, qty, unitCost) {
 }
 function incbSearch(q) {
   const box = el('incb-suggest'); if (!box) return;
-  q = (q || '').trim().toLowerCase();
+  const raw = (q || '').trim();
+  q = raw.toLowerCase();
   if (q.length < 2) { box.style.display = 'none'; return; }
+  const pn = p => [p.partNumber || p.part_number || '', ...((p.partNumbers || []).map(x => x.code || x))].join(' ').toLowerCase();
   const matches = (State.products || []).filter(p =>
-    (p.title || '').toLowerCase().includes(q) || (p.sku || '').toLowerCase().includes(q) || (p.part_number || '').toLowerCase().includes(q)
+    (p.title || '').toLowerCase().includes(q) || (p.sku || '').toLowerCase().includes(q) || pn(p).includes(q)
   ).slice(0, 12);
-  if (!matches.length) { box.style.display = 'none'; return; }
-  box.innerHTML = matches.map(p => `<div onclick="incbPick(${p.id})" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line);font-size:12px" onmouseover="this.style.background='var(--bg-soft)'" onmouseout="this.style.background=''">
-    <div style="font-weight:600">${escapeHtml(p.title)}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')} · on hand ${p.qty_on_hand ?? 0}</div></div>`).join('');
+  State._incbMatches = matches;
+  const newRow = `<div onclick="incbAddNew()" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line);font-size:12px;color:var(--amber, #b26a00)" onmouseover="this.style.background='var(--bg-soft)'" onmouseout="this.style.background=''">
+    <div style="font-weight:600">➕ Add “${escapeHtml(raw)}” as a new item</div><div style="font-size:11px;color:var(--ink-soft)">Not listed yet — becomes a placeholder product (name, cost, postage etc. on the line)</div></div>`;
+  const rows = matches.map(p => `<div onclick="incbPick(${p.id})" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--line);font-size:12px" onmouseover="this.style.background='var(--bg-soft)'" onmouseout="this.style.background=''">
+    <div style="font-weight:600">${escapeHtml(p.title)}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')}${p.partNumber ? ' · ' + escapeHtml(p.partNumber) : ''} · on hand ${p.qtyOnHand ?? p.qty_on_hand ?? 0}</div></div>`).join('');
+  box.innerHTML = matches.length ? rows + newRow : newRow;
   box.style.display = 'block';
+}
+// Enter in the search: an exact SKU / part-number match → add it; the only
+// match → add it; otherwise add what was typed as a new item.
+function incbSearchEnter(v) {
+  const q = (v || '').trim(); if (!q) return;
+  const exact = (State.products || []).find(p => (p.sku || '').toLowerCase() === q.toLowerCase() || (p.partNumber || p.part_number || '').toLowerCase() === q.toLowerCase());
+  if (exact) return incbPick(exact.id);
+  const m = State._incbMatches || [];
+  if (m.length === 1) return incbPick(m[0].id);
+  incbAddNew();
+}
+function incbAddNew() {
+  const code = (el('incb-search')?.value || '').trim();
+  if (!code) return;
+  _incLines.push({ productId: null, sku: code, partNumber: code, title: '', qty: 1, unitCostForeign: null });
+  if (el('incb-search')) el('incb-search').value = '';
+  const box = el('incb-suggest'); if (box) box.style.display = 'none';
+  incbRenderLines();
+  setTimeout(() => { const ins = document.querySelectorAll('#incb-lines-wrap input[placeholder^="Name"]'); ins[ins.length - 1]?.focus(); }, 30);
 }
 function incbPick(id) {
   const p = (State.products || []).find(x => x.id === id);
@@ -4812,6 +4839,9 @@ function incbParsePaste() {
     const n = h.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').trim();
     for (const [f, re] of INC_PASTE_COLS) if (headerMap[f] === undefined && re.test(n) && !Object.values(headerMap).includes(idx)) { headerMap[f] = idx; break; }
   });
+  // "Container"/"Ref" columns — matched first and exactly so they're never read as the code.
+  first.forEach((h, idx) => { if (headerMap.containerRef === undefined && /^(container|container no|container number|cntr|shipment|reference|ref|ref no|load|batch)$/.test(h.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').trim())) headerMap.containerRef = idx; });
+  if (headerMap.containerRef !== undefined) for (const k of Object.keys(headerMap)) if (k !== 'containerRef' && headerMap[k] === headerMap.containerRef) delete headerMap[k];
   const hasHeader = headerMap.qty !== undefined && (headerMap.partNumber !== undefined || headerMap.supplierSku !== undefined || headerMap.title !== undefined);
   const rows = hasHeader ? raw.slice(1) : raw;
   for (const line of rows) {
@@ -4820,7 +4850,7 @@ function incbParsePaste() {
       const c = split(line); const g = f => headerMap[f] !== undefined ? (c[headerMap[f]] || '').trim() : '';
       rec = { code: g('partNumber') || g('supplierSku'), supplierSku: g('supplierSku') || null, qty: parseInt(String(g('qty')).replace(/[^\d]/g, '')), cost: g('unitCost') || null,
         title: g('title') || null, postage: g('postage') || null, packaged: g('packaged') || null, sellPrice: g('sellPrice') || null, cbm: g('cbm') || null,
-        make: g('make') || null, model: g('model') || null, packagingCost: g('packagingCost') || null };
+        make: g('make') || null, model: g('model') || null, packagingCost: g('packagingCost') || null, containerRef: g('containerRef') || null };
     } else {
       const m = line.includes('\t') || line.includes(',') || line.includes(';') ? split(line) : line.trim().split(/\s+/);
       // code, qty[, cost][, name…]
@@ -4834,10 +4864,15 @@ function incbParsePaste() {
     if ((!rec.code && !rec.title) || !Number.isInteger(rec.qty) || rec.qty <= 0) { bad.push(line.trim()); continue; }
     const cl = (rec.code || '').toLowerCase();
     const p = cl ? (State.products || []).find(x => (x.sku || '').toLowerCase() === cl || (x.partNumber || x.part_number || '').toLowerCase() === cl) : null;
-    if (p) { incbAddProduct(p, rec.qty, rec.cost); added++; continue; }
+    if (p) {
+      // The same product in two containers stays as two lines.
+      if (rec.containerRef) _incLines.push({ productId: p.id, sku: p.sku, title: p.title, qty: rec.qty, unitCostForeign: rec.cost, containerRef: rec.containerRef });
+      else incbAddProduct(p, rec.qty, rec.cost);
+      added++; continue;
+    }
     _incLines.push({ productId: null, sku: rec.code || null, partNumber: rec.code || null, supplierSku: rec.supplierSku || null, title: rec.title || '',
       qty: rec.qty, unitCostForeign: rec.cost, postage: rec.postage, packaged: rec.packaged, sellPrice: rec.sellPrice,
-      cbm: rec.cbm, make: rec.make, model: rec.model, packagingCost: rec.packagingCost });
+      cbm: rec.cbm, make: rec.make, model: rec.model, packagingCost: rec.packagingCost, containerRef: rec.containerRef || null });
     created++;
   }
   const res = el('incb-paste-result');
@@ -4860,7 +4895,7 @@ async function submitBulkIncoming(andNext) {
     supplier: el('incb-supplier')?.value || null,
     status: 'on_order',
     lines: _incLines.filter(l => (parseInt(l.qty) || 0) > 0).map(l => ({
-      productId: l.productId || undefined, qty: parseInt(l.qty),
+      productId: l.productId || undefined, qty: parseInt(l.qty), containerRef: l.containerRef || undefined,
       unitCostForeign: (l.unitCostForeign != null && l.unitCostForeign !== '') ? parseFloat(l.unitCostForeign) : undefined,
       currency: header.currency,
       ...(l.productId ? {} : { sku: l.sku || undefined, partNumber: l.partNumber || undefined, supplierSku: l.supplierSku || undefined,
@@ -4873,15 +4908,18 @@ async function submitBulkIncoming(andNext) {
     createPlaceholders: !!el('incb-ph')?.checked,
     shopifyMode: el('incb-phshop')?.value || 'draft',
   };
-  if ((payload.freightPerCbm || payload.containerFreight) && !header.containerRef) { toast('Enter the container number to add freight to it', 'warn'); return; }
+  const lineRefs = new Set(payload.lines.map(l => l.containerRef || header.containerRef || ''));
+  if ((payload.freightPerCbm || payload.containerFreight) && lineRefs.has('')) { toast('Enter a container number (above, or on each line) to add freight to it', 'warn'); return; }
+  if (payload.containerFreight && !payload.freightPerCbm && lineRefs.size > 1) { toast("These lines are in more than one container — use a freight rate per CBM, or add each container's freight from its card afterwards", 'warn', 8000); return; }
   const taskId = Task.start('Adding incoming stock…');
   try {
     const r = await Api.post('/api/incoming/bulk', payload);
     Task.done(taskId, 'Added');
     const newMsg = r.placeholders ? ` · 🧩 ${r.placeholders.created.length} placeholder product(s) created${r.placeholders.errors.length ? ` (${r.placeholders.errors.length} failed)` : ''} — 🚀 Go live when ready`
       : (r.newItems?.length ? ` · ${r.newItems.length} NEW unlisted item(s) — use 🧩 Placeholder or 📝 Draft listing on those lines` : '');
-    const frMsg = r.freight && !r.freight.error ? ` · freight ${r.freight.currency} ${r.freight.freight}${r.freight.cbm != null ? ` (${r.freight.cbm} CBM × ${r.freight.perCbm})` : ''}` : '';
-    toast(`Added ${r.created} line(s) · ${r.createdUnits} units${newMsg}${frMsg}` + (r.unmatched?.length ? ` · ${r.unmatched.length} skipped (no qty/sku)` : ''), 'success', newMsg ? 9000 : 5000);
+    const frMsg = r.freight && !r.freight.error ? ` · freight ${r.freight.currency} ${r.freight.freight}${r.freight.cbm != null ? ` (${r.freight.cbm} CBM × ${r.freight.perCbm})` : ''}${r.freight.containers ? ` across ${r.freight.containers.length} containers` : ''}` : (r.freight?.error ? ` · ⚠ ${r.freight.error}` : '');
+    const ctnMsg = (r.containers || []).length > 1 ? ` · into ${r.containers.length} containers (${r.containers.join(', ')})` : '';
+    toast(`Added ${r.created} line(s) · ${r.createdUnits} units${ctnMsg}${newMsg}${frMsg}` + (r.unmatched?.length ? ` · ${r.unmatched.length} skipped (no qty/sku)` : ''), 'success', newMsg ? 9000 : 5000);
     State._suppliersLoaded = false;   // a new supplier name may have been typed — refresh dropdowns
     if (andNext) {
       // Re-open with the shared container header pre-filled; supplier + lines clear.
@@ -17597,7 +17635,7 @@ function simpLineHtml(l, i) {
       <div style="flex:1;min-width:0;font-size:12px">
         <div style="font-weight:600">${escapeHtml(l.title || '(no description)')}${l.make || l.model ? ` <span style="font-weight:400;color:var(--ink-soft)">· ${escapeHtml([l.make, l.model, l.year].filter(Boolean).join(' '))}</span>` : ''}</div>
         <div style="color:var(--ink-soft);font-family:ui-monospace,monospace;font-size:11px">
-          ${l.partNumber ? 'PN ' + escapeHtml(l.partNumber) : ''}${l.supplierSku ? ' · their SKU ' + escapeHtml(l.supplierSku) : ''}${l.unitPrice != null && canSeeMoney() ? ' · ¥' + l.unitPrice : ''}${l.total != null && canSeeMoney() ? ' = ¥' + l.total : ''}${l.cbm != null ? ' · ' + l.cbm + ' CBM' : ''}${l.cartons != null ? ' · ' + l.cartons + ' ctn' : ''}${l.lengthCm ? ` · 📦 ${l.lengthCm}×${l.widthCm ?? '?'}×${l.heightCm ?? '?'}cm` : ''}${l.weightKg ? ' ' + l.weightKg + 'kg' : ''}${l.postage != null ? ' · 🚚 £' + l.postage + '/item' : ''}${l.packaged ? ' · 📦 packaged: ' + escapeHtml(l.packaged) : ''}${l.sellPrice != null && canSeeMoney() ? ' · sell £' + l.sellPrice : ''}
+          ${l.partNumber ? 'PN ' + escapeHtml(l.partNumber) : ''}${l.supplierSku ? ' · their SKU ' + escapeHtml(l.supplierSku) : ''}${l.unitPrice != null && canSeeMoney() ? ' · ¥' + l.unitPrice : ''}${l.total != null && canSeeMoney() ? ' = ¥' + l.total : ''}${l.cbm != null ? ' · ' + l.cbm + ' CBM' : ''}${l.cartons != null ? ' · ' + l.cartons + ' ctn' : ''}${l.lengthCm ? ` · 📦 ${l.lengthCm}×${l.widthCm ?? '?'}×${l.heightCm ?? '?'}cm` : ''}${l.weightKg ? ' ' + l.weightKg + 'kg' : ''}${l.postage != null ? ' · 🚚 £' + l.postage + '/item' : ''}${l.packaged ? ' · 📦 packaged: ' + escapeHtml(l.packaged) : ''}${l.sellPrice != null && canSeeMoney() ? ' · sell £' + l.sellPrice : ''}${l.containerRef ? ' · 📦 ' + escapeHtml(l.containerRef) : ''}
         </div>
         ${l.totalMismatch && canSeeMoney() ? `<div style="color:var(--red);font-size:11px">⚠ Their total ¥${l.total} ≠ price × qty (¥${(l.unitPrice * l.qty).toFixed(2)}) — check with the supplier</div>` : ''}
         ${l.extras && Object.keys(l.extras).length ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:3px">${Object.entries(l.extras).map(([k, v]) => `<span class="pill" style="font-size:10px;background:var(--bg-soft)">${escapeHtml(k)}: <strong>${escapeHtml(v)}</strong></span>`).join('')}</div>` : ''}
@@ -17646,7 +17684,7 @@ async function simpImport(btn) {
   const taskId = Task.start('Importing ' + picked.length + ' lines');
   try {
     const lines = picked.map(l => {
-      const base = { qty: l.qty, unitCostForeign: l.unitPrice != null ? l.unitPrice : undefined, notes: l.remark || undefined,
+      const base = { containerRef: l.containerRef || undefined, qty: l.qty, unitCostForeign: l.unitPrice != null ? l.unitPrice : undefined, notes: l.remark || undefined,
         photoUrl: l.photo || undefined, cbm: l.cbm != null ? l.cbm : undefined, lineTotal: l.total != null ? l.total : undefined,
         supplierSku: l.supplierSku || undefined, extras: l.extras && Object.keys(l.extras).length ? l.extras : undefined };
       if (l.choice !== 'new') return { ...base, productId: l.choice };
@@ -17659,7 +17697,9 @@ async function simpImport(btn) {
         lengthCm: l.lengthCm ?? undefined, widthCm: l.widthCm ?? undefined, heightCm: l.heightCm ?? undefined, weightKg: l.weightKg ?? undefined };
     });
     const containerRef = (el('simp-container')?.value || '').trim() || null;
-    if ((el('simp-frcbm')?.value || el('simp-frtotal')?.value) && !containerRef) { toast('Enter the container / invoice ref to add freight to it', 'warn'); if (btn) btn.disabled = false; Task.fail(taskId); return; }
+    const sheetRefs = new Set(lines.map(l => l.containerRef || containerRef || ''));
+    if ((el('simp-frcbm')?.value || el('simp-frtotal')?.value) && sheetRefs.has('')) { toast('Enter the container / invoice ref to add freight to it', 'warn'); if (btn) btn.disabled = false; Task.fail(taskId); return; }
+    if (el('simp-frtotal')?.value && !el('simp-frcbm')?.value && sheetRefs.size > 1) { toast("This sheet has more than one container — use a freight rate per CBM, or add each container's freight from its card", 'warn', 8000); if (btn) btn.disabled = false; Task.fail(taskId); return; }
     const r = await Api.post('/api/incoming/bulk', {
       supplier, containerRef,
       expectedDate: el('simp-eta')?.value || null,

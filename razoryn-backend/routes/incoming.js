@@ -354,6 +354,7 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
 
   const created = [], unmatched = [], newItems = [];
   const newLineInfo = {};   // incoming id → the uploaded line (for placeholders)
+  const refs = new Set();   // every container these lines landed in
   for (const l of lines) {
     const qty = parseInt(l.qty);
     if (!Number.isInteger(qty) || qty <= 0) { unmatched.push({ ...l, reason: 'bad qty' }); continue; }
@@ -373,13 +374,17 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
     // Per-line cost capture (foreign → GBP). Container-level freight/duty are
     // captured on each line (not apportioned in v1).
     const lineCurrency = String(l.currency || b.currency || 'CNY').toUpperCase();
+    // A list can mix containers (same day, told apart by a reference column):
+    // a line's own container ref wins over the header one.
+    const lineRef = String(l.containerRef || b.containerRef || '').trim() || null;
+    if (lineRef) refs.add(lineRef);
     const { gbp: lineGbp, rate: lineRate } = await costToGbp(l.unitCostForeign, lineCurrency, b.expectedDate, l.fxRate);
     const ins = await query(
       `INSERT INTO incoming_stock (product_id, sku, title, part_number, qty_ordered, container_ref, supplier, expected_date, status, notes, created_by,
                                    unit_cost_foreign, currency, fx_rate, unit_cost_gbp, freight_total, duty,
                                    photo_url, cbm, line_total_foreign, supplier_sku, extras)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb) RETURNING id`,
-      [prod.id, prod.sku, prod.title, prod.part_number, qty, b.containerRef || null, b.supplier || null,
+      [prod.id, prod.sku, prod.title, prod.part_number, qty, lineRef, b.supplier || null,
        b.expectedDate || null, b.status || 'on_order', l.notes || b.notes || null, req.user.id,
        (l.unitCostForeign != null && l.unitCostForeign !== '') ? parseFloat(l.unitCostForeign) : null,
        lineCurrency, lineRate, lineGbp,
@@ -393,16 +398,27 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
     created.push({ id: ins.rows[0].id, productId: prod.id, sku: prod.sku, qty });
     if (!prod.id) newLineInfo[ins.rows[0].id] = l;
   }
-  await audit(req, 'incoming_bulk_add', 'incoming', null, { created: created.length, unmatched: unmatched.length, container: b.containerRef });
+  await audit(req, 'incoming_bulk_add', 'incoming', null, { created: created.length, unmatched: unmatched.length, containers: [...refs] });
   if (b.supplier) { try { await require('./suppliers').ensureSupplierByName(b.supplier); } catch (_) {} }
   // Sea freight quoted per CBM (or one total) → the container's freight, so it's
   // apportioned into every line's landed cost. Duty already on file is kept.
+  // Per-CBM rate → applied to EACH container (its own CBM); a single total only
+  // makes sense for one container.
   let freight = null;
-  if (b.containerRef && (num(b.freightPerCbm) != null || num(b.containerFreight) != null)) {
-    try { freight = await setContainerFreight(b.containerRef, { perCbm: num(b.freightPerCbm), total: num(b.containerFreight), currency: b.freightCurrency, date: b.expectedDate }); }
-    catch (e) { freight = { error: e.message }; }
+  const perCbm = num(b.freightPerCbm), freightTotal = num(b.containerFreight);
+  if (refs.size && (perCbm != null || freightTotal != null)) {
+    if (perCbm == null && refs.size > 1) freight = { error: 'A freight total can only go on one container — use a rate per CBM for a mixed list, or add each container\'s freight from its card.' };
+    else {
+      const each = [];
+      for (const ref of refs) {
+        try { each.push({ ref, ...(await setContainerFreight(ref, { perCbm, total: freightTotal, currency: b.freightCurrency, date: b.expectedDate })) }); }
+        catch (e) { each.push({ ref, error: e.message }); }
+      }
+      freight = each.length === 1 ? each[0] : { containers: each, currency: String(b.freightCurrency || 'GBP').toUpperCase(),
+        freight: +each.reduce((a, x) => a + (x.freight || 0), 0).toFixed(2) };
+    }
   }
-  if (b.containerRef) await reapportionContainer(b.containerRef).catch(() => {});
+  for (const ref of refs) await reapportionContainer(ref).catch(() => {});
   // Not listed yet → placeholder products (Thumbnail Maker can find them by SKU /
   // part number; Shopify pre-order or draft; eBay held until Go live).
   let placeholders = null;
@@ -410,7 +426,7 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
     placeholders = await createPlaceholders(Object.keys(newLineInfo).map(Number), {
       shopifyMode: b.shopifyMode, userId: req.user.id, perLine: newLineInfo });
   }
-  res.json({ ok: true, created: created.length, createdUnits: created.reduce((a, c) => a + c.qty, 0), unmatched, newItems, placeholders, freight });
+  res.json({ ok: true, created: created.length, createdUnits: created.reduce((a, c) => a + c.qty, 0), unmatched, newItems, placeholders, freight, containers: [...refs] });
 });
 
 const num = (v) => { if (v == null || v === '') return null; const n = parseFloat(String(v).replace(/[£$¥,\s]/g, '')); return Number.isFinite(n) ? n : null; };
