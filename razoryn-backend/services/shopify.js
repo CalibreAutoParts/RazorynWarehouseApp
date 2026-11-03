@@ -567,6 +567,20 @@ async function replaceProductImagesOrdered(productId, items = []) {
   return (out.images || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0)).map(im => im.src).filter(Boolean);
 }
 
+// Append photos (https links or base64 data URLs) after the product's current
+// ones, without removing anything. Returns the full ordered image list.
+async function addProductImages(productId, items = []) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  for (const item of (items || []).map(x => String(x || '').trim()).filter(Boolean)) {
+    const isData = /^data:[^;]+;base64,/.test(item);
+    const image = isData ? { attachment: item.replace(/^data:[^;]+;base64,/, '') } : { src: item };
+    try { await shopifyRequest('post', `/products/${productId}/images.json`, { data: { image } }); }
+    catch (e) { console.warn('[shopify] add image failed:', isData ? '(upload)' : item, e.message); }
+  }
+  const out = (await shopifyRequest('get', `/products/${productId}.json`)).data.product;
+  return (out.images || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0)).map(im => im.src).filter(Boolean);
+}
+
 // Lightweight SKU-only update — sets the first variant's SKU (and keeps barcode
 // in sync with it, so scanning works) without touching title, price, images or
 // inventory. Used by the cross-channel bulk-SKU tool.
@@ -1443,6 +1457,7 @@ async function setProductRating(productId, rating, count) {
 
 module.exports = {
   isConfigured,
+  addProductImages,
   setOrderInvoiceMetafields,
   getCustomerForOffer,
   getProductForOffer,

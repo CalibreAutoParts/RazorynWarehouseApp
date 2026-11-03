@@ -170,6 +170,59 @@ router.get('/links/:productId', requirePermission('inventory'), async (req, res)
   } catch (e) { res.status(500).json({ error: 'load_failed', message: e.message }); }
 });
 
+// Save (or update) a product's code at one supplier — every supplier can have
+// its own code for the same part. Only fills cost/currency when given.
+async function upsertSupplierCode(productId, supplierName, supplierSku, { unitCost = null, currency = null } = {}) {
+  await ensureLinksTable();
+  const supplierId = await ensureSupplierByName(supplierName, { currency });
+  if (!supplierId || !productId) return null;
+  const cost = (unitCost === '' || unitCost == null) ? null : parseFloat(unitCost);
+  const { rows } = await query(`
+    INSERT INTO product_suppliers (product_id, supplier_id, supplier_sku, unit_cost, currency, updated_at)
+    VALUES ($1,$2,$3,$4,COALESCE($5,'GBP'), now())
+    ON CONFLICT (product_id, supplier_id) DO UPDATE SET
+      supplier_sku = COALESCE(EXCLUDED.supplier_sku, product_suppliers.supplier_sku),
+      unit_cost = COALESCE(EXCLUDED.unit_cost, product_suppliers.unit_cost),
+      currency = CASE WHEN EXCLUDED.unit_cost IS NOT NULL THEN EXCLUDED.currency ELSE product_suppliers.currency END,
+      updated_at = now()
+    RETURNING *`,
+    [productId, supplierId, String(supplierSku || '').trim() || null, Number.isFinite(cost) ? cost : null,
+     currency ? String(currency).toUpperCase() : null]);
+  return rows[0];
+}
+
+// POST /api/suppliers/links/bulk
+//   { supplierName?, currency?, rows: [{ code (our SKU / part number / alt code), supplierName?, supplierCode, unitCost? }] }
+// Upload supplier codes for many parts at once. Each part can carry a different
+// code at each supplier. Rows whose part isn't found come back as unmatched.
+router.post('/links/bulk', requireAdmin, async (req, res) => {
+  try {
+    await ensureLinksTable();
+    const b = req.body || {};
+    const rows = Array.isArray(b.rows) ? b.rows.slice(0, 5000) : [];
+    const out = { saved: 0, unmatched: [], errors: [] };
+    for (const r of rows) {
+      const code = String(r.code || '').trim();
+      const supplierName = String(r.supplierName || b.supplierName || '').trim();
+      const supplierCode = String(r.supplierCode || '').trim();
+      if (!code || !supplierName || !supplierCode) { out.errors.push({ code, error: 'needs part number, supplier and supplier code' }); continue; }
+      const norm = code.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      let p = (await query(`SELECT id FROM products WHERE active = true AND (UPPER(sku) = UPPER($1) OR UPPER(part_number) = UPPER($1)) ORDER BY (UPPER(sku) = UPPER($1)) DESC LIMIT 1`, [code])).rows[0];
+      if (!p && norm) {
+        p = (await query(`SELECT p.id FROM products p
+            LEFT JOIN product_part_numbers ppn ON ppn.product_id = p.id
+           WHERE p.active = true AND (regexp_replace(UPPER(p.part_number),'[^A-Z0-9]','','g') = $1 OR regexp_replace(UPPER(ppn.code),'[^A-Z0-9]','','g') = $1)
+           LIMIT 1`, [norm]).catch(() => ({ rows: [] }))).rows[0];
+      }
+      if (!p) { out.unmatched.push(code); continue; }
+      try { await upsertSupplierCode(p.id, supplierName, supplierCode, { unitCost: r.unitCost, currency: r.currency || b.currency }); out.saved++; }
+      catch (e) { out.errors.push({ code, error: e.message }); }
+    }
+    await audit(req, 'supplier_codes_bulk', null, null, { saved: out.saved, unmatched: out.unmatched.length });
+    res.json({ ok: true, ...out });
+  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+});
+
 // POST /api/suppliers/links — upsert one product↔supplier link (admin).
 // { productId, supplierName, supplierSku?, unitCost?, currency?, preferred?, inStock?, notes?, lastPurchasedAt? }
 router.post('/links', requireAdmin, async (req, res) => {
@@ -314,4 +367,5 @@ router.get('/:id/reorders', requirePermission('inventory'), async (req, res) => 
 });
 
 router.ensureSupplierByName = ensureSupplierByName;
+router.upsertSupplierCode = upsertSupplierCode;
 module.exports = router;

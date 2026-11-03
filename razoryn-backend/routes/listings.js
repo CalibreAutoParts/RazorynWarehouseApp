@@ -2153,7 +2153,8 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
     try {
       await shopify.updateProduct(product.shopify_product_id, {
         title: shopTitle, sku, price: shopifyPrice,
-        status: ['active', 'draft'].includes(b.status) ? b.status : undefined,
+        // Incoming placeholders stay a hidden draft until 🚀 Go live in Incoming.
+        status: product.is_placeholder ? undefined : (['active', 'draft'].includes(b.status) ? b.status : undefined),
         tags: b.tags != null ? b.tags : null,
         templateSuffix: b.templateSuffix != null ? b.templateSuffix : null,
         description: b.description != null ? b.description : null,

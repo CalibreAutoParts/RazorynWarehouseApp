@@ -396,6 +396,54 @@
     transform: scale(.96); transition: transform .15s;
   }
   .modal-overlay.open .modal { transform: scale(1); }
+  /* Clean form building blocks (Incoming etc.): labelled sections, mini fields. */
+  .ui-section { background: var(--bg-soft); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; }
+  .ui-label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 10px; }
+  .ui-label .ui-opt { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 4px; }
+  .ui-section .field { margin-bottom: 10px; }
+  .ui-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .ui-hint { font-size: 11px; color: var(--ink-soft); margin-top: 8px; line-height: 1.45; }
+  .ui-check { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; margin: 0 0 12px; cursor: pointer; }
+  .ui-check input { margin-top: 3px; }
+  .ui-check small { display: block; color: var(--ink-soft); font-size: 11px; margin-top: 2px; }
+  .ui-search { width: 100%; padding: 11px 14px; font-size: 14px; border-radius: 10px; }
+  .ui-empty { padding: 28px; text-align: center; color: var(--ink-soft); font-size: 13px; border: 1px dashed var(--line); border-radius: 12px; }
+  .inc-layout { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 16px; align-items: start; }
+  .inc-sum { font-size: 13px; margin: 2px 0 8px; color: var(--ink-soft); }
+  .inc-sum b { color: var(--ink); }
+  .inc-line { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; background: var(--white); }
+  .inc-line.is-new { border-left: 4px solid var(--amber, #b26a00); }
+  .inc-line-top, .inc-line-extra { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+  .inc-line-extra { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+  .inc-line-name { flex: 1 1 260px; min-width: 200px; }
+  .inc-line-name .nm { font-weight: 600; font-size: 14px; line-height: 1.3; }
+  .inc-line-name .nm-in { width: 100%; font-weight: 600; }
+  .inc-line-name .meta { font-size: 11px; color: var(--ink-soft); font-family: ui-monospace, monospace; margin-top: 3px; }
+  .inc-line-name .meta .new { color: var(--amber, #b26a00); font-family: inherit; font-weight: 600; }
+  .mini { display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+  .mini small { text-transform: none; font-weight: 400; }
+  .mini input, .mini select { width: 120px; font-size: 13px; text-transform: none; letter-spacing: 0; }
+  .inc-line-top .mini input[type=number] { width: 96px; }
+  .inc-x { color: var(--red); align-self: center; }
+  details.row-menu { display: inline-block; position: relative; }
+  details.row-menu > summary { list-style: none; cursor: pointer; }
+  details.row-menu > summary::-webkit-details-marker { display: none; }
+  details.row-menu .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 40; background: var(--white); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-lg); min-width: 240px; padding: 6px; text-align: left; }
+  details.row-menu .menu button { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 8px 10px; border-radius: 6px; font-size: 13px; color: var(--ink); cursor: pointer; white-space: nowrap; }
+  details.row-menu .menu button:hover { background: var(--bg-soft); }
+  .ctn-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; }
+  .ctn-card { border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; background: var(--white); display: flex; flex-direction: column; gap: 10px; }
+  .ctn-card .ctn-head { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+  .ctn-card .ctn-ref { font-weight: 700; font-size: 15px; font-family: ui-monospace, monospace; }
+  .ctn-card .ctn-sub { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
+  .ctn-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .ctn-stat { background: var(--bg-soft); border-radius: 10px; padding: 8px 10px; }
+  .ctn-stat .v { font-weight: 700; font-size: 15px; }
+  .ctn-stat .l { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-soft); }
+  .ctn-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .ctn-warn { font-size: 12px; color: var(--amber, #b26a00); }
+  .ctn-ok { font-size: 12px; color: var(--green); }
+  @media (max-width: 900px) { .inc-layout { grid-template-columns: 1fr; } .mini input, .mini select { width: 100%; } .mini { flex: 1 1 120px; } }
   .modal-head {
     padding: 18px 20px; border-bottom: 1px solid var(--line);
     display: flex; align-items: center; justify-content: space-between;
@@ -4386,6 +4434,7 @@ function renderIncoming() {
       <div class="page-head">
         <div><h1>Incoming stock</h1><div class="desc">Stock ordered in but not with us yet — receive it when a container is unloaded to update stock and push to Shopify + eBay.</div></div>
         <div class="actions">
+          <button class="btn btn-outline admin-only" onclick="openSupplierCodesUpload()" title="Upload each supplier's own code for your part numbers (every supplier can use a different code for the same part)">🔖 Supplier codes</button>
           <button class="btn btn-outline admin-only" onclick="openSupplierImport()" title="Upload a supplier's invoice / packing list (.xlsx) — the lines are read, matched to your listings by part number, sub part numbers and remembered supplier SKUs, then land here as a container after your review.">📄 Import supplier file</button>
           <button class="btn btn-primary" onclick="openAddIncoming()">+ Add incoming</button>
         </div>
@@ -4407,10 +4456,10 @@ function renderIncoming() {
         <div class="table-wrap">
           <table class="table">
             <thead><tr>
-              <th>Item</th><th class="num">On hand</th><th class="num">Ordered</th><th class="num">Received</th><th class="num">Remaining</th>
-              <th>Container</th><th>Supplier</th><th>Expected</th><th>Status</th><th></th>
+              <th>Item</th><th class="num">Incoming</th><th class="num">On hand</th>
+              <th>Container · supplier</th><th>ETA</th><th>Status</th><th></th>
             </tr></thead>
-            <tbody id="incoming-tbody"><tr><td colspan="10"><div class="empty"><div class="t">Loading…</div></div></td></tr></tbody>
+            <tbody id="incoming-tbody"><tr><td colspan="7"><div class="empty"><div class="t">Loading…</div></div></td></tr></tbody>
           </table>
         </div>
       </div>
@@ -4425,6 +4474,7 @@ async function loadIncoming() {
   const q = (el('incoming-search')?.value || '').trim();
   const qs = new URLSearchParams();
   if (status && status !== 'open') qs.set('status', status);
+  if (State._incArchived) qs.set('archived', '1');
   if (q) qs.set('q', q);
   try {
     const r = await Api.get('/api/incoming' + (qs.toString() ? '?' + qs.toString() : ''));
@@ -4443,25 +4493,48 @@ async function loadIncoming() {
 }
 async function loadIncomingContainers() {
   const wrap = el('incoming-containers'); if (!wrap) return;
+  const showArch = !!State._incArchived;
   try {
-    const r = await Api.get('/api/incoming/containers');
+    const r = await Api.get('/api/incoming/containers' + (showArch ? '?archived=1' : ''));
     const cs = r.containers || [];
-    if (!cs.length) { wrap.innerHTML = ''; return; }
-    wrap.innerHTML = `<div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Open containers</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">` + cs.map(c => `
-        <div style="border:1px solid var(--line);border-radius:8px;padding:8px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <div style="min-width:0">
-            <div style="font-weight:600;font-size:13px">${escapeHtml(c.ref)}${c.supplier ? ` <span style="font-weight:400;color:var(--ink-soft)">· ${escapeHtml(c.supplier)}</span>` : ''}</div>
-            <div style="font-size:11px;color:var(--ink-soft)">${c.lines} line(s) · ${c.units} units${c.expected ? ' · ETA ' + new Date(c.expected).toLocaleDateString('en-GB') : ''}</div>
-            <div style="font-size:11px;${(c.freight_total_gbp != null || c.duty_gbp != null) ? 'color:var(--green)' : 'color:var(--amber)'}">${(c.freight_total_gbp != null || c.duty_gbp != null) ? `🚢 freight £${(+c.freight_total_gbp||0).toFixed(2)} · duty £${(+c.duty_gbp||0).toFixed(2)}` : '⚠️ freight/duty not entered'}</div>
-            ${c.note ? `<div style="font-size:11px;color:var(--ink-soft)">📝 ${escapeHtml(c.note)}</div>` : ''}
+    const money = n => canSeeMoney() ? '£' + Number(n || 0).toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : '£•••';
+    const toggle = `<button class="btn btn-ghost btn-sm" onclick="State._incArchived=${!showArch};loadIncomingContainers();loadIncoming()">${showArch ? '← Back to open containers' : `🗄 Archived (${r.archivedCount || 0})`}</button>`;
+    if (!cs.length) { wrap.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><div class="ui-label" style="margin:0">${showArch ? 'Archived containers' : 'Containers'}</div>${toggle}</div>${showArch ? '<div class="ui-empty">Nothing archived.</div>' : ''}`; return; }
+    wrap.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><div class="ui-label" style="margin:0">${showArch ? 'Archived containers' : 'Containers'}</div>${toggle}</div>
+      <div class="ctn-grid">` + cs.map(c => {
+        const ref = escapeAttr(c.ref);
+        const hasFreight = c.freight_total_gbp != null, hasDuty = c.duty_gbp != null;
+        const done = c.units === 0;
+        return `<div class="ctn-card">
+          <div class="ctn-head">
+            <div><div class="ctn-ref">${escapeHtml(c.ref)}</div>
+              <div class="ctn-sub">${escapeHtml(c.supplier || '—')}${c.expected ? ' · ETA ' + new Date(c.expected).toLocaleDateString('en-GB') : ''}${c.note ? ' · ' + escapeHtml(String(c.note).slice(0, 40)) : ''}</div></div>
+            ${done ? '<span class="pill green" style="font-size:10px">all received</span>' : `<span class="pill" style="font-size:10px">${c.units} to come</span>`}
           </div>
-          <button class="btn btn-outline btn-sm" onclick="openContainerDetail('${escapeAttr(c.ref)}')" title="Open this container — see what's inside and enter freight + duty">🔎 Open</button>
-          <button class="btn btn-outline btn-sm" onclick="incMakePlaceholders({ containerRef: '${escapeAttr(c.ref)}' })" title="Create placeholder products for every line in this container that isn't listed yet">🧩 Placeholders</button>
-          <button class="btn btn-outline btn-sm" onclick="incGoLiveContainer('${escapeAttr(c.ref)}')" title="Go live with every placeholder in this container">🚀 Go live</button>
-          <button class="btn btn-primary btn-sm" onclick="receiveContainer('${escapeAttr(c.ref)}')" title="Receive every remaining line on this container and push to Shopify + eBay">📦 Receive all</button>
-        </div>`).join('') + `</div>`;
+          <div class="ctn-stats">
+            <div class="ctn-stat"><div class="v">${c.lines}</div><div class="l">lines · ${c.units_total} units</div></div>
+            <div class="ctn-stat"><div class="v">${money(c.landed_gbp)}</div><div class="l">landed cost</div></div>
+            <div class="ctn-stat"><div class="v">${money(c.potential_ebay)}</div><div class="l">eBay value${c.unpriced ? ` · ${c.unpriced} unpriced` : ''}</div></div>
+          </div>
+          <div class="${hasFreight && hasDuty ? 'ctn-ok' : 'ctn-warn'}">${hasFreight || hasDuty ? `🚢 freight ${hasFreight ? '£' + (+c.freight_total_gbp).toFixed(2) : '—'} · duty ${hasDuty ? '£' + (+c.duty_gbp).toFixed(2) : '—'}` : '⚠ freight / duty not added yet'}
+            ${!(hasFreight && hasDuty) ? ` · <a href="#" onclick="openContainerDetail('${ref}');return false">add when it lands</a>` : ''}
+            ${c.unlisted ? ` · <span style="color:var(--amber,#b26a00)">${c.unlisted} not listed</span>` : ''}${c.placeholders ? ` · ${c.placeholders} placeholder${c.placeholders > 1 ? 's' : ''}` : ''}</div>
+          <div class="ctn-actions">
+            <button class="btn btn-outline btn-sm" onclick="openContainerDetail('${ref}')">🔎 Open · costs</button>
+            <button class="btn btn-outline btn-sm" onclick="openContainerLabels('${ref}')">🏷 Labels</button>
+            ${c.unlisted ? `<button class="btn btn-outline btn-sm" onclick="incMakePlaceholders({ containerRef: '${ref}' })">🧩 Placeholders</button>` : ''}
+            ${c.placeholders ? `<button class="btn btn-outline btn-sm" onclick="incGoLiveContainer('${ref}')">🚀 Go live</button>` : ''}
+            ${!done ? `<button class="btn btn-primary btn-sm" onclick="receiveContainer('${ref}')">📦 Receive all</button>` : ''}
+            <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="incArchiveContainer('${ref}', ${!c.archived_at})" title="${c.archived_at ? 'Bring back to the open list' : 'Tuck this container away (its lines leave the list; search still finds them)'}">${c.archived_at ? '↩ Unarchive' : '🗄 Archive'}</button>
+          </div>
+        </div>`;
+      }).join('') + `</div>`;
   } catch (e) { wrap.innerHTML = ''; }
+}
+async function incArchiveContainer(ref, on) {
+  if (on && !confirm(`Archive container ${ref}?\n\nIt leaves the open list (and its lines leave the table). Nothing is deleted — find it under 🗄 Archived, or by searching.`)) return;
+  try { await Api.post('/api/incoming/containers/' + encodeURIComponent(ref) + '/archive', { archived: on }); toast(on ? 'Archived' : 'Back in the open list', 'success'); loadIncomingContainers(); loadIncoming(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
 }
 async function receiveContainer(ref) {
   if (!confirm(`Receive ALL remaining stock on container "${ref}"?\n\nThis adds every line's remaining units to warehouse stock and pushes the new quantities to Shopify + eBay.`)) return;
@@ -4483,6 +4556,7 @@ async function openContainerDetail(ref) {
   _ctnRef = ref;
   modal({
     title: 'Container — ' + ref,
+    size: 'xl',
     body: `<div id="ctn-body"><div style="padding:20px;text-align:center;color:var(--ink-soft)">Loading…</div></div>`,
     actions: [
       { label: 'Close', onClick: closeModal },
@@ -4496,38 +4570,69 @@ async function renderContainerDetail() {
   let d;
   try { d = await Api.get('/api/incoming/containers/' + encodeURIComponent(_ctnRef)); }
   catch (e) { wrap.innerHTML = '<div style="color:var(--red)">Failed to load container.</div>'; return; }
-  const h = d.header || {};
-  const t = d.totals || {};
+  const h = d.header || {}, t = d.totals || {}, e = d.ebay || {};
+  const m = n => canSeeMoney() ? '£' + Number(n || 0).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '£•••';
   const curOpts = ['GBP','CNY','USD','EUR'].map(c => `<option value="${c}"${(h.freight_currency||'GBP')===c?' selected':''}>${c}</option>`).join('');
+  const stat = (v, l, color) => `<div class="ctn-stat"><div class="v" style="${color ? 'color:' + color : ''}">${v}</div><div class="l">${l}</div></div>`;
   wrap.innerHTML = `
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px">
-      <div class="field"><label>Freight total</label><input id="ctn-freight" type="number" step="0.01" min="0" value="${h.freight_total != null ? h.freight_total : ''}" placeholder="e.g. 1200"></div>
-      <div class="field"><label>Duty total</label><input id="ctn-duty" type="number" step="0.01" min="0" value="${h.duty != null ? h.duty : ''}" placeholder="e.g. 800"></div>
-      <div class="field"><label>Currency</label><select id="ctn-cur">${curOpts}</select></div>
-    </div>
-    <div style="font-size:11px;color:var(--ink-soft);margin-bottom:10px">Freight + duty are split across the items below <strong>by value</strong> to give each one's true landed unit cost. Enter these any time — even weeks after listing, once the shipping invoice arrives.</div>
-    <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:600;margin-bottom:6px">
-      <span>${t.units || 0} units · goods £${(t.goodsValueGbp||0).toFixed(2)}</span>
-      <span>+ freight/duty £${(t.freightDutyGbp||0).toFixed(2)} = landed £${(t.landedValueGbp||0).toFixed(2)}</span>
-    </div>
-    <div class="table-wrap" style="max-height:340px;overflow:auto"><table class="table"><thead><tr>
-      <th>Item</th><th class="num">Qty</th><th class="num">Goods/unit</th><th class="num">Landed/unit</th>
-    </tr></thead><tbody>
-      ${(d.lines||[]).map(l => `<tr>
-        <td><div style="font-weight:500;font-size:13px">${escapeHtml(l.title || '(unnamed)')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || '')}</div></td>
-        <td class="num">${l.qty_ordered}</td>
-        <td class="num">${l.unit_cost_gbp != null ? '£' + (+l.unit_cost_gbp).toFixed(2) : '—'}</td>
-        <td class="num"><strong>${l.landed_unit_cost_gbp != null ? '£' + (+l.landed_unit_cost_gbp).toFixed(2) : (l.unit_cost_gbp != null ? '£' + (+l.unit_cost_gbp).toFixed(2) : '—')}</strong></td>
-      </tr>`).join('')}
-    </tbody></table></div>
-    <div style="font-size:11px;color:var(--ink-soft);margin-top:8px">Landed cost is written to each product's cost when the container is received.</div>`;
+    <div class="inc-layout">
+      <div class="inc-side">
+        <div class="ui-section">
+          <div class="ui-label">Freight &amp; duty <span class="ui-opt">add any time — e.g. when it lands</span></div>
+          <div class="ui-row2">
+            <div class="field"><label>Freight total</label><input id="ctn-freight" type="number" step="0.01" min="0" value="${h.freight_total != null ? h.freight_total : ''}" placeholder="e.g. 1200"></div>
+            <div class="field"><label>Duty total</label><input id="ctn-duty" type="number" step="0.01" min="0" value="${h.duty != null ? h.duty : ''}" placeholder="e.g. 800"></div>
+          </div>
+          <div class="field" style="margin:0"><label>Currency</label><select id="ctn-cur">${curOpts}</select></div>
+          <div class="ui-hint">Split across the items <b>by value</b> into each one's landed cost. Leave one blank to add it later — the other is kept. Items not yet received / still placeholders pick up the new cost straight away.</div>
+        </div>
+        <div class="ui-section">
+          <div class="ui-label">Container cost</div>
+          <div class="ctn-stats" style="grid-template-columns:1fr 1fr">
+            ${stat(m(t.goodsValueGbp), 'goods')}${stat(m(t.freightDutyGbp), 'freight + duty')}
+            ${stat(m(t.landedValueGbp), 'landed total')}${stat(t.units || 0, 'units')}
+          </div>
+        </div>
+        <div class="ui-section">
+          <div class="ui-label">If it all sells on eBay</div>
+          <div class="ctn-stats" style="grid-template-columns:1fr 1fr">
+            ${stat(m(e.revenue), 'sales (inc VAT)')}${stat(m(e.vat), 'VAT')}
+            ${stat(m(e.fees), `eBay fees (${e.feePct}% + fixed)`)}${stat(m(e.postage + e.packaging), 'postage + packaging')}
+            ${stat(m(e.cost), 'landed cost')}${stat(m(e.net), 'profit' + (e.marginPct != null ? ` · ${e.marginPct}%` : ''), e.net >= 0 ? 'var(--green)' : 'var(--red)')}
+          </div>
+          ${e.unpriced ? `<div class="ctn-warn" style="margin-top:8px">${e.unpriced} line(s) / ${e.unpricedUnits} units have no eBay price yet — add them on the right, the totals update.</div>` : ''}
+          <div class="ui-hint">Uses your Costs &amp; margins settings (eBay fee %, VAT, postage bands, packaging, ads).</div>
+        </div>
+      </div>
+      <div class="inc-main">
+        <div class="table-wrap" style="border:1px solid var(--line);border-radius:12px;max-height:64vh;overflow:auto"><table class="table"><thead><tr>
+          <th>Item</th><th class="num">Qty</th><th class="num">Landed / unit</th><th class="num">eBay price</th><th class="num">Profit / unit</th><th class="num">Line profit</th>
+        </tr></thead><tbody>
+          ${(d.lines || []).map(l => {
+            const landed = l.landed_unit_cost_gbp != null ? +l.landed_unit_cost_gbp : (l.unit_cost_gbp != null ? +l.unit_cost_gbp : null);
+            const editable = l.product_id && (l.is_placeholder || !l.ebay || true);
+            const pu = l.ebay?.perUnit;
+            return `<tr>
+              <td><div style="font-weight:600;font-size:13px">${escapeHtml(l.product_title || l.title || '(unnamed)')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || '')}${l.is_placeholder ? ' · placeholder' : ''}</div></td>
+              <td class="num">${l.qty_ordered}</td>
+              <td class="num">${landed != null ? m(landed) : '—'}</td>
+              <td class="num">${l.product_id ? `<input type="number" step="0.01" min="0" value="${l.price_ebay != null ? escapeAttr(l.price_ebay) : ''}" placeholder="£" style="width:90px;text-align:right" onchange="ctnSetPrice(${l.product_id}, this.value)" ${l.is_placeholder || l.price_ebay == null ? '' : 'title="Live listing — change its price from Edit listing"'}>` : '<span style="font-size:11px;color:var(--ink-soft)">make placeholder first</span>'}</td>
+              <td class="num">${pu ? `<span style="color:${pu.net >= 0 ? 'var(--green)' : 'var(--red)'}">${m(pu.net)}</span><div style="font-size:10px;color:var(--ink-soft)">${pu.marginPct}% · fees ${m(pu.fees)}</div>` : '—'}</td>
+              <td class="num"><strong>${pu ? m(pu.net * l.qty_ordered) : '—'}</strong></td>
+            </tr>`;
+          }).join('')}
+        </tbody></table></div>
+      </div>
+    </div>`;
+}
+async function ctnSetPrice(productId, price) {
+  try { await Api.post('/api/incoming/set-price', { productId, price }); await renderContainerDetail(); loadIncomingContainers(); }
+  catch (e) { toast(e.data?.message || e.message, 'error', 7000); }
 }
 async function saveContainerCosts() {
-  const payload = {
-    freightTotal: el('ctn-freight')?.value || null,
-    duty: el('ctn-duty')?.value || null,
-    freightCurrency: el('ctn-cur')?.value || 'GBP',
-  };
+  const payload = { freightCurrency: el('ctn-cur')?.value || 'GBP' };
+  if ((el('ctn-freight')?.value || '') !== '') payload.freightTotal = el('ctn-freight').value;
+  if ((el('ctn-duty')?.value || '') !== '') payload.duty = el('ctn-duty').value;
   const taskId = Task.start('Saving container costs…');
   try {
     const r = await Api.patch('/api/incoming/containers/' + encodeURIComponent(_ctnRef), payload);
@@ -4627,37 +4732,44 @@ function paintIncomingStats(s) {
 }
 function paintIncoming(items) {
   const tb = el('incoming-tbody'); if (!tb) return;
-  if (!items.length) { tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="t">Nothing incoming</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Add stock you\'ve ordered so the team can see what\'s on the way.</div></div></td></tr>'; return; }
+  if (!items.length) { tb.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="t">Nothing incoming</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Add stock you\'ve ordered so the team can see what\'s on the way.</div></div></td></tr>'; return; }
   const statusPill = (st) => {
-    const c = st === 'received' ? 'green' : st === 'arrived' ? 'amber' : st === 'cancelled' ? '' : '';
-    return `<span class="pill ${c}" style="font-size:10px">${INCOMING_STATUS[st] || st}</span>`;
+    const c = st === 'received' ? 'green' : st === 'arrived' ? 'amber' : '';
+    return `<span class="pill ${c}" style="font-size:10px;white-space:nowrap">${INCOMING_STATUS[st] || st}</span>`;
   };
   tb.innerHTML = items.map(i => {
     const remaining = Math.max(0, i.qty_ordered - i.qty_received);
-    const onHand = i.product_qty_on_hand != null ? i.product_qty_on_hand : '—';
     const exp = i.expected_date ? new Date(i.expected_date).toLocaleDateString('en-GB') : '—';
     const linked = !!i.product_id;
+    const ph = linked && i.product_is_placeholder;
+    const menu = [
+      ph ? `<button onclick="openEditListing(${i.product_id})">✎ Complete listing (title, photos, category)</button>` : '',
+      ph ? `<button onclick="incAddPhotos(${i.product_id})">📷 Add photos you already have</button>` : '',
+      !linked ? `<button onclick="incMakePlaceholders({ ids: [${i.id}] })">🧩 Make placeholder</button>` : '',
+      !linked ? `<button onclick="incDraftListing(${i.id})">📝 Draft full listing</button>` : '',
+      `<button onclick="printIncomingLabels(${i.id})">🏷 Print labels</button>`,
+      `<button onclick="openEditIncoming(${i.id})">✏️ Edit line</button>`,
+      `<button style="color:var(--red)" onclick="deleteIncoming(${i.id})">🗑 Delete line</button>`,
+    ].filter(Boolean).join('');
     return `<tr>
-      <td><div style="font-weight:600">${escapeHtml(i.product_title || i.title || '(unnamed)')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(i.sku || i.part_number || '')}${linked ? '' : ' · <span style="color:var(--amber)">not listed yet</span>'}</div>
-        ${linked && i.product_is_placeholder ? `<div style="font-size:11px;margin-top:2px"><span class="pill amber" style="font-size:10px">🧩 placeholder — not live</span>${i.product_shopify_id ? ' <span style="color:var(--ink-soft)">Shopify draft/pre-order</span>' : ''}</div>`
-          : linked && i.product_ebay_status === 'on_arrival' ? `<div style="font-size:11px;margin-top:2px;color:var(--green)">🚀 live — eBay lists when stock arrives</div>` : ''}</td>
-      <td class="num">${onHand}</td>
-      <td class="num">${i.qty_ordered}</td>
-      <td class="num">${i.qty_received}</td>
-      <td class="num"><strong>${remaining}</strong></td>
-      <td>${escapeHtml(i.container_ref || '—')}</td>
-      <td>${escapeHtml(i.supplier || '—')}</td>
+      <td style="min-width:280px">
+        <div style="font-weight:600;line-height:1.3">${escapeHtml(i.product_title || i.title || '(unnamed)')}</div>
+        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace;margin-top:2px">${escapeHtml(i.sku || i.part_number || '')}${i.supplier_sku ? ' · ' + escapeHtml(i.supplier || 'supplier') + ': ' + escapeHtml(i.supplier_sku) : ''}</div>
+        <div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap">
+          ${!linked ? '<span class="pill amber" style="font-size:10px">not listed yet</span>' : ''}
+          ${ph ? '<span class="pill amber" style="font-size:10px">🧩 placeholder · held</span>' : ''}
+          ${linked && i.product_ebay_status === 'on_arrival' ? '<span class="pill green" style="font-size:10px">🚀 live · eBay on arrival</span>' : ''}
+        </div>
+      </td>
+      <td class="num"><div style="font-weight:700;font-size:15px">${remaining}</div><div style="font-size:10px;color:var(--ink-soft)">of ${i.qty_ordered}${i.qty_received ? ` · ${i.qty_received} in` : ''}</div></td>
+      <td class="num">${i.product_qty_on_hand != null ? i.product_qty_on_hand : '—'}</td>
+      <td><div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(i.container_ref || '—')}</div><div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(i.supplier || '')}</div></td>
       <td style="white-space:nowrap">${exp}</td>
       <td>${statusPill(i.status)}</td>
-      <td style="white-space:nowrap">
-        ${remaining > 0 ? `<button class="btn btn-primary btn-sm" onclick="openReceiveIncoming(${i.id})" title="Receive units — adds to stock & pushes to channels">📦 Receive</button>` : ''}
-        ${linked && i.product_is_placeholder ? `<button class="btn btn-primary btn-sm" onclick="incGoLive([${i.product_id}])" title="Make it live: Shopify (pre-order until stock lands) and eBay (now if in stock, or automatically when it's received)">🚀 Go live</button>
-          <button class="btn btn-outline btn-sm" onclick="openEditListing(${i.product_id})" title="Finish the title, photos, category and specifics before going live">✎ Complete</button>` : ''}
-        ${!linked ? `<button class="btn btn-outline btn-sm" onclick="incMakePlaceholders({ ids: [${i.id}] })" title="Create a placeholder product from this line (SKU / part number, cost, name, photo) so the Thumbnail Maker can find it and Shopify can take pre-orders. eBay waits for Go live.">🧩 Placeholder</button>` : ''}
-        ${!linked ? `<button class="btn btn-outline btn-sm" onclick="incDraftListing(${i.id})" title="This item isn't listed yet — start its listing pre-filled from this line (SKU, title, part number, qty, cost). Save as draft or push live; the line links up automatically via the SKU.">📝 Draft listing</button>` : ''}
-        <button class="btn btn-ghost btn-sm" onclick="printIncomingLabels(${i.id})" title="Print labels for this item (to apply when the goods arrive)">🏷</button>
-        <button class="btn btn-ghost btn-sm" onclick="openEditIncoming(${i.id})" title="Edit">✏️</button>
-        <button class="btn btn-ghost btn-sm" onclick="deleteIncoming(${i.id})" title="Delete" style="color:var(--red)">🗑</button>
+      <td style="white-space:nowrap;text-align:right">
+        ${ph ? `<button class="btn btn-primary btn-sm" onclick="incGoLive([${i.product_id}])" title="Shopify (pre-order until stock lands) + eBay (now if in stock, or automatically when received)">🚀 Go live</button>` : ''}
+        ${remaining > 0 ? `<button class="btn ${ph ? 'btn-outline' : 'btn-primary'} btn-sm" onclick="openReceiveIncoming(${i.id})" title="Receive units — adds to stock & pushes to channels">📦 Receive</button>` : ''}
+        <details class="row-menu"><summary class="btn btn-ghost btn-sm" title="More">⋯</summary><div class="menu">${menu}</div></details>
       </td>
     </tr>`;
   }).join('');
@@ -4691,53 +4803,72 @@ function incomingModalBody(it) {
 // need re-entering. The "Save & add another supplier" action submits the current
 // supplier then re-opens this modal pre-filled with that shared header.
 let _incMulti = false;
+// Shipping prices saved in Costs & margins (bands) — offered on new lines.
+async function incShipBands() {
+  if (State._shipBands) return State._shipBands;
+  try { State._shipBands = (await Api.get('/api/costs/settings')).settings?.shippingBands || []; } catch (_) { State._shipBands = []; }
+  return State._shipBands;
+}
 function openAddIncoming(prefill) {
   _incLines = [];
   prefill = prefill || {};
   _incMulti = !!prefill.multi;
+  incShipBands().then(() => incbRenderLines());
   const curOpts = ['CNY','GBP','USD','EUR'].map(c => `<option value="${c}"${(prefill.currency||'CNY')===c?' selected':''}>${c}</option>`).join('');
   modal({
-    title: '+ Add incoming stock',
+    title: 'Add incoming stock',
+    size: 'xl',
     body: `
-      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Add a whole container at once. Each line links to a product in your inventory — no need to retype SKUs. Adding goods from several suppliers? Use <strong>Save &amp; add another supplier</strong> to keep the container details and just change the supplier + lines.</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 0.7fr;gap:10px;margin-bottom:6px">
-        <div class="field"><label>Container number / name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— unique, e.g. MSKU1234567</span></label><input id="incb-container" placeholder="Container no. (trackable) or a name" value="${escapeAttr(prefill.containerRef||'')}"></div>
-        <div class="field"><label>Supplier</label>${supplierComboHtml('incb-supplier', prefill.supplier || '', "This supplier's name")}</div>
-        <div class="field"><label>Rough ETA <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(sea freight, approx.)</span></label><input id="incb-expected" type="date" value="${escapeAttr(prefill.expectedDate||'')}"></div>
-        <div class="field"><label>Cost currency</label><select id="incb-currency">${curOpts}</select></div>
-      </div>
-      <label style="display:flex;gap:8px;align-items:flex-start;font-size:12px;margin:-2px 0 8px"><input type="checkbox" id="incb-multi" ${prefill.multi ? 'checked' : ''} onchange="_incMulti=this.checked;if(!this.checked)_incLines.forEach(l=>delete l.containerRef);incbRenderLines()" style="margin-top:2px">
-        <span>This list covers <b>more than one container</b> (e.g. two loaded the same day) — set the container on each line. <span style="color:var(--ink-soft)">Leave unticked and every line goes into the container above.</span></span></label>
-      <div class="field" style="margin-bottom:6px"><label>Container note <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— what's in it / which suppliers</span></label><input id="incb-note" placeholder="e.g. MG + Tesla body panels — suppliers T&T and ABC" value="${escapeAttr(prefill.notes||'')}"></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 0.7fr;gap:10px;margin-bottom:6px">
-        <div class="field" style="margin:0"><label>Sea freight rate per CBM <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(if you have it)</span></label><input id="incb-frcbm" type="number" step="0.01" min="0" placeholder="e.g. 45"></div>
-        <div class="field" style="margin:0"><label>…or freight total for the container</label><input id="incb-frtotal" type="number" step="0.01" min="0" placeholder="e.g. 1800"></div>
-        <div class="field" style="margin:0"><label>Freight currency</label><select id="incb-frcur"><option>GBP</option><option>USD</option><option>CNY</option><option>EUR</option></select></div>
-      </div>
-      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Freight is split into every line's landed cost (per CBM × each line's CBM, by value otherwise). Duty can be added later from the container.</div>
-      <div style="border-top:1px solid var(--line);margin:12px 0;padding-top:10px">
-        <div style="font-weight:600;font-size:13px;margin-bottom:6px">Add products</div>
-        <div style="position:relative">
-          <input id="incb-search" placeholder="Search a product by title / SKU / part — or type a new part number and press Enter" autocomplete="off" oninput="incbSearch(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();incbSearchEnter(this.value)}">
-          <div id="incb-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-lg);max-height:240px;overflow:auto"></div>
-        </div>
-        <details style="margin-top:8px">
-          <summary style="cursor:pointer;font-size:12px;color:var(--brand-primary)">📋 Paste from a packing list / spreadsheet (part number, qty, unit cost, name, postage, packaged…)</summary>
-          <div style="margin-top:8px">
-            <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">Copy rows straight from Excel <b>with the header row</b> (columns like Part Number, Supplier Number, Name, Qty, Price, CBM, Shipping rate, Packaged, Selling price), or one per line: <code>code, qty, unit cost, name</code>. Codes that aren't listed yet come in as <b>new items</b>.</div>
-            <textarea id="incb-paste" rows="5" placeholder="Part Number	Name	Qty	Price	Shipping rate	Packaged&#10;9829310980	Peugeot 2008 front bumper	20	85	12.99	yes&#10;— or —&#10;11192455, 120, 8.50, Tesla Model 3 headlight" style="width:100%;font-family:ui-monospace,monospace;font-size:12px"></textarea>
-            <button type="button" class="btn btn-outline btn-sm" onclick="incbParsePaste()" style="margin-top:6px">Add pasted lines</button>
-            <div id="incb-paste-result" style="font-size:11px;color:var(--ink-soft);margin-top:6px"></div>
+      <div class="inc-layout">
+        <div class="inc-side">
+          <div class="ui-section">
+            <div class="ui-label">Container</div>
+            <div class="field"><label>Container number / name</label><input id="incb-container" placeholder="e.g. MSKU1234567" value="${escapeAttr(prefill.containerRef||'')}" oninput="incbRenderLines()"></div>
+            <label class="ui-check"><input type="checkbox" id="incb-multi" ${prefill.multi ? 'checked' : ''} onchange="_incMulti=this.checked;if(!this.checked)_incLines.forEach(l=>delete l.containerRef);incbRenderLines()">
+              <span>More than one container in this list<small>Set the container on each line instead</small></span></label>
+            <div class="field"><label>Supplier</label>${supplierComboHtml('incb-supplier', prefill.supplier || '', "Supplier's name")}</div>
+            <div class="ui-row2">
+              <div class="field"><label>Rough ETA</label><input id="incb-expected" type="date" value="${escapeAttr(prefill.expectedDate||'')}"></div>
+              <div class="field"><label>Cost currency</label><select id="incb-currency" onchange="incbRenderLines()">${curOpts}</select></div>
+            </div>
+            <div class="field" style="margin:0"><label>Note</label><input id="incb-note" placeholder="What's in it / which suppliers" value="${escapeAttr(prefill.notes||'')}"></div>
           </div>
-        </details>
-      </div>
-      <div id="incb-lines-wrap" style="margin-top:8px"></div>
-      <div id="incb-newopts" style="display:none;border-top:1px solid var(--line);margin-top:10px;padding-top:10px">
-        <label style="display:flex;gap:8px;font-size:13px;align-items:flex-start"><input type="checkbox" id="incb-ph" checked style="margin-top:3px"><span><b>Create placeholder products for the new items</b><div style="font-size:11px;color:var(--ink-soft)">SKU = their part number. The Thumbnail Maker can find them to make the title + photos; eBay waits for 🚀 Go live.</div></span></label>
-        <div class="field" style="margin:6px 0 0 26px;max-width:380px"><label style="font-size:12px">On Shopify</label><select id="incb-phshop">
-          <option value="draft">Draft until it's finished (recommended)</option><option value="preorder">Pre-order now (needs name + selling price)</option><option value="none">Not on Shopify yet</option></select></div>
-      </div>
-    `,
+          <div class="ui-section">
+            <div class="ui-label">Freight <span class="ui-opt">optional — add it later when it lands</span></div>
+            <div class="ui-row2">
+              <div class="field"><label>Rate per CBM</label><input id="incb-frcbm" type="number" step="0.01" min="0" placeholder="e.g. 45"></div>
+              <div class="field"><label>…or total</label><input id="incb-frtotal" type="number" step="0.01" min="0" placeholder="e.g. 1800"></div>
+            </div>
+            <div class="field" style="margin:0"><label>Currency</label><select id="incb-frcur"><option>GBP</option><option>USD</option><option>CNY</option><option>EUR</option></select></div>
+            <div class="ui-hint">Split into each line's landed cost. Duty (and freight, if you don't have it yet) can be added from the container card any time.</div>
+          </div>
+          <div class="ui-section" id="incb-newopts" style="display:none">
+            <div class="ui-label">New items</div>
+            <label class="ui-check"><input type="checkbox" id="incb-ph" checked>
+              <span>Create placeholder products<small>SKU = their part number · Thumbnail Maker can find them · eBay waits for 🚀 Go live</small></span></label>
+            <div class="field" style="margin:0"><label>On Shopify</label><select id="incb-phshop">
+              <option value="draft">Hidden draft until Go live (recommended)</option><option value="preorder">Pre-order now (needs name + price)</option><option value="none">Not on Shopify yet</option></select></div>
+          </div>
+        </div>
+        <div class="inc-main">
+          <div class="ui-section" style="overflow:visible">
+            <div class="ui-label">Products</div>
+            <div style="position:relative">
+              <input id="incb-search" class="ui-search" placeholder="Search by name, SKU or part number — or type a new part number and press Enter" autocomplete="off" oninput="incbSearch(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();incbSearchEnter(this.value)}">
+              <div id="incb-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--white);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow-lg);max-height:280px;overflow:auto"></div>
+            </div>
+            <details style="margin-top:10px">
+              <summary style="cursor:pointer;font-size:12px;color:var(--brand-primary);font-weight:600">📋 Paste a packing list / spreadsheet</summary>
+              <div style="margin-top:8px">
+                <div class="ui-hint" style="margin:0 0 6px">Copy rows from Excel <b>with the header row</b> (Part Number, Supplier Number, Name, Qty, Price, CBM, Shipping rate, Packaged, Selling price, Container) — or one per line: <code>code, qty, unit cost, name</code>.</div>
+                <textarea id="incb-paste" rows="5" placeholder="Part Number&#9;Name&#9;Qty&#9;Price&#10;9829310980&#9;Peugeot 2008 front bumper&#9;20&#9;85" style="width:100%;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+                <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button type="button" class="btn btn-outline btn-sm" onclick="incbParsePaste()">Add pasted lines</button><span id="incb-paste-result" style="font-size:11px;color:var(--ink-soft)"></span></div>
+              </div>
+            </details>
+          </div>
+          <div id="incb-lines-wrap"></div>
+        </div>
+      </div>`,
     actions: [
       { label: 'Cancel', onClick: closeModal },
       { label: 'Save & add another supplier', onClick: () => submitBulkIncoming(true) },
@@ -4749,29 +4880,41 @@ function openAddIncoming(prefill) {
 let _incLines = [];
 function incbRenderLines() {
   const wrap = el('incb-lines-wrap'); if (!wrap) return;
-  if (!_incLines.length) { wrap.innerHTML = '<div style="font-size:12px;color:var(--ink-soft);padding:8px 0">No lines yet — search a product above or paste a list.</div>'; return; }
+  if (el('incb-newopts')) el('incb-newopts').style.display = _incLines.some(l => !l.productId) ? '' : 'none';
+  if (!_incLines.length) { wrap.innerHTML = '<div class="ui-empty">No lines yet — search a product above, type a new part number, or paste a list.</div>'; return; }
   const units = _incLines.reduce((a, l) => a + (parseInt(l.qty) || 0), 0);
   const cur = (el('incb-currency')?.value) || 'CNY';
-  wrap.innerHTML = `<div style="font-size:12px;font-weight:600;margin-bottom:6px">${_incLines.length} line(s) · ${units} units</div>` +
-    (() => { const hdr = el('incb-container')?.value?.trim() || '(no container)'; const refOf = l => l.containerRef || hdr; const refs = [...new Set(_incLines.map(refOf))];
-      return refs.length > 1 ? `<div style="font-size:11px;margin-bottom:6px">📦 ${refs.length} containers: ${refs.map(r => `<b>${escapeHtml(r)}</b> (${_incLines.filter(l => refOf(l) === r).length})`).join(' · ')}</div>` : ''; })() +
-    `<div style="display:flex;gap:8px;font-size:10px;color:var(--ink-soft);padding:0 28px 0 0"><div style="flex:1">Product</div>${_incMulti ? '<div style="width:110px;text-align:center">Container</div>' : ''}<div style="width:80px;text-align:center">Qty</div><div style="width:90px;text-align:center">Unit cost (${escapeHtml(cur)})</div></div>` +
-    _incLines.map((l, i) => `<div style="margin-bottom:6px;${l.productId ? '' : 'border-left:3px solid var(--amber, #b26a00);padding-left:6px'}"><div style="display:flex;gap:8px;align-items:center">
-      <div style="flex:1;min-width:0">${l.productId
-        ? `<div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(l.title)}</div>`
-        : `<input value="${escapeAttr(l.title || '')}" placeholder="Name (optional — Thumbnail Maker / you can add it later)" onchange="_incLines[${i}].title=this.value" style="width:100%;font-size:12px">`}
-        <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || l.partNumber || '')}${l.productId ? '' : ' · <span style="color:var(--amber, #b26a00)">NEW — not listed yet</span>'}${l.supplierSku ? ' · their code ' + escapeHtml(l.supplierSku) : ''}${l.cbm != null ? ' · ' + l.cbm + ' CBM' : ''}</div></div>
-      ${_incMulti ? `<input value="${escapeAttr(l.containerRef || '')}" placeholder="${escapeAttr(el('incb-container')?.value?.trim() || 'container no.')}" title="Which container this line is in — blank = the container number at the top" onchange="_incLines[${i}].containerRef=this.value.trim();incbRenderLines()" style="width:110px;font-size:12px">` : ''}
-      <input type="number" min="1" value="${escapeAttr(l.qty)}" onchange="_incLines[${i}].qty=parseInt(this.value)||0" style="width:80px">
-      <input type="number" min="0" step="0.01" value="${l.unitCostForeign != null ? escapeAttr(l.unitCostForeign) : ''}" placeholder="cost" onchange="_incLines[${i}].unitCostForeign=this.value" style="width:90px">
-      <button class="btn btn-ghost btn-sm" onclick="_incLines.splice(${i},1);incbRenderLines()" style="color:var(--red)">×</button>
-    </div>${l.productId ? '' : `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;font-size:11px;align-items:center">
-      <input type="number" step="0.01" min="0" value="${l.postage != null ? escapeAttr(l.postage) : ''}" placeholder="postage £/item" title="What it costs to post one to a customer" onchange="_incLines[${i}].postage=this.value" style="width:120px;font-size:11px">
-      <select onchange="_incLines[${i}].packaged=this.value" style="font-size:11px" title="Does it arrive packaged, ready to send?"><option value="">Packaged?</option><option value="yes" ${String(l.packaged).match(/^(y|yes|true)/i) ? 'selected' : ''}>Comes packaged</option><option value="no" ${String(l.packaged).match(/^(n|no|false)/i) ? 'selected' : ''}>Needs packaging</option></select>
-      <input type="number" step="0.01" min="0" value="${l.sellPrice != null ? escapeAttr(l.sellPrice) : ''}" placeholder="selling £ (optional)" onchange="_incLines[${i}].sellPrice=this.value" style="width:120px;font-size:11px">
-      <input type="number" step="0.001" min="0" value="${l.cbm != null ? escapeAttr(l.cbm) : ''}" placeholder="CBM (line)" onchange="_incLines[${i}].cbm=this.value" style="width:90px;font-size:11px">
-    </div>`}</div>`).join('');
-  if (el('incb-newopts')) el('incb-newopts').style.display = _incLines.some(l => !l.productId) ? '' : 'none';
+  const hdr = el('incb-container')?.value?.trim() || '(no container)';
+  const refOf = l => l.containerRef || hdr;
+  const refs = [...new Set(_incLines.map(refOf))];
+  const bands = State._shipBands || [];
+  const nNew = _incLines.filter(l => !l.productId).length;
+  const opt = (v, l, sel) => `<option value="${escapeAttr(v)}" ${sel ? 'selected' : ''}>${escapeHtml(l)}</option>`;
+  wrap.innerHTML = `
+    <div class="inc-sum"><b>${_incLines.length}</b> line${_incLines.length === 1 ? '' : 's'} · <b>${units}</b> units${nNew ? ` · <span style="color:var(--amber,#b26a00)">${nNew} new</span>` : ''}${refs.length > 1 ? ` · 📦 ${refs.map(r => `${escapeHtml(r)} (${_incLines.filter(l => refOf(l) === r).length})`).join(', ')}` : ''}</div>
+    ${_incLines.map((l, i) => `
+    <div class="inc-line ${l.productId ? '' : 'is-new'}">
+      <div class="inc-line-top">
+        <div class="inc-line-name">
+          ${l.productId ? `<div class="nm">${escapeHtml(l.title)}</div>`
+            : `<input class="nm-in" value="${escapeAttr(l.title || '')}" placeholder="Name (optional — add it later or let the Thumbnail Maker)" onchange="_incLines[${i}].title=this.value">`}
+          <div class="meta">${escapeHtml(l.sku || l.partNumber || '')}${l.productId ? '' : ' · <span class="new">NEW — not listed yet</span>'}</div>
+        </div>
+        ${_incMulti ? `<label class="mini"><span>Container</span><input value="${escapeAttr(l.containerRef || '')}" placeholder="${escapeAttr(hdr)}" onchange="_incLines[${i}].containerRef=this.value.trim();incbRenderLines()"></label>` : ''}
+        <label class="mini"><span>Qty</span><input type="number" min="1" value="${escapeAttr(l.qty)}" onchange="_incLines[${i}].qty=parseInt(this.value)||0;incbRenderLines()"></label>
+        <label class="mini"><span>Unit cost (${escapeHtml(cur)})</span><input type="number" min="0" step="0.01" value="${l.unitCostForeign != null ? escapeAttr(l.unitCostForeign) : ''}" onchange="_incLines[${i}].unitCostForeign=this.value"></label>
+        <label class="mini"><span>Supplier code</span><input value="${escapeAttr(l.supplierSku || '')}" placeholder="their code" onchange="_incLines[${i}].supplierSku=this.value.trim()"></label>
+        <button class="btn btn-ghost btn-sm inc-x" onclick="_incLines.splice(${i},1);incbRenderLines()" title="Remove">✕</button>
+      </div>
+      ${l.productId ? '' : `<div class="inc-line-extra">
+        <label class="mini"><span>Shipping (Costs &amp; margins)</span><select onchange="_incLines[${i}].shippingBand=this.value;incbRenderLines()">
+          ${opt('', '— choose —', !l.shippingBand)}${bands.map(b => opt(b.code, `${b.label} · £${(+b.cost).toFixed(2)}`, l.shippingBand === b.code)).join('')}${opt('custom', 'Other £…', l.shippingBand === 'custom')}</select></label>
+        ${l.shippingBand === 'custom' ? `<label class="mini"><span>Postage £ / item</span><input type="number" step="0.01" min="0" value="${l.postage != null ? escapeAttr(l.postage) : ''}" onchange="_incLines[${i}].postage=this.value"></label>` : ''}
+        <label class="mini"><span>Arrives</span><select onchange="_incLines[${i}].packaged=this.value">${opt('', '—', !l.packaged)}${opt('yes', 'Packaged', /^(y|yes|true)/i.test(String(l.packaged)))}${opt('no', 'Needs packaging', /^(n|no|false)/i.test(String(l.packaged)))}</select></label>
+        <label class="mini"><span>eBay price £ <small>optional</small></span><input type="number" step="0.01" min="0" value="${l.sellPrice != null ? escapeAttr(l.sellPrice) : ''}" onchange="_incLines[${i}].sellPrice=this.value"></label>
+        <label class="mini"><span>CBM (line)</span><input type="number" step="0.001" min="0" value="${l.cbm != null ? escapeAttr(l.cbm) : ''}" onchange="_incLines[${i}].cbm=this.value"></label>
+      </div>`}
+    </div>`).join('')}`;
 }
 function incbAddProduct(p, qty, unitCost) {
   if (!p) return;
@@ -4902,9 +5045,11 @@ async function submitBulkIncoming(andNext) {
     status: 'on_order',
     lines: _incLines.filter(l => (parseInt(l.qty) || 0) > 0).map(l => ({
       productId: l.productId || undefined, qty: parseInt(l.qty), containerRef: l.containerRef || undefined,
+      supplierSku: l.supplierSku || undefined,
       unitCostForeign: (l.unitCostForeign != null && l.unitCostForeign !== '') ? parseFloat(l.unitCostForeign) : undefined,
       currency: header.currency,
-      ...(l.productId ? {} : { sku: l.sku || undefined, partNumber: l.partNumber || undefined, supplierSku: l.supplierSku || undefined,
+      ...(l.productId ? {} : { sku: l.sku || undefined, partNumber: l.partNumber || undefined,
+        shippingBand: l.shippingBand || (l.postage != null && l.postage !== '' ? 'custom' : undefined),
         title: l.title || undefined, postage: l.postage, packaged: l.packaged, sellPrice: l.sellPrice, packagingCost: l.packagingCost,
         cbm: l.cbm != null && l.cbm !== '' ? l.cbm : undefined, make: l.make, model: l.model }),
     })),
@@ -5080,6 +5225,107 @@ function incomingLabelItems(it, qty) {
   const n = parseInt(qty) || it.qty_ordered || 1;
   return [{ sku: it.sku || it.product_sku || '', title: it.title || it.product_title || '', partNumber: it.part_number || it.sku || '', barcode: it.sku || '', qty: n }];
 }
+// ── Labels for a container, printed before it arrives ──────────────────────
+// Each label carries the container ref so stock can be matched as it's
+// unloaded. Small items that can't take a label → one bag/box label with the
+// piece count instead.
+async function openContainerLabels(ref) {
+  let d;
+  try { d = await Api.get('/api/incoming/containers/' + encodeURIComponent(ref)); } catch (e) { toast(e.message, 'error'); return; }
+  const lines = (d.lines || []).filter(l => (l.qty_ordered - l.qty_received) > 0);
+  State._ctnLabelLines = lines;
+  modal({ title: '🏷 Labels — ' + ref, size: 'lg', body: `
+    <div class="ui-hint" style="margin:0 0 10px">Print before the container arrives — every label shows <b>🚢 ${escapeHtml(ref)}</b> so goods can be matched on unloading. Tick <b>Bag label</b> for small parts that can't take a label: you get one label for the bag/box with the piece count.</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
+      <div class="field" style="margin:0"><label>Label size</label><select id="cl-lab-size"><option value="100x150">4×6 landscape</option><option value="100x150p">4×6 portrait</option><option value="50x25">50×25 small</option><option value="25x50">25×50 tall</option></select></div>
+      <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.cl-lab-on').forEach(x=>x.checked=true)">Select all</button>
+      <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.cl-lab-on').forEach(x=>x.checked=false)">Select none</button>
+    </div>
+    <div style="max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:12px">
+      <table class="table" style="margin:0"><thead><tr><th style="width:30px"></th><th>Item</th><th class="num">Remaining</th><th class="num">Labels</th><th>Bag label</th></tr></thead><tbody>
+      ${lines.map((l, i) => { const rem = l.qty_ordered - l.qty_received; return `<tr>
+        <td><input type="checkbox" class="cl-lab-on" data-i="${i}" checked></td>
+        <td><div style="font-weight:600;font-size:13px">${escapeHtml(l.product_title || l.title || '')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || l.part_number || '')}</div></td>
+        <td class="num">${rem}</td>
+        <td class="num"><input type="number" min="1" value="${rem}" id="cl-lab-n-${i}" style="width:70px"></td>
+        <td><label style="font-size:12px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="cl-lab-bag-${i}" onchange="el('cl-lab-n-${i}').value=this.checked?1:${rem}"> 1 label · ${rem} pcs</label></td>
+      </tr>`; }).join('') || '<tr><td colspan="5" class="ui-empty">Nothing left to receive on this container.</td></tr>'}
+      </tbody></table></div>`,
+    actions: [{ label: 'Cancel', onClick: closeModal }, { label: '🖨 Print labels', primary: true, onClick: () => {
+      const items = [];
+      document.querySelectorAll('.cl-lab-on:checked').forEach(cb => {
+        const i = +cb.dataset.i, l = State._ctnLabelLines[i], rem = l.qty_ordered - l.qty_received;
+        const bag = el('cl-lab-bag-' + i).checked;
+        const n = Math.max(1, parseInt(el('cl-lab-n-' + i).value) || 1);
+        items.push({ ...incomingLabelItems({ ...l, title: l.product_title || l.title }, n)[0], container: ref, pcs: bag ? rem : undefined });
+      });
+      if (!items.length) return toast('Tick at least one item', 'warn');
+      const sz = el('cl-lab-size').value;
+      closeModal();
+      labelsPrint(items, { size: sz === '100x150p' ? '100x150' : sz, orient: sz === '100x150p' ? 'portrait' : 'landscape' });
+    } }] });
+}
+
+// ── Supplier codes: each supplier's own code for your part numbers ─────────
+function openSupplierCodesUpload() {
+  loadSuppliersOnce();
+  modal({ title: '🔖 Upload supplier codes', size: 'lg', body: `
+    <div class="ui-hint" style="margin:0 0 10px">Every supplier can use a different code for the same part. Upload them once and incoming lists from that supplier match automatically (their code → your part). Columns: <b>part number</b> (or your SKU), <b>supplier code</b>, optional <b>supplier</b> and <b>cost</b>. Copy from Excel (with the header row) or upload a .csv.</div>
+    <div class="ui-row2">
+      <div class="field"><label>Supplier <small style="font-weight:400;color:var(--ink-soft)">(if the list has no supplier column)</small></label>${supplierComboHtml('sc-supplier', '', 'e.g. JUNGCHENG')}</div>
+      <div class="field"><label>Or a .csv file</label><input type="file" id="sc-file" accept=".csv,.txt,.tsv" onchange="scLoadFile(this)"></div>
+    </div>
+    <div class="field"><label>Paste</label><textarea id="sc-paste" rows="9" style="width:100%;font-family:ui-monospace,monospace;font-size:12px" placeholder="Part Number&#9;Supplier Code&#9;Supplier&#9;Cost&#10;9829310980&#9;JC-778&#9;JUNGCHENG&#9;85&#10;9829310980&#9;TT-0091&#9;T&amp;T&#9;80"></textarea></div>
+    <div id="sc-result" class="ui-hint"></div>`,
+    actions: [{ label: 'Close', onClick: closeModal }, { label: 'Save codes', primary: true, onClick: scSave }] });
+}
+function scLoadFile(inp) {
+  const f = inp.files?.[0]; if (!f) return;
+  const r = new FileReader(); r.onload = () => { el('sc-paste').value = String(r.result || ''); }; r.readAsText(f);
+}
+async function scSave() {
+  const raw = (el('sc-paste').value || '').split(/\r?\n/).filter(x => x.trim());
+  if (!raw.length) return toast('Paste or upload the codes first', 'warn');
+  const split = line => line.includes('\t') ? line.split('\t') : line.split(/[,;]/);
+  const head = split(raw[0]).map(h => h.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').trim());
+  const find = re => head.findIndex(h => re.test(h));
+  let iCode = find(/\b(part ?(no|number)|oem|oe|sku|our code|pn)\b/), iSup = find(/^(supplier|supplier name|vendor|factory)$/);
+  let iSc = find(/\b(supplier|factory|vendor|item|their) ?(code|no|number|sku)\b/), iCost = find(/\b(cost|price|unit)\b/);
+  const hasHeader = iCode >= 0 && iSc >= 0;
+  if (!hasHeader) { iCode = 0; iSc = 1; iSup = -1; iCost = 2; }
+  const rows = (hasHeader ? raw.slice(1) : raw).map(line => { const c = split(line).map(x => x.trim()); return {
+    code: c[iCode] || '', supplierCode: c[iSc] || '', supplierName: iSup >= 0 ? (c[iSup] || '') : '', unitCost: iCost >= 0 ? (c[iCost] || '').replace(/[^\d.]/g, '') : '' }; })
+    .filter(r => r.code && r.supplierCode);
+  const supplierName = (el('sc-supplier')?.value || '').trim();
+  if (rows.some(r => !r.supplierName) && !supplierName) return toast('Pick the supplier (the list has no supplier column)', 'warn');
+  const taskId = Task.start('Saving supplier codes…');
+  try {
+    const r = await Api.post('/api/suppliers/links/bulk', { supplierName, rows });
+    Task.done(taskId, 'Saved');
+    el('sc-result').innerHTML = `✅ Saved <b>${r.saved}</b> code(s).${r.unmatched.length ? ` <span style="color:var(--amber,#b26a00)">${r.unmatched.length} part number(s) not found: ${r.unmatched.slice(0, 10).map(escapeHtml).join(', ')}${r.unmatched.length > 10 ? '…' : ''}</span>` : ''}${r.errors.length ? ` · ${r.errors.length} skipped (missing fields)` : ''}`;
+    State._suppliersLoaded = false;
+  } catch (e) { Task.fail(taskId, 'Failed'); toast(e.data?.message || e.message, 'error'); }
+}
+
+// ── Photos you already have (e.g. from the supplier) → placeholder draft ────
+function incAddPhotos(productId) {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*'; inp.multiple = true;
+  inp.onchange = async () => {
+    const files = [...inp.files].slice(0, 12);
+    if (!files.length) return;
+    const taskId = Task.start(`Uploading ${files.length} photo(s)…`);
+    try {
+      const images = await Promise.all(files.map(f => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); })));
+      const r = await Api.post('/api/incoming/placeholder-photos', { productId, images });
+      Task.done(taskId, 'Uploaded');
+      toast(`📷 ${files.length} photo(s) added to the hidden Shopify draft (${r.images.length} in total) — published with 🚀 Go live`, 'success', 7000);
+      Store.refresh('products').catch(() => {});
+    } catch (e) { Task.fail(taskId, 'Failed'); toast(e.data?.message || e.message, 'error', 8000); }
+  };
+  inp.click();
+}
+
 async function printIncomingLabels(id) {
   const it = (State.incoming || []).find(x => x.id === id);
   if (!it) return;
@@ -5088,7 +5334,7 @@ async function printIncomingLabels(id) {
   if (n === null) return;
   const qty = parseInt(n);
   if (!Number.isInteger(qty) || qty <= 0) { toast('Enter a valid number', 'warn'); return; }
-  labelsPrint(incomingLabelItems(it, qty));
+  labelsPrint(incomingLabelItems(it, qty).map(x => ({ ...x, container: it.container_ref || undefined })), { size: '100x150', orient: 'landscape' });
 }
 
 function renderInventory() {
@@ -6989,7 +7235,7 @@ function labelFitsModels(it, prod) {
   return models;
 }
 
-function labelsPrint(itemsArg) {
+function labelsPrint(itemsArg, opts = {}) {
   // itemsArg lets other features (e.g. Listing Mirror "Print label") print a
   // one-off label set without touching the Labels page list. Each item:
   // { sku, title, partNumber, barcode, qty }.
@@ -7015,10 +7261,11 @@ function labelsPrint(itemsArg) {
       pkgWeightG: it.pkgWeightG ?? prod?.pkgWeightG ?? null,
     };
   });
-  const size = el('lab-size').value;
+  // Size/orientation from the caller (e.g. Incoming), else the Labels page controls.
+  const size = opts.size || el('lab-size')?.value || '100x150';
   // For 4x6 the user can choose landscape (default) or portrait.
   // Other sizes have fixed orientation (50x25 is always landscape, 25x50 is always portrait).
-  const orient = size === '100x150' ? (el('lab-orient').value || 'landscape') : (size === '25x50' ? 'portrait' : 'landscape');
+  const orient = size === '100x150' ? (opts.orient || el('lab-orient')?.value || 'landscape') : (size === '25x50' ? 'portrait' : 'landscape');
 
   // Build size config. pageW/pageH = the PHYSICAL media fed to the printer; w/h =
   // the label content box. For 4×6 landscape the media is still 4"×6" portrait
@@ -7097,12 +7344,13 @@ function labelsPrint(itemsArg) {
       ${it.title ? `<div class="t-name">${escapeHtml(it.title)}</div>` : ''}
       ${models.length > 1 ? `<div class="t-fits"><span class="fits-lbl">Fits ${models.length}:</span> ${escapeHtml(models.join(' · '))}</div>` : ''}
       ${boxLine}
+      ${it.container ? `<div class="t-box">🚢 ${escapeHtml(it.container)}</div>` : ''}
     </div>`;
   };
   // Compact description for the tiny thermal labels — the item NAME first,
   // fitments capped at 4 (then "+N more") so the auto-shrunk text stays legible.
   const smallTitle = (it) => {
-    const base = it.title || [it.type, it.position].filter(Boolean).join(' ');
+    const base = (it.container ? '🚢 ' + it.container + ' · ' : '') + (it.title || [it.type, it.position].filter(Boolean).join(' '));
     const models = it.fitsModels || [];
     if (models.length > 1) {
       const cap = 4;
@@ -14016,6 +14264,7 @@ async function renderEditListing() {
           <button class="btn btn-primary" onclick="submitUnifiedUpdate(this)">Save &amp; push everywhere</button>
         </div>
       </div>
+      <div id="el-ph-banner"></div>
       <div id="el-banner"></div>
       <div class="grid-2" style="align-items:start;gap:16px">
         <div class="card"><div class="card-head"><h3>Warehouse &amp; Shopify</h3></div><div class="card-body" id="cl-core"><div class="empty" style="padding:18px"><div class="t">Loading…</div></div></div></div>
@@ -14030,6 +14279,10 @@ async function renderEditListing() {
   try { detail = await Api.get('/api/listings/listing-detail/' + productId); }
   catch (e) { el('cl-core').innerHTML = `<div class="empty" style="padding:18px"><div class="t">Couldn't load the listing</div>${escapeHtml(e.data?.message || e.message)}</div>`; return; }
   CL._editDetail = detail;
+  // Incoming placeholder: edits are held (warehouse + hidden Shopify draft) until Go live.
+  if (el('el-ph-banner')) el('el-ph-banner').innerHTML = detail.product?.is_placeholder
+    ? `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--amber,#b26a00)"><div class="card-body" style="padding:10px 14px;font-size:13px">🧩 <b>Incoming placeholder — held.</b> Saving here updates the warehouse and the <b>hidden</b> Shopify draft only; nothing is visible to customers and eBay isn't touched until you press <b>🚀 Go live</b> in Incoming.</div></div>` : '';
+  clLoadSupplierCodes(productId);
   const p = detail.product || {};
   const sh = detail.shopify || {};
   const eb = detail.ebay || {};
@@ -14281,6 +14534,7 @@ async function submitUnifiedUpdate(btn) {
   const taskId = Task.start('Saving & pushing everywhere…');
   let r;
   try {
+    clSaveSupplierCode(productId);
     r = await Api.post('/api/listings/update-listing', {
       productId,
       sku,
@@ -14384,6 +14638,9 @@ function clCoreHtml() {
         <input id="cl-cost" type="hidden">
         <div id="cl-cost-rate-note" style="font-size:11px;color:var(--ink-soft);margin-top:3px">Enter what you paid — RMB converts to £ automatically at today's rate. Optional.</div></div>
     </div>
+    <div class="field"><label>Supplier code <span style="color:var(--ink-soft);font-weight:400">— this supplier's own code for the part (internal only, never on listings)</span></label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">${supplierComboHtml('cl-sup-name', '', 'Supplier')}<input id="cl-sup-code" placeholder="Their code / SKU"></div>
+      <div id="cl-sup-list" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div></div>
     <div id="cl-est-profit" style="display:none;font-size:12px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:10px"></div>
     <div class="field"><label>📦 Parcel size &amp; weight <span style="color:var(--ink-soft);font-weight:400">— pushed to eBay + Shopify for shipping rates. Optional.</span></label>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">
@@ -14557,6 +14814,7 @@ async function submitUnifiedCreate(btn, overrides = {}) {
     toast('Create failed: ' + (e.data?.message || e.message), 'error', 9000);
     return;
   }
+  clSaveSupplierCode(created.productId);
   if (created.stockPool) toast(`🔗 Linked into a shared stock pool — ${created.stockPool.memberCount} listings now share part № ${escapeHtml(created.partNumber || partNumber || sku)} (qty ${created.stockPool.qty})`, 'success', 8000);
   // Surface any Shopify metafields that were rejected instead of silently dropping them.
   if ((created.metafieldIssues || []).length) {
@@ -23527,6 +23785,28 @@ async function trCleanSave() {
   catch (e) { toast(e.data?.message || e.message, 'error'); }
 }
 
+// Supplier codes on the create / edit listing form (product_suppliers).
+async function clLoadSupplierCodes(productId) {
+  const box = el('cl-sup-list'); if (!box || !productId) return;
+  try {
+    const r = await Api.get('/api/suppliers/links/' + productId);
+    box.innerHTML = (r.links || []).filter(l => l.supplier_sku).map(l => `<span class="pill" style="font-size:11px">${escapeHtml(l.supplier_name)}: <b>${escapeHtml(l.supplier_sku)}</b>
+      <a href="#" style="margin-left:4px;color:var(--red)" title="Remove" onclick="clDelSupplierCode(${l.id}, ${productId});return false">×</a></span>`).join('');
+  } catch (_) {}
+}
+async function clDelSupplierCode(linkId, productId) {
+  try { await Api.delete('/api/suppliers/links/' + linkId); clLoadSupplierCodes(productId); } catch (e) { toast(e.message, 'error'); }
+}
+async function clSaveSupplierCode(productId) {
+  const name = (el('cl-sup-name')?.value || '').trim(), code = (el('cl-sup-code')?.value || '').trim();
+  if (!productId || !name || !code) return;
+  try {
+    await Api.post('/api/suppliers/links', { productId, supplierName: name, supplierSku: code });
+    if (el('cl-sup-code')) el('cl-sup-code').value = '';
+    clLoadSupplierCodes(productId);
+  } catch (e) { toast('Supplier code not saved: ' + (e.data?.message || e.message), 'warn'); }
+}
+
 async function loadEbayLimits(fresh) {
   const box = el('ebay-limits-box'); if (!box) return;
   box.textContent = 'Checking eBay selling limits…';
@@ -29138,8 +29418,10 @@ function toast(msg, type='', duration=3000) {
   el('toast-host').appendChild(t);
   setTimeout(() => { t.style.opacity='0'; setTimeout(()=>t.remove(),200); }, duration);
 }
-function modal({ title, body, actions=[] }) {
+function modal({ title, body, actions=[], size = null }) {
   el('modal-title').textContent = title;
+  // size: 'lg' (≈900px) / 'xl' (most of the screen) for busy forms; default narrow.
+  el('modal').style.maxWidth = size === 'xl' ? 'min(1360px, 96vw)' : size === 'lg' ? 'min(920px, 96vw)' : '';
   el('modal-body').innerHTML = body;
   el('modal-foot').innerHTML = '';
   actions.forEach(a => {
