@@ -4690,20 +4690,24 @@ function incomingModalBody(it) {
 // note / currency) when continuing to the next supplier, so only supplier + lines
 // need re-entering. The "Save & add another supplier" action submits the current
 // supplier then re-opens this modal pre-filled with that shared header.
+let _incMulti = false;
 function openAddIncoming(prefill) {
   _incLines = [];
   prefill = prefill || {};
+  _incMulti = !!prefill.multi;
   const curOpts = ['CNY','GBP','USD','EUR'].map(c => `<option value="${c}"${(prefill.currency||'CNY')===c?' selected':''}>${c}</option>`).join('');
   modal({
     title: '+ Add incoming stock',
     body: `
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Add a whole container at once. Each line links to a product in your inventory — no need to retype SKUs. Adding goods from several suppliers? Use <strong>Save &amp; add another supplier</strong> to keep the container details and just change the supplier + lines.</div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 0.7fr;gap:10px;margin-bottom:6px">
-        <div class="field"><label>Container number / name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— unique, e.g. MSKU1234567 · two containers in one list? set it per line</span></label><input id="incb-container" placeholder="Container no. (trackable) or a name" value="${escapeAttr(prefill.containerRef||'')}"></div>
+        <div class="field"><label>Container number / name <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— unique, e.g. MSKU1234567</span></label><input id="incb-container" placeholder="Container no. (trackable) or a name" value="${escapeAttr(prefill.containerRef||'')}"></div>
         <div class="field"><label>Supplier</label>${supplierComboHtml('incb-supplier', prefill.supplier || '', "This supplier's name")}</div>
         <div class="field"><label>Rough ETA <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(sea freight, approx.)</span></label><input id="incb-expected" type="date" value="${escapeAttr(prefill.expectedDate||'')}"></div>
         <div class="field"><label>Cost currency</label><select id="incb-currency">${curOpts}</select></div>
       </div>
+      <label style="display:flex;gap:8px;align-items:flex-start;font-size:12px;margin:-2px 0 8px"><input type="checkbox" id="incb-multi" ${prefill.multi ? 'checked' : ''} onchange="_incMulti=this.checked;if(!this.checked)_incLines.forEach(l=>delete l.containerRef);incbRenderLines()" style="margin-top:2px">
+        <span>This list covers <b>more than one container</b> (e.g. two loaded the same day) — set the container on each line. <span style="color:var(--ink-soft)">Leave unticked and every line goes into the container above.</span></span></label>
       <div class="field" style="margin-bottom:6px"><label>Container note <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— what's in it / which suppliers</span></label><input id="incb-note" placeholder="e.g. MG + Tesla body panels — suppliers T&T and ABC" value="${escapeAttr(prefill.notes||'')}"></div>
       <div style="display:grid;grid-template-columns:1fr 1fr 0.7fr;gap:10px;margin-bottom:6px">
         <div class="field" style="margin:0"><label>Sea freight rate per CBM <span style="font-weight:400;color:var(--ink-soft);font-size:11px">(if you have it)</span></label><input id="incb-frcbm" type="number" step="0.01" min="0" placeholder="e.g. 45"></div>
@@ -4751,13 +4755,13 @@ function incbRenderLines() {
   wrap.innerHTML = `<div style="font-size:12px;font-weight:600;margin-bottom:6px">${_incLines.length} line(s) · ${units} units</div>` +
     (() => { const hdr = el('incb-container')?.value?.trim() || '(no container)'; const refOf = l => l.containerRef || hdr; const refs = [...new Set(_incLines.map(refOf))];
       return refs.length > 1 ? `<div style="font-size:11px;margin-bottom:6px">📦 ${refs.length} containers: ${refs.map(r => `<b>${escapeHtml(r)}</b> (${_incLines.filter(l => refOf(l) === r).length})`).join(' · ')}</div>` : ''; })() +
-    `<div style="display:flex;gap:8px;font-size:10px;color:var(--ink-soft);padding:0 28px 0 0"><div style="flex:1">Product</div><div style="width:110px;text-align:center">Container</div><div style="width:80px;text-align:center">Qty</div><div style="width:90px;text-align:center">Unit cost (${escapeHtml(cur)})</div></div>` +
+    `<div style="display:flex;gap:8px;font-size:10px;color:var(--ink-soft);padding:0 28px 0 0"><div style="flex:1">Product</div>${_incMulti ? '<div style="width:110px;text-align:center">Container</div>' : ''}<div style="width:80px;text-align:center">Qty</div><div style="width:90px;text-align:center">Unit cost (${escapeHtml(cur)})</div></div>` +
     _incLines.map((l, i) => `<div style="margin-bottom:6px;${l.productId ? '' : 'border-left:3px solid var(--amber, #b26a00);padding-left:6px'}"><div style="display:flex;gap:8px;align-items:center">
       <div style="flex:1;min-width:0">${l.productId
         ? `<div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(l.title)}</div>`
         : `<input value="${escapeAttr(l.title || '')}" placeholder="Name (optional — Thumbnail Maker / you can add it later)" onchange="_incLines[${i}].title=this.value" style="width:100%;font-size:12px">`}
         <div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || l.partNumber || '')}${l.productId ? '' : ' · <span style="color:var(--amber, #b26a00)">NEW — not listed yet</span>'}${l.supplierSku ? ' · their code ' + escapeHtml(l.supplierSku) : ''}${l.cbm != null ? ' · ' + l.cbm + ' CBM' : ''}</div></div>
-      <input value="${escapeAttr(l.containerRef || '')}" placeholder="container" title="Which container this line is in — leave blank to use the container number above" onchange="_incLines[${i}].containerRef=this.value.trim();incbRenderLines()" style="width:110px;font-size:12px">
+      ${_incMulti ? `<input value="${escapeAttr(l.containerRef || '')}" placeholder="${escapeAttr(el('incb-container')?.value?.trim() || 'container no.')}" title="Which container this line is in — blank = the container number at the top" onchange="_incLines[${i}].containerRef=this.value.trim();incbRenderLines()" style="width:110px;font-size:12px">` : ''}
       <input type="number" min="1" value="${escapeAttr(l.qty)}" onchange="_incLines[${i}].qty=parseInt(this.value)||0" style="width:80px">
       <input type="number" min="0" step="0.01" value="${l.unitCostForeign != null ? escapeAttr(l.unitCostForeign) : ''}" placeholder="cost" onchange="_incLines[${i}].unitCostForeign=this.value" style="width:90px">
       <button class="btn btn-ghost btn-sm" onclick="_incLines.splice(${i},1);incbRenderLines()" style="color:var(--red)">×</button>
@@ -4875,6 +4879,7 @@ function incbParsePaste() {
       cbm: rec.cbm, make: rec.make, model: rec.model, packagingCost: rec.packagingCost, containerRef: rec.containerRef || null });
     created++;
   }
+  if (_incLines.some(l => l.containerRef) && !_incMulti) { _incMulti = true; if (el('incb-multi')) el('incb-multi').checked = true; }
   const res = el('incb-paste-result');
   if (res) res.innerHTML = `Added ${added} listed item(s)${created ? ` · <b>${created} new item(s)</b> not listed yet` : ''}.` + (bad.length ? ` <span style="color:var(--amber)">Skipped ${bad.length} line(s) without a code/qty:</span> ${bad.slice(0, 5).map(escapeHtml).join(', ')}${bad.length > 5 ? '…' : ''}` : '');
   if (el('incb-paste')) el('incb-paste').value = '';
@@ -4889,6 +4894,7 @@ async function submitBulkIncoming(andNext) {
     expectedDate: el('incb-expected')?.value || null,
     notes: el('incb-note')?.value || null,
     currency: el('incb-currency')?.value || 'CNY',
+    multi: _incMulti,
   };
   const payload = {
     ...header,
