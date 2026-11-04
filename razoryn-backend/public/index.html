@@ -14252,7 +14252,7 @@ async function renderEditListing() {
         <div class="actions">
           <button class="btn btn-outline" onclick="routeTo('inventory')">Cancel</button>
           <span id="el-create-ebay-btn"></span>
-          <button class="btn btn-primary" onclick="submitUnifiedUpdate(this)">Save &amp; push everywhere</button>
+          <button class="btn btn-primary" id="el-save-btn" onclick="submitUnifiedUpdate(this)">Save &amp; push everywhere</button>
         </div>
       </div>
       <div id="el-ph-banner"></div>
@@ -14293,7 +14293,20 @@ async function renderEditListing() {
   CL._editNoEbay = noEbay;
   CL._ebayNeed = needStores;
   if (warn.length && !needStores.length) el('el-banner').innerHTML = `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--amber)"><div class="card-body" style="padding:10px 14px;font-size:12px;color:var(--ink-soft)">⚠ ${warn.map(escapeHtml).join(' · ')}</div></div>`;
-  if (needStores.length) {
+  const isPh = !!p.is_placeholder;
+  let held = p.ebay_prelist_payload;
+  if (typeof held === 'string') { try { held = JSON.parse(held); } catch (_) { held = null; } }
+  CL._held = isPh ? (held || {}) : null;
+  if (isPh) {
+    const nm = (k) => (State.brand?.stores || []).find(x => x.code === k)?.name || k;
+    const acc = (held?.accounts || []).map(a => nm(a.storeCode));
+    if (el('el-save-btn')) el('el-save-btn').innerHTML = '💾 Save — held until Go live';
+    el('el-banner').innerHTML = `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--blue)"><div class="card-body" style="padding:10px 14px;font-size:12.5px">
+      🛒 <strong>eBay is held for this incoming item.</strong> Fill in the eBay panel (title, category, specifics) and tick the accounts at the bottom with their policies — <strong>Save</strong> stores it, and it's published on those accounts when you press <strong>🚀 Go live</strong> in Incoming (or automatically when the stock is received).
+      ${acc.length ? `<div style="margin-top:6px">Currently set to list on: <strong>${acc.map(escapeHtml).join(', ')}</strong>.</div>` : '<div style="margin-top:6px;color:var(--amber)">No eBay listing prepared yet.</div>'}
+    </div></div>`;
+  }
+  if (needStores.length && !isPh) {
     const why = (x) => x.status === 'missing' ? 'not listed on this account'
       : x.status === 'ended' ? `listing ${escapeHtml(x.deadItemId || '')} has <strong>ended</strong> on eBay`
       : `linked listing ${escapeHtml(x.deadItemId || '')} <strong>can't be read</strong> (removed, or on another account)${(detail.ebayLinks || []).find(l => l.itemId === x.deadItemId)?.error ? ' — ' + escapeHtml((detail.ebayLinks.find(l => l.itemId === x.deadItemId).error || '').slice(0, 120)) : ''}`;
@@ -14354,7 +14367,11 @@ async function renderEditListing() {
     shopify_product_id: p.shopify_product_id || null,
     shopify_price: p.price_shopify, price_shopify: p.price_shopify,
   };
-  await openCreateEbayListing(productId, { draft: true, edit: !noEbay, container: 'cl-ebay-panel', draftProduct, editSpecifics: eb.specifics || [], editCategoryId: eb.categoryId || '' });
+  // Placeholder: re-open what was prepared (held listing → product's saved category/specifics).
+  const heldSpecs = (CL._held?.itemSpecifics || (Array.isArray(p.ebay_item_specifics) ? p.ebay_item_specifics : [])) || [];
+  await openCreateEbayListing(productId, { draft: true, edit: !noEbay, container: 'cl-ebay-panel', draftProduct,
+    editSpecifics: (eb.specifics && eb.specifics.length) ? eb.specifics : heldSpecs,
+    editCategoryId: eb.categoryId || CL._held?.categoryId || p.ebay_category_id || '' });
   // Pre-fill eBay fields from the live listing (specifics already rendered above).
   set('ce-title', eb.title || draftProduct.title);
   if (el('ce-title-count') && el('ce-title')) el('ce-title-count').textContent = el('ce-title').value.length + '/80';
@@ -14396,6 +14413,16 @@ async function renderEditListing() {
   }
   if (eb.categoryId) { set('ce-category', eb.categoryId); const path = el('ce-cat-path'); if (path && eb.categoryName) path.textContent = eb.categoryName; }
   if (eb.description) set('ce-desc', eb.description);
+  if (CL._held) {
+    const h = CL._held;
+    if (h.titleOverride) set('ce-title', h.titleOverride);
+    if (h.descriptionOverride) set('ce-desc', h.descriptionOverride);
+    if (h.conditionId) set('ce-condition', h.conditionId);
+    if (!eb.categoryId && (h.categoryId || p.ebay_category_id)) set('ce-category', h.categoryId || p.ebay_category_id);
+    if (h.countryOfOrigin) set('ce-country-origin', h.countryOfOrigin);
+    // Ticked accounts + their policies, once each account's policy list has loaded.
+    if (Array.isArray(h.accounts) && h.accounts.length) elApplyHeldAccounts(h.accounts);
+  }
   // Keep the derived Shopify price label in sync with the eBay price + show a
   // cost-floor warning under the eBay price field (non-blocking).
   setTimeout(() => {
@@ -14405,6 +14432,28 @@ async function renderEditListing() {
     clUpdateDerivedFromEbay();
     clRenderEstProfit();   // cost is pre-filled → show the recommended price / margin
   }, 150);
+}
+
+// Re-tick the accounts saved on a held (incoming) listing and restore their policies.
+// The eBay panel as a held listing: everything + the ticked accounts with their policies.
+function elHeldListing() {
+  const inp = ceCollectListingInput();
+  const main = inp.storeCode;
+  const ticked = [...document.querySelectorAll('#ce-accounts .ce-acct-on:checked')].map(c => c.value);
+  const order = [main, ...ticked.filter(c => c !== main)].filter(Boolean);
+  const out = { ...inp, accounts: order.map(code => ({ storeCode: code, businessPolicies: ceAcctPolicies(code) || inp.businessPolicies })) };
+  delete out._title; delete out._mpnFilled;
+  return out;
+}
+async function elApplyHeldAccounts(accounts) {
+  for (let i = 0; i < 40 && !document.querySelector('#ce-accounts .ce-acct [data-pol="shippingId"] option:nth-child(2)'); i++) await new Promise(r => setTimeout(r, 150));
+  if (accounts[0]?.storeCode && el('ce-store')) el('ce-store').value = accounts[0].storeCode;
+  for (const a of accounts) {
+    const b = document.querySelector(`#ce-accounts .ce-acct[data-code="${CSS.escape(a.storeCode)}"]`); if (!b) continue;
+    b.querySelector('.ce-acct-on').checked = true;
+    for (const [k, v] of Object.entries(a.businessPolicies || {})) { const sel = b.querySelector(`[data-pol="${k}"]`); if (sel && v && [...sel.options].some(o => o.value === String(v))) sel.value = String(v); }
+  }
+  ceSyncAlsoStores();
 }
 
 // Edit listing on an item with NO eBay listing: ask, collect only what the
@@ -14600,6 +14649,8 @@ async function submitUnifiedUpdate(btn) {
       packagingCost: (el('cl-pack-cost')?.value || '') !== '' ? parseFloat(el('cl-pack-cost').value) : undefined,
       shippingBand: el('cl-ship-band') ? (el('cl-ship-band').value || null) : undefined,
       shippingCost: (el('cl-ship-cost')?.value || '') !== '' ? parseFloat(el('cl-ship-cost').value) : undefined,
+      // Incoming placeholder: the eBay panel is stored (not published) for Go live.
+      ebayHeld: CL._held ? elHeldListing() : undefined,
     });
     Task.done(taskId, 'Saved');
   } catch (e) {
@@ -14629,6 +14680,15 @@ async function submitUnifiedUpdate(btn) {
   const missing = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_') && !pushedCodes.has(s.code));
   if (missing.length && ebayEntries.length) bits.push(`${missing.map(s => storeName(s.code)).join(', ')} — not linked`);
   if (r.images?.ok) bits.push(`Photos ✓ (${r.images.count})`); else if (r.images?.error) bits.push('Photos ✗');
+  if (CL._held) {
+    // Held incoming item: nothing goes to eBay now — it's stored for Go live.
+    const acc = (r.ebayHeld?.accounts || []).map(k => (State.brand?.stores || []).find(x => x.code === k)?.name || k);
+    toast(`💾 Saved — warehouse + hidden Shopify draft updated. eBay listing stored${acc.length ? ' for ' + acc.join(' + ') : ''}; it goes live when you press 🚀 Go live in Incoming (or when the stock arrives).`, r.ebayHeld?.error ? 'warn' : 'success', 9000);
+    if (btn) btn.disabled = false;
+    Editing.dirty = false;
+    await Store.refresh('products').catch(() => {});
+    return;
+  }
   if (CL._editNoEbay) {
     // Warehouse + Shopify are saved — now offer the missing eBay listing.
     toast(`Saved — Warehouse ✓${bits.filter(b => !/not linked/.test(b)).length ? ' · ' + bits.filter(b => !/not linked/.test(b)).join(' · ') : ''}`, 'success', 5000);
