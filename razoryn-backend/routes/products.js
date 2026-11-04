@@ -1366,6 +1366,7 @@ const _shopify = () => require('../services/shopify');
 
 // GET /api/products/:id/shopify-stock — live Shopify available qty (Match button).
 router.get('/:id/shopify-stock', requireAdmin, async (req, res) => {
+  if (!/^\d+$/.test(String(req.params.id))) return res.status(400).json({ error: 'bad_id', message: 'Save the product first.' });
   const pr = await query('SELECT shopify_inventory_id, qty_on_hand FROM products WHERE id = $1', [req.params.id]);
   if (!pr.rows[0]) return res.status(404).json({ error: 'not_found' });
   const invId = pr.rows[0].shopify_inventory_id;
