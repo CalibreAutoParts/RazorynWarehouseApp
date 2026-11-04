@@ -4771,6 +4771,22 @@ function paintIncomingStats(s) {
     <div class="stat"><div class="label">Open containers</div><div class="value">${s.open_containers || 0}</div></div>
     <div class="stat"><div class="label">&nbsp;</div><div class="value"><button class="btn btn-outline btn-sm" onclick="openAddIncoming()">+ Add incoming</button></div></div>`;
 }
+// Untie a line from a listing it shares with a different part: it gets its own
+// placeholder (own SKU / part number / Shopify draft), then opens to finish it.
+async function incSplit(id) {
+  const it = (State.incoming || []).find(x => x.id === id) || {};
+  const code = it.part_number || it.supplier_sku || it.sku || '';
+  if (!confirm(`Give ${code || 'this line'} its own listing?\n\nIt gets a new placeholder (its own SKU, title, photos and hidden Shopify draft). The other line keeps the current listing. You'll then fix its title and photos.`)) return;
+  const t = Task.start('Splitting into its own listing…');
+  try {
+    const r = await Api.post(`/api/incoming/${id}/split`, {});
+    Task.done(t, 'Split');
+    toast(`✂ ${code} now has its own listing (${r.sku}) — set its title and photos`, 'success', 7000);
+    await loadIncoming();
+    openEditListing(r.productId);
+  } catch (e) { Task.fail(t, 'Failed'); toast(e.data?.message || e.message, 'error', 8000); }
+}
+
 // Readiness filter (client side — the list is already loaded).
 function incReadyFilter(items) {
   const f = el('incoming-ready-filter')?.value || '';
@@ -4827,6 +4843,7 @@ function paintIncoming(items) {
       ph ? `<button onclick="incAddPhotos(${i.product_id})">📷 Add photos you already have</button>` : '',
       !linked ? `<button onclick="incMakePlaceholders({ ids: [${i.id}] })">🧩 Make placeholder</button>` : '',
       !linked ? `<button onclick="incDraftListing(${i.id})">📝 Draft full listing</button>` : '',
+      linked ? `<button onclick="incSplit(${i.id})" title="Give this line its own listing (if it was tied to another part by mistake)">✂ Split into its own listing</button>` : '',
       `<button onclick="printIncomingLabels(${i.id})">🏷 Print labels</button>`,
       `<button onclick="openEditIncoming(${i.id})">✏️ Edit line</button>`,
       `<button style="color:var(--red)" onclick="deleteIncoming(${i.id})">🗑 Delete line</button>`,
@@ -4840,6 +4857,9 @@ function paintIncoming(items) {
           ${ph ? '<span class="pill amber" style="font-size:10px">🧩 placeholder · held</span>' : ''}
           ${linked && i.product_ebay_status === 'on_arrival' ? '<span class="pill green" style="font-size:10px">🚀 live · eBay on arrival</span>' : ''}
         </div>
+        ${i.shared_with ? `<div style="margin-top:5px;padding:6px 8px;border-radius:6px;background:var(--amber-light);color:var(--amber);font-size:11.5px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          ⚠ Shares one listing with ${i.shared_with.map(o => `<b>${escapeHtml(o.code || '')}</b>${o.container && o.container !== i.container_ref ? ' (' + escapeHtml(o.container) + ')' : ''}`).join(', ')} — editing one changes both.
+          <button class="btn btn-primary btn-sm" onclick="incSplit(${i.id})">✂ Split into its own listing</button></div>` : ''}
         ${i.readiness && i.readiness.listed && (ph || !i.readiness.ready) ? `<div style="margin-top:5px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">${incReadyChips(i)}</div>` : ''}
       </td>
       <td class="num"><div style="font-weight:700;font-size:15px">${remaining}</div><div style="font-size:10px;color:var(--ink-soft)">of ${i.qty_ordered}${i.qty_received ? ` · ${i.qty_received} in` : ''}</div></td>
