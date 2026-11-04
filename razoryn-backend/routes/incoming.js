@@ -196,12 +196,19 @@ async function ebayPotential(lines) {
 // Incoming lines entered before the product existed (e.g. listed later via
 // "Draft listing" or Create listing) link up by SKU once it does.
 async function linkUnmatchedLines(ref = null, productId = null) {
-  return query(`UPDATE incoming_stock i SET product_id = p.id, updated_at = now()
-                  FROM products p
+  // Candidates by SKU, then the same "really the same part?" test as placeholders
+  // (opposite side in the title / a different supplier code → not linked).
+  const cands = (await query(`SELECT i.*, p.id AS cand_id FROM incoming_stock i
+                  JOIN products p ON p.active = true AND LOWER(TRIM(p.sku)) = LOWER(TRIM(i.sku))
                  WHERE i.product_id IS NULL AND i.status <> 'cancelled' AND COALESCE(TRIM(i.sku), '') <> ''
-                   AND p.active = true AND LOWER(TRIM(p.sku)) = LOWER(TRIM(i.sku))
-                   AND ($1::text IS NULL OR i.container_ref = $1) AND ($2::int IS NULL OR p.id = $2)
-               RETURNING i.container_ref`, [ref, productId]).then(r => r.rows).catch(() => []);
+                   AND ($1::text IS NULL OR i.container_ref = $1) AND ($2::int IS NULL OR p.id = $2)`, [ref, productId]).catch(() => ({ rows: [] }))).rows;
+  const linked = [];
+  for (const c of cands) {
+    if (!(await isReallySamePart(c, c.cand_id).catch(() => false))) continue;
+    await query(`UPDATE incoming_stock SET product_id = $2, updated_at = now() WHERE id = $1 AND product_id IS NULL`, [c.id, c.cand_id]);
+    linked.push({ container_ref: c.container_ref });
+  }
+  return linked;
 }
 
 async function syncPlaceholderCosts(ref) {
@@ -285,6 +292,19 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
       COUNT(DISTINCT container_ref) FILTER (WHERE container_ref IS NOT NULL AND status <> 'received')::int AS open_containers
     FROM incoming_stock WHERE status <> 'cancelled'`);
   for (const r of rows) { r.readiness = readinessFor(r); delete r.product_held; delete r.product_specifics; }
+  // Lines tied to the SAME listing but with different part numbers (an earlier
+  // mix-up) — editing one changes the other. Flag them so they can be split.
+  const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const byProd = new Map();
+  for (const r of rows) if (r.product_id && r.status !== 'received') { if (!byProd.has(r.product_id)) byProd.set(r.product_id, []); byProd.get(r.product_id).push(r); }
+  for (const list of byProd.values()) {
+    if (list.length < 2) continue;
+    for (const r of list) {
+      const mine = norm(r.part_number || r.supplier_sku || r.sku);
+      const others = list.filter(o => o !== r && (norm(o.part_number || o.supplier_sku || o.sku) !== mine || (r.supplier_sku && o.supplier_sku && norm(r.supplier_sku) !== norm(o.supplier_sku))));
+      if (others.length) r.shared_with = others.map(o => ({ id: o.id, code: o.part_number || o.supplier_sku || o.sku, container: o.container_ref }));
+    }
+  }
   // Items marked "no photo" that have a Shopify draft: check Shopify for photos
   // in the background (uploads can still be processing when first saved) — the
   // next refresh shows them ✓.
@@ -559,6 +579,18 @@ router.post('/bulk', requirePermission('inventory'), async (req, res) => {
       || (l.sku && bySku.get(String(l.sku).trim().toLowerCase()))
       || (l.partNumber && byPart.get(String(l.partNumber).trim().toLowerCase()))
       || null;
+    // Matched only by number (not picked by hand) but clearly a different item —
+    // other side in the title, or this supplier already has a different code
+    // for that listing → keep it separate instead of merging into one listing.
+    if (prod && !l.productId) {
+      let different = !!(l.title && sidesConflict(l.title, prod.title));
+      if (!different && l.supplierSku && b.supplier) {
+        const known = (await query(`SELECT ps.supplier_sku FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
+            WHERE ps.product_id = $1 AND LOWER(s.name) = LOWER($2) AND COALESCE(ps.supplier_sku, '') <> '' LIMIT 1`, [prod.id, b.supplier]).catch(() => ({ rows: [] }))).rows[0];
+        if (known && known.supplier_sku.trim().toLowerCase() !== String(l.supplierSku).trim().toLowerCase()) different = true;
+      }
+      if (different) prod = null;
+    }
     // NEW/unlisted stock: no matching product is NOT a reason to reject the line —
     // record it product-less (typed sku/title/part number kept) so the container is
     // complete; a listing can be drafted from the Incoming page and the line links
@@ -757,7 +789,28 @@ async function applyIncomingToProduct(productId) {
 }
 router.applyIncomingToProduct = applyIncomingToProduct;
 
-async function createPlaceholders(lineIds, { shopifyMode = 'draft', userId = null, perLine = {} } = {}) {
+// Two lines that look like the same part but aren't: different supplier codes,
+// or opposite sides/positions in the titles (Left vs Right, Front vs Rear…).
+const SIDES = [['left', 'right'], ['front', 'rear'], ['upper', 'lower'], ['inner', 'outer'], ['lh', 'rh'], ['nsf', 'osf'], ['nsr', 'osr']];
+function sidesConflict(a, b) {
+  const wa = new Set(String(a || '').toLowerCase().split(/[^a-z]+/)), wb = new Set(String(b || '').toLowerCase().split(/[^a-z]+/));
+  return SIDES.some(([x, y]) => (wa.has(x) && !wa.has(y) && wb.has(y) && !wb.has(x)) || (wa.has(y) && !wa.has(x) && wb.has(x) && !wb.has(y)));
+}
+async function isReallySamePart(line, productId) {
+  const p = (await query(`SELECT title FROM products WHERE id = $1`, [productId])).rows[0] || {};
+  if (sidesConflict(line.title, p.title)) return false;
+  if (line.supplier_sku) {
+    const other = (await query(`SELECT supplier_sku FROM incoming_stock WHERE product_id = $1 AND id <> $2 AND status <> 'cancelled'
+      AND COALESCE(supplier_sku, '') <> '' AND LOWER(COALESCE(supplier, '')) = LOWER(COALESCE($3, '')) LIMIT 1`, [productId, line.id, line.supplier])).rows[0];
+    if (other && other.supplier_sku.trim().toLowerCase() !== line.supplier_sku.trim().toLowerCase()) return false;
+    const known = (await query(`SELECT ps.supplier_sku FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
+        WHERE ps.product_id = $1 AND LOWER(s.name) = LOWER(COALESCE($2, '')) AND COALESCE(ps.supplier_sku, '') <> '' LIMIT 1`, [productId, line.supplier]).catch(() => ({ rows: [] }))).rows[0];
+    if (known && known.supplier_sku.trim().toLowerCase() !== line.supplier_sku.trim().toLowerCase()) return false;
+  }
+  return true;
+}
+
+async function createPlaceholders(lineIds, { shopifyMode = 'draft', userId = null, perLine = {}, noDedup = false } = {}) {
   await ensureTable(); await ensurePlaceholderCols();
   const shopify = require('../services/shopify');
   const preorder = require('../lib/preorder');
@@ -768,7 +821,9 @@ async function createPlaceholders(lineIds, { shopifyMode = 'draft', userId = nul
       const x = { ...((r.extras && r.extras.listing) || {}), ...(perLine[r.id] || {}) };
       const code = (r.sku || r.part_number || r.supplier_sku || '').trim();
       // Same part already created by an earlier line/container → just link it.
-      const dup = code ? (await query(`SELECT id, sku FROM products WHERE active = true AND (LOWER(sku) = LOWER($1) OR LOWER(part_number) = LOWER($1)) LIMIT 1`, [code])).rows[0] : null;
+      let dup = (code && !noDedup) ? (await query(`SELECT id, sku FROM products WHERE active = true AND (LOWER(sku) = LOWER($1) OR LOWER(part_number) = LOWER($1)) LIMIT 1`, [code])).rows[0] : null;
+      // Same number but clearly a different item (other supplier code / other side) → its own listing.
+      if (dup && !(await isReallySamePart(r, dup.id))) dup = null;
       if (dup) {
         await query(`UPDATE incoming_stock SET product_id = $1, sku = $2, updated_at = now() WHERE id = $3`, [dup.id, dup.sku, r.id]);
         await applyIncomingToProduct(dup.id).catch(() => {});
@@ -855,6 +910,26 @@ router.post('/placeholders', requirePermission('inventory'), safe(async (req, re
   const out = await createPlaceholders(ids, { shopifyMode: b.shopifyMode || 'draft', userId: req.user.id, perLine: b.perLine || {} });
   await audit(req, 'incoming_placeholders', 'incoming', null, { created: out.created.length, linked: out.linked });
   res.json({ ok: true, ...out });
+}));
+
+// POST /api/incoming/:id/split — give this line its OWN listing (new placeholder
+// with this line's part number), un-tying it from a listing shared with a
+// different part. The other line keeps the existing listing.
+router.post('/:id/split', requirePermission('inventory'), safe(async (req, res) => {
+  await ensureTable();
+  const line = (await query(`SELECT * FROM incoming_stock WHERE id = $1`, [req.params.id])).rows[0];
+  if (!line) return res.status(404).json({ error: 'not_found' });
+  if (!line.product_id) return res.status(400).json({ error: 'not_linked', message: 'This line has no listing yet.' });
+  const code = (line.part_number || line.supplier_sku || line.sku || '').trim();
+  await query(`UPDATE incoming_stock SET product_id = NULL, sku = $2, updated_at = now() WHERE id = $1`, [line.id, code || line.sku]);
+  const out = await createPlaceholders([line.id], { shopifyMode: req.body?.shopifyMode || 'draft', userId: req.user.id, noDedup: true });
+  const created = out.created[0];
+  if (!created) {
+    await query(`UPDATE incoming_stock SET product_id = $2 WHERE id = $1 AND product_id IS NULL`, [line.id, line.product_id]).catch(() => {});
+    return res.status(500).json({ error: 'split_failed', message: (out.errors[0] && out.errors[0].error) || 'Could not create the new listing.' });
+  }
+  await audit(req, 'incoming_split', 'incoming', line.id, { from: line.product_id, to: created.productId });
+  res.json({ ok: true, productId: created.productId, sku: created.sku });
 }));
 
 // POST /api/incoming/placeholder-photos { productId, images: [dataUrl | https], replace? }
