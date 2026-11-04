@@ -141,4 +141,23 @@ async function applyNames() {
   }
 }
 
-module.exports = { getAll, getProfile, vatOffFor, storeForChannel, saleVatOff, companyForSale, save, saveProfile, applyNames };
+// Shop on/off + main shop (app_settings.data.ebayShops = { disabled: [codes], main: code }).
+async function getShopState() {
+  const { query } = require('../db');
+  const d = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+  const st = d.ebayShops || {};
+  return { disabled: Array.isArray(st.disabled) ? st.disabled : [], main: st.main || null };
+}
+async function saveShopState(patch = {}) {
+  const { query } = require('../db');
+  const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+  const st = { ...(await getShopState()) };
+  if (Array.isArray(patch.disabled)) st.disabled = [...new Set(patch.disabled.map(String))];
+  if ('main' in patch) st.main = patch.main ? String(patch.main) : null;
+  await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify({ ...cur, ebayShops: st })]);
+  require('./brand').applyShopState(st);
+  return st;
+}
+async function applyShopState() { require('./brand').applyShopState(await getShopState()); }
+
+module.exports = { getAll, getProfile, vatOffFor, storeForChannel, saleVatOff, companyForSale, save, saveProfile, applyNames, getShopState, saveShopState, applyShopState };
