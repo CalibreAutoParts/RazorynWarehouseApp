@@ -868,10 +868,42 @@ router.get('/store-vat', requireAdmin, async (req, res) => {
   const out = [];
   for (const s of require('../services/ebay').listStores()) {
     const prof = await sv.getProfile(s.code);
+    const bs = require('../lib/brand').getStore(s.code) || {};
     out.push({ code: s.code, name: s.name, hasToken: s.hasToken, disabled: s.disabled, primary: s.primary,
-      tokenEnv: (require('../lib/brand').getStore(s.code) || {}).tokenEnv || null, ...prof });
+      tokenSet: !!bs._rawToken, envDisabled: !!bs._envDisabled,
+      tokenEnv: bs.tokenEnv || null, ...prof });
   }
   res.json({ stores: out });
+});
+
+// PUT /api/settings/ebay-shops  { code, on?: bool, main?: true }
+// Switch a shop off/on, or make it the MAIN shop (default for new listings and
+// the source for cross-listing). Takes effect straight away — no redeploy.
+router.put('/ebay-shops', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const brand = require('../lib/brand');
+  const store = brand.getStore(String(b.code || ''));
+  if (!store) return res.status(404).json({ error: 'store_not_found' });
+  if (store._envDisabled) return res.status(409).json({ error: 'env_disabled', message: `Switched off in Railway (EBAY_STORE_DISABLED) — remove it there to manage it here.` });
+  const sv = require('../lib/store-vat');
+  const st = await sv.getShopState();
+  let disabled = [...st.disabled];
+  let main = st.main || (brand.stores.find(s => s.primary) || {}).code || null;
+  if (b.on === true) disabled = disabled.filter(c => c !== store.code);
+  if (b.on === false) {
+    disabled = [...disabled.filter(c => c !== store.code), store.code];
+    if (main === store.code) {
+      const next = brand.stores.find(s => s.code !== store.code && s._rawToken && !disabled.includes(s.code) && !s._envDisabled);
+      main = next ? next.code : null;
+    }
+  }
+  if (b.main === true) {
+    if (b.on === false || !store._rawToken || disabled.includes(store.code)) return res.status(400).json({ error: 'not_connected', message: 'Only a connected, switched-on shop can be the main one — switch it on first.' });
+    main = store.code;
+  }
+  const saved = await sv.saveShopState({ disabled, main });
+  await audit(req, 'ebay_shop_state', null, null, { code: store.code, on: b.on, main: b.main, result: saved });
+  res.json({ ok: true, state: saved, stores: require('../services/ebay').listStores() });
 });
 
 // Body: { code, displayName, businessType, vatOff, since, tradingName, listingBranding, photos }

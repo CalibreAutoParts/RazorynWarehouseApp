@@ -23379,9 +23379,15 @@ async function loadStoreVat() {
   box.innerHTML = State._shops.map(s => { const c = escapeAttr(s.code); return `
     <div style="padding:12px;border:1px solid var(--line);border-radius:8px;margin-bottom:10px;color:var(--ink);${s.hasToken || s.disabled ? '' : 'border-style:dashed'}">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
-        <b style="font-size:14px">${escapeHtml(s.name)}</b>${s.primary ? ' <span style="font-size:11px;color:var(--ink-soft)">(main)</span>' : ''}
-        <span style="font-size:11px;${s.hasToken ? 'color:var(--green)' : 'color:var(--amber, #b26a00)'}">${s.disabled ? '⏸ switched off' : s.hasToken ? '✓ connected' : `not connected — add <code>${escapeHtml(s.tokenEnv || '')}</code> in Railway and redeploy`}</span>
+        <b style="font-size:14px">${escapeHtml(s.name)}</b>${s.primary && !s.disabled ? ' <span class="pill green" style="font-size:10.5px">⭐ main account</span>' : ''}
+        <span style="font-size:11px;${s.hasToken ? 'color:var(--green)' : 'color:var(--amber, #b26a00)'}">${s.envDisabled ? '⏸ switched off in Railway (EBAY_STORE_DISABLED)' : s.disabled ? '⏸ switched off' : s.hasToken ? '✓ connected' : `not connected — add <code>${escapeHtml(s.tokenEnv || '')}</code> in Railway and redeploy`}</span>
+        ${s.tokenSet && !s.envDisabled ? `<span style="margin-left:auto;display:flex;gap:10px;align-items:center">
+          ${!s.disabled && !s.primary ? `<button class="btn btn-sm btn-outline" onclick="setShopState('${c}', { main: true }, this)" title="Default account for new listings and the source for copying listings between shops">⭐ Make main account</button>` : ''}
+          <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;cursor:pointer" title="Switched off: not offered for new listings, and no orders, stock or prices are synced with it. Its old orders stay in Sales.">
+            <label class="switch"><input type="checkbox" ${s.disabled ? '' : 'checked'} onchange="setShopState('${c}', { on: this.checked }, this)"><span></span></label> ${s.disabled ? 'Off' : 'On'}
+          </label></span>` : ''}
       </div>
+      ${s.disabled && !s.envDisabled ? `<div style="font-size:12px;color:var(--ink-soft);margin:-2px 0 8px">Not offered for new listings; orders, stock and prices aren't synced with it. Its past orders stay in Sales. Switch it back on any time.</div>` : ''}
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px">
         <div class="field" style="margin:0"><label style="font-size:11px">Shop name in the app</label><input id="shp-name-${c}" value="${escapeAttr(s.displayName || '')}" placeholder="${escapeAttr(s.name)}"></div>
         <div class="field" style="margin:0"><label style="font-size:11px">Business</label>${sel('shp-type-' + c, s.businessType, [['company', 'Limited company / business'], ['sole_trader', 'Sole trader']])}</div>
@@ -23398,6 +23404,19 @@ async function loadStoreVat() {
       </div>
     </div>`; }).join('') || 'No eBay shops.';
   for (const s of State._shops) shopProfileHints(s.code, true);
+}
+
+// Switch a shop on/off or make it the main one — applies straight away.
+async function setShopState(code, change, ctl) {
+  const shop = (State._shops || []).find(x => x.code === code) || {};
+  if (change.on === false && !confirm(`Switch off ${shop.name || code}?\n\nIt won't be offered for new listings and no orders, stock or prices will sync with it until you switch it back on.${shop.primary ? '\n\nIt is the main account — the next connected shop becomes main.' : ''}`)) { if (ctl) ctl.checked = true; return; }
+  if (ctl) ctl.disabled = true;
+  try {
+    await Api.put('/api/settings/ebay-shops', { code, ...change });
+    toast(change.main ? `⭐ ${shop.name || code} is now the main account` : change.on ? `${shop.name || code} switched on` : `${shop.name || code} switched off`, 'success', 5000);
+    try { State.brand = brandWithConnectedStores(await Api.get('/api/brand')); } catch (_) {}
+    loadStoreVat();
+  } catch (e) { toast(e.data?.message || e.message, 'error', 8000); if (ctl) { ctl.disabled = false; if ('on' in change) ctl.checked = !change.on; } }
 }
 
 // Live "what this means" line; changing the business type suggests the usual

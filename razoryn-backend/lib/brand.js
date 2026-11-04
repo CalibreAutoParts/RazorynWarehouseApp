@@ -134,7 +134,10 @@ const disabledList = (process.env.EBAY_STORE_DISABLED || '')
 
 for (const s of active.stores) {
   const rawToken = process.env[s.tokenEnv] || null;
+  s._rawToken = rawToken;                 // kept so a shop switched off in the app can be switched back on
+  s._codePrimary = !!s.primary;           // the code's default main shop
   if (disabledList.includes(s.code)) {
+    s._envDisabled = true;
     s.token = null;
     s.disabled = true;
     s.disabledReason = `EBAY_STORE_DISABLED env var includes "${s.code}"`;
@@ -148,8 +151,25 @@ for (const s of active.stores) {
   }
 }
 
+// In-app shop switches (Settings → eBay shops): turn a shop off/on and choose the
+// MAIN shop, without touching Railway. EBAY_STORE_DISABLED still wins over the app.
+function applyShopState({ disabled = [], main = null } = {}) {
+  const off = new Set((disabled || []).map(String));
+  for (const s of active.stores) {
+    if (s._envDisabled) continue;
+    if (off.has(s.code)) {
+      s.token = null; s.disabled = true; s.disabledReason = 'Switched off in Settings → eBay shops';
+    } else {
+      s.token = s._rawToken; s.disabled = false; s.disabledReason = null;
+    }
+  }
+  const pick = main && active.stores.find(s => s.code === main && !s.disabled);
+  for (const s of active.stores) s.primary = pick ? s.code === main : s._codePrimary;
+}
+
 module.exports = active;
 module.exports.all = BRANDS;
+module.exports.applyShopState = applyShopState;
 // Helper: get store by code, or null
 module.exports.getStore = function (code) {
   return active.stores.find(s => s.code === code) || null;
