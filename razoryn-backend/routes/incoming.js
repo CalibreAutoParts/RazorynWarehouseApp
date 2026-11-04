@@ -267,7 +267,11 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
            p.is_placeholder AS product_is_placeholder, p.is_prelisted AS product_is_prelisted,
            p.ebay_prelist_status AS product_ebay_status, ${EFF_PRICE} AS product_price_ebay,
            (NULLIF(p.price_ebay, 0) IS NULL AND dr.d_price IS NOT NULL) AS price_from_draft, dr.draft_id,
-           p.shopify_product_id AS product_shopify_id
+           p.shopify_product_id AS product_shopify_id,
+           -- for the readiness checklist
+           p.image_url AS product_image, p.ebay_category_id AS product_ebay_category, p.ebay_item_specifics AS product_specifics,
+           p.ebay_prelist_payload AS product_held, COALESCE(p.landed_cost, p.cost_price) AS product_cost, p.shipping_band AS product_ship_band,
+           (p.shopify_product_id IS NOT NULL AND EXISTS (SELECT 1 FROM mirror_links ml WHERE ml.shopify_product_id::text = p.shopify_product_id::text)) AS product_on_ebay
     FROM incoming_stock i
     LEFT JOIN products p ON p.id = i.product_id
     ${DRAFT_JOIN}
@@ -280,8 +284,37 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
       COALESCE(SUM(GREATEST(qty_ordered - qty_received, 0)) FILTER (WHERE status IN ('on_order','in_transit','arrived')), 0)::int AS units_incoming,
       COUNT(DISTINCT container_ref) FILTER (WHERE container_ref IS NOT NULL AND status <> 'received')::int AS open_containers
     FROM incoming_stock WHERE status <> 'cancelled'`);
+  for (const r of rows) { r.readiness = readinessFor(r); delete r.product_held; delete r.product_specifics; }
   res.json({ items: rows, summary: summary.rows[0] });
 });
+
+// What's still missing before an incoming item can go live — for items not on
+// eBay yet (placeholders / prepared listings). null = not applicable (already live).
+const READY_CHECKS = [
+  ['photos', '📷 Photos'], ['title', 'Title'], ['price', '£ Price'], ['category', 'eBay category'],
+  ['specifics', 'Item specifics'], ['accounts', 'eBay accounts'], ['cost', 'Cost'], ['postage', 'Postage'],
+];
+function readinessFor(r) {
+  if (!r.product_id) return { listed: false, ready: false, done: 0, total: READY_CHECKS.length, checks: READY_CHECKS.map(([k, l]) => ({ k, l, ok: false })) };
+  if (r.product_on_ebay && !r.product_is_placeholder) return null;
+  let held = r.product_held;
+  if (typeof held === 'string') { try { held = JSON.parse(held); } catch (_) { held = null; } }
+  const title = String(r.product_title || '').trim();
+  const specs = (Array.isArray(held?.itemSpecifics) && held.itemSpecifics.length) || (Array.isArray(r.product_specifics) && r.product_specifics.length);
+  const ok = {
+    photos: !!r.product_image,
+    title: !!title && !/\(incoming — add title\)$/.test(title),
+    price: parseFloat(r.product_price_ebay) > 0,
+    category: !!(held?.categoryId || r.product_ebay_category),
+    specifics: !!specs,
+    accounts: !!(held?.accounts?.length) || !!r.product_on_ebay,
+    cost: parseFloat(r.product_cost) > 0,
+    postage: !!r.product_ship_band,
+  };
+  const checks = READY_CHECKS.map(([k, l]) => ({ k, l, ok: !!ok[k] }));
+  const done = checks.filter(c => c.ok).length;
+  return { listed: true, ready: done === checks.length, done, total: checks.length, checks };
+}
 
 // GET /api/incoming/containers — distinct open container refs (for the filter),
 // joined to the container header so the UI can show which ones still need freight/duty.
