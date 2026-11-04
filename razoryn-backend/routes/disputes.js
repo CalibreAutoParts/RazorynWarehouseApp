@@ -123,7 +123,7 @@ router.patch('/settings', aw(async (req, res) => {
   if (b.policyNotes !== undefined) { params.push(b.policyNotes ? String(b.policyNotes).slice(0, 2000) : null); sets.push(`policy_notes = $${params.length}`); }
   if (!sets.length) return res.status(400).json({ error: 'no_fields' });
   sets.push('updated_at = now()');
-  const r = await query(`UPDATE dispute_settings SET ${sets.join(', ')} WHERE id = 1 RETURNING *`);
+  const r = await query(`UPDATE dispute_settings SET ${sets.join(', ')} WHERE id = 1 RETURNING *`, params);
   await audit(req, 'dispute_settings', null, null, b);
   res.json({ settings: r.rows[0] });
 }));

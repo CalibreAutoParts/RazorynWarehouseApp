@@ -16,6 +16,60 @@ router.use(requireAuth);
 
 const canRead = requirePermission('competitors');
 
+// ---------- part-number lookup (Create listing / draft) ----------
+// GET /api/competitors/part-lookup?pn=0052170582[&live=0]
+// Everyone selling this part number: tracked competitors' listings (exact part
+// number, or the number inside their title) + a live eBay search for NEW items.
+// Prices are compared DELIVERED (item + postage). Returns the cheapest, median
+// and the listings themselves (with links) so staff can check it's the same item.
+const normPn = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+router.get('/part-lookup', canRead, async (req, res) => {
+  const raw = String(req.query.pn || '').trim().slice(0, 60);
+  const pn = normPn(raw);
+  if (pn.length < 4) return res.json({ pn: raw, listings: [], summary: null, note: 'Enter a part number (4+ characters).' });
+  const delivered = (x) => x.price == null ? null : +(Number(x.price) + (x.shipping_free ? 0 : Number(x.shipping_cost || 0))).toFixed(2);
+  const out = [];
+  try {
+    const { rows } = await query(`
+      SELECT cl.id, cl.url, cl.title, cl.price, cl.shipping_cost, cl.shipping_free, cl.condition, cl.seller_username,
+             cl.image_url, cl.parsed_make, cl.parsed_model, cl.parsed_part_type, cl.last_seen_at, c.name AS competitor
+        FROM competitor_listings cl JOIN competitors c ON c.id = cl.competitor_id
+       WHERE cl.available = true AND (
+             REGEXP_REPLACE(UPPER(COALESCE(cl.parsed_part_number, '')), '[^A-Z0-9]', '', 'g') = $1
+          OR ($2 AND REGEXP_REPLACE(UPPER(cl.title), '[^A-Z0-9]', '', 'g') LIKE '%' || $1 || '%'))
+       ORDER BY cl.price NULLS LAST LIMIT 50`, [pn, pn.length >= 6]);
+    for (const r of rows) out.push({ source: 'tracked', competitor: r.competitor, seller: r.seller_username, title: r.title, url: r.url,
+      price: r.price != null ? Number(r.price) : null, shipping: r.shipping_free ? 0 : (r.shipping_cost != null ? Number(r.shipping_cost) : null),
+      delivered: delivered(r), condition: r.condition, image: r.image_url, make: r.parsed_make, model: r.parsed_model, partType: r.parsed_part_type, seenAt: r.last_seen_at });
+  } catch (e) { /* competitor tables not set up yet */ }
+  let liveError = null, liveTotal = null;
+  if (req.query.live !== '0') {
+    try {
+      const ours = String(process.env.OUR_EBAY_SELLERS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+      const r = await ebay.searchActiveListings({ q: raw, conditionIds: '1000', limit: 40 });
+      liveTotal = r.total;
+      const seen = new Set(out.map(x => x.url).filter(Boolean));
+      for (const it of r.items || []) {
+        if (!it.url || seen.has(it.url)) continue;
+        // Keep only results that actually carry the part number (eBay search is fuzzy).
+        if (pn.length >= 6 && !normPn(it.title).includes(pn) && normPn(it.mpn || '') !== pn) continue;
+        out.push({ source: 'ebay', competitor: null, seller: it.seller_username, title: it.title, url: it.url,
+          price: it.price != null ? Number(it.price) : null, shipping: it.shipping_free ? 0 : (it.shipping_cost != null ? Number(it.shipping_cost) : null),
+          delivered: delivered(it), condition: it.condition, image: it.image_url, isUs: !!(it.seller_username && ours.includes(it.seller_username.toLowerCase())) });
+      }
+    } catch (e) { liveError = e.message; }
+  }
+  const others = out.filter(x => !x.isUs && x.delivered != null).sort((a, b) => a.delivered - b.delivered);
+  const d = others.map(x => x.delivered);
+  const median = d.length ? (d.length % 2 ? d[(d.length - 1) / 2] : (d[d.length / 2 - 1] + d[d.length / 2]) / 2) : null;
+  // Prefill hints from tracked listings (most common make / model / part type).
+  const top = (k) => { const m = {}; out.forEach(x => { if (x[k]) m[x[k]] = (m[x[k]] || 0) + 1; }); return Object.entries(m).sort((a, b) => b[1] - a[1])[0]?.[0] || null; };
+  res.json({ pn: raw, listings: [...others, ...out.filter(x => x.isUs || x.delivered == null)].slice(0, 40),
+    summary: d.length ? { count: d.length, cheapest: d[0], median: +median.toFixed(2), dearest: d[d.length - 1] } : null,
+    hints: { make: top('make'), model: top('model'), partType: top('partType') },
+    liveTotal, liveError });
+});
+
 // ---------- competitor list ----------
 
 // GET /api/competitors — competitors with listing counts + last scan status.

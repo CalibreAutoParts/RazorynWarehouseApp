@@ -310,7 +310,9 @@
     padding: 16px 18px; border-bottom: 1px solid var(--line);
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
   }
-  .card-head h3 { font-size: 15px; font-weight: 600; }
+  .card-head h3 { font-size: 15px; font-weight: 600; flex-shrink: 0; }
+  /* A description beside a card title: small and grey, never squashing the title. */
+  .card-head .card-desc { font-size: 12.5px; color: var(--ink-soft); font-weight: 400; line-height: 1.45; text-align: right; flex: 1 1 260px; max-width: 70%; }
   .card-body { padding: 18px; }
   /* Collapsible settings sections — headings only until opened. */
   .card.s-collapsed > :not(.card-head) { display: none !important; }
@@ -431,6 +433,8 @@
   details.row-menu .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 40; background: var(--white); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-lg); min-width: 240px; padding: 6px; text-align: left; }
   details.row-menu .menu button { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 8px 10px; border-radius: 6px; font-size: 13px; color: var(--ink); cursor: pointer; white-space: nowrap; }
   details.row-menu .menu button:hover { background: var(--bg-soft); }
+  details.row-menu .menu button.danger { color: var(--red); }
+  details.row-menu .menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
   .ctn-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; }
   .ctn-card { border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; background: var(--white); display: flex; flex-direction: column; gap: 10px; }
   .ctn-card .ctn-head { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
@@ -1188,11 +1192,33 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
           Locations
         </button>
+        <button class="nav-item" data-page="dispatch">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16h6"/><path d="M19 13v6"/><path d="M14 8h6"/><path d="M3 7l9-4 9 4M3 7v10l9 4 9-4V7M3 7l9 4 9-4M12 11v10"/></svg>
+          Dispatch
+          <span class="ct" id="nav-dispatch-count">0</span>
+        </button>
         <button class="nav-item" data-page="returns">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
           Returns
           <span class="ct" id="nav-ret-count">0</span>
         </button>
+        <button class="nav-item" data-page="labels">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><line x1="7" y1="9" x2="7" y2="15"/><line x1="10" y1="9" x2="10" y2="15"/><line x1="13" y1="9" x2="13" y2="15"/><line x1="16" y1="9" x2="16" y2="15"/></svg>
+          Labels
+        </button>
+        <button class="nav-item" data-page="printstation">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+          Print station <span id="nav-print-badge" style="display:none;margin-left:auto;background:var(--amber,orange);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;line-height:18px"></span>
+        </button>
+        <button class="nav-item alert" data-page="notifications">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+          Notifications
+          <span class="ct" id="nav-notif-count">0</span>
+        </button>
+      </div>
+
+      <div class="nav-section admin-only">
+        <div class="nav-label">Sales &amp; customers</div>
         <button class="nav-item admin-only" data-page="sales">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 7c0-5.333-8-5.333-8 0"/><path d="M10 7v6h-4"/><path d="M6 13h9"/><path d="M6 19h12"/></svg>
           Sales
@@ -1205,10 +1231,49 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           Watched listings
         </button>
-        <button class="nav-item" data-page="dispatch">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16h6"/><path d="M19 13v6"/><path d="M14 8h6"/><path d="M3 7l9-4 9 4M3 7v10l9 4 9-4V7M3 7l9 4 9-4M12 11v10"/></svg>
-          Dispatch
-          <span class="ct" id="nav-dispatch-count">0</span>
+        <button class="nav-item admin-only" data-page="disputes">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          Disputes
+        </button>
+        <button class="nav-item admin-only" data-page="trade">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l1.5-5h15L21 9"/><path d="M3 9h18v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9 21v-6h6v6"/></svg>
+          Trade
+        </button>
+        <button class="nav-item admin-only" data-page="onbuy">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.7 13.4a2 2 0 0 0 2 1.6h9.7a2 2 0 0 0 2-1.6L23 6H6"/></svg>
+          OnBuy
+        </button>
+      </div>
+
+      <div class="nav-section admin-only">
+        <div class="nav-label">Listings</div>
+        <button class="nav-item admin-only" data-page="createlisting">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Create listing
+        </button>
+        <button class="nav-item admin-only" data-page="drafts">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          Drafts
+        </button>
+        <button class="nav-item admin-only" data-page="mirror">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+          Listing Mirror
+        </button>
+        <button class="nav-item admin-only" data-page="bulk" data-source="ebay">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+          eBay → Shopify
+        </button>
+        <button class="nav-item admin-only" data-page="bulk" data-source="shopify">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m11 18-6-6 6-6"/></svg>
+          Shopify → eBay
+        </button>
+        <button class="nav-item admin-only multistore-only" data-page="clonestore">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          Copy between eBay shops
+        </button>
+        <button class="nav-item admin-only" data-page="pushes">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Push queue
         </button>
         <button class="nav-item admin-only" data-page="bundles">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
@@ -1218,22 +1283,33 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
           Shared parts
         </button>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-label">Pricing &amp; money</div>
         <button class="nav-item admin-only" data-page="costs">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           Costs &amp; margins
+        </button>
+        <button class="nav-item admin-only" data-page="pricingrules">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          Pricing rules
         </button>
         <button class="nav-item admin-only" data-page="pricing">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><polyline points="9 14 11 16 15 12"/></svg>
           Quote Builder
         </button>
-        <button class="nav-item alert" data-page="notifications">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
-          Notifications
-          <span class="ct" id="nav-notif-count">0</span>
+        <button class="nav-item competitors-only" data-page="competitors">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          Competitors
+        </button>
+        <button class="nav-item admin-only" data-page="books">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Books &amp; VAT
         </button>
       </div>
 
-      <div class="nav-section admin-only">
+      <div class="nav-section">
         <div class="nav-label">Resources</div>
         <button class="nav-item" data-page="vinsearch">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -1259,10 +1335,6 @@
 
       <div class="nav-section admin-only">
         <div class="nav-label">Admin</div>
-        <button class="nav-item" data-page="labels">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><line x1="7" y1="9" x2="7" y2="15"/><line x1="10" y1="9" x2="10" y2="15"/><line x1="13" y1="9" x2="13" y2="15"/><line x1="16" y1="9" x2="16" y2="15"/></svg>
-          Labels
-        </button>
         <button class="nav-item admin-only" data-page="staff">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           Staff &amp; Access
@@ -1271,71 +1343,16 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
           Activity
         </button>
-        <button class="nav-item admin-only" data-page="pricingrules">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-          Pricing
-        </button>
-        <button class="nav-item competitors-only" data-page="competitors">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-          Competitors
-        </button>
         <button class="nav-item admin-only" data-page="ai">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>
           AI <span id="nav-ai-badge" style="display:none;margin-left:auto;background:var(--blue);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;line-height:18px"></span>
-        </button>
-        <button class="nav-item admin-only" data-page="books">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-          Books &amp; VAT
-        </button>
-        <button class="nav-item" data-page="printstation">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
-          Print station <span id="nav-print-badge" style="display:none;margin-left:auto;background:var(--amber,orange);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;line-height:18px"></span>
-        </button>
-        <button class="nav-item admin-only" data-page="onbuy">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.7 13.4a2 2 0 0 0 2 1.6h9.7a2 2 0 0 0 2-1.6L23 6H6"/></svg>
-          OnBuy
-        </button>
-        <button class="nav-item admin-only" data-page="trade">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l1.5-5h15L21 9"/><path d="M3 9h18v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9 21v-6h6v6"/></svg>
-          Trade
-        </button>
-        <button class="nav-item admin-only" data-page="disputes">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          Disputes
-        </button>
-        <button class="nav-item admin-only" data-page="pushes">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-          Push queue
-        </button>
-        <button class="nav-item admin-only" data-page="createlisting">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          Create listing
-        </button>
-        <button class="nav-item admin-only" data-page="drafts">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-          Drafts
-        </button>
-        <button class="nav-item admin-only" data-page="mirror">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-          Listing Mirror
-        </button>
-        <button class="nav-item admin-only" data-page="bulk" data-source="ebay">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
-          eBay → Shopify
-        </button>
-        <button class="nav-item admin-only" data-page="bulk" data-source="shopify">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m11 18-6-6 6-6"/></svg>
-          Shopify → eBay
-        </button>
-        <button class="nav-item admin-only multistore-only" data-page="clonestore">
-          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          Copy between eBay shops
         </button>
         <button class="nav-item admin-only" data-page="settings">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           Settings
         </button>
       </div>
+
     </aside>
 
     <main class="content" id="content"></main>
@@ -2338,6 +2355,11 @@ function enterApp() {
   bindNav();
   bindHeader();
   initKiosk();
+  // A menu section whose pages this user can't open shows no empty heading.
+  requestAnimationFrame(() => document.querySelectorAll('.sidebar .nav-section').forEach(sec => {
+    const any = [...sec.querySelectorAll('.nav-item[data-page]')].some(n => getComputedStyle(n).display !== 'none');
+    if (!any) sec.style.display = 'none';
+  }));
   applyAppMode();           // strip to warehouse pages + bottom quick-bar in the app shell
   if (State.appShell) initHardwareScanner();  // global keyboard-wedge scanner capture — app only, so it can't intercept keys on desktop
   initCopyTap();            // tap a part number / SKU to copy it
@@ -2503,37 +2525,7 @@ function enterApp() {
   }, 60_000);
 }
 
-// New-return notification — fires when a return record appears in State.returns
-// that we didn't see on the previous poll. Plays the user's "new return" sound.
-function notifyNewReturn(returnRow) {
-  const sku = returnRow.sku || returnRow.product_sku || '';
-  const reason = returnRow.reason || returnRow.reason_code || 'reason unspecified';
-  const title = 'New return opened';
-  const body = sku ? `${sku} · ${reason}` : reason;
-  try {
-    if ('Notification' in window && Notification.permission === 'granted') {
-      const n = new Notification(title, { body, icon: (State.brand?.logoUrl || '/logo.png'), tag: 'return-' + returnRow.id });
-      n.onclick = () => { window.focus(); routeTo('returns'); };
-    }
-  } catch (e) {}
-  Sounds.playForReturn();
-  toast(`${title} · ${body}`, 'warn');
-}
 
-// Return-closed notification — fires when an existing return transitions to a
-// closed/resolved status. Lower-urgency sound by default (pop).
-function notifyReturnClosed(returnRow) {
-  const sku = returnRow.sku || returnRow.product_sku || '';
-  const title = 'Return closed';
-  const body = sku ? `${sku} · ${returnRow.status}` : returnRow.status;
-  try {
-    if ('Notification' in window && Notification.permission === 'granted') {
-      new Notification(title, { body, icon: (State.brand?.logoUrl || '/logo.png'), tag: 'return-closed-' + returnRow.id });
-    }
-  } catch (e) {}
-  Sounds.playForReturnClosed();
-  toast(`${title} · ${body}`, 'success');
-}
 
 // Low-stock notification — one alert covering all the items that just crossed
 // the threshold in this poll cycle (avoids spamming when several drop together).
@@ -2591,33 +2583,6 @@ function notifyReturnsBatch(returns, isClosed) {
   toast(`${title} · ${body}`, isClosed ? 'success' : 'warn', 6000);
 }
 
-function notifyNewSale(sale) {
-  // `sale` is an *adapted* row from State.sales (via adaptSale), so its fields
-  // are camelCase and renamed — not the raw DB column names. Common gotchas:
-  //   amount         (not total)
-  //   customer       (not customer_name)
-  //   invoice        (not invoice_number)
-  //   externalOrderId (not external_order_id)
-  // Using the wrong names was the cause of the "£0.00 in notification" bug.
-  const channel = (sale.channel || '').replace('_', ' ');
-  const amount = parseFloat(sale.amount || sale.total || 0);  // fall back to total just in case
-  const title = `New ${channel} order · £${amount.toFixed(2)}`;
-  const ref = sale.invoice || sale.externalOrderId || sale.paymentReference || '';
-  const body = `${sale.customer || sale.customer_name || 'Customer'}${ref ? ' · ' + ref : ''}`;
-  // Browser notification
-  try {
-    if ('Notification' in window && Notification.permission === 'granted') {
-      const n = new Notification(title, { body, icon: (State.brand?.logoUrl || '/logo.png'), tag: 'sale-' + sale.id });
-      n.onclick = () => { window.focus(); routeTo('sales'); };
-    }
-  } catch (e) {}
-  // Vibrate (mobile)
-  try { if ('vibrate' in navigator) navigator.vibrate([100, 50, 100]); } catch (e) {}
-  // Play the user's chosen sale sound — debounced to avoid blasting when several
-  // orders arrive in the same polling cycle.
-  Sounds.playForSale();
-  toast(title + ' · ' + body, 'success');
-}
 
 /* ==========================================================
    SOUND MODULE
@@ -2900,14 +2865,18 @@ function bindNav() {
 // editable field (not a search/filter box) on the current page, and confirm
 // before leaving if so. Cleared whenever a page renders or a save completes.
 const Editing = { dirty: false };
-function markClean() { Editing.dirty = false; }
 function isSearchLike(elm) {
   if (!elm) return true;
   if (elm.matches && elm.matches('[data-no-dirty]')) return true;
   const t = (elm.type || '').toLowerCase();
   if (['search', 'checkbox', 'radio', 'button', 'submit', 'range'].includes(t)) return true;
   const hay = ((elm.id || '') + ' ' + (typeof elm.className === 'string' ? elm.className : '') + ' ' + ((elm.getAttribute && elm.getAttribute('placeholder')) || '')).toLowerCase();
-  return /search|filter|find/.test(hay);
+  if (/search|filter|find|period|sort|view|range|show|-tab\b|page-size|per-page/.test(hay)) return true;
+  // View controls act immediately (nothing to save): a dropdown that does its job
+  // on change, or anything in a toolbar / page header / filter strip.
+  if (elm.tagName === 'SELECT' && elm.getAttribute && elm.getAttribute('onchange') && !elm.closest('.modal, #modal-overlay, form, .field')) return true;
+  if (elm.closest && elm.closest('.toolbar, .page-head, .filters, .seg, .card-head, .inv-filters')) return true;
+  return false;
 }
 function initEditingTracker() {
   const content = document.getElementById('content');
@@ -3264,7 +3233,7 @@ function renderClock() {
       <div class="page-head">
         <div><h1>Clock in / out</h1><div class="desc">Clock in when you start, out when you finish — your hours are totted up for pay.</div></div>
         <div class="actions">
-          <select id="clock-period" onchange="State.clockPeriod=this.value;paintClock()" style="padding:6px 10px;font-size:13px">
+          <select id="clock-period" aria-label="Period" title="Period" onchange="State.clockPeriod=this.value;paintClock()" style="padding:6px 10px;font-size:13px">
             ${[['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'This week'], ['lastweek', 'Last week'], ['month', 'This month'], ['14d', 'Last 14 days']]
               .map(([v, l]) => `<option value="${v}" ${State.clockPeriod === v ? 'selected' : ''}>${l}</option>`).join('')}
           </select>
@@ -3983,7 +3952,7 @@ async function stCount(pid, adjust) {
     stPaint();
     if (State.page === 'qtycheck' && typeof qc2Paint === 'function') qc2Paint();
     const base = (adjustedTo != null && res && res.variance) ? `Counted — adjusted to ${adjustedTo}` : 'Counted ✓';
-    toast(`${base} · ${summarizeChannelPush(res && res.channelPush)}`, 'success', 2600);
+    toast(`${base} · ${summarizeChannelPushShort(res && res.channelPush)}`, 'success', 2600);
   } catch (e) {
     toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
@@ -3991,7 +3960,7 @@ async function stCount(pid, adjust) {
 
 // Turn a /api/stock-checks channelPush result into a short status string for the
 // per-item toast, e.g. "Shopify ✓ · eBay ✓ (2)" or "eBay ✕".
-function summarizeChannelPush(cp) {
+function summarizeChannelPushShort(cp) {
   if (!cp) return 'channels: no change';
   const parts = [];
   if (cp.shopify) {
@@ -4498,7 +4467,7 @@ function renderIncoming() {
       <div id="incoming-containers" style="margin-bottom:14px"></div>
       <div class="toolbar" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <input type="search" class="search-input" id="incoming-search" placeholder="Search part, SKU, container, supplier…" oninput="incomingDebouncedSearch(this.value)" style="flex:1;min-width:200px">
-        <select id="incoming-status-filter" onchange="loadIncoming()" style="padding:6px 8px;font-size:13px">
+        <select id="incoming-status-filter" aria-label="Show" title="Show" onchange="loadIncoming()" style="padding:6px 8px;font-size:13px">
           <option value="open">Open (not yet received)</option>
           <option value="">All</option>
           <option value="on_order">On order</option>
@@ -5191,13 +5160,6 @@ function incDraftListing(id) {
   toast('Pre-filled from the incoming line — set the SKU/price, add photos, then create (or Save as draft).', 'info', 8000);
 }
 
-function openAddIncomingSingle() {
-  _incPickedProductId = null;
-  modal({ title: '+ Add one incoming line', body: incomingModalBody(), actions: [
-    { label: 'Cancel', onClick: closeModal },
-    { label: 'Add', primary: true, onClick: () => submitIncoming(null) },
-  ]});
-}
 function openEditIncoming(id) {
   const it = (State.incoming || []).find(x => x.id === id);
   if (!it) return;
@@ -5437,11 +5399,11 @@ function renderInventory() {
 
       <div class="toolbar">
         <input type="search" class="search-input" id="inv-search" placeholder="Search by name, SKU, part #...">
-        <select class="filter-select" id="inv-brand"><option value="">All brands</option>${(() => { const s2 = new Map(); for (const p2 of State.products) { const r2 = String(p2.brand || '').trim(); if (!r2 || r2.toLowerCase() === 'null') continue; const k2 = r2.toLowerCase(); if (!s2.has(k2)) s2.set(k2, r2); } return [...s2.values()].sort((a2, b2) => a2.localeCompare(b2)).map(b2 => `<option value="${escapeAttr(b2)}">${escapeHtml(b2)}</option>`).join(''); })()}</select>
+        <select class="filter-select" id="inv-brand" aria-label="Filter by make" title="Filter by make"><option value="">All brands</option>${(() => { const s2 = new Map(); for (const p2 of State.products) { const r2 = String(p2.brand || '').trim(); if (!r2 || r2.toLowerCase() === 'null') continue; const k2 = r2.toLowerCase(); if (!s2.has(k2)) s2.set(k2, r2); } return [...s2.values()].sort((a2, b2) => a2.localeCompare(b2)).map(b2 => `<option value="${escapeAttr(b2)}">${escapeHtml(b2)}</option>`).join(''); })()}</select>
         <select class="filter-select" id="inv-source" style="${State.products.some(p2 => p2.partnerLinkId) ? '' : 'display:none'}" title="Where the stock comes from">
           <option value="">All sources</option><option value="own">Own stock</option><option value="partner">From partner warehouses</option>
         </select>
-        <select class="filter-select" id="inv-stock">
+        <select class="filter-select" id="inv-stock" aria-label="Filter by stock" title="Filter by stock">
           <option value="">All stock levels</option>
           <option value="low">Low stock</option>
           <option value="ok">In stock</option>
@@ -5513,7 +5475,7 @@ function renderInventory() {
           ${(p.incomingQty > 0 || p.isPrelisted) ? `<div style="font-size:11px;margin-top:3px"><span class="pill" style="background:var(--amber-light);color:var(--amber);font-size:10px;font-weight:600">${(p.isPrelisted || tq===0)?'Pre-order':'+'+p.incomingQty+' incoming'}</span>${(p.preorderEta || p.incomingEta) ? `<div style="color:var(--ink-soft);font-size:10px;margin-top:2px">ETA ~${new Date(p.preorderEta || p.incomingEta).toLocaleDateString('en-GB')}</div>` : ''}${p.isPrelisted && p.ebayPrelistStatus==='scheduled' ? `<div style="color:var(--ink-soft);font-size:10px;margin-top:2px">eBay: scheduled</div>` : ''}</div>` : ''}
         </td>
         <td class="num">${gbp(p.priceShopify)}</td>
-        <td style="white-space:nowrap">${(p.isPrelisted && p.ebayPrelistStatus === 'scheduled') ? `<button class="btn btn-primary btn-sm" onclick="pushPrelistingLive(${p.id})" title="Publish the held eBay listing now">⚡ Push live</button> ` : ''}<button class="btn btn-outline btn-sm" data-act="edit" data-pid="${p.id}">Edit</button> ${p.shopifyProductId ? `<button class="btn btn-ghost btn-sm" data-act="imgpush" data-pid="${p.id}" title="Re-push this product's current Shopify photos to its eBay listing(s)">📷→eBay</button> ` : ''}<button class="btn btn-ghost btn-sm" data-act="${p.hidden ? 'unhide' : 'hide'}" data-pid="${p.id}" title="${p.hidden ? 'Unhide — restore to stock-checks &amp; channel pushes' : 'Hide — park this listing: keep it in inventory but stop stock-checks &amp; channel pushes'}">${p.hidden ? '👁 Unhide' : '🙈 Hide'}</button> <button class="btn btn-ghost btn-sm" data-act="del" data-pid="${p.id}" style="color:var(--red)" title="Delete product">🗑</button></td>
+        <td style="white-space:nowrap">${(p.isPrelisted && p.ebayPrelistStatus === 'scheduled') ? `<button class="btn btn-primary btn-sm" onclick="pushPrelistingLive(${p.id})" title="Publish the held eBay listing now">⚡ Push live</button> ` : ''}<button class="btn btn-outline btn-sm" data-act="edit" data-pid="${p.id}">Edit</button> <details class="row-menu"><summary class="btn btn-ghost btn-sm" title="More actions">⋯</summary><div class="menu">${p.shopifyProductId ? `<button type="button" data-act="imgpush" data-pid="${p.id}" title="Re-push this product's current Shopify photos to its eBay listing(s)">📷 Re-send photos to eBay</button>` : ''}<button type="button" data-act="${p.hidden ? 'unhide' : 'hide'}" data-pid="${p.id}" title="${p.hidden ? 'Restore to stock-checks &amp; channel pushes' : 'Keep it in inventory but stop stock-checks &amp; channel pushes'}">${p.hidden ? '👁 Unhide' : '🙈 Hide (park it)'}</button><button type="button" class="danger" data-act="del" data-pid="${p.id}">🗑 Delete product</button></div></details></td>
       </tr>
     `;
   }
@@ -6911,14 +6873,6 @@ function lmSetMain(key) {
     const on = b.getAttribute('data-key') === key;
     b.textContent = on ? '★ Main' : '☆ Set as main';
     b.style.color = on ? 'var(--amber)' : 'var(--ink-soft)';
-  });
-}
-function fileToDataUrl(file) {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result);
-    r.onerror = rej;
-    r.readAsDataURL(file);
   });
 }
 
@@ -8643,12 +8597,15 @@ function renderDispatchRow(s, kind) {
         <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div></td>
         <td class="num"><strong>${gbp(s.total)}</strong></td>
         <td>${ageBadge}</td>
-        <td onclick="event.stopPropagation()" style="white-space:nowrap">
-          <button class="btn btn-ghost btn-sm" onclick="openSaleDetail('${s.id}')" title="Preview what's in this order">🧾</button>
-          <button class="btn btn-ghost btn-sm" onclick="openPickCheck('${s.id}')" title="Pick-check: scan each item to verify it's the right part (shows locations)">🎯</button>
-          <button class="btn btn-ghost btn-sm" onclick="pushDropfleet('${s.id}',this)" title="${s.dropfleet_pushed_at ? 'Re-send this order to DropFleet (updates the pending order)' : "Send this order to DropFleet's Integrated Orders for booking"}">🚚 ${s.dropfleet_pushed_at ? 'Re-send' : 'DropFleet'}</button>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap;text-align:right">
           <button class="btn btn-primary btn-sm" onclick="openDispatchModal('${s.id}')">📦 Mark dispatched</button>
-          <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','collect');return false" style="color:var(--ink-soft)">↪ It's a collection</a> · <a href="#" onclick="removeCancelledOrder('${s.id}');return false" style="color:var(--red)" title="Cancelled/refunded on the channel — remove from this list (marks the order cancelled)">✕ cancelled</a></div>
+          ${actionMenu([
+            { label: '🧾 View order', onclick: `openSaleDetail('${s.id}')` },
+            { label: '🎯 Pick-check (scan each item)', onclick: `openPickCheck('${s.id}')`, title: 'Verify it is the right part; shows where to find it' },
+            { label: `🚚 ${s.dropfleet_pushed_at ? 'Re-send to DropFleet' : 'Send to DropFleet'}`, onclick: `pushDropfleet('${s.id}',this)` },
+            { label: "↪ It's a collection, not a delivery", onclick: `reclassifyOrder('${s.id}','collect')` },
+            { label: '✕ Cancelled on the channel — remove', onclick: `removeCancelledOrder('${s.id}')`, danger: true },
+          ])}
         </td>
       </tr>
     `;
@@ -8667,12 +8624,15 @@ function renderDispatchRow(s, kind) {
         <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div></td>
         <td class="num"><strong>${gbp(s.total)}</strong></td>
         <td>${ageBadge}</td>
-        <td onclick="event.stopPropagation()" style="white-space:nowrap">
-          <button class="btn btn-ghost btn-sm" onclick="openSaleDetail('${s.id}')" title="Preview what's in this order">🧾</button>
-          <button class="btn btn-ghost btn-sm" onclick="printCollectionLabel('${s.id}')" title="Print 6×4 collection label(s) — customer, item, piece count + QR. No address.">🏷 Label</button>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap;text-align:right">
           <button class="btn btn-primary btn-sm" onclick="openCollectModal('${s.id}')">✓ Mark collected</button>
-          ${isDirect && s.customer_email ? `<button class="btn btn-ghost btn-sm" onclick="notifyReady('${s.id}',this)" title="Email the customer that their order is ready to collect">📧 Notify ready</button>` : ''}
-          <div style="font-size:10px;margin-top:3px"><a href="#" onclick="reclassifyOrder('${s.id}','ship');return false" style="color:var(--ink-soft)">↪ It's a delivery</a> · <a href="#" onclick="removeCancelledOrder('${s.id}');return false" style="color:var(--red)" title="Cancelled/refunded on the channel — remove from this list (marks the order cancelled)">✕ cancelled</a></div>
+          ${actionMenu([
+            { label: '🧾 View order', onclick: `openSaleDetail('${s.id}')` },
+            { label: '🏷 Print collection label', onclick: `printCollectionLabel('${s.id}')`, title: '6×4 label: customer, item, piece count + QR (no address)' },
+            isDirect && s.customer_email && { label: '📧 Email "ready to collect"', onclick: `notifyReady('${s.id}',this)` },
+            { label: "↪ It's a delivery, not a collection", onclick: `reclassifyOrder('${s.id}','ship')` },
+            { label: '✕ Cancelled on the channel — remove', onclick: `removeCancelledOrder('${s.id}')`, danger: true },
+          ])}
         </td>
       </tr>
     `;
@@ -9357,7 +9317,7 @@ function renderCustomers() {
         <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none">
           <input type="checkbox" id="cust-repeat" ${State.custRepeat?'checked':''}> Repeat only
         </label>
-        <select id="cust-sort" style="padding:6px 8px;font-size:13px">
+        <select id="cust-sort" aria-label="Sort by" title="Sort by" style="padding:6px 8px;font-size:13px">
           ${[['spend','Top spenders'],['orders','Most orders'],['recent','Most recent']].map(([v,l])=>`<option value="${v}" ${State.custSort===v?'selected':''}>${l}</option>`).join('')}
         </select>
       </div>
@@ -9595,14 +9555,16 @@ function renderSales() {
       <div class="page-head">
         <div><h1>Sales</h1><div class="desc">Unified sales across all channels · click a row for details</div></div>
         <div class="actions">
-          <button class="btn btn-primary admin-only" onclick="openManualSale()">+ New sale / estimate</button>
-          <button class="btn btn-outline admin-only" onclick="openVatReport()" title="VAT due per quarter — bank + card sales, with a download for your VAT return">📊 VAT returns</button>
-          <button class="btn btn-outline admin-only" onclick="openBankRundown()" title="Statement of completed bank-transfer payments — per-order VAT / subtotal / total breakdown. Preview, download, or email it to your accountant / colleagues in two formats.">🏦 Bank run-down</button>
-          <button class="btn btn-outline admin-only" onclick="relinkUnmatchedSales()" title="Try to match unlinked orders to products by SKU again">🔗 Re-link unmatched</button>
-          <button class="btn btn-outline admin-only" onclick="reconcileRefunds(this)" title="Pull the latest eBay return cases and re-check every sale, so returned/refunded items (incl. open returns) are correctly deducted from the totals">↩ Reconcile returns</button>
-          <button class="btn btn-outline" onclick="exportSalesXlsx()" title="Excel workbook with one sheet per channel">⬇ Excel (per-channel)</button>
-          <button class="btn btn-outline" onclick="exportSalesCsv()" title="Single CSV — current filter only">CSV</button>
           <button class="btn btn-outline" onclick="syncNow()">↻ Pull latest</button>
+          ${headerMore([
+            State.user?.role === 'admin' && { label: '📊 VAT returns', onclick: 'openVatReport()', title: 'VAT due per quarter — bank + card sales, with a download for your VAT return' },
+            State.user?.role === 'admin' && { label: '🏦 Bank run-down', onclick: 'openBankRundown()', title: 'Statement of completed bank-transfer payments, to preview, download or email' },
+            { label: '⬇ Excel (one sheet per channel)', onclick: 'exportSalesXlsx()' },
+            { label: '⬇ CSV (current filter)', onclick: 'exportSalesCsv()' },
+            State.user?.role === 'admin' && { label: '🔗 Re-link unmatched orders', onclick: 'relinkUnmatchedSales()', title: 'Try to match unlinked orders to products by SKU again' },
+            State.user?.role === 'admin' && { label: '↩ Reconcile returns', onclick: 'reconcileRefunds(this)', title: 'Pull the latest eBay return cases and re-check every sale' },
+          ])}
+          <button class="btn btn-primary admin-only" onclick="openManualSale()">+ New sale / estimate</button>
         </div>
       </div>
 
@@ -9626,7 +9588,7 @@ function renderSales() {
 
       <div class="toolbar" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <input type="search" class="search-input" id="sales-search" placeholder="Search invoice / reference, customer, phone, item, order #…" value="${escapeAttr(State.salesSearch || '')}" style="flex:1;min-width:220px">
-        <select id="sales-period" onchange="salesSetPeriod(this.value)" style="padding:6px 8px;font-size:13px">
+        <select id="sales-period" aria-label="Period" title="Period" onchange="salesSetPeriod(this.value)" style="padding:6px 8px;font-size:13px">
           ${[['all','All time'],['7d','Last 7 days'],['30d','Last 30 days'],['tm','This month'],['lm','Last month'],['tq','This quarter'],['lq','Last quarter'],['year','This year'],['ly','Last year'],['custom','Custom…']]
             .map(([v,l]) => `<option value="${v}" ${(State.salesPeriod||'all')===v?'selected':''}>${l}</option>`).join('')}
         </select>
@@ -9810,8 +9772,8 @@ function renderSales() {
       const isCollectOrder = s.fulfillmentMethod === 'collect';
       const dispatchBtn = canDispatch
         ? (isCollectOrder
-            ? `<button class="btn btn-ghost btn-sm" onclick="openCollectModalShortcut('${s.id}')" title="Mark collected (customer pickup)" style="color:var(--green)">📦</button>`
-            : `<button class="btn btn-ghost btn-sm" onclick="openDispatchModalShortcut('${s.id}')" title="Mark dispatched — record carrier + tracking" style="color:var(--green)">📦</button>`)
+            ? `<button class="btn btn-outline btn-sm" onclick="openCollectModalShortcut('${s.id}')" title="Mark collected (customer pickup)">📦 Collected</button>`
+            : `<button class="btn btn-outline btn-sm" onclick="openDispatchModalShortcut('${s.id}')" title="Mark dispatched — record carrier + tracking">📦 Dispatch</button>`)
         : '';
       return `
       <tr style="cursor:pointer${unpaidOverdue ? ';background:var(--red-light);box-shadow:inset 3px 0 0 var(--red)' : (s.unpaid ? ';background:var(--amber-light)' : '')}" onclick="if(!event.target.closest('button,input,a'))openSaleDetail('${s.id}')">
@@ -9822,16 +9784,17 @@ function renderSales() {
         <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
         <td>${s.customer}</td>
         <td class="num">${amountCell}</td>
-        <td onclick="event.stopPropagation()" style="white-space:nowrap">
-          <button class="btn btn-ghost btn-sm" onclick="printSingleInvoice('${s.id}')" title="Open invoice in new tab to print or save as PDF">🖨</button>
-          <button class="btn btn-ghost btn-sm" onclick="emailSingleInvoice('${s.id}')" title="Email this invoice to the customer">✉</button>
-          <button class="btn btn-ghost btn-sm" onclick="openMessageModal('${s.id}')" title="Message the customer (email / eBay / WhatsApp)">💬</button>
-          <button class="btn btn-ghost btn-sm" onclick="openEditSale('${s.id}')" title="Edit customer / reg / VIN / notes">✏️</button>
-          ${s.isEstimate ? `<button class="btn btn-ghost btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Mark payment received → decrements stock, generates paid invoice using locked payment method" style="color:var(--green)">✓ Mark paid</button>` : ''}
-          ${s.unpaid ? `<button class="btn btn-ghost btn-sm" onclick="recordPartialPayment('${s.id}')" title="Record a PART payment — e.g. customer paid £300 of £600; invoice stays open for the balance" style="color:var(--blue)">💷 Part-pay</button><button class="btn btn-ghost btn-sm" onclick="markSalePaid('${s.id}')" title="Record that payment has now been received in full (stock already given)" style="color:var(--green)">✓ Mark paid</button>` : ''}
-          ${dispatchBtn}
-          ${(['cash', 'bank', 'card'].includes(s.channel) && !s.isEstimate && !s.isPreorder && s.status !== 'refunded') ? `<button class="btn btn-ghost btn-sm" onclick="openReturnFromSale('${s.id}')" title="Book a return / refund — restocks the item and corrects the cash book so revenue isn't over-stated" style="color:var(--amber)">↩ Return</button>` : ''}
-          <button class="btn btn-ghost btn-sm" onclick="deleteSale('${s.id}', ${s.isEstimate})" title="Delete this ${s.isEstimate ? 'estimate' : 'invoice'} ${!s.isEstimate ? '(restores stock)' : ''}" style="color:var(--red)">🗑</button>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap;text-align:right">
+          ${salesRowPrimary(s, dispatchBtn)}
+          ${actionMenu([
+            { label: '🖨 Print invoice', onclick: `printSingleInvoice('${s.id}')` },
+            { label: '✉ Email invoice', onclick: `emailSingleInvoice('${s.id}')` },
+            { label: '💬 Message customer', onclick: `openMessageModal('${s.id}')` },
+            { label: '✏️ Edit details', onclick: `openEditSale('${s.id}')`, title: 'Customer, reg, VIN, notes' },
+            s.unpaid && { label: '💷 Record part payment', onclick: `recordPartialPayment('${s.id}')` },
+            (['cash', 'bank', 'card'].includes(s.channel) && !s.isEstimate && !s.isPreorder && s.status !== 'refunded') && { label: '↩ Book a return / refund', onclick: `openReturnFromSale('${s.id}')`, title: 'Restocks the item and corrects the cash book' },
+            { label: `🗑 Delete ${s.isEstimate ? 'estimate' : 'invoice'}${s.isEstimate ? '' : ' (restores stock)'}`, onclick: `deleteSale('${s.id}', ${s.isEstimate})`, danger: true },
+          ])}
         </td>
       </tr>
     `; }).join('') + (subset.length > CAP ? `<tr><td colspan="8" style="text-align:center;padding:14px;color:var(--ink-soft)">Showing the first ${CAP} of ${subset.length.toLocaleString()} — narrow with the search box, a channel tab, or a shorter date range to see the rest. Totals above cover all ${subset.length.toLocaleString()}.</td></tr>` : '')) : '<tr><td colspan="8"><div class="empty"><div class="t">No ' + (filter === 'estimates' ? 'estimates' : 'sales') + '</div></div></td></tr>';
@@ -11320,73 +11283,7 @@ async function submitManualSale() {
   }
 }
 
-// Phone-quote driven sale — pre-fills using whichever quote channel matches
-function openPhoneQuoteSale() {
-  // For now just opens manual sale; the user can pick channel which auto-prices
-  openManualSale();
-}
 
-function generateInvoice(id) {
-  let html;
-  if (id) {
-    const s = State.sales.find(x => x.id == id);
-    html = invoiceHtml([s]);
-  } else {
-    // Generate invoice for whatever filter is active
-    const active = document.querySelector('[data-sf].active');
-    const filter = active?.dataset.sf || 'all';
-    const subset = filter==='all' ? State.sales : State.sales.filter(s => s.channel === filter);
-    html = invoiceHtml(subset, filter);
-  }
-  const w = window.open('', '_blank');
-  w.document.write(html);
-  w.document.close();
-  toast('Invoice generated · ready to print or save as PDF', 'success');
-}
-function invoiceHtml(items, filter) {
-  const total = items.reduce((a,b)=>a+b.amount, 0);
-  const today = new Date().toLocaleDateString('en-GB');
-  // Brand + company details — pulled from the active brand and the configured
-  // company settings so this export is never hardcoded to one company.
-  const b = State.brand || {};
-  const cfg = State.pricingConfig || {};
-  const brandName = b.name || 'Company';
-  const brandColor = b.primaryColor || '#111';
-  const fullName = cfg.companyName || b.fullName || brandName;
-  const domain = (cfg.companyWebsite || b.domain || '').replace(/^https?:\/\//, '');
-  const addr = (cfg.companyAddress || '').replace(/\n+/g, ', ').replace(/, $/, '');
-  const regNo = cfg.companyRegNo ? ` · Co. ${escapeHtml(cfg.companyRegNo)}` : '';
-  const email = cfg.companyEmail || '';
-  const phone = cfg.companyPhone || '';
-  const contactLine = [email, phone].filter(Boolean).map(escapeHtml).join(' · ');
-  // Split brand name into main + suffix for the wordmark (e.g. "Calibre Auto Parts")
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Invoice — ${escapeHtml(fullName)}</title>
-  <style>body{font-family:Inter,sans-serif;padding:40px;max-width:800px;margin:auto;color:#0f1115}
-  .top{display:flex;justify-content:space-between;border-bottom:3px solid ${brandColor};padding-bottom:20px;margin-bottom:30px}
-  .logo{font-size:28px;font-weight:800;color:${brandColor}}
-  table{width:100%;border-collapse:collapse;margin:20px 0}
-  th,td{padding:10px;text-align:left;border-bottom:1px solid #ddd}
-  th{background:#f5f5f5}.num{text-align:right}.tot{font-size:20px;font-weight:700}
-  .small{font-size:12px;color:#666}
-  </style></head><body>
-  <div class="top">
-    <div><div class="logo">${escapeHtml(brandName)}</div><div class="small">${escapeHtml(b.tagline || '')}</div></div>
-    <div style="text-align:right">
-      <div><strong>Invoice</strong></div>
-      <div class="small">Date: ${today}</div>
-      <div class="small">${filter && filter !== 'all' ? 'Channel: ' + escapeHtml(filter) : 'All channels'}</div>
-    </div>
-  </div>
-  <p><strong>${escapeHtml(fullName)}</strong>${addr ? ' · ' + escapeHtml(addr) : ''}${regNo}</p>
-  <table>
-    <thead><tr><th>Date</th><th>Invoice</th><th>Channel</th><th>Item</th><th>Customer</th><th class="num">Amount</th></tr></thead>
-    <tbody>${items.map(s => `<tr><td>${new Date(s.date).toLocaleDateString('en-GB')}</td><td>${s.invoice||'—'}</td><td>${s.channel}</td><td>${s.title}<br><span class="small">${s.sku}</span></td><td>${s.customer}</td><td class="num">£${s.amount.toFixed(2)}</td></tr>`).join('')}</tbody>
-    <tfoot><tr><td colspan="5" class="num"><strong>Total</strong></td><td class="num tot">£${total.toFixed(2)}</td></tr></tfoot>
-  </table>
-  <p class="small">Thank you for your business. VAT 20% included where applicable. Returns within 30 days.${contactLine ? ' ' + contactLine : ''}${domain ? ' · ' + escapeHtml(domain) : ''}</p>
-  <script>setTimeout(()=>window.print(),300)<\/script>
-  </body></html>`;
-}
 
 /* ==========================================================
    QUOTE BUILDER
@@ -13297,7 +13194,7 @@ function renderActivity() {
       <div class="page-head">
         <div><h1>Activity</h1><div class="desc">What each staff member has been doing — summarised, plus a recent feed.</div></div>
         <div class="actions">
-          <select id="act-days" onchange="loadActivity()" style="padding:6px 10px;font-size:13px">
+          <select id="act-days" aria-label="Period" title="Period" onchange="loadActivity()" style="padding:6px 10px;font-size:13px">
             <option value="7">Last 7 days</option>
             <option value="30" selected>Last 30 days</option>
             <option value="90">Last 3 months</option>
@@ -13318,7 +13215,7 @@ function renderActivity() {
       <div class="card">
         <div class="card-head" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
           <h3 style="margin:0">Recent activity</h3>
-          <select id="act-user" onchange="loadActivityFeed()" style="padding:6px 10px;font-size:13px"><option value="">All staff</option></select>
+          <select id="act-user" aria-label="Staff member" title="Staff member" onchange="loadActivityFeed()" style="padding:6px 10px;font-size:13px"><option value="">All staff</option></select>
         </div>
         <div class="table-wrap"><table class="table"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Details</th></tr></thead><tbody id="act-feed"><tr><td colspan="4"><div class="empty"><div class="t">Loading…</div></div></td></tr></tbody></table></div>
       </div>
@@ -13512,15 +13409,6 @@ function promptInput({ title, label, value = '', placeholder = '', type = 'text'
   });
 }
 
-async function resetPin(uid, uname) {
-  const newPin = await promptInput({ title: 'Reset PIN', label: `New 4–6 digit PIN for ${uname}`, type: 'tel' });
-  if (newPin === null) return;
-  if (!/^\d{4,6}$/.test(newPin)) { toast('PIN must be 4-6 digits', 'error'); return; }
-  try {
-    await Api.patch('/api/staff/' + uid, { pin: newPin });
-    toast('PIN reset for ' + uname, 'success');
-  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
-}
 async function resetPassword(uid, uname) {
   const newPwd = await promptInput({ title: 'Reset password', label: `New password for ${uname}`, type: 'password', help: 'Minimum 8 characters.', okLabel: 'Set password' });
   if (newPwd === null) return;
@@ -14325,9 +14213,12 @@ async function renderCreateListing() {
   if (!CL_REPEAT) CL._incomingId = null;
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
   if (el('cl-core')) { el('cl-core').innerHTML = clCoreHtml(); clRenderPhotos(); }
-  clFillShipBands(CL_REPEAT?.fields?.['cl-ship-band'] ?? '', CL_REPEAT?.fields?.['cl-ship-cost'] ?? null).then(() => {
+  _clCompFor = '';
+  const _pre = CL_REPEAT?.fields || CL_DRAFT?.snapshot?.fields || {};
+  clFillShipBands(_pre['cl-ship-band'] ?? '', _pre['cl-ship-cost'] ?? null).then(() => {
     const pi = el('cl-pack-inc'); if (pi && el('cl-pack-cost-wrap')) el('cl-pack-cost-wrap').style.display = pi.checked ? 'none' : '';
     clRenderEstProfit();
+    clCompSchedule(1500);   // a draft / incoming part number → competitors straight away (after the form refills)
   });
   // Populate the Shopify delivery (shipping) profile dropdown.
   Api.get('/api/listings/delivery-profiles').then(r => {
@@ -14443,7 +14334,8 @@ async function renderEditListing() {
     if (el('cl-pack-cost-wrap')) el('cl-pack-cost-wrap').style.display = p.packaging_included ? 'none' : '';
   }
   set('cl-pack-cost', p.packaging_cost ?? '');
-  clFillShipBands(p.shipping_band || '', p.shipping_cost ?? null).then(() => clRenderEstProfit());
+  _clCompFor = '';
+  clFillShipBands(p.shipping_band || '', p.shipping_cost ?? null).then(() => { clRenderEstProfit(); clCompSchedule(300); });
   // Shopify price is derived display only.
   Api.get('/api/listings/delivery-profiles').then(r => {
     const sel = el('cl-shipprofile'); if (!sel) return;
@@ -14759,7 +14651,7 @@ function clCoreHtml() {
     <div class="field"><label>SKU *</label><input id="cl-sku" style="font-family:ui-monospace,monospace" placeholder="e.g. 7450B289" autocomplete="off">
       <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Must be unique per listing (Shopify & eBay require it). For a part that fits several models, give each listing its own SKU.</div></div>
     <div class="field"><label>Part number <span style="color:var(--ink-soft);font-weight:400">— blank = same as SKU</span></label>
-      <input id="cl-partnumber" style="font-family:ui-monospace,monospace" placeholder="e.g. 602001929AA" autocomplete="off">
+      <input id="cl-partnumber" style="font-family:ui-monospace,monospace" placeholder="e.g. 602001929AA" autocomplete="off" oninput="clCompSchedule()">
       <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">🔗 Listings that fit multiple models should share <strong>the same part number</strong> — they'll be auto-linked into one shared stock pool (a sale on any one reduces them all).</div></div>
     <div class="field"><label>Photos</label>
       <input type="file" id="cl-photo-file" accept="image/*" multiple capture="environment" onchange="clAddPhotos(this)" style="font-size:12px">
@@ -14792,6 +14684,7 @@ function clCoreHtml() {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">${supplierComboHtml('cl-sup-name', '', 'Supplier')}<input id="cl-sup-code" placeholder="Their code / SKU"></div>
       <div id="cl-sup-list" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div></div>
     <div id="cl-est-profit" style="display:none;font-size:12px;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin-bottom:10px"></div>
+    <div id="cl-comp" style="display:none;font-size:12px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:10px"></div>
     <div class="field"><label>📦 Parcel size &amp; weight <span style="color:var(--ink-soft);font-weight:400">— pushed to eBay + Shopify for shipping rates. Optional.</span></label>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">
         <div><input type="number" step="0.1" min="0" id="cl-pkg-l" placeholder="L cm"><div style="font-size:10px;color:var(--ink-soft);text-align:center">Length</div></div>
@@ -15093,6 +14986,75 @@ function clCostRecalc() {
 // same fee model as the live estimate, then add the configured target on top
 // (floor = breakeven × (1 + target%) — the target is a markup over breakeven,
 // NOT a margin-of-price, which is why the old solver ran away to a huge number).
+// ── Competitors for this part number ─────────────────────────────────────
+// Looks the part number up in the Competitors data (tracked sellers) + a live
+// eBay search, so a NEW listing is priced against the market straight away.
+let _clCompT = null, _clCompFor = '';
+function clCompSchedule(delay = 700) { clSyncMpn(); clearTimeout(_clCompT); _clCompT = setTimeout(() => clCompLookup(), delay); }
+// The part number is eBay's Manufacturer Part Number — keep it filled (unless typed over).
+let _clMpnLast = '';
+function clSyncMpn() {
+  const pn = (el('cl-partnumber')?.value || '').trim();
+  const mpn = document.querySelector('#ce-specifics [data-spec="Manufacturer Part Number"]');
+  if (mpn && pn && (!mpn.value.trim() || mpn.value.trim() === _clMpnLast)) { mpn.value = pn; _clMpnLast = pn; }
+}
+async function clCompLookup(force) {
+  const box = el('cl-comp'); if (!box) return;
+  const pn = (el('cl-partnumber')?.value || '').trim() || (el('cl-sku')?.value || '').trim();
+  if (pn.replace(/[^a-z0-9]/gi, '').length < 4) { box.style.display = 'none'; _clCompFor = ''; return; }
+  if (pn === _clCompFor && !force) return;
+  _clCompFor = pn;
+  box.style.display = '';
+  box.innerHTML = `<div style="color:var(--ink-soft)">🔎 Checking competitors for <b>${escapeHtml(pn)}</b>…</div>`;
+  let r;
+  try { r = await Api.get('/api/competitors/part-lookup?pn=' + encodeURIComponent(pn)); }
+  catch (e) { box.innerHTML = `<div style="color:var(--ink-soft)">🔎 Competitor check unavailable: ${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  if (pn !== _clCompFor) return;   // typed on since
+  CL._comp = r;
+  const L = r.listings || [], S = r.summary;
+  const money = (n) => n == null ? '—' : '£' + Number(n).toFixed(2);
+  const setBtn = (label, v) => v ? `<button type="button" class="btn btn-outline btn-sm" onclick="clCompSetPrice(${v})">${label} ${money(v)}</button>` : '';
+  const cost = parseFloat(el('cl-cost')?.value);
+  let rec = null;
+  try { if (cost > 0 && CT.settings && Object.keys(CT.settings).length) rec = clRecommendPrice(cost, 'ebay', parseFloat(CT.settings.targetMarginPct) || 25)?.reco || null; } catch (_) {}
+  const under = S ? +(Math.max(0.99, S.cheapest - Math.max(0.5, S.cheapest * 0.01))).toFixed(2) : null;
+  box.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+      <b>🔎 Competitors selling ${escapeHtml(r.pn)}</b>
+      <a href="#" onclick="clCompLookup(true);return false" style="font-size:11px">↻ refresh</a>
+    </div>
+    ${S ? `<div style="margin-bottom:8px">${S.count} listing${S.count === 1 ? '' : 's'} · cheapest <b>${money(S.cheapest)}</b> · median <b>${money(S.median)}</b> · dearest ${money(S.dearest)} <span style="color:var(--ink-soft)">(delivered = item + postage)</span></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+        ${setBtn('Match cheapest', S.cheapest)}${setBtn('Undercut', under)}${setBtn('Median', S.median)}${rec ? `<button type="button" class="btn btn-primary btn-sm" onclick="clCompSetPrice(${rec})">Recommended ${money(rec)}</button>` : ''}
+      </div>`
+      : `<div style="color:var(--ink-soft);margin-bottom:6px">No competitor listings found for this part number${r.liveError ? ' (live eBay search unavailable)' : ''}.${rec ? ` <button type="button" class="btn btn-primary btn-sm" onclick="clCompSetPrice(${rec})">Recommended ${money(rec)}</button>` : ''}</div>`}
+    ${rec && S && rec > S.cheapest ? `<div style="color:var(--amber);margin-bottom:6px">⚠ Your recommended price (from cost + target margin) is above the cheapest competitor.</div>` : ''}
+    ${(r.hints?.make || r.hints?.model) ? `<div style="margin-bottom:6px">They list it as <b>${escapeHtml([r.hints.make, r.hints.model, r.hints.partType].filter(Boolean).join(' '))}</b> <button type="button" class="btn btn-ghost btn-sm" onclick="clCompFillHints()">Fill Make/Model</button></div>` : ''}
+    ${L.length ? `<div style="max-height:260px;overflow:auto;border-top:1px solid var(--line)">${L.slice(0, 25).map(x => `
+      <div style="display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)">
+        ${x.image ? `<img src="${escapeAttr(x.image)}" loading="lazy" style="width:38px;height:38px;object-fit:cover;border-radius:5px;flex-shrink:0">` : '<div style="width:38px;height:38px;border-radius:5px;background:var(--line-2);flex-shrink:0"></div>'}
+        <div style="flex:1;min-width:0">
+          <a href="${escapeAttr(x.url || '#')}" target="_blank" rel="noopener" style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Open their listing to check it's the same part">${escapeHtml(x.title || '')} ↗</a>
+          <div style="color:var(--ink-soft);font-size:11px">${escapeHtml(x.competitor || x.seller || 'eBay seller')}${x.isUs ? ' · <b>you</b>' : ''}${x.condition ? ' · ' + escapeHtml(x.condition) : ''}${x.source === 'tracked' ? ' · tracked' : ''}</div>
+        </div>
+        <div style="text-align:right;white-space:nowrap"><b>${money(x.delivered)}</b><div style="color:var(--ink-soft);font-size:11px">${money(x.price)}${x.shipping ? ' + ' + money(x.shipping) : x.shipping === 0 ? ' · free post' : ''}</div></div>
+        ${x.delivered ? `<button type="button" class="btn btn-ghost btn-sm" title="Use this price" onclick="clCompSetPrice(${x.delivered})">Use</button>` : ''}
+      </div>`).join('')}</div>` : ''}`;
+}
+function clCompSetPrice(v) {
+  const p = el('ce-price'); if (!p) { toast('Open the eBay panel first', 'warn'); return; }
+  p.value = (+v).toFixed(2);
+  p.dispatchEvent(new Event('input', { bubbles: true }));
+  clRenderEstProfit?.();
+  toast(`eBay price set to £${(+v).toFixed(2)}`, 'success', 2500);
+}
+function clCompFillHints() {
+  const h = CL._comp?.hints || {};
+  const put = (name, v) => { const i = document.querySelector(`#ce-specifics [data-spec="${name}"]`); if (i && v && !i.value.trim()) { i.value = v; i.dispatchEvent(new Event('input', { bubbles: true })); return true; } return false; };
+  const n = [put('Make', h.make), put('Model', h.model)].filter(Boolean).length;
+  toast(n ? 'Filled from competitor listings — check them' : 'Make/Model already filled (or not on this category form)', n ? 'success' : 'info', 4000);
+}
+
 // Postage choices = the shipping bands saved in Costs & margins.
 async function clFillShipBands(selected, cost) {
   const sel = el('cl-ship-band'); if (!sel) return;
@@ -15335,6 +15297,14 @@ async function clSaveDraft(btn) {
     toast('💾 Draft saved — find it under Drafts', 'success', 5000);
   } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
   finally { if (btn) btn.disabled = false; }
+}
+
+// Sales row: the ONE thing this order most likely needs next.
+function salesRowPrimary(s, dispatchBtn) {
+  if (s.isEstimate) return `<button class="btn btn-primary btn-sm" onclick="convertEstimateToInvoice('${s.id}')" title="Payment received → takes stock, issues the paid invoice">✓ Mark paid</button>`;
+  if (s.unpaid) return `<button class="btn btn-primary btn-sm" onclick="markSalePaid('${s.id}')" title="Payment received in full">✓ Mark paid</button>`;
+  if (dispatchBtn) return dispatchBtn;
+  return `<button class="btn btn-ghost btn-sm" onclick="printSingleInvoice('${s.id}')" title="Open the invoice to print or save as PDF">🖨 Invoice</button>`;
 }
 
 async function renderDrafts() {
@@ -15580,11 +15550,6 @@ async function clImportStudioPhotos(setId, btn) {
     if (btn) { btn.disabled = false; btn.textContent = 'Import'; }
     alert('Import failed: ' + (e.message || 'error'));
   }
-}
-function clDerivedShopify(eb) { return eb ? eb * (1 - clPct() / 100) : 0; }
-function clUpdateDerived() {
-  const eb = parseFloat(el('cl-ebay')?.value) || 0;
-  const o = el('cl-shop'); if (o) o.value = eb ? '£' + clDerivedShopify(eb).toFixed(2) : '';
 }
 let _clCatT;
 function clSearchCats(q) {
@@ -16209,7 +16174,8 @@ function groupIsMixed(g) {
 
 function renderReconcile() {
   const data = State.reconcile;
-  if (!data) return;
+  // The pull is slow — if the user moved to another page meanwhile, there's nothing to draw into.
+  if (!data || !el('links-content')) return;
   const s = data.summary;
   const filter = State.reconcileFilter || 'all';
   const search = (State.reconcileSearch || '').toLowerCase().trim();
@@ -16652,8 +16618,8 @@ function renderCosts() {
       <div id="ct-stats" class="grid-4" style="margin-bottom:14px"></div>
       <div class="toolbar">
         <input type="search" class="search-input" id="ct-search" placeholder="Search by name, SKU, part #...">
-        <select class="filter-select" id="ct-brand"><option value="">All makes</option></select>
-        <select class="filter-select" id="ct-filter">
+        <select class="filter-select" id="ct-brand" aria-label="Filter by make" title="Filter by make"><option value="">All makes</option></select>
+        <select class="filter-select" id="ct-filter" aria-label="Filter" title="Filter">
           <option value="">All items</option>
           <option value="below">Below floor (any channel)</option>
           <option value="below_ebay">Below floor — eBay</option>
@@ -16678,9 +16644,6 @@ function loadSuppliersOnce() {
   if (State._suppliersLoaded) return Promise.resolve();
   State._suppliersLoaded = true;
   return Api.get('/api/suppliers').then(r => { State.suppliers = r.suppliers || []; }).catch(() => {});
-}
-function supplierDatalist(id) {
-  return `<datalist id="${id || 'dl-suppliers'}">${(State.suppliers || []).map(s => `<option value="${escapeAttr(s.name)}">`).join('')}</datalist>`;
 }
 
 // ── Supplier combo-box ──────────────────────────────────────────────────────
@@ -17422,7 +17385,7 @@ async function qsSaveQty(id) {
     const r = await Api.post('/api/stock-checks', { productId: id, actualQty: qty, reason: 'stock_take', notes: 'Quick sheet (scan)', forcePush: true });
     Task.done(taskId);
     if (State._stChecked instanceof Set) State._stChecked.add(String(id));
-    toast('Counted ✓ · ' + summarizeChannelPush(r && r.channelPush), 'success', 5000);
+    toast('Counted ✓ · ' + summarizeChannelPushShort(r && r.channelPush), 'success', 5000);
     await Store.refresh('products').catch(() => {});
     const q2 = el('qs-qty'); if (q2) q2.dataset.orig = String(qty);
     if (State.page === 'stocktake' && typeof stPaint === 'function') stPaint();
@@ -19175,14 +19138,6 @@ function floorWarnHtml(productId, price, channel) {
   if (floor == null || isNaN(p) || p <= 0 || p >= floor) return '';
   return `<div style="font-size:11px;color:var(--amber);font-weight:600;margin-top:3px">⚠ Below floor — min £${Number(floor).toFixed(2)}${be != null ? ` <span style="font-weight:400;color:var(--ink-soft)">(breakeven £${Number(be).toFixed(2)})</span>` : ''}</div>`;
 }
-// Inline (single-line) variant for tight rows.
-function floorWarnInline(productId, price, channel) {
-  const f = costFloorFor(productId); if (!f) return '';
-  const { floor } = floorFor(f, channel);
-  const p = parseFloat(price);
-  if (floor == null || isNaN(p) || p <= 0 || p >= floor) return '';
-  return ` <span style="color:var(--amber);font-weight:700" title="Cost-based minimum">⚠ min £${Number(floor).toFixed(2)}</span>`;
-}
 
 function reconcileRow(g) {
   const dupBadge = (n, label) => `<div style="font-size:10px;color:var(--red);font-weight:700;margin-bottom:3px">⚠ ${n} ${label} — possible duplicate</div>`;
@@ -19432,7 +19387,7 @@ function renderLinkStatus() {
           <button class="btn btn-primary" onclick="forceMatchLinks()" title="Pull active eBay listings and auto-match by SKU + barcode + title token">🔗 Force match all</button>
           <button class="btn btn-outline" onclick="hydrateEbayPrices()" title="Pull live eBay prices and backfill them on warehouse products. Also auto-detects each item's store. Run this if 'phone pricing' shows £0 or if you see the legacy-store-code warning below.">💷 Hydrate eBay prices</button>
           <button class="btn btn-outline" onclick="pullEbayStock()" title="Read live quantities from eBay for every linked product and update the warehouse to match. Use this if the app shows 0 stock but eBay actually has stock.">📦 Pull eBay stock</button>
-          <button class="btn btn-outline" onclick="testEbayConnection()" title="Test if eBay tokens still work — surfaces the actual error so you can see if a token has expired or has wrong scopes">🩺 Test eBay connection</button>
+          <button class="btn btn-outline" onclick="testEbayConnectionMirror()" title="Test if eBay tokens still work — surfaces the actual error so you can see if a token has expired or has wrong scopes">🩺 Test eBay connection</button>
           <button class="btn btn-outline" onclick="cleanupDisabledStoreLinks()" title="Delete mirror_links rows tied to disabled stores. Use after temporarily disabling a store via the EBAY_STORE_DISABLED env var.">🗑 Clean stale links</button>
           <button class="btn btn-outline" onclick="openDataIntegrity()" title="Find duplicate links (one Shopify product linked to several eBay items, etc.) and duplicate listings sharing the same part number. Read-only.">🧮 Data integrity</button>
           <input id="links-search" placeholder="Search by SKU, title or part #…" oninput="debouncedLinkSearch(this.value)" value="${escapeAttr(State.linkSearch || '')}" style="flex:1;min-width:220px">
@@ -20051,7 +20006,8 @@ async function ceMatchQty(source, btn) {
     toast('Quantity matched to warehouse stock', 'success', 1500);
     return;
   }
-  // Shopify — fetch live quantity.
+  // Shopify — fetch live quantity (only once the product exists).
+  if (!product.id) { toast('Save the listing first — there is no Shopify product to match yet', 'info', 4000); return; }
   const orig = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
   try {
@@ -20737,7 +20693,7 @@ function showEbayErrorsModal(storeErrors, fullResponse, quota) {
       // from the daily Trading API limit, so it's safe to call even when
       // you're hitting the cap. The result will show exactly which call-name
       // is at its limit and how many calls remain.
-      { label: '🩺 Run connection test', primary: true, onClick: async () => { closeModal(); await testEbayConnection(); } },
+      { label: '🩺 Run connection test', primary: true, onClick: async () => { closeModal(); await testEbayConnectionMirror(); } },
     ],
   });
 }
@@ -20747,7 +20703,7 @@ function showEbayErrorsModal(storeErrors, fullResponse, quota) {
 // Always shows quota (when available) since that's frequently what the user
 // actually needs to see — even when stores test "OK", you might be 1 call away
 // from the daily cap.
-async function testEbayConnection() {
+async function testEbayConnectionMirror() {
   const taskId = Task.start('Testing eBay connectivity per store…');
   try {
     const r = await Api.get('/api/listings/test-ebay-connection');
@@ -20914,20 +20870,6 @@ async function pullEbayListings() {
   }
 }
 
-function resetPhotoSelections(mode) {
-  // mode: 'first' | 'all' | 'none'
-  for (const l of MirrorState.listings) {
-    if (mode === 'first') {
-      MirrorState.selectedImages[l.itemId] = new Set(l.pictureUrls.length ? [l.pictureUrls[0]] : []);
-    } else if (mode === 'all') {
-      MirrorState.selectedImages[l.itemId] = new Set(l.pictureUrls);
-    } else {
-      MirrorState.selectedImages[l.itemId] = new Set();
-    }
-  }
-  paintMirrorList();
-  toast(mode === 'first' ? 'Reset to first photo only' : mode === 'all' ? 'All photos selected' : 'All photos deselected', 'success');
-}
 
 function updatePricingMode() {
   MirrorState.pricingMode = el('mr-pricing-mode').value;
@@ -20935,9 +20877,6 @@ function updatePricingMode() {
   paintMirrorList();
 }
 
-function repaintPrices() {
-  paintMirrorList();
-}
 function applyDiscount() {
   const val = parseFloat(el('mr-percent').value) || 0;
   MirrorState.percentDiscount = val;
@@ -20993,11 +20932,6 @@ function renderPriceCell(l) {
   </div>`;
 }
 
-function updateFilter(text) {
-  MirrorState.filterText = (text || '').toLowerCase().trim();
-  MirrorState.page = 1;
-  paintMirrorList();
-}
 
 // Load/persist the common (bulk) metafields so they survive refresh + are shared.
 async function loadCommonMetafields() {
@@ -21042,112 +20976,7 @@ function addSeoDescriptionTemplate() {
   if (!def) toast('Tip: define an "seo_description" metafield in Shopify admin first, or change namespace/key above', 'info');
 }
 
-async function checkSkuMatches() {
-  toast('Comparing SKUs — this may take 1-2 minutes…', 'info');
-  try {
-    const r = await Api.get('/api/listings/sku-mismatches');
-    const lines = [];
-    lines.push(`Checked ${r.checked} mirrored listings.`);
-    lines.push(`Mismatches found: ${r.mismatchCount}`);
-    lines.push('');
-    if (r.mismatchCount === 0) {
-      lines.push('✓ All SKUs match between eBay and Shopify.');
-    } else {
-      lines.push('Mismatches:');
-      for (const m of r.mismatches.slice(0, 30)) {
-        if (m.status === 'sku_mismatch') {
-          lines.push(`  eBay ${m.ebayItemId}: eBay="${m.ebaySku}" vs Shopify="${m.shopifySku}"`);
-        } else if (m.status === 'ebay_listing_missing') {
-          lines.push(`  eBay ${m.ebayItemId}: not active anymore (Shopify SKU "${m.shopifySku}")`);
-        } else {
-          lines.push(`  eBay ${m.ebayItemId}: Shopify product deleted (was "${m.lastSyncedSku}")`);
-        }
-      }
-      if (r.mismatches.length > 30) lines.push(`  …and ${r.mismatches.length - 30} more.`);
-      lines.push('');
-      lines.push('Fix: in each mismatched row, edit the SKU and click "↑ Push to eBay".');
-    }
-    alert(lines.join('\n'));
-  } catch (e) {
-    toast('Check failed: ' + (e.data?.message || e.message), 'error');
-  }
-}
 
-async function runShopifyDiag() {
-  toast('Running Shopify diagnostic…', 'info');
-  try {
-    const r = await Api.get('/api/listings/debug-shopify');
-    const lines = [];
-    lines.push(`Configured: ${r.isConfigured ? '✓' : '✗'}`);
-    lines.push(`Store: ${r.storeDomain || '(missing)'}`);
-    lines.push(`Location ID: ${r.locationId || '(missing — set SHOPIFY_LOCATION_ID env var)'}`);
-    lines.push('');
-    lines.push(`Sales channels (publications): ${r.publicationCount || 0}`);
-    if (r.publications && r.publications.length) {
-      for (const p of r.publications) lines.push(`  · ${p.name} (${p.id})`);
-    } else {
-      lines.push('  ✗ NONE — your Shopify custom app token is missing the read_publications scope.');
-      lines.push('  Fix: Shopify admin → Apps → custom app → Configuration → API access scopes →');
-      lines.push('       enable read_publications + write_publications, then reinstall the app.');
-    }
-    lines.push('');
-    lines.push(`Metafield definitions: ${(r.metafieldDefinitions || []).length}`);
-    if (r.metafieldDefinitions && r.metafieldDefinitions.length) {
-      for (const d of r.metafieldDefinitions) lines.push(`  · ${d.name} (${d.namespace}.${d.key}, type: ${d.type})`);
-    } else {
-      lines.push('  ✗ NONE — token may need read_metafield_definitions scope, or no definitions exist on the store.');
-    }
-    lines.push('');
-    lines.push(`Shipping profiles: ${(r.deliveryProfiles || []).length}`);
-    if (r.deliveryProfiles && r.deliveryProfiles.length) {
-      for (const p of r.deliveryProfiles) lines.push(`  · ${p.name}`);
-    } else {
-      lines.push('  ✗ NONE');
-      if (r.deliveryProfileHint) lines.push('  Hint: ' + r.deliveryProfileHint);
-    }
-    if (r.publicationsError) lines.push(`Pub error: ${r.publicationsError}`);
-    if (r.metafieldDefError) lines.push(`Metafield def error: ${r.metafieldDefError}`);
-    if (r.deliveryProfilesError) lines.push(`Profiles error: ${r.deliveryProfilesError}`);
-    alert(lines.join('\n'));
-  } catch (e) {
-    toast('Diagnostic failed: ' + (e.data?.message || e.message), 'error');
-  }
-}
-// Diagnose why the eBay policy dropdowns (shipping/payment/return) are empty.
-// Hits the raw GetUserPreferences debug endpoint per store and explains the
-// result in plain English.
-async function runEbayPolicyDiag() {
-  toast('Checking eBay business policies…', 'info');
-  const stores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
-  const codes = stores.length ? stores.map(s => s.code) : [''];
-  const lines = [];
-  for (const code of codes) {
-    const label = stores.find(s => s.code === code)?.name || code || 'default store';
-    try {
-      const r = await Api.get('/api/listings/business-policies-debug' + (code ? '?storeCode=' + encodeURIComponent(code) : ''));
-      const counts = r.parsed
-        ? `${r.parsed.shipping?.length || 0} shipping · ${r.parsed.payment?.length || 0} payment · ${r.parsed.return?.length || 0} return`
-        : '—';
-      lines.push(`■ ${label}  [store=${r.store}]`);
-      lines.push(`   Store token: ${r.hasStoreToken ? '✓' : '✗ (no Auth’n’Auth token in env)'}`);
-      lines.push(`   eBay Ack: ${r.ack || '(none)'}`);
-      if (r.errors && r.errors.length) {
-        for (const er of r.errors) lines.push(`   ⚠ [${er.code}] ${er.longMessage || er.shortMessage}`);
-      }
-      lines.push(`   Policies found: ${counts}`);
-      if (r.parsed && !((r.parsed.shipping?.length || 0) + (r.parsed.payment?.length || 0) + (r.parsed.return?.length || 0))) {
-        lines.push('   → None found. If Ack=Success, this account is NOT opted into Business');
-        lines.push('     Policies. Fix on eBay: Account → Business Policies → Opt in, create');
-        lines.push('     a Shipping/Payment/Return policy, then re-check here.');
-      }
-      if (r.error) lines.push('   ✗ ' + r.error);
-    } catch (e) {
-      lines.push(`■ ${label}: request failed — ${e.data?.message || e.message}`);
-    }
-    lines.push('');
-  }
-  alert(lines.join('\n'));
-}
 
 // ── Shopify SEO optimiser ───────────────────────────────────────────────────
 let SeoPreview = [];
@@ -21603,36 +21432,7 @@ function populateShippingProfileDropdown() {
   }
 }
 
-function setStatusFilter(v) {
-  MirrorState.statusFilter = v;
-  MirrorState.page = 1;
-  // Update segmented button visual state (the buttons aren't auto-managed)
-  document.querySelectorAll('[data-mstatus]').forEach(b => {
-    b.classList.toggle('active', b.dataset.mstatus === v);
-  });
-  paintMirrorList();
-}
 
-function toggleHideTemplates(on) {
-  MirrorState.hideTemplateImages = !!on;
-  // Filter listings' picture lists: when hiding, remove TMPL urls; when re-showing, restore from imageMeta
-  for (const l of MirrorState.listings) {
-    if (!l._originalPictureUrls) l._originalPictureUrls = [...l.pictureUrls];
-    if (!l._originalImageMeta) l._originalImageMeta = l.imageMeta ? [...l.imageMeta] : null;
-    if (on) {
-      const meta = l._originalImageMeta || [];
-      l.pictureUrls = l._originalPictureUrls.filter((_, i) => !(meta[i]?.likelyTemplate));
-      l.imageMeta = meta.filter(m => !m.likelyTemplate);
-    } else {
-      l.pictureUrls = [...l._originalPictureUrls];
-      l.imageMeta = l._originalImageMeta ? [...l._originalImageMeta] : null;
-    }
-    // Reset selection to first photo of the (possibly filtered) list
-    MirrorState.selectedImages[l.itemId] = new Set(l.pictureUrls.length ? [l.pictureUrls[0]] : []);
-  }
-  paintMirrorList();
-  toast(on ? 'Template images hidden everywhere' : 'Template images visible again', 'success');
-}
 
 function setItemStatus(itemId, status) {
   // Empty value = "Keep current status" (existing listings) → no explicit choice,
@@ -21683,6 +21483,40 @@ async function pushToEbay(itemId) {
 
 function escapeHtml(s) { return String(s||'').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
 function escapeAttr(s) { return (s === 0 ? '0' : String(s||'')).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+
+// ── Shared action layout (the Incoming pattern) ─────────────────────────────
+// One clear button for the main job + everything else tucked under a menu, so
+// rows and page headers stay tidy. items: [{ label, onclick, title?, danger? }]
+// (falsy items are skipped). onclick is the same JS string a button would use.
+function actionMenu(items, { label = '⋯', title = 'More actions', btnClass = 'btn btn-ghost btn-sm' } = {}) {
+  const list = (items || []).filter(Boolean);
+  if (!list.length) return '';
+  return `<details class="row-menu" onclick="event.stopPropagation()"><summary class="${btnClass}" title="${escapeAttr(title)}">${label}</summary><div class="menu">${
+    list.map(i => `<button type="button"${i.title ? ` title="${escapeAttr(i.title)}"` : ''}${i.danger ? ' class="danger"' : ''} onclick="this.closest('details').open=false;${i.onclick}">${i.label}</button>`).join('')}</div></details>`;
+}
+// Page header: main action(s) shown, the rest under "More ▾".
+function headerMore(items) { return actionMenu(items, { label: 'More ▾', title: 'More tools', btnClass: 'btn btn-outline' }); }
+// Menus open above/below the button and never get clipped by a scrolling table.
+document.addEventListener('toggle', (e) => {
+  const d = e.target;
+  if (!(d instanceof HTMLDetailsElement) || !d.classList.contains('row-menu')) return;
+  const m = d.querySelector('.menu'); if (!m) return;
+  if (!d.open) { m.style.cssText = ''; return; }
+  document.querySelectorAll('details.row-menu[open]').forEach(o => { if (o !== d) o.open = false; });
+  const r = d.querySelector('summary').getBoundingClientRect();
+  m.style.position = 'fixed';
+  m.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+  m.style.left = 'auto';
+  const h = m.offsetHeight || 200;
+  m.style.top = (r.bottom + 4 + h > window.innerHeight && r.top - 4 - h > 0 ? r.top - 4 - h : r.bottom + 4) + 'px';
+}, true);
+document.addEventListener('click', (e) => {
+  document.querySelectorAll('details.row-menu[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; });
+  // Picking a menu item closes its menu (after the item's own handler ran).
+  const mb = e.target.closest && e.target.closest('details.row-menu .menu button');
+  if (mb) setTimeout(() => { const d = mb.closest('details'); if (d) d.open = false; }, 0);
+});
+window.addEventListener('scroll', () => document.querySelectorAll('details.row-menu[open]').forEach(d => { d.open = false; }), true);
 
 function toggleListing(itemId, on) {
   if (on) MirrorState.selected.add(itemId);
@@ -22271,7 +22105,7 @@ function renderSettings() {
 
       <div class="card" id="set-finder" style="margin-bottom:14px">
         <div class="card-body" style="padding:12px 14px">
-          <input id="set-find" placeholder="🔍 Find a setting… (e.g. eBay policies, couriers, VAT, AI, clock)" autocomplete="off" oninput="settingsFilter(this.value)">
+          <input id="set-find" type="search" style="width:100%" placeholder="🔍 Find a setting… (e.g. eBay policies, couriers, VAT, AI, clock)" autocomplete="off" oninput="settingsFilter(this.value)">
           <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Sections are collapsed — click a heading to open it (it stays open next time). Type above to jump straight to a setting.</div>
         </div>
       </div>
@@ -24880,7 +24714,7 @@ function renderBooks() {
       <div class="page-head">
         <div><h1>Books &amp; VAT</h1><div class="desc">Upload the month's bank statement — Claude reads it (knows Monzo, Wise, Mettle, Barclays…), links payments to invoices &amp; payouts, captures expenditure VAT, and chases missing VAT receipts. Export or share the lot with your accountant.</div></div>
         <div class="actions">
-          <select id="bk-period" onchange="bkSetPeriod(this.value)">
+          <select id="bk-period" aria-label="Period" title="Period" onchange="bkSetPeriod(this.value)">
             <option value="thismonth">This month</option>
             <option value="lastmonth">Last month</option>
             <option value="thisvq">This VAT quarter</option>
@@ -24896,7 +24730,7 @@ function renderBooks() {
             <option value="1">Qtrs end Apr/Jul/Oct/Jan</option>
             <option value="2">Qtrs end Feb/May/Aug/Nov</option>
           </select>
-          <select id="bk-account" onchange="BK.accountId=this.value;bkLoad()"><option value="">All accounts</option></select>
+          <select id="bk-account" aria-label="Account" title="Account" onchange="BK.accountId=this.value;bkLoad()"><option value="">All accounts</option></select>
           <button class="btn btn-primary" onclick="bkOpenUpload()">⬆ Upload statement</button>
         </div>
       </div>
@@ -28847,11 +28681,6 @@ async function hydrateEbayPrices() {
     toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
 }
-async function resetData() {
-  // In production mode this is disabled — wiping a real DB requires using
-  // psql or running `npm run seed -- --force` from the server.
-  toast('Reset disabled in production. Use server-side scripts.', 'warn');
-}
 
 /* ==========================================================
    COMPETITOR MONITORING
@@ -28985,10 +28814,12 @@ async function loadCompManager() {
       <td style="font-size:12px">${c.last_scanned_at ? fmtDate(c.last_scanned_at) : 'never'}<br><span style="color:var(--ink-soft)">${status}</span></td>
       <td style="text-align:right;white-space:nowrap">
         <button class="btn btn-outline btn-sm" onclick="viewCompListings(${c.id}, '${escapeHtml(c.name).replace(/'/g, '')}')">Listings</button>
-        ${isAdmin ? `<button class="btn btn-outline btn-sm" onclick="scanCompetitorNow(${c.id}, this)">Scan</button>
-        <button class="btn btn-outline btn-sm" onclick="rematchCompetitorNow(${c.id}, this)" title="Re-run matching over the already-stored listings (no re-fetch) — part numbers first, then titles/make/model. Use after adding products or when matches look thin.">🔗 Re-match</button>
-        <button class="btn btn-outline btn-sm" onclick="editCompetitor(${c.id})">Edit</button>
-        <button class="btn btn-outline btn-sm" onclick="deleteCompetitor(${c.id})" title="Remove">✕</button>` : ''}
+        ${isAdmin ? actionMenu([
+          { label: '⟳ Scan now', onclick: `scanCompetitorNow(${c.id}, this)` },
+          { label: '🔗 Re-match stored listings', onclick: `rematchCompetitorNow(${c.id}, this)`, title: 'Re-run matching over stored listings (no re-fetch) — use after adding products' },
+          { label: '✏️ Edit', onclick: `editCompetitor(${c.id})` },
+          { label: '✕ Remove competitor', onclick: `deleteCompetitor(${c.id})`, danger: true },
+        ]) : ''}
       </td>
     </tr>`;
   }).join('');
