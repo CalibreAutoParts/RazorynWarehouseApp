@@ -306,7 +306,7 @@ async function stockList(account, { q = '', make = '', inStock = false, changedS
   if (q) {
     params.push(`%${q}%`);
     where.push(`(p.sku ILIKE $${params.length} OR p.title ILIKE $${params.length} OR p.part_number ILIKE $${params.length}
-      OR EXISTS (SELECT 1 FROM product_part_numbers pp WHERE pp.product_id = p.id AND pp.code ILIKE $${params.length}))`);
+      OR EXISTS (SELECT 1 FROM product_part_numbers pp WHERE pp.product_id = p.id AND NOT COALESCE(pp.private, false) AND pp.code ILIKE $${params.length}))`);
   }
   if (make) { params.push(make); where.push(`lower(p.brand) = lower($${params.length})`); }
   if (inStock) { params.push(bufferFor(account, settings)); where.push(`p.qty_on_hand > $${params.length}`); }
@@ -333,7 +333,7 @@ async function productBySku(sku) {
     WHERE upper(p.sku) = upper($1) AND p.active = true LIMIT 1`, [String(sku || '').trim()]);
   const p = r.rows[0];
   if (!p) return null;
-  try { p.alternates = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [p.id])).rows.map(x => x.code); }
+  try { await require('./part-numbers').ensurePrivateCol(); p.alternates = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 AND NOT private ORDER BY id`, [p.id])).rows.map(x => x.code); }
   catch (_) { p.alternates = []; }
   return p;
 }

@@ -285,8 +285,32 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
       COUNT(DISTINCT container_ref) FILTER (WHERE container_ref IS NOT NULL AND status <> 'received')::int AS open_containers
     FROM incoming_stock WHERE status <> 'cancelled'`);
   for (const r of rows) { r.readiness = readinessFor(r); delete r.product_held; delete r.product_specifics; }
+  // Items marked "no photo" that have a Shopify draft: check Shopify for photos
+  // in the background (uploads can still be processing when first saved) — the
+  // next refresh shows them ✓.
+  syncMissingPhotos(rows.filter(r => r.readiness && r.readiness.listed && !r.product_image && r.product_shopify_id)).catch(() => {});
   res.json({ items: rows, summary: summary.rows[0] });
 });
+
+let _photoSyncAt = 0;
+const _photoChecked = new Map();   // productId → last checked (ms)
+async function syncMissingPhotos(rows) {
+  if (!rows.length || Date.now() - _photoSyncAt < 30 * 1000) return;
+  _photoSyncAt = Date.now();
+  const shopify = require('../services/shopify');
+  if (!shopify.isConfigured()) return;
+  let fixed = 0;
+  for (const r of rows.slice(0, 40)) {
+    if (Date.now() - (_photoChecked.get(r.product_id) || 0) < 5 * 60 * 1000) continue;
+    _photoChecked.set(r.product_id, Date.now());
+    try {
+      const sp = await shopify.getShopifyProductFull(r.product_shopify_id);
+      const main = sp?.primaryImage || sp?.imageUrls?.[0];
+      if (main) { await query(`UPDATE products SET image_url = $2 WHERE id = $1 AND COALESCE(image_url, '') = ''`, [r.product_id, main]); fixed++; }
+    } catch (_) {}
+  }
+  if (fixed) console.log(`[incoming] picked up Shopify photos for ${fixed} item(s)`);
+}
 
 // What's still missing before an incoming item can go live — for items not on
 // eBay yet (placeholders / prepared listings). null = not applicable (already live).
@@ -772,7 +796,9 @@ async function createPlaceholders(lineIds, { shopifyMode = 'draft', userId = nul
         [sku, title, r.part_number || null, x.make || null, x.model || null, cost, photo, r.expected_date || null, sell,
          postage, band, yesNo(x.packaged), num(x.packagingCost), L, W, H, kg != null ? Math.round(kg * 1000) : null])).rows[0];
       if (r.supplier_sku && r.supplier_sku !== r.part_number) {
-        await query(`INSERT INTO product_part_numbers (product_id, code, note) VALUES ($1,$2,$3)`, [ins.id, r.supplier_sku, `${r.supplier || 'Supplier'} code`]).catch(() => {});
+        // Supplier's own code: private — searchable in the warehouse, never on listings.
+        await require('../lib/part-numbers').ensurePrivateCol();
+        await query(`INSERT INTO product_part_numbers (product_id, code, note, private) VALUES ($1,$2,$3,true)`, [ins.id, r.supplier_sku, `${r.supplier || 'Supplier'} code`]).catch(() => {});
       }
       await query(`UPDATE incoming_stock SET product_id = $1, sku = $2, title = COALESCE(title, $3), updated_at = now() WHERE id = $4`, [ins.id, sku, title, r.id]);
       await applyIncomingToProduct(ins.id).catch(e => console.warn('[incoming] apply to placeholder:', e.message));

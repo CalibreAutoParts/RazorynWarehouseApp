@@ -1407,6 +1407,23 @@ async function searchTaxonomyCategories(term) {
   }
 }
 
+// Every product's standard-taxonomy category (for the category audit).
+async function listProductCategories({ max = 5000 } = {}) {
+  const out = []; let after = null;
+  const q = `query($after: String) { products(first: 250, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    edges { node { id legacyResourceId title productType status category { id fullName } } } } }`;
+  while (out.length < max) {
+    const r = await shopifyRequest('post', '/graphql.json', { data: { query: q, variables: { after } } });
+    if (r.data.errors) throw new Error(JSON.stringify(r.data.errors));
+    const p = r.data.data?.products;
+    for (const e of p?.edges || []) out.push(e.node);
+    if (!p?.pageInfo?.hasNextPage) break;
+    after = p.pageInfo.endCursor;
+  }
+  return out;
+}
+
 // Apply SEO fields to a product. Any field left undefined is not touched.
 //   { seoTitle, seoDescription, handle, categoryId }
 // Returns { ok, userErrors }.
@@ -1471,6 +1488,7 @@ module.exports = {
   getProductSeo,
   findTaxonomyCategory,
   searchTaxonomyCategories,
+  listProductCategories,
   applyProductSeo,
   getInventoryLevel,
   getCustomCollections,

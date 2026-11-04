@@ -50,6 +50,51 @@ router.get('/store-categories', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/listings/shopify-category-match?q=Bonnet Panels — the best VEHICLE
+// category for an eBay category / part name (UK → US car terms; never anything
+// outside Vehicles & Parts). Used to auto-fill the Shopify category.
+router.get('/shopify-category-match', requireAdmin, async (req, res) => {
+  if (!shopify.isConfigured()) return res.json({ category: null });
+  try { res.json({ category: await require('../lib/shopify-category').vehicleCategoryFor(String(req.query.q || '')) }); }
+  catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
+});
+
+// GET /api/listings/shopify-category-audit — Shopify products whose category is
+// missing or outside Vehicles & Parts, each with a suggested vehicle category.
+router.get('/shopify-category-audit', requireAdmin, async (req, res) => {
+  if (!shopify.isConfigured()) return res.status(400).json({ error: 'shopify_not_configured', message: 'Shopify is not connected.' });
+  try {
+    const sc = require('../lib/shopify-category');
+    const { extractPartType } = require('../lib/vehicle');
+    const all = await shopify.listProductCategories();
+    const wrong = all.filter(p => !p.category || !sc.isVehicle(p.category.fullName));
+    const cache = new Map();
+    const items = [];
+    for (const p of wrong.slice(0, 400)) {
+      const term = (p.productType || '').trim() || extractPartType(p.title) || '';
+      let sug = null;
+      if (term) {
+        if (!cache.has(term.toLowerCase())) cache.set(term.toLowerCase(), await sc.vehicleCategoryFor(term).catch(() => null));
+        sug = cache.get(term.toLowerCase());
+      }
+      items.push({ id: p.id, productId: p.legacyResourceId, title: p.title, status: p.status, productType: p.productType || null,
+        current: p.category ? p.category.fullName : null, suggestion: sug });
+    }
+    res.json({ checked: all.length, wrong: wrong.length, items });
+  } catch (e) { res.status(502).json({ error: 'shopify_error', message: e.message }); }
+});
+// POST /api/listings/shopify-category-fix { items: [{ id, categoryId }] }
+router.post('/shopify-category-fix', requireAdmin, async (req, res) => {
+  const items = (Array.isArray(req.body?.items) ? req.body.items : []).filter(x => x && x.id && x.categoryId).slice(0, 500);
+  let ok = 0; const errors = [];
+  for (const it of items) {
+    try { const r = await shopify.applyProductSeo(it.id, { categoryId: it.categoryId }); if (r.ok) ok++; else errors.push({ id: it.id, error: (r.userErrors || []).map(u => u.message).join('; ') }); }
+    catch (e) { errors.push({ id: it.id, error: e.message }); }
+  }
+  await audit(req, 'shopify_category_fix', null, null, { requested: items.length, ok });
+  res.json({ ok, errors });
+});
+
 // GET /api/listings/shopify-categories?q= — search Shopify's product taxonomy
 // for the Mirror-to-Shopify category picker (#1).
 router.get('/shopify-categories', requireAdmin, async (req, res) => {
@@ -2110,12 +2155,19 @@ router.get('/listing-detail/:productId', requireAdmin, async (req, res) => {
         ORDER BY expected_date NULLS LAST`, [product.id])).rows;
   } catch (_) { out.incoming = []; }
   try {
-    const spn = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [product.id]);
+    await require('../lib/part-numbers').ensurePrivateCol();
+    const spn = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 AND NOT private ORDER BY id`, [product.id]);
     out.subPartNumbers = spn.rows.map(r => r.code);
   } catch (_) { out.subPartNumbers = []; }
 
   if (product.shopify_product_id && shopify.isConfigured()) {
-    try { out.shopify = await shopify.getShopifyProductFull(product.shopify_product_id); }
+    try {
+      out.shopify = await shopify.getShopifyProductFull(product.shopify_product_id);
+      // Photos added on Shopify (or still processing when they were uploaded) →
+      // remember the main one so the warehouse knows the item has a photo.
+      const main = out.shopify?.primaryImage || out.shopify?.imageUrls?.[0];
+      if (main && !product.image_url) { await query(`UPDATE products SET image_url = $2 WHERE id = $1 AND COALESCE(image_url, '') = ''`, [product.id, main]).catch(() => {}); product.image_url = main; }
+    }
     catch (e) { out.shopifyError = e.message; }
   }
 
@@ -2268,7 +2320,9 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
   if (Array.isArray(b.subPartNumbers)) {
     const codes = b.subPartNumbers.map(x => String(x || '').trim()).filter(Boolean);
     try {
-      await query(`DELETE FROM product_part_numbers WHERE product_id = $1`, [productId]);
+      await require('../lib/part-numbers').ensurePrivateCol();
+      // Supplier codes (private) aren't on the form — keep them.
+      await query(`DELETE FROM product_part_numbers WHERE product_id = $1 AND NOT private`, [productId]);
       for (const code of codes) {
         try { await query(`INSERT INTO product_part_numbers (product_id, code) VALUES ($1, $2)`, [productId, code]); } catch (_) {}
       }
@@ -3929,7 +3983,8 @@ async function deriveEbaySpecifics(product, { countryOfOrigin, includeProductNum
   // the reference/interchange specifics carry every form as its own value.
   try {
     const { allPnForms } = require('../lib/part-numbers');
-    const spn = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [product.id]);
+    await require('../lib/part-numbers').ensurePrivateCol();
+    const spn = await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 AND NOT private ORDER BY id`, [product.id]);
     const codes = spn.rows.map(r => r.code).filter(Boolean);
     if (codes.length) {
       const interVals = allPnForms(null, codes, { cap: 20 });

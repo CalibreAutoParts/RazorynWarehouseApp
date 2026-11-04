@@ -289,7 +289,7 @@ router.get('/products', async (req, res) => {
   const products = [];
   for (const p of rows) {
     const alts = (await query(
-      `SELECT code, note FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [p.id]
+      `SELECT code, note FROM product_part_numbers WHERE product_id = $1 AND NOT COALESCE(private, false) ORDER BY id`, [p.id]
     )).rows;
     // Latest known supplier (from cost history) — the photo studio files sets
     // under it for organisation. Best-effort: the table is created lazily.
