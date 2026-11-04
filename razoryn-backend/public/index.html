@@ -4503,6 +4503,7 @@ function renderIncoming() {
       </div>
     </div>
   `;
+  filterMemory('incoming', ['incoming-search', 'incoming-status-filter', 'incoming-ready-filter'], () => loadIncoming());
   loadIncoming();
 }
 let _incomingSearchTimer = null;
@@ -5645,6 +5646,7 @@ function renderInventory() {
   let _invPaintT;
   el('inv-search').addEventListener('input', () => { clearTimeout(_invPaintT); _invPaintT = setTimeout(paint, 160); });
   ['inv-brand','inv-stock','inv-hidden','inv-source','inv-acct'].forEach(id => { const e = el(id); if (e) e.addEventListener('change', paint); });
+  if (filterMemory('inventory', ['inv-search', 'inv-brand', 'inv-stock', 'inv-hidden', 'inv-source', 'inv-acct'], () => paint())) paint();
   // Name each partner warehouse in the source filter (admin only).
   if (State.user?.role === 'admin' && State.products.some(p2 => p2.partnerLinkId)) {
     Api.get('/api/trade/partners').then(r => {
@@ -19973,12 +19975,11 @@ async function clAutoMatchShopCat(name) {
   if (!name) return;
   if (CL.categoryId && !CL.categoryAuto) return;   // user chose one — leave it alone
   try {
-    const r = await Api.get('/api/listings/shopify-categories?q=' + encodeURIComponent(name));
-    const cats = r.categories || [];
-    if (!cats.length) return;
-    // Prefer an exact leaf-name match; else the first (best-ranked) result.
-    const exact = cats.find(c => (c.name || '').split(/[>›]/).pop().trim().toLowerCase() === name.toLowerCase());
-    const pick = exact || cats[0];
+    // Vehicle-only match with UK → US car terms (Bonnet → Hood, Wing → Fender,
+    // Boot → Trunk…) — Shopify's taxonomy otherwise files "Bonnets" under hats.
+    const r = await Api.get('/api/listings/shopify-category-match?q=' + encodeURIComponent(name));
+    const pick = r.category;
+    if (!pick) return;
     if (CL.categoryId && !CL.categoryAuto) return;   // user picked one while we were searching
     CL.categoryId = pick.id; CL.categoryName = pick.name; CL.categoryAuto = true;
     const cur = el('cl-cat-current');
@@ -21657,6 +21658,47 @@ async function pushToEbay(itemId) {
 function escapeHtml(s) { return String(s||'').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
 function escapeAttr(s) { return (s === 0 ? '0' : String(s||'')).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
+// ── Remembered filters ──────────────────────────────────────────────────────
+// A page's search + filter boxes keep their values (across reloads and leaving
+// the page) until changed or "Reset filters" is pressed. Stored per browser.
+function filterMemory(page, ids, onReset) {
+  const key = 'rzn_filters_' + page;
+  const read = () => { try { return JSON.parse(localStorage.getItem(key) || '{}'); } catch (_) { return {}; } };
+  const def = (e) => e.tagName === 'SELECT' ? (e.options[0]?.value ?? '') : '';
+  const saved = read();
+  let restored = false;
+  for (const id of ids) {
+    const e = el(id); if (!e) continue;
+    if (id in saved && saved[id] !== e.value) {
+      if (e.tagName !== 'SELECT' || [...e.options].some(o => o.value === saved[id])) { e.value = saved[id]; restored = true; }
+    }
+    if (e._fmBound) continue;
+    e._fmBound = true;
+    const save = () => { const cur = read(); cur[id] = e.value; try { localStorage.setItem(key, JSON.stringify(cur)); } catch (_) {} showReset(); };
+    e.addEventListener('input', save); e.addEventListener('change', save);
+  }
+  const last = ids.map(el).filter(Boolean).pop();
+  let btn = el(page + '-filter-reset');
+  if (!btn && last) {
+    btn = document.createElement('button');
+    btn.id = page + '-filter-reset'; btn.type = 'button'; btn.className = 'btn btn-ghost btn-sm';
+    btn.textContent = '✕ Reset filters'; btn.title = 'Clear the search and filters (they are remembered until you reset)';
+    btn.onclick = () => {
+      try { localStorage.removeItem(key); } catch (_) {}
+      for (const id of ids) { const e = el(id); if (e) e.value = def(e); }
+      showReset();
+      if (typeof onReset === 'function') onReset();
+    };
+    last.insertAdjacentElement('afterend', btn);
+  }
+  function showReset() {
+    const b = el(page + '-filter-reset'); if (!b) return;
+    b.style.display = ids.some(id => { const e = el(id); return e && e.value !== def(e); }) ? '' : 'none';
+  }
+  showReset();
+  return restored;
+}
+
 // ── Shared action layout (the Incoming pattern) ─────────────────────────────
 // One clear button for the main job + everything else tucked under a menu, so
 // rows and page headers stay tidy. items: [{ label, onclick, title?, danger? }]
@@ -22464,6 +22506,7 @@ function renderSettings() {
           </p>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
             <button class="btn btn-primary" onclick="findShopifyLocations()">📍 Find my Location ID</button>
+            <button class="btn btn-outline" onclick="openShopifyCategoryAudit()" title="Find Shopify products whose category is missing or outside Vehicles & Parts (e.g. bonnets filed as hats) and fix them">🔎 Check Shopify categories</button>
             <button class="btn btn-primary" onclick="importFromShopify()">⬇ Import all products</button>
             <button class="btn btn-outline" onclick="syncNow()">↻ Sync orders &amp; stock now</button>
             <button class="btn btn-outline" onclick="cleanupShopifyDuplicates(this)" title="Remove already-imported Shopify orders that came from a non-store sales channel (e.g. the old eBay channel), which double-counted eBay sales. Restores their stock. Store sales going forward already only count Online Store, Shop and POS.">🧹 Remove non-store (duplicate) orders</button>
@@ -23471,6 +23514,36 @@ async function setShopState(code, change, ctl) {
     try { State.brand = brandWithConnectedStores(await Api.get('/api/brand')); } catch (_) {}
     loadStoreVat();
   } catch (e) { toast(e.data?.message || e.message, 'error', 8000); if (ctl) { ctl.disabled = false; if ('on' in change) ctl.checked = !change.on; } }
+}
+
+// Shopify products filed in the wrong category (missing or not Vehicles & Parts).
+async function openShopifyCategoryAudit() {
+  modal({ title: '🔎 Shopify categories', size: 'lg', body: '<div id="sca-body" style="color:var(--ink-soft)">Reading every Shopify product\'s category…</div>', actions: [{ label: 'Close', onClick: closeModal }] });
+  let r;
+  try { r = await Api.get('/api/listings/shopify-category-audit'); }
+  catch (e) { el('sca-body').innerHTML = `<span style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</span>`; return; }
+  State._sca = r.items || [];
+  const fixable = State._sca.filter(x => x.suggestion);
+  el('sca-body').innerHTML = !State._sca.length
+    ? `<div style="color:var(--green);font-weight:600">✓ All ${r.checked} Shopify products are under Vehicles &amp; Parts.</div>`
+    : `<div style="margin-bottom:10px;color:var(--ink)">Checked <b>${r.checked}</b> products — <b>${r.wrong}</b> have no category or one outside Vehicles &amp; Parts.
+        ${fixable.length ? `<button class="btn btn-primary btn-sm" style="margin-left:8px" onclick="fixShopifyCategories()">Fix ${fixable.length} with the suggested category</button>` : ''}</div>
+      <div style="max-height:55vh;overflow:auto"><table class="table" style="font-size:12.5px"><thead><tr><th>Product</th><th>Now</th><th>Suggested</th></tr></thead><tbody>
+      ${State._sca.map(x => `<tr><td><div style="font-weight:600">${escapeHtml(x.title)}</div><div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(x.productType || '')}${x.status && x.status !== 'ACTIVE' ? ' · ' + escapeHtml(x.status.toLowerCase()) : ''}</div></td>
+        <td style="color:var(--red)">${escapeHtml(x.current || '— none —')}</td>
+        <td>${x.suggestion ? `<span style="color:var(--green)">${escapeHtml(x.suggestion.name)}</span>` : '<span style="color:var(--ink-soft)">no match — set it on the listing</span>'}</td></tr>`).join('')}
+      </tbody></table></div>`;
+}
+async function fixShopifyCategories() {
+  const items = (State._sca || []).filter(x => x.suggestion).map(x => ({ id: x.id, categoryId: x.suggestion.id }));
+  if (!items.length) return;
+  const t = Task.start(`Fixing ${items.length} Shopify categor${items.length === 1 ? 'y' : 'ies'}…`);
+  try {
+    const r = await Api.post('/api/listings/shopify-category-fix', { items });
+    Task.done(t, 'Done');
+    toast(`✓ ${r.ok} Shopify categor${r.ok === 1 ? 'y' : 'ies'} fixed${r.errors?.length ? ` · ${r.errors.length} failed` : ''}`, r.errors?.length ? 'warn' : 'success', 8000);
+    openShopifyCategoryAudit();
+  } catch (e) { Task.fail(t, 'Failed'); toast(e.data?.message || e.message, 'error'); }
 }
 
 // Live "what this means" line; changing the business type suggests the usual

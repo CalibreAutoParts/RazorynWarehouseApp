@@ -185,7 +185,8 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
     // the product's sub part-numbers so searching an alternate factory/country
     // code surfaces the master SKU.
     where.push(`(title ILIKE $${i} OR sku ILIKE $${i} OR part_number ILIKE $${i} OR barcode ILIKE $${i}
-      OR EXISTS (SELECT 1 FROM product_part_numbers ppn WHERE ppn.product_id = p.id AND ppn.code ILIKE $${i}))`);
+      OR EXISTS (SELECT 1 FROM product_part_numbers ppn WHERE ppn.product_id = p.id AND ppn.code ILIKE $${i})
+      OR (to_regclass('product_suppliers') IS NOT NULL AND EXISTS (SELECT 1 FROM product_suppliers ps WHERE ps.product_id = p.id AND ps.supplier_sku ILIKE $${i})))`);
   }
   if (brand) { params.push(brand); where.push(`brand = $${params.length}`); }
   if (lowStock === '1') where.push('qty_on_hand <= low_stock_threshold');
@@ -252,6 +253,16 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
       const pn = await query(`SELECT id, product_id, code, note FROM product_part_numbers WHERE product_id = ANY($1) ORDER BY id`, [ids]);
       const byProd = new Map();
       for (const x of pn.rows) { if (!byProd.has(x.product_id)) byProd.set(x.product_id, []); byProd.get(x.product_id).push(x); }
+      // Supplier codes too (warehouse-only search; marked private).
+      try {
+        const sc = await query(`SELECT ps.product_id, ps.supplier_sku AS code, s.name AS note FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
+          WHERE ps.product_id = ANY($1) AND COALESCE(ps.supplier_sku, '') <> ''`, [ids]);
+        for (const x of sc.rows) {
+          if (!byProd.has(x.product_id)) byProd.set(x.product_id, []);
+          const list = byProd.get(x.product_id);
+          if (!list.some(y => String(y.code).toUpperCase() === String(x.code).toUpperCase())) list.push({ product_id: x.product_id, code: x.code, note: x.note + ' code', private: true });
+        }
+      } catch (_) {}
       for (const r of rows) r.part_numbers = byProd.get(r.id) || [];
     }
   } catch (e) { for (const r of rows) r.part_numbers = r.part_numbers || []; }

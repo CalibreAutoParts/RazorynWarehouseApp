@@ -151,7 +151,8 @@ async function pushAlternatesToChannels(productId, { superseded = [], extra = []
   const out = { shopify: null, ebay: [] };
   const nm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const pr = (await query(`SELECT shopify_product_id, part_number FROM products WHERE id = $1`, [productId])).rows[0] || {};
-  const codes = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [productId])).rows.map(r => r.code);
+  await require('../lib/part-numbers').ensurePrivateCol();
+  const codes = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 AND NOT private ORDER BY id`, [productId])).rows.map(r => r.code);
   try {
     const shopify = require('../services/shopify');
     if (pr.shopify_product_id && shopify.isConfigured() && codes.length) {
@@ -458,7 +459,7 @@ router.post('/check-part-number', async (req, res) => {
   const p = pr.rows[0];
   if (!p) return res.status(404).json({ error: 'product_not_found' });
   let alternates = [];
-  try { alternates = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 ORDER BY id`, [productId])).rows.map(r => r.code); } catch (_) {}
+  try { await require('../lib/part-numbers').ensurePrivateCol(); alternates = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 AND NOT private ORDER BY id`, [productId])).rows.map(r => r.code); } catch (_) {}
   // Already on file in the WAREHOUSE? That doesn't mean eBay has it — look
   // at every linked live listing (whole shared group) and report which ones
   // actually carry the number, so missing ones can be pushed in one click.

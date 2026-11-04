@@ -745,6 +745,8 @@ cron.schedule('15 3 * * *', async () => {
 require('./lib/trade').ensureSchema().catch(e => console.warn('[trade] schema:', e.message));
 // eBay shop names set in the app (Settings → eBay shops) override the defaults.
 require('./lib/store-vat').applyNames().catch(e => console.warn('[shops] names:', e.message));
+// Supplier codes kept private (never sent to channels).
+require('./lib/part-numbers').ensurePrivateCol();
 // Shops switched off / main shop chosen in Settings → eBay shops.
 require('./lib/store-vat').applyShopState().catch(e => console.warn('[shops] state:', e.message));
 cron.schedule('*/2 * * * *', async () => {

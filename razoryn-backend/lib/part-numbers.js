@@ -42,4 +42,26 @@ function allPnForms(mainPn, altCodes, { cap = 20 } = {}) {
   return out;
 }
 
-module.exports = { pnVariants, allPnForms };
+// Supplier codes are PRIVATE: kept for warehouse search, supplier orders and cost
+// tracking, never sent to eBay / Shopify / trade customers / AI-written titles.
+// Adds product_part_numbers.private and marks the codes that are supplier codes.
+let _privReady = null;
+function ensurePrivateCol() {
+  if (!_privReady) _privReady = (async () => {
+    const { query } = require('../db');
+    await query(`CREATE TABLE IF NOT EXISTS product_part_numbers (id SERIAL PRIMARY KEY,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE, code TEXT NOT NULL, note TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+    await query(`ALTER TABLE product_part_numbers ADD COLUMN IF NOT EXISTS private BOOLEAN NOT NULL DEFAULT false`);
+    // Supplier codes saved as alternates by older versions → private.
+    await query(`UPDATE product_part_numbers ppn SET private = true
+      WHERE private = false AND (note ~* ' code$'
+        OR (to_regclass('product_suppliers') IS NOT NULL AND EXISTS (SELECT 1 FROM product_suppliers ps
+              WHERE ps.product_id = ppn.product_id AND upper(trim(ps.supplier_sku)) = upper(trim(ppn.code))))
+        OR (to_regclass('incoming_stock') IS NOT NULL AND EXISTS (SELECT 1 FROM incoming_stock i
+              WHERE i.product_id = ppn.product_id AND upper(trim(i.supplier_sku)) = upper(trim(ppn.code)))))`).catch(e => console.warn('[part-numbers] mark private:', e.message));
+  })().catch(e => { _privReady = null; console.warn('[part-numbers] private col:', e.message); });
+  return _privReady;
+}
+
+module.exports = { pnVariants, allPnForms, ensurePrivateCol };
