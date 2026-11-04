@@ -882,17 +882,27 @@ router.post('/go-live', requireAdmin, safe(async (req, res) => {
         } catch (e) { r.shopify = 'failed: ' + e.message; }
       }
       // eBay
-      if (ebayMode !== 'skip' && store && store.token) {
-        const payload = { storeCode: store.code, price, categoryId: p.ebay_category_id || undefined };
+      let held = p.ebay_prelist_payload;
+      if (typeof held === 'string') { try { held = JSON.parse(held); } catch (_) { held = null; } }
+      const hasHeld = !!(held && Array.isArray(held.accounts) && held.accounts.length);
+      if (ebayMode !== 'skip' && (hasHeld || (store && store.token))) {
+        // The listing prepared on Edit listing (accounts, policies, specifics…) wins;
+        // otherwise the basic one for the store picked here.
+        const payload = hasHeld ? { ...held, price, categoryId: held.categoryId || p.ebay_category_id || undefined }
+          : { storeCode: store.code, price, categoryId: p.ebay_category_id || undefined };
+        const where = hasHeld ? held.accounts.map(a => (brand.getStore(a.storeCode)?.name || a.storeCode)).join(' + ') : store.name;
         await query(`UPDATE products SET ebay_prelist_payload = $2::jsonb, ebay_prelist_status = $3 WHERE id = $1`,
           [p.id, JSON.stringify(payload), inStock && ebayMode === 'now' ? 'scheduled' : 'on_arrival']);
         if (inStock && ebayMode === 'now') {
           try {
             const fresh = (await query(`SELECT * FROM products WHERE id = $1`, [p.id])).rows[0];
             const out = await require('./listings').publishPrelisting(fresh, { req });
-            r.ebay = 'listed'; r.itemId = out.itemId; r.url = out.url;
+            r.ebay = (out.accounts || []).length > 1
+              ? 'listed on ' + out.accounts.map(x => `${brand.getStore(x.store)?.name || x.store} ${x.ok ? '✓' : '✗ ' + x.error}`).join(', ')
+              : 'listed';
+            r.itemId = out.itemId; r.url = out.url;
           } catch (e) { r.ebay = 'failed: ' + e.message; }
-        } else r.ebay = `goes live on ${store.name} when stock is received`;
+        } else r.ebay = `goes live on ${where} when stock is received`;
       }
       r.ok = true;
     } catch (e) { r.ok = false; r.error = e.message; }

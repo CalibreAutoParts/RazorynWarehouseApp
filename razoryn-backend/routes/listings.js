@@ -2215,6 +2215,24 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
     [sku, shopTitle, partNumber, ebayPrice, shopifyPrice, qty, productId]);
   result.warehouse = { ok: true };
 
+  // Incoming placeholder: the eBay panel is HELD, not published — store the whole
+  // listing (per-account policies included) so Go live / stock arrival publishes
+  // exactly this. Quantity is left out: it's the real stock at go-live time.
+  if (product.is_placeholder && b.ebayHeld && typeof b.ebayHeld === 'object') {
+    try {
+      const h = { ...b.ebayHeld };
+      delete h.quantity; delete h.preview; delete h.productId;
+      const accounts = (Array.isArray(h.accounts) ? h.accounts : []).filter(a => a && a.storeCode)
+        .map(a => ({ storeCode: String(a.storeCode), businessPolicies: a.businessPolicies || undefined }));
+      if (!accounts.length && h.storeCode) accounts.push({ storeCode: String(h.storeCode), businessPolicies: h.businessPolicies || undefined });
+      h.accounts = accounts;
+      h.storeCode = accounts[0]?.storeCode || h.storeCode || null;
+      if (ebayPrice != null) h.price = ebayPrice;
+      await query(`UPDATE products SET ebay_prelist_payload = $2::jsonb, updated_at = now() WHERE id = $1`, [productId, JSON.stringify(h)]);
+      result.ebayHeld = { ok: true, accounts: accounts.map(a => a.storeCode) };
+    } catch (e) { result.ebayHeld = { error: e.message }; }
+  }
+
   // Cost, parcel size + packaging from the edit form (only what was sent).
   try {
     const numOr = (v) => (v != null && v !== '' && Number.isFinite(parseFloat(v))) ? parseFloat(v) : undefined;
@@ -4676,13 +4694,24 @@ async function publishPrelisting(product, { req } = {}) {
   }
   // Force a live publish (never a preview), and list the current quantity.
   const b = { ...payload, productId: product.id, preview: false };
+  delete b.accounts;
   try {
-    const out = await doCreateEbay(b, { req });
+    // Several accounts held (each with its own policies): the first is the main
+    // listing; the rest follow. A failure on an extra account is reported, not fatal.
+    const accounts = Array.isArray(payload.accounts) && payload.accounts.length ? payload.accounts : [{ storeCode: payload.storeCode, businessPolicies: payload.businessPolicies }];
+    const out = await doCreateEbay({ ...b, storeCode: accounts[0].storeCode, businessPolicies: accounts[0].businessPolicies || b.businessPolicies }, { req });
+    out.accounts = [{ store: accounts[0].storeCode, ok: true, itemId: out.itemId }];
+    for (const a of accounts.slice(1)) {
+      try {
+        const o2 = await doCreateEbay({ ...b, storeCode: a.storeCode, businessPolicies: a.businessPolicies, storeCategoryId: undefined }, { req });
+        out.accounts.push({ store: a.storeCode, ok: true, itemId: o2.itemId });
+      } catch (e2) { out.accounts.push({ store: a.storeCode, ok: false, error: e2.body?.message || e2.message }); }
+    }
     await query(`UPDATE products SET ebay_prelist_status = 'live', ebay_scheduled_at = NULL WHERE id = $1`, [product.id]);
     // Cap the freshly-listed eBay quantity to the available-to-promise (units on
     // the way − already pre-ordered), now that a mirror_link exists.
     try { await require('./products').pushProductStockToChannels(product.id); } catch (_) {}
-    return { ok: true, itemId: out.itemId, url: out.url };
+    return { ok: true, itemId: out.itemId, url: out.url, accounts: out.accounts };
   } catch (e) {
     await query(`UPDATE products SET ebay_prelist_status = 'failed' WHERE id = $1`, [product.id]).catch(() => {});
     // Best-effort notification so staff know an automatic go-live failed.
