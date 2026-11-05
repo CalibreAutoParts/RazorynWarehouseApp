@@ -4555,6 +4555,10 @@ async function loadIncomingContainers() {
             <div class="ctn-stat"><div class="v">${money(c.landed_gbp)}</div><div class="l">landed cost</div></div>
             <div class="ctn-stat"><div class="v">${money(c.potential_ebay)}</div><div class="l">eBay value${c.unpriced ? ` · ${c.unpriced} unpriced` : ''}</div></div>
           </div>
+          ${c.pnl && canSeeMoney() && c.pnl.likely.revenue ? `<div style="font-size:12.5px;margin:2px 0 8px;display:flex;gap:6px;align-items:baseline;flex-wrap:wrap" title="Estimated profit if the container sells, by your sales mix — open the container to adjust">
+            <span>📈 Est. profit</span>
+            <b style="color:${c.pnl.likely.net >= 0 ? 'var(--green)' : 'var(--red)'}">${money(c.pnl.likely.net)}</b>
+            <span style="color:var(--ink-soft)">(${c.pnl.likely.marginPct ?? '—'}%) · range ${money(c.pnl.cautious.net)}–${money(c.pnl.best.net)}${c.pnl.freightIn ? '' : ' · freight est.'}</span></div>` : ''}
           <div class="${hasFreight && hasDuty ? 'ctn-ok' : 'ctn-warn'}">${hasFreight || hasDuty ? `🚢 freight ${hasFreight ? '£' + (+c.freight_total_gbp).toFixed(2) : '—'} · duty ${hasDuty ? '£' + (+c.duty_gbp).toFixed(2) : '—'}` : '⚠ freight / duty not added yet'}
             ${!(hasFreight && hasDuty) ? ` · <a href="#" onclick="openContainerDetail('${ref}');return false">add when it lands</a>` : ''}
             ${c.unlisted ? ` · <span style="color:var(--amber,#b26a00)">${c.unlisted} not listed</span>` : ''}${c.placeholders ? ` · ${c.placeholders} placeholder${c.placeholders > 1 ? 's' : ''}` : ''}</div>
@@ -4632,16 +4636,7 @@ async function renderContainerDetail() {
             ${stat(m(t.landedValueGbp), 'landed total')}${stat(t.units || 0, 'units')}
           </div>
         </div>
-        <div class="ui-section">
-          <div class="ui-label">If it all sells on eBay</div>
-          <div class="ctn-stats" style="grid-template-columns:1fr 1fr">
-            ${stat(m(e.revenue), 'sales (inc VAT)')}${stat(m(e.vat), 'VAT')}
-            ${stat(m(e.fees), `eBay fees (${e.feePct}% + fixed)`)}${stat(m(e.postage + e.packaging), 'postage + packaging')}
-            ${stat(m(e.cost), 'landed cost')}${stat(m(e.net), 'profit' + (e.marginPct != null ? ` · ${e.marginPct}%` : ''), e.net >= 0 ? 'var(--green)' : 'var(--red)')}
-          </div>
-          ${e.unpriced ? `<div class="ctn-warn" style="margin-top:8px">${e.unpriced} line(s) / ${e.unpricedUnits} units have no eBay price yet — add them on the right, the totals update.</div>` : ''}
-          <div class="ui-hint">Uses your Costs &amp; margins settings (eBay fee %, VAT, postage bands, packaging, ads).</div>
-        </div>
+        <div class="ui-section" id="ctn-pnl"><div class="ui-label">Profit &amp; loss</div><div style="color:var(--ink-soft);font-size:12px">Working it out…</div></div>
       </div>
       <div class="inc-main">
         <div class="table-wrap" style="border:1px solid var(--line);border-radius:12px;max-height:64vh;overflow:auto"><table class="table"><thead><tr>
@@ -4654,7 +4649,7 @@ async function renderContainerDetail() {
             return `<tr>
               <td><div style="font-weight:600;font-size:13px">${escapeHtml(l.product_title || l.title || '(unnamed)')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(l.sku || '')}${l.is_placeholder ? ' · placeholder' : ''}</div></td>
               <td class="num">${l.qty_ordered}</td>
-              <td class="num">${landed != null ? m(landed) : '—'}</td>
+              <td class="num">${l.ebay?.landedUnit != null ? m(l.ebay.landedUnit) + (l.ebay.landedEstimated ? '<div style="font-size:10px;color:var(--ink-soft)">incl. est. freight</div>' : '') : (landed != null ? m(landed) : '—')}</td>
               <td class="num">${l.product_id && !l.price_from_draft ? `<input type="number" step="0.01" min="0" value="${l.price_ebay != null ? escapeAttr(l.price_ebay) : ''}" placeholder="£" style="width:90px;text-align:right" onchange="ctnSetPrice(${l.product_id}, this.value)" ${l.is_placeholder || l.price_ebay == null ? '' : 'title="Live listing — change its price from Edit listing"'}>`
                 : l.price_from_draft ? `<span title="From the saved listing draft — counts toward the container value">£${(+l.price_ebay).toFixed(2)} <span style="font-size:10.5px;color:var(--ink-soft)">draft</span></span>`
                 : '<span style="font-size:11px;color:var(--ink-soft)">make placeholder first</span>'}</td>
@@ -4665,7 +4660,94 @@ async function renderContainerDetail() {
         </tbody></table></div>
       </div>
     </div>`;
+  ctnLoadPnl();
 }
+// ── Container profit & loss: channel mix sliders + cautious / likely / best ──
+let _pnl = null;
+async function ctnLoadPnl() {
+  const box = el('ctn-pnl'); if (!box) return;
+  try { _pnl = await Api.get('/api/incoming/containers/' + encodeURIComponent(_ctnRef) + '/pnl'); }
+  catch (e) { box.innerHTML = '<div class="ui-label">Profit &amp; loss</div><div style="color:var(--red);font-size:12px">' + escapeHtml(e.data?.message || e.message) + '</div>'; return; }
+  _pnl.mixNow = {};
+  for (const k of Object.keys(_pnl.channels)) _pnl.mixNow[k] = Math.round(Number(_pnl.mix[k]) || 0);
+  ctnMixNormalise();
+  ctnPaintPnl();
+}
+// Keep the mix at exactly 100%.
+function ctnMixNormalise() {
+  const mix = _pnl.mixNow, keys = Object.keys(mix);
+  const tot = keys.reduce((a, k) => a + mix[k], 0);
+  if (!tot) { mix[keys[0]] = 100; return; }
+  for (const k of keys) mix[k] = Math.round(mix[k] / tot * 100);
+  const drift = 100 - keys.reduce((a, k) => a + mix[k], 0);
+  if (drift) { const k = keys.reduce((b, k2) => mix[k2] > mix[b] ? k2 : b, keys[0]); mix[k] += drift; }
+}
+// Move one channel; the others shrink/grow in proportion so it stays 100%.
+function ctnMix(key, val) {
+  const mix = _pnl.mixNow; val = Math.max(0, Math.min(100, Math.round(+val || 0)));
+  const others = Object.keys(mix).filter(k => k !== key);
+  const rest = others.reduce((a, k) => a + mix[k], 0);
+  const left = 100 - val;
+  for (const k of others) mix[k] = rest > 0 ? Math.round(mix[k] / rest * left) : Math.round(left / others.length);
+  mix[key] = val;
+  const drift = 100 - Object.values(mix).reduce((a, x) => a + x, 0);
+  if (drift) { const k = others.find(k2 => mix[k2] + drift >= 0); if (k) mix[k] += drift; else mix[key] += drift; }
+  ctnPaintPnl();
+}
+function ctnUseRealMix() {
+  for (const k of Object.keys(_pnl.mixNow)) _pnl.mixNow[k] = Math.round(Number((_pnl.actualMix || {})[k]) || 0);
+  ctnMixNormalise(); ctnPaintPnl();
+}
+function ctnBlend(sc) {
+  const r = { revenue: 0, vat: 0, fees: 0, postage: 0, packaging: 0, returns: 0, cost: 0, net: 0 };
+  for (const [k, pct] of Object.entries(_pnl.mixNow)) { const t = _pnl.channels[k]?.scenarios[sc]; if (!t) continue; for (const f of Object.keys(r)) r[f] += t[f] * pct / 100; }
+  r.marginPct = r.revenue ? r.net / r.revenue * 100 : null;
+  return r;
+}
+function ctnPaintPnl() {
+  const box = el('ctn-pnl'); if (!box || !_pnl) return;
+  const m = n => canSeeMoney() ? (n < 0 ? '−' : '') + '£' + Math.abs(Math.round(Number(n || 0))).toLocaleString('en-GB') : '£•••';
+  const a = _pnl.assumptions, S = { cautious: ctnBlend('cautious'), likely: ctnBlend('likely'), best: ctnBlend('best') };
+  const L = S.likely;
+  const col = n => n >= 0 ? 'var(--green)' : 'var(--red)';
+  const row = (l, v, strong) => `<div style="display:flex;justify-content:space-between;${strong ? 'font-weight:700;border-top:1px solid var(--line);margin-top:4px;padding-top:4px;color:' + col(v) : 'color:var(--ink-soft)'}"><span>${l}</span><span>${m(v)}</span></div>`;
+  box.innerHTML = `
+    <div class="ui-label" style="display:flex;justify-content:space-between;align-items:center">Profit &amp; loss <span class="ui-opt">estimate — if it all sells</span></div>
+    ${_pnl.priced.units ? `
+    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-bottom:12px">
+      ${[['cautious', 'Cautious'], ['likely', 'Likely'], ['best', 'Best']].map(([k, l]) => `<div style="border:1px solid var(--line);border-radius:10px;padding:8px 10px;${k === 'likely' ? 'background:var(--bg-soft);border-color:var(--ink-soft)' : ''}">
+        <div style="font-size:11px;color:var(--ink-soft)">${l}</div>
+        <div style="font-weight:700;font-size:${k === 'likely' ? '18px' : '15px'};color:${col(S[k].net)}">${m(S[k].net)}</div>
+        <div style="font-size:11px;color:var(--ink-soft)">${S[k].marginPct != null ? S[k].marginPct.toFixed(1) + '%' : '—'} margin</div></div>`).join('')}
+    </div>
+    <div style="font-size:12px;font-weight:600;margin-bottom:6px">Where it sells <span style="font-weight:400;color:var(--ink-soft)">— drag to set your mix (always 100%)</span></div>
+    ${Object.entries(_pnl.channels).map(([k, c]) => `<div style="display:grid;grid-template-columns:132px minmax(0,1fr) 40px;gap:8px;align-items:center;margin-bottom:4px;font-size:12px">
+      <span>${escapeHtml(c.label)}</span>
+      <input type="range" min="0" max="100" step="1" value="${_pnl.mixNow[k] || 0}" oninput="ctnMix('${k}', this.value)" aria-label="${escapeAttr(c.label)} share" style="width:100%;padding:0">
+      <span style="text-align:right;font-weight:600">${_pnl.mixNow[k] || 0}%</span></div>`).join('')}
+    <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;margin:6px 0 12px">
+      ${Object.keys(_pnl.actualMix || {}).length ? `<a href="#" onclick="ctnUseRealMix();return false">Use my real mix (last 90 days)</a>` : ''}
+      <a href="#" onclick="ctnSaveMix();return false">Save as my default mix</a>
+    </div>
+    <div style="font-size:12px;border-top:1px solid var(--line);padding-top:8px">
+      <div style="font-weight:600;margin-bottom:4px;color:var(--ink)">Likely, broken down</div>
+      ${row('Sales (inc VAT)', L.revenue)}${row('VAT', -L.vat)}${row('Selling fees', -L.fees)}${row('Postage + packaging', -(L.postage + L.packaging))}
+      ${row('Returns allowance', -L.returns)}${row('Landed cost' + (a.freightIn ? '' : ' (freight est.)'), -L.cost)}${row('Profit', L.net, true)}
+    </div>
+    <div class="ui-hint" style="margin-top:8px;line-height:1.5">
+      <b>Cautious</b>: every sale at your ${a.offerPct}% offer price, ${(a.returnsPct * 1.5).toFixed(1)}% returns${a.freightIn ? '' : ', freight + duty +50%'}.
+      <b>Likely</b>: half that discount on average, ${a.returnsPct}% returns (${escapeHtml(a.returnsFrom)}).
+      <b>Best</b>: full prices, ${(a.returnsPct / 2).toFixed(1)}% returns.
+      ${a.freightIn ? 'Freight + duty: as entered.' : `Freight + duty not in yet — estimated at <b>${a.upliftPct}%</b> of goods from ${escapeHtml(a.upliftFrom)}; enter the real figures above and it updates.`}
+      Other channels follow your price rules (website −${a.prices.shopPct}%, bank −${a.prices.bankPct}%, cash −${a.prices.cashPct}%, OnBuy ${a.prices.onbuyPct >= 0 ? '+' : ''}${a.prices.onbuyPct}% vs eBay).
+    </div>` : '<div style="font-size:12px;color:var(--ink-soft)">Add eBay prices and costs to the lines to see profit.</div>'}
+    ${_pnl.unpriced.lines ? `<div class="ctn-warn" style="margin-top:8px">${_pnl.unpriced.lines} line(s) / ${_pnl.unpriced.units} units have no price or cost yet — not counted.</div>` : ''}`;
+}
+async function ctnSaveMix() {
+  try { await Api.put('/api/incoming/sales-mix', { mix: _pnl.mixNow }); toast("Sales mix saved — used for every container's profit estimate", 'success', 4000); loadIncomingContainers(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+
 async function ctnSetPrice(productId, price) {
   try { await Api.post('/api/incoming/set-price', { productId, price }); await renderContainerDetail(); loadIncomingContainers(); }
   catch (e) { toast(e.data?.message || e.message, 'error', 7000); }
