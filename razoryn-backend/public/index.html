@@ -23688,7 +23688,7 @@ const OB = { filter: 'all', q: '', items: [], sel: new Set(), status: null };
 async function renderOnBuy() {
   el('content').innerHTML = `<div class="page">
     <div class="page-head"><div><h1>OnBuy</h1><div class="desc">Sell on OnBuy alongside eBay &amp; Shopify — one warehouse stock, prices set from your eBay price (never below your margin floor), orders land in Sales &amp; Dispatch like any other channel.</div></div>
-      <div class="actions"><button class="btn btn-outline" onclick="obAction('import-orders','Importing OnBuy orders…')">⬇ Import orders</button>
+      <div class="actions"><button class="btn btn-primary" onclick="obTest()">🔌 Test connection</button><button class="btn btn-outline" onclick="obAction('import-orders','Importing OnBuy orders…')">⬇ Import orders</button>
         <button class="btn btn-outline" onclick="obAction('push','Pushing stock &amp; prices…',{all:true})">⇅ Push stock &amp; prices</button></div></div>
     <div id="ob-status"><div class="card"><div class="card-body" style="color:var(--ink-soft)">Loading…</div></div></div>
     <div class="grid-2" style="align-items:start;gap:16px;margin-top:14px">
@@ -23727,9 +23727,10 @@ async function obLoadStatus() {
       <b>🔌 Connect your OnBuy seller account</b><br>
       1. In OnBuy's Seller Control Panel go to <b>Inventory → Integrations → OnBuy API</b> and copy the <b>Consumer key</b> and <b>Secret key</b> (use the <i>Test</i> keys while you try it, then the <i>Live</i> keys).<br>
       2. In Railway add the variables <code>ONBUY_CONSUMER_KEY</code> and <code>ONBUY_SECRET_KEY</code> (optional <code>ONBUY_SITE_ID</code>, default 2000 = OnBuy UK) and redeploy.<br>
+      ${r.keys && (r.keys.consumer || r.keys.secret) ? `<span style="color:var(--red)">Found ${r.keys.consumer ? 'ONBUY_CONSUMER_KEY' : 'ONBUY_SECRET_KEY'} but not ${r.keys.consumer ? 'ONBUY_SECRET_KEY' : 'ONBUY_CONSUMER_KEY'} — check the variable name is spelt exactly like this.</span><br>` : `<span style="color:var(--red)">Neither key is visible to the app yet — check both variable names are spelt exactly as above (capitals, underscores) and that the service redeployed.</span><br>`}
       3. Come back here, press <b>Test connection</b>, pick your delivery template + default category, then switch OnBuy <b>on</b>.</div></div>`
     : `<div class="grid-4">
-      ${[['Connection', s.enabled ? '<span style="color:var(--green)">● On</span>' : '<span style="color:var(--ink-soft)">● Paused</span>', `<a href="#" onclick="obTest();return false">Test connection</a>`],
+      ${[['Connection', (s.enabled ? '<span style="color:var(--green)">● On</span>' : '<span style="color:var(--ink-soft)">● Paused</span>') + (r.keys?.mode === 'test' ? ' <span class="pill amber" style="font-size:10px;vertical-align:middle">TEST keys</span>' : r.keys?.mode === 'live' ? ' <span class="pill green" style="font-size:10px;vertical-align:middle">LIVE keys</span>' : ''), `<a href="#" onclick="obTest();return false">Test connection</a>`],
          ['Listed', (c.listed || 0), `${c.queued ? c.queued + ' being created' : 'live offers'}`],
          ['Needs attention', (c.error || 0) + (c.needs_ean || 0), `${c.needs_ean || 0} need an EAN`],
          ['Orders (30 days)', r.orders30d?.count || 0, ctMoney(r.orders30d?.total || 0)]]
@@ -23785,9 +23786,29 @@ async function obSaveSettings() {
   } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
 }
 async function obTest() {
-  const t = Task.start('Testing OnBuy connection…');
-  try { const r = await Api.post('/api/onbuy/test', {}); Task.done(t, 'Connected'); toast(`✓ Connected to OnBuy (site ${r.siteId}) · ${r.deliveryTemplates} delivery template(s)`, 'success', 7000); }
-  catch (e) { Task.fail(t, 'Failed'); toast('OnBuy: ' + (e.data?.message || e.message), 'error', 10000); }
+  modal({ title: '🔌 OnBuy connection test', size: 'lg', body: '<div id="obt-body" style="color:var(--ink-soft)">Checking…</div>', actions: [{ label: 'Close', onClick: closeModal }] });
+  let r;
+  try { r = await Api.post('/api/onbuy/test', {}); }
+  catch (e) { el('obt-body').innerHTML = `<span style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</span>`; return; }
+  const box = el('obt-body'); if (!box) return;
+  box.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
+      ${(r.steps || []).map(st => `<div style="display:flex;gap:8px;align-items:flex-start;font-size:13.5px;color:var(--ink)">
+        <span style="font-weight:700;color:${st.ok ? 'var(--green)' : 'var(--red)'}">${st.ok ? '✓' : '✗'}</span>
+        <span><b>${escapeHtml(st.step)}</b>${st.detail ? ` <span style="color:var(--ink-soft)">— ${escapeHtml(st.detail)}</span>` : ''}</span></div>`).join('')}
+    </div>
+    ${r.ok ? `<div style="padding:10px 12px;border-radius:8px;background:var(--green-light, #e8f6ee);color:var(--green);font-weight:600;margin-bottom:12px">✓ Connected to OnBuy${r.mode === 'test' ? ' with your TEST keys — safe to try everything below' : r.mode === 'live' ? ' with your LIVE keys' : ''}.</div>
+    <div style="font-size:13px;line-height:1.6;color:var(--ink)"><b>Try the whole flow${r.mode === 'test' ? ' on the test account' : ''}:</b>
+      <ol style="margin:4px 0 0;padding-left:18px">
+        <li>Pick your <b>delivery template</b> in Settings on this page and Save.</li>
+        <li>In <b>Products</b> below, press <b>List</b> on one in-stock part. It should show <i>Listed</i> (or <i>Needs EAN</i> if it isn't in OnBuy's catalogue and has no barcode).</li>
+        <li>In OnBuy's Seller panel → <b>Create Test Order</b>, put that part's <b>SKU exactly as in the warehouse</b> in Product 1. (A made-up SKU like "test" is refused by OnBuy — that's the "Unable to create test orders" message.)</li>
+        <li>Back here press <b>⬇ Import orders</b> — it appears in <b>Sales</b> as an OnBuy order and the stock comes off.</li>
+        <li>Mark it dispatched in <b>Dispatch</b> — the tracking is sent to OnBuy.</li>
+      </ol>
+      <div style="margin-top:8px;color:var(--ink-soft)">When you're happy, swap the Railway keys for the <b>Live</b> ones, redeploy, and switch <b>OnBuy on</b> so orders, stock and prices sync every 10 minutes.</div></div>`
+    : `<div style="font-size:13px;color:var(--ink-soft)">Fix the ✗ step above${(r.steps || []).some(s => /Signed in/.test(s.step) && !s.ok) ? ' — OnBuy turned the keys down: copy both keys again from OnBuy (Seller panel → Inventory → Integrations → OnBuy API), with no spaces, and make sure both are Test keys (or both Live)' : ''}, redeploy on Railway, then test again.</div>`}`;
+  obLoadStatus();
 }
 async function obAction(path, label, body = {}) {
   const t = Task.start(label.replace(/&amp;/g, '&'));

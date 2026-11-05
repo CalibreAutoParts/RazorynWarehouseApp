@@ -16,8 +16,15 @@ const axios = require('axios');
 const BASE = 'https://api.onbuy.com/v2';
 const SITE_ID = parseInt(process.env.ONBUY_SITE_ID || '2000', 10) || 2000;
 
-function isConfigured() {
-  return !!(process.env.ONBUY_CONSUMER_KEY && process.env.ONBUY_SECRET_KEY);
+// Keys as pasted into Railway (trimmed — a stray space breaks sign-in).
+const ck = () => String(process.env.ONBUY_CONSUMER_KEY || '').trim();
+const sk = () => String(process.env.ONBUY_SECRET_KEY || '').trim();
+function isConfigured() { return !!(ck() && sk()); }
+// Which keys are set, and whether they're OnBuy's Test or Live keys.
+function keyInfo() {
+  const c = ck(), s = sk();
+  const mode = /^ck_test_/i.test(c) || /^sk_test_/i.test(s) ? 'test' : (/^ck_live_/i.test(c) || /^sk_live_/i.test(s) ? 'live' : (c || s ? 'unknown' : null));
+  return { consumer: !!c, secret: !!s, mode, mismatch: !!(c && s && (/^ck_test_/i.test(c) !== /^sk_test_/i.test(s))) };
 }
 
 let _token = null, _tokenExp = 0;
@@ -25,7 +32,7 @@ async function token(force = false) {
   if (!isConfigured()) { const e = new Error('onbuy_not_configured'); e.code = 'onbuy_not_configured'; throw e; }
   if (!force && _token && Date.now() < _tokenExp) return _token;
   const r = await axios.post(`${BASE}/auth/request-token`,
-    new URLSearchParams({ secret_key: process.env.ONBUY_SECRET_KEY, consumer_key: process.env.ONBUY_CONSUMER_KEY }).toString(),
+    new URLSearchParams({ secret_key: sk(), consumer_key: ck() }).toString(),
     { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 20000 });
   _token = r.data?.access_token;
   if (!_token) throw new Error('OnBuy returned no access token');
@@ -140,13 +147,27 @@ async function categories(name = '') {
   return (d?.results || []).map(c => ({ id: String(c.category_id || c.id), name: c.name, path: c.category_tree || c.tree || null, canList: c.can_list_in }));
 }
 
+// Step-by-step check for the "Test connection" button — never throws.
 async function testConnection() {
-  await token(true);
-  const templates = await deliveryTemplates().catch(e => { throw e; });
-  return { ok: true, siteId: SITE_ID, deliveryTemplates: templates.length };
+  const k = keyInfo();
+  const steps = [];
+  const add = (step, ok, detail) => { steps.push({ step, ok, detail: detail || null }); return ok; };
+  if (!add('Keys found in Railway', k.consumer && k.secret,
+    k.consumer && k.secret ? `${k.mode === 'test' ? 'Test' : k.mode === 'live' ? 'Live' : 'OnBuy'} keys` : `Missing: ${[!k.consumer && 'ONBUY_CONSUMER_KEY', !k.secret && 'ONBUY_SECRET_KEY'].filter(Boolean).join(' and ')}`)) {
+    return { ok: false, siteId: SITE_ID, mode: k.mode, steps };
+  }
+  if (k.mismatch) add('Keys are a matching pair', false, 'One key is a Test key and the other a Live key — use both Test keys or both Live keys.');
+  try { await token(true); add('Signed in to OnBuy', true, `site ${SITE_ID}`); }
+  catch (e) { add('Signed in to OnBuy', false, errMessage(e)); return { ok: false, siteId: SITE_ID, mode: k.mode, steps }; }
+  let templates = [];
+  try { templates = await deliveryTemplates(); add('Read your delivery templates', true, `${templates.length} found`); }
+  catch (e) { add('Read your delivery templates', false, e.message); }
+  try { const o = await getOrders({ status: 'all', limit: 5 }); add('Read your orders', true, `${o.length} recent`); }
+  catch (e) { add('Read your orders', false, e.message); }
+  return { ok: steps.every(s => s.ok), siteId: SITE_ID, mode: k.mode, deliveryTemplates: templates.length, steps };
 }
 
 module.exports = {
-  isConfigured, SITE_ID, call, searchProducts, createListing, createProduct, queue, updateBySku, deleteBySku,
+  isConfigured, keyInfo, SITE_ID, call, searchProducts, createListing, createProduct, queue, updateBySku, deleteBySku,
   listingsBySku, getOrders, dispatchOrder, deliveryTemplates, categories, testConnection,
 };
