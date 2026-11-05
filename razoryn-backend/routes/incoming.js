@@ -181,7 +181,20 @@ async function ebayPotential(lines, { upliftPct = null } = {}) {
     const cost = PF.effectiveCost(landed, landed, s);
     const m = PF.marginAtPrice({ price, costPrice: landed, landedCost: landed, isLarge: !!l.large_panel, band: l.shipping_band,
       shippingCost: l.shipping_cost, postageInPrice: l.postage_in_price, channel: 'ebay', settings: SI });
-    const e = { price, fromDraft: !!l.price_from_draft, landedUnit: landed, landedEstimated: upliftPct != null, perUnit: { vat: +(price * v).toFixed(2), fees: +fees.toFixed(2), postage: +postage.toFixed(2), packaging: pack, cost: +cost.toFixed(2), net: m.net, marginPct: m.marginPct } };
+    // Itemised fees (Costs & margins settings) for the "fees" breakdown.
+    const pct = (x) => price * (Number(x) || 0) / 100;
+    const feeParts = [
+      [`eBay final value fee ${s.ebayFvfPct}%`, pct(s.ebayFvfPct)],
+      [`Regulatory fee ${s.ebayRegulatoryPct}%`, pct(s.ebayRegulatoryPct)],
+      [`High-return-rate fee ${s.ebayHighReturnPct}%`, pct(s.ebayHighReturnPct)],
+      [`Promoted listing ad ${s.adRatePct}%`, pct(s.adRatePct)],
+      ['Per-order fee', Number(s.ebayPerOrderFee) || 0],
+    ].filter(x => x[1] > 0);
+    const feeNet = feeParts.reduce((a2, x) => a2 + x[1], 0);
+    if (ch.feeVatMult > 1) feeParts.push([`VAT on eBay fees ${s.feesVatPct}%`, feeNet * (ch.feeVatMult - 1)]);
+    if (Number(s.externalAdPct) > 0) feeParts.push([`Off-eBay ads ${s.externalAdPct}%`, pct(s.externalAdPct)]);
+    const e = { price, fromDraft: !!l.price_from_draft, landedUnit: landed, landedEstimated: upliftPct != null, perUnit: { vat: +(price * v).toFixed(2), fees: +fees.toFixed(2), postage: +postage.toFixed(2), packaging: pack, cost: +cost.toFixed(2), net: m.net, marginPct: m.marginPct,
+      feeParts: feeParts.map(([l2, a2]) => ({ label: l2, amount: +a2.toFixed(2) })) } };
     t.revenue += price * qty; t.vat += price * v * qty; t.fees += fees * qty; t.postage += postage * qty;
     t.packaging += pack * qty; t.cost += cost * qty; t.net += (m.net || 0) * qty; t.units += qty;
     out.push({ ...l, ebay: e });
