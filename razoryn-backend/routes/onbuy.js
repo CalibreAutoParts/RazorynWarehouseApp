@@ -21,7 +21,7 @@ router.get('/status', safe(async (req, res) => {
     .reduce((a, r) => (a[r.status] = r.n, a), {});
   const orders = (await query(`SELECT COUNT(*)::int AS n, COALESCE(SUM(total), 0) AS total FROM sales
     WHERE channel = 'onbuy' AND occurred_at >= now() - interval '30 days' AND status NOT IN ('refunded','cancelled')`)).rows[0];
-  res.json({ configured: onbuy.isConfigured(), siteId: onbuy.SITE_ID, settings, counts,
+  res.json({ configured: onbuy.isConfigured(), keys: onbuy.keyInfo(), siteId: onbuy.SITE_ID, settings, counts,
     orders30d: { count: orders.n, total: Number(orders.total) } });
 }));
 
