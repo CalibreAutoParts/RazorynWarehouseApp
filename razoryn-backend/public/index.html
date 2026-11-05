@@ -4682,21 +4682,33 @@ function ctnMixNormalise() {
   const drift = 100 - keys.reduce((a, k) => a + mix[k], 0);
   if (drift) { const k = keys.reduce((b, k2) => mix[k2] > mix[b] ? k2 : b, keys[0]); mix[k] += drift; }
 }
-// Move one channel; the others shrink/grow in proportion so it stays 100%.
-function ctnMix(key, val) {
-  const mix = _pnl.mixNow; val = Math.max(0, Math.min(100, Math.round(+val || 0)));
-  const others = Object.keys(mix).filter(k => k !== key);
-  const rest = others.reduce((a, k) => a + mix[k], 0);
-  const left = 100 - val;
-  for (const k of others) mix[k] = rest > 0 ? Math.round(mix[k] / rest * left) : Math.round(left / others.length);
-  mix[key] = val;
-  const drift = 100 - Object.values(mix).reduce((a, x) => a + x, 0);
-  if (drift) { const k = others.find(k2 => mix[k2] + drift >= 0); if (k) mix[k] += drift; else mix[key] += drift; }
-  ctnPaintPnl();
+// Move one channel. Channels you've already set stay put; the ones you
+// haven't touched rebalance so the total stays 100% (only if they can't absorb
+// it do the others move too). Exact figures can be typed in the % boxes.
+function ctnMix(key, val, fromBox) {
+  val = Math.max(0, Math.min(100, Math.round(+val || 0)));
+  // Exact (unrounded) shares are kept behind the scenes so lots of small moves
+  // stay proportional; the % shown are whole numbers that always add to 100.
+  const ex = _pnl.mixExact || (_pnl.mixExact = { ..._pnl.mixNow });
+  _pnl.touched = (_pnl.touched || []).filter(k => k !== key); _pnl.touched.push(key);
+  const others = Object.keys(ex).filter(k => k !== key);
+  const free = others.filter(k => !_pnl.touched.includes(k));
+  const fixedSum = others.filter(k => _pnl.touched.includes(k)).reduce((a, k) => a + ex[k], 0);
+  let pool = free, left = 100 - val - fixedSum;
+  if (!free.length || left < 0) { pool = others; left = 100 - val; }   // can't fit → everything else gives way
+  const rest = pool.reduce((a, k) => a + ex[k], 0);
+  for (const k of pool) ex[k] = rest > 0 ? ex[k] / rest * left : left / pool.length;
+  ex[key] = val;
+  // Whole numbers by largest remainder (fair rounding, total exactly 100).
+  const keys = Object.keys(ex), fl = {}; let sum = 0;
+  for (const k of keys) { fl[k] = Math.floor(ex[k] + 1e-9); sum += fl[k]; }
+  keys.filter(k => k !== key).sort((a, b) => (ex[b] - fl[b]) - (ex[a] - fl[a])).slice(0, Math.max(0, 100 - sum)).forEach(k => fl[k]++);
+  _pnl.mixNow = fl;
+  ctnUpdatePnl(fromBox ? null : key);
 }
 function ctnUseRealMix() {
   for (const k of Object.keys(_pnl.mixNow)) _pnl.mixNow[k] = Math.round(Number((_pnl.actualMix || {})[k]) || 0);
-  ctnMixNormalise(); ctnPaintPnl();
+  _pnl.touched = []; ctnMixNormalise(); _pnl.mixExact = null; ctnUpdatePnl();
 }
 function ctnBlend(sc) {
   const r = { revenue: 0, vat: 0, fees: 0, postage: 0, packaging: 0, returns: 0, cost: 0, net: 0 };
@@ -4704,36 +4716,27 @@ function ctnBlend(sc) {
   r.marginPct = r.revenue ? r.net / r.revenue * 100 : null;
   return r;
 }
+const ctnMoney = n => canSeeMoney() ? (n < 0 ? '−' : '') + '£' + Math.abs(Math.round(Number(n || 0))).toLocaleString('en-GB') : '£•••';
+// Built ONCE (sliders stay put while dragged); ctnUpdatePnl() refreshes numbers.
 function ctnPaintPnl() {
   const box = el('ctn-pnl'); if (!box || !_pnl) return;
-  const m = n => canSeeMoney() ? (n < 0 ? '−' : '') + '£' + Math.abs(Math.round(Number(n || 0))).toLocaleString('en-GB') : '£•••';
-  const a = _pnl.assumptions, S = { cautious: ctnBlend('cautious'), likely: ctnBlend('likely'), best: ctnBlend('best') };
-  const L = S.likely;
-  const col = n => n >= 0 ? 'var(--green)' : 'var(--red)';
-  const row = (l, v, strong) => `<div style="display:flex;justify-content:space-between;${strong ? 'font-weight:700;border-top:1px solid var(--line);margin-top:4px;padding-top:4px;color:' + col(v) : 'color:var(--ink-soft)'}"><span>${l}</span><span>${m(v)}</span></div>`;
+  const a = _pnl.assumptions;
   box.innerHTML = `
     <div class="ui-label" style="display:flex;justify-content:space-between;align-items:center">Profit &amp; loss <span class="ui-opt">estimate — if it all sells</span></div>
     ${_pnl.priced.units ? `
-    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-bottom:12px">
-      ${[['cautious', 'Cautious'], ['likely', 'Likely'], ['best', 'Best']].map(([k, l]) => `<div style="border:1px solid var(--line);border-radius:10px;padding:8px 10px;${k === 'likely' ? 'background:var(--bg-soft);border-color:var(--ink-soft)' : ''}">
-        <div style="font-size:11px;color:var(--ink-soft)">${l}</div>
-        <div style="font-weight:700;font-size:${k === 'likely' ? '18px' : '15px'};color:${col(S[k].net)}">${m(S[k].net)}</div>
-        <div style="font-size:11px;color:var(--ink-soft)">${S[k].marginPct != null ? S[k].marginPct.toFixed(1) + '%' : '—'} margin</div></div>`).join('')}
-    </div>
-    <div style="font-size:12px;font-weight:600;margin-bottom:6px">Where it sells <span style="font-weight:400;color:var(--ink-soft)">— drag to set your mix (always 100%)</span></div>
-    ${Object.entries(_pnl.channels).map(([k, c]) => `<div style="display:grid;grid-template-columns:132px minmax(0,1fr) 40px;gap:8px;align-items:center;margin-bottom:4px;font-size:12px">
-      <span>${escapeHtml(c.label)}</span>
-      <input type="range" min="0" max="100" step="1" value="${_pnl.mixNow[k] || 0}" oninput="ctnMix('${k}', this.value)" aria-label="${escapeAttr(c.label)} share" style="width:100%;padding:0">
-      <span style="text-align:right;font-weight:600">${_pnl.mixNow[k] || 0}%</span></div>`).join('')}
+    <div id="pnl-cards" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-bottom:12px"></div>
+    <div style="font-size:12px;font-weight:600;margin-bottom:6px">Where it sells <span style="font-weight:400;color:var(--ink-soft)">— drag, type a %, or click a slider and use ← →; always adds up to 100%</span></div>
+    ${Object.entries(_pnl.channels).map(([k, c]) => `<div style="margin-bottom:8px;font-size:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
+        <span>${escapeHtml(c.label)}</span>
+        <span style="display:flex;align-items:center;gap:3px"><input type="number" id="pnl-n-${k}" min="0" max="100" step="1" value="${_pnl.mixNow[k] || 0}" onchange="ctnMix('${k}', this.value, true)" onkeydown="if(event.key==='Enter')this.blur()" aria-label="${escapeAttr(c.label)} %" style="width:52px;padding:3px 6px;font-size:12px;text-align:right">%</span>
+      </div>
+      <input type="range" id="pnl-r-${k}" min="0" max="100" step="1" value="${_pnl.mixNow[k] || 0}" oninput="ctnMix('${k}', this.value)" aria-label="${escapeAttr(c.label)} share" style="width:100%;padding:0;margin:0;cursor:pointer;display:block"></div>`).join('')}
     <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;margin:6px 0 12px">
       ${Object.keys(_pnl.actualMix || {}).length ? `<a href="#" onclick="ctnUseRealMix();return false">Use my real mix (last 90 days)</a>` : ''}
       <a href="#" onclick="ctnSaveMix();return false">Save as my default mix</a>
     </div>
-    <div style="font-size:12px;border-top:1px solid var(--line);padding-top:8px">
-      <div style="font-weight:600;margin-bottom:4px;color:var(--ink)">Likely, broken down</div>
-      ${row('Sales (inc VAT)', L.revenue)}${row('VAT', -L.vat)}${row('Selling fees', -L.fees)}${row('Postage + packaging', -(L.postage + L.packaging))}
-      ${row('Returns allowance', -L.returns)}${row('Landed cost' + (a.freightIn ? '' : ' (freight est.)'), -L.cost)}${row('Profit', L.net, true)}
-    </div>
+    <div id="pnl-break" style="font-size:12px;border-top:1px solid var(--line);padding-top:8px"></div>
     <div class="ui-hint" style="margin-top:8px;line-height:1.5">
       <b>Cautious</b>: every sale at your ${a.offerPct}% offer price, ${(a.returnsPct * 1.5).toFixed(1)}% returns${a.freightIn ? '' : ', freight + duty +50%'}.
       <b>Likely</b>: half that discount on average, ${a.returnsPct}% returns (${escapeHtml(a.returnsFrom)}).
@@ -4742,6 +4745,26 @@ function ctnPaintPnl() {
       Other channels follow your price rules (website −${a.prices.shopPct}%, bank −${a.prices.bankPct}%, cash −${a.prices.cashPct}%, OnBuy ${a.prices.onbuyPct >= 0 ? '+' : ''}${a.prices.onbuyPct}% vs eBay).
     </div>` : '<div style="font-size:12px;color:var(--ink-soft)">Add eBay prices and costs to the lines to see profit.</div>'}
     ${_pnl.unpriced.lines ? `<div class="ctn-warn" style="margin-top:8px">${_pnl.unpriced.lines} line(s) / ${_pnl.unpriced.units} units have no price or cost yet — not counted.</div>` : ''}`;
+  ctnUpdatePnl();
+}
+// Refresh figures + the OTHER sliders/boxes (never the slider being dragged).
+function ctnUpdatePnl(dragging) {
+  if (!_pnl || !el('pnl-cards')) return;
+  for (const k of Object.keys(_pnl.mixNow)) {
+    const r = el('pnl-r-' + k), n = el('pnl-n-' + k);
+    if (r && k !== dragging) r.value = _pnl.mixNow[k];
+    if (n && document.activeElement !== n) n.value = _pnl.mixNow[k];
+  }
+  const m = ctnMoney, a = _pnl.assumptions, col = v => v >= 0 ? 'var(--green)' : 'var(--red)';
+  const S = { cautious: ctnBlend('cautious'), likely: ctnBlend('likely'), best: ctnBlend('best') }, L = S.likely;
+  el('pnl-cards').innerHTML = [['cautious', 'Cautious'], ['likely', 'Likely'], ['best', 'Best']].map(([k, l]) => `<div style="border:1px solid var(--line);border-radius:10px;padding:8px 10px;${k === 'likely' ? 'background:var(--bg-soft);border-color:var(--ink-soft)' : ''}">
+    <div style="font-size:11px;color:var(--ink-soft)">${l}</div>
+    <div style="font-weight:700;font-size:${k === 'likely' ? '18px' : '15px'};color:${col(S[k].net)}">${m(S[k].net)}</div>
+    <div style="font-size:11px;color:var(--ink-soft)">${S[k].marginPct != null ? S[k].marginPct.toFixed(1) + '%' : '—'} margin</div></div>`).join('');
+  const row = (l, v, strong) => `<div style="display:flex;justify-content:space-between;${strong ? 'font-weight:700;border-top:1px solid var(--line);margin-top:4px;padding-top:4px;color:' + col(v) : 'color:var(--ink-soft)'}"><span>${l}</span><span>${m(v)}</span></div>`;
+  el('pnl-break').innerHTML = `<div style="font-weight:600;margin-bottom:4px;color:var(--ink)">Likely, broken down</div>
+    ${row('Sales (inc VAT)', L.revenue)}${row('VAT', -L.vat)}${row('Selling fees', -L.fees)}${row('Postage + packaging', -(L.postage + L.packaging))}
+    ${row('Returns allowance', -L.returns)}${row('Landed cost' + (a.freightIn ? '' : ' (freight est.)'), -L.cost)}${row('Profit', L.net, true)}`;
 }
 async function ctnSaveMix() {
   try { await Api.put('/api/incoming/sales-mix', { mix: _pnl.mixNow }); toast("Sales mix saved — used for every container's profit estimate", 'success', 4000); loadIncomingContainers(); }
