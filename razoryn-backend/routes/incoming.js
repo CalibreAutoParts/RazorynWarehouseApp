@@ -155,7 +155,7 @@ async function ensureDraftsTable() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`).catch(() => {});
 }
 
-async function ebayPotential(lines) {
+async function ebayPotential(lines, { upliftPct = null } = {}) {
   const PF = require('../lib/pricing-floor');
   const row = (await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {};
   const s = PF.resolveCostSettings(row);
@@ -165,7 +165,9 @@ async function ebayPotential(lines) {
   for (const l of lines) {
     const qty = parseInt(l.qty_ordered) || 0;
     const price = parseFloat(l.price_ebay) || 0;
-    const landed = l.landed_unit_cost_gbp != null ? parseFloat(l.landed_unit_cost_gbp) : (l.unit_cost_gbp != null ? parseFloat(l.unit_cost_gbp) : null);
+    // Freight/duty not in yet → the same estimate the profit & loss uses.
+    let landed = l.landed_unit_cost_gbp != null ? parseFloat(l.landed_unit_cost_gbp) : (l.unit_cost_gbp != null ? parseFloat(l.unit_cost_gbp) : null);
+    if (upliftPct != null && l.unit_cost_gbp != null) landed = +(parseFloat(l.unit_cost_gbp) * (1 + upliftPct / 100)).toFixed(4);
     if (!(price > 0)) { t.unpriced++; t.unpricedUnits += qty; out.push({ ...l, ebay: null }); continue; }
     const item = { band: l.shipping_band, isLarge: !!l.large_panel, shippingCost: l.shipping_cost };
     // Per-item packaging: came packaged → £0; bought separately → its own £.
@@ -176,10 +178,10 @@ async function ebayPotential(lines) {
     const inPrice = l.postage_in_price == null ? !l.large_panel : !!l.postage_in_price;
     const fees = price * ((ch.feePct + ch.adRatePct) / 100) * ch.feeVatMult + ch.fixedFee * ch.feeVatMult + price * (Number(s.externalAdPct) || 0) / 100;
     const postage = inPrice ? ch.postage : 0;
-    const cost = PF.effectiveCost(landed, l.landed_unit_cost_gbp, s);
-    const m = PF.marginAtPrice({ price, costPrice: landed, landedCost: l.landed_unit_cost_gbp, isLarge: !!l.large_panel, band: l.shipping_band,
+    const cost = PF.effectiveCost(landed, landed, s);
+    const m = PF.marginAtPrice({ price, costPrice: landed, landedCost: landed, isLarge: !!l.large_panel, band: l.shipping_band,
       shippingCost: l.shipping_cost, postageInPrice: l.postage_in_price, channel: 'ebay', settings: SI });
-    const e = { price, fromDraft: !!l.price_from_draft, perUnit: { vat: +(price * v).toFixed(2), fees: +fees.toFixed(2), postage: +postage.toFixed(2), packaging: pack, cost: +cost.toFixed(2), net: m.net, marginPct: m.marginPct } };
+    const e = { price, fromDraft: !!l.price_from_draft, landedUnit: landed, landedEstimated: upliftPct != null, perUnit: { vat: +(price * v).toFixed(2), fees: +fees.toFixed(2), postage: +postage.toFixed(2), packaging: pack, cost: +cost.toFixed(2), net: m.net, marginPct: m.marginPct } };
     t.revenue += price * qty; t.vat += price * v * qty; t.fees += fees * qty; t.postage += postage * qty;
     t.packaging += pack * qty; t.cost += cost * qty; t.net += (m.net || 0) * qty; t.units += qty;
     out.push({ ...l, ebay: e });
@@ -387,6 +389,8 @@ router.get('/containers', requirePermission('inventory'), async (req, res) => {
     GROUP BY i.container_ref, c.freight_total, c.duty, c.freight_currency, c.freight_total_gbp, c.duty_gbp, c.archived_at
     ORDER BY MIN(i.expected_date) NULLS LAST`);
   const archivedCount = archived ? rows.length : (await query(`SELECT COUNT(*)::int AS n FROM incoming_containers WHERE archived_at IS NOT NULL`)).rows[0].n;
+  // Estimated profit range per container (by the saved / real sales mix).
+  for (const c of rows) { try { const p = await containerPnl(c.ref); c.pnl = { ...p.summary, freightIn: p.assumptions.freightIn, unpriced: p.unpriced.lines }; } catch (_) {} }
   res.json({ containers: rows, archivedCount });
 });
 
@@ -400,6 +404,121 @@ router.post('/containers/:ref/archive', requirePermission('inventory'), async (r
   await audit(req, on ? 'incoming_container_archive' : 'incoming_container_unarchive', 'incoming', null, { container: req.params.ref });
   res.json({ ok: true, archived: on });
 });
+
+// ── Container profit & loss (estimate, as a range) ───────────────────────────
+// Every priced line × every channel × three scenarios, using the Costs & margins
+// model. The client blends the channels by the sales mix (linear), so sliders
+// recalculate instantly. Assumes the whole container sells.
+const PNL_CHANNELS = [['ebay', 'eBay'], ['shopify', 'Website (Shopify)'], ['onbuy', 'OnBuy'], ['bank', 'Bank / card (delivered)'], ['cash', 'Cash (collected)']];
+const chGroup = (c) => c === 'shopify' ? 'shopify' : c === 'onbuy' ? 'onbuy' : c === 'direct_cash' ? 'cash' : /^direct_/.test(c || '') ? 'bank' : /^ebay/.test(c || '') ? 'ebay' : null;
+async function salesMix() {
+  const d = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+  const actual = {};
+  try {
+    const r = await query(`SELECT channel, COUNT(*)::int AS n FROM sales WHERE occurred_at >= now() - interval '90 days'
+      AND COALESCE(is_estimate, false) = false AND status NOT IN ('refunded','cancelled') GROUP BY channel`);
+    let tot = 0; for (const x of r.rows) { const g = chGroup(x.channel); if (g) { actual[g] = (actual[g] || 0) + x.n; tot += x.n; } }
+    for (const k of Object.keys(actual)) actual[k] = Math.round(actual[k] / tot * 100);
+  } catch (_) {}
+  const fallback = { ebay: 70, shopify: 15, onbuy: 0, bank: 10, cash: 5 };
+  const saved = d.salesMix && typeof d.salesMix === 'object' ? d.salesMix : null;
+  return { mix: saved || (Object.keys(actual).length ? actual : fallback), actual, saved: !!saved };
+}
+// Freight + duty: the real figure when entered; else an estimate from your own
+// past containers, else Costs & margins' uplift, else 20% of goods (stated).
+async function freightEstimate(header, S) {
+  const freightIn = (parseFloat(header.freight_total_gbp) || 0) + (parseFloat(header.duty_gbp) || 0) > 0;
+  if (freightIn) return { freightIn, upliftPct: null, upliftFrom: null };
+  const past = (await query(`SELECT c.freight_total_gbp, c.duty_gbp, SUM(i.unit_cost_gbp * i.qty_ordered) AS goods
+      FROM incoming_containers c JOIN incoming_stock i ON i.container_ref = c.container_ref
+     WHERE COALESCE(c.freight_total_gbp, 0) + COALESCE(c.duty_gbp, 0) > 0 AND i.status <> 'cancelled'
+     GROUP BY c.container_ref, c.freight_total_gbp, c.duty_gbp`).catch(() => ({ rows: [] }))).rows.filter(x => parseFloat(x.goods) > 0);
+  if (past.length) {
+    const g = past.reduce((a, x) => a + parseFloat(x.goods), 0), f = past.reduce((a, x) => a + (parseFloat(x.freight_total_gbp) || 0) + (parseFloat(x.duty_gbp) || 0), 0);
+    return { freightIn, upliftPct: +(f / g * 100).toFixed(1), upliftFrom: `your ${past.length} previous container${past.length > 1 ? 's' : ''}` };
+  }
+  if (S.landedUpliftPct > 0) return { freightIn, upliftPct: S.landedUpliftPct, upliftFrom: 'Costs & margins' };
+  return { freightIn, upliftPct: 20, upliftFrom: 'a typical 20% (set your real figure in Costs & margins)' };
+}
+async function containerPnl(ref) {
+  const PF = require('../lib/pricing-floor');
+  const row = (await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {};
+  const S = PF.resolveCostSettings(row);
+  let ob = {}; try { ob = await require('../lib/onbuy-sync').getSettings(); } catch (_) {}
+  const SO = { ...S, onbuyFeePct: Number(ob.feePct) || 9 };
+  const header = (await query(`SELECT * FROM incoming_containers WHERE container_ref = $1`, [ref])).rows[0] || {};
+  const lines = (await query(`
+    SELECT i.qty_ordered, i.unit_cost_gbp, i.landed_unit_cost_gbp, ${EFF_PRICE} AS price_ebay, p.price_shopify, p.large_panel,
+           COALESCE(p.shipping_band, dr.d_band) AS shipping_band, COALESCE(p.shipping_cost, dr.d_ship_cost) AS shipping_cost,
+           COALESCE(p.packaging_included, dr.d_pack_inc) AS packaging_included, COALESCE(p.packaging_cost, dr.d_pack_cost) AS packaging_cost,
+           p.postage_in_price
+      FROM incoming_stock i LEFT JOIN products p ON p.id = i.product_id ${DRAFT_JOIN}
+     WHERE i.container_ref = $1 AND i.status <> 'cancelled'`, [ref])).rows;
+  const { freightIn, upliftPct, upliftFrom } = await freightEstimate(header, S);
+  // Returns: your real rate over 6 months (bounded), else 5%.
+  let returnsPct = 5, returnsFrom = 'typical 5%';
+  try {
+    const rr = (await query(`SELECT (SELECT COALESCE(SUM(qty), 0) FROM returns WHERE created_at >= now() - interval '180 days') AS ret,
+      (SELECT COALESCE(SUM(si.qty), 0) FROM sale_items si JOIN sales s ON s.id = si.sale_id WHERE s.occurred_at >= now() - interval '180 days' AND COALESCE(s.is_estimate, false) = false) AS sold`)).rows[0];
+    if (Number(rr.sold) >= 50) { returnsPct = Math.min(20, Math.max(1, +(Number(rr.ret) / Number(rr.sold) * 100).toFixed(1))); returnsFrom = 'your last 6 months'; }
+  } catch (_) {}
+  const offerPct = Number(S.offerDiscountPct) || 5;
+  const shopPct = row.price_link_pct != null ? parseFloat(row.price_link_pct) : (row.bank_transfer_pct != null ? parseFloat(row.bank_transfer_pct) : 10);
+  const bankPct = row.bank_transfer_pct != null ? parseFloat(row.bank_transfer_pct) : 10;
+  const cashPct = row.cash_discount_pct != null ? parseFloat(row.cash_discount_pct) : 10;
+  const obPct = Number(ob.pricePct) || 0;
+  const v = S.vatRegistered ? (S.vatRate / 100) / (1 + S.vatRate / 100) : 0;
+  const SC = { cautious: { m: 1 - offerPct / 100, ret: 1.5, up: 1.5 }, likely: { m: 1 - offerPct / 200, ret: 1, up: 1 }, best: { m: 1, ret: 0.5, up: 0.75 } };
+  const out = {}; for (const [k, label] of PNL_CHANNELS) { out[k] = { label, scenarios: {} }; for (const sc of Object.keys(SC)) out[k].scenarios[sc] = { revenue: 0, vat: 0, fees: 0, postage: 0, packaging: 0, returns: 0, cost: 0, net: 0 }; }
+  let pricedLines = 0, pricedUnits = 0, unpriced = 0, unpricedUnits = 0;
+  for (const l of lines) {
+    const qty = parseInt(l.qty_ordered) || 0;
+    const base = parseFloat(l.price_ebay) || 0;
+    const goods = l.unit_cost_gbp != null ? parseFloat(l.unit_cost_gbp) : (l.landed_unit_cost_gbp != null ? parseFloat(l.landed_unit_cost_gbp) : null);
+    if (!(base > 0) || goods == null) { unpriced++; unpricedUnits += qty; continue; }
+    pricedLines++; pricedUnits += qty;
+    const pack = l.packaging_included === true ? 0 : (l.packaging_included === false && l.packaging_cost != null ? parseFloat(l.packaging_cost) || 0 : S.packagingCost);
+    const item = { band: l.shipping_band, isLarge: !!l.large_panel, shippingCost: l.shipping_cost };
+    const inPrice = l.postage_in_price == null ? !l.large_panel : !!l.postage_in_price;
+    const prices = { ebay: base, shopify: parseFloat(l.price_shopify) > 0 ? parseFloat(l.price_shopify) : base * (1 - shopPct / 100),
+      onbuy: base * (1 + obPct / 100), bank: base * (1 - bankPct / 100), cash: base * (1 - cashPct / 100) };
+    for (const [k] of PNL_CHANNELS) {
+      const ch = PF.channelParams(k === 'bank' || k === 'cash' ? 'direct' : k, item, SO);
+      const postage = k === 'cash' ? 0 : (inPrice ? ch.postage : 0);
+      for (const [sc, f] of Object.entries(SC)) {
+        const B = prices[k] * f.m;
+        const fees = B * ((ch.feePct + ch.adRatePct) / 100) * ch.feeVatMult + ch.fixedFee * ch.feeVatMult + (k === 'cash' || k === 'bank' ? 0 : B * (Number(S.externalAdPct) || 0) / 100);
+        const cost = freightIn && l.landed_unit_cost_gbp != null ? parseFloat(l.landed_unit_cost_gbp) : goods * (1 + (upliftPct || 0) * f.up / 100);
+        const retCost = (returnsPct * f.ret / 100) * (2 * (k === 'cash' ? 0 : ch.postage) + pack);   // per unit sold: postage both ways + re-pack
+        const net = B - B * v - fees - postage - pack - (Number(S.overheadPerUnit) || 0) - cost - retCost;
+        const t = out[k].scenarios[sc];
+        t.revenue += B * qty; t.vat += B * v * qty; t.fees += fees * qty; t.postage += postage * qty; t.packaging += pack * qty;
+        t.returns += retCost * qty; t.cost += (cost + (Number(S.overheadPerUnit) || 0)) * qty; t.net += net * qty;
+      }
+    }
+  }
+  for (const k of Object.keys(out)) for (const t of Object.values(out[k].scenarios)) for (const f of Object.keys(t)) t[f] = +t[f].toFixed(2);
+  const mix = await salesMix();
+  const blend = (sc) => { const r = { revenue: 0, net: 0 }; let w = 0; for (const [k, pct] of Object.entries(mix.mix)) { if (!out[k]) continue; w += pct; r.revenue += out[k].scenarios[sc].revenue * pct; r.net += out[k].scenarios[sc].net * pct; } if (w) { r.revenue /= w; r.net /= w; } r.revenue = +r.revenue.toFixed(2); r.net = +r.net.toFixed(2); r.marginPct = r.revenue ? +(r.net / r.revenue * 100).toFixed(1) : null; return r; };
+  return { channels: out, mix: mix.mix, actualMix: mix.actual, mixSaved: mix.saved,
+    summary: { cautious: blend('cautious'), likely: blend('likely'), best: blend('best') },
+    assumptions: { offerPct, returnsPct, returnsFrom, freightIn, upliftPct, upliftFrom, prices: { shopPct, bankPct, cashPct, onbuyPct: obPct } },
+    priced: { lines: pricedLines, units: pricedUnits }, unpriced: { lines: unpriced, units: unpricedUnits } };
+}
+const pnlSafe = fn => (req, res) => Promise.resolve(fn(req, res)).catch(e => { console.warn('[incoming pnl]', e.message); res.status(500).json({ error: 'failed', message: e.message }); });
+router.get('/containers/:ref/pnl', requirePermission('inventory'), pnlSafe(async (req, res) => {
+  await ensureTable(); await ensureDraftsTable();
+  res.json(await containerPnl(req.params.ref));
+}));
+// PUT /api/incoming/sales-mix { mix: { ebay, shopify, onbuy, bank, cash } } (null = use real mix)
+router.put('/sales-mix', requirePermission('inventory'), pnlSafe(async (req, res) => {
+  const m = req.body?.mix;
+  const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+  let clean = null;
+  if (m && typeof m === 'object') { clean = {}; for (const [k] of PNL_CHANNELS) clean[k] = Math.max(0, Math.min(100, Math.round(Number(m[k]) || 0))); }
+  await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify({ ...cur, salesMix: clean })]);
+  res.json({ ok: true, mix: clean });
+}));
 
 // GET /api/incoming/containers/:ref — one container: header (freight/duty) + its lines
 // with the live landed cost per unit + a totals summary.
@@ -419,7 +538,10 @@ router.get('/containers/:ref', requirePermission('inventory'), async (req, res) 
     ORDER BY i.title NULLS LAST, i.id`, [ref])).rows;
   const goods = lines.reduce((a, l) => a + (parseFloat(l.unit_cost_gbp) || 0) * (parseInt(l.qty_ordered) || 0), 0);
   const addOn = (parseFloat(header.freight_total_gbp) || 0) + (parseFloat(header.duty_gbp) || 0);
-  const ebay = await ebayPotential(lines);
+  const PFd = require('../lib/pricing-floor');
+  const Sd = PFd.resolveCostSettings((await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {});
+  const fe = await freightEstimate(header, Sd);
+  const ebay = await ebayPotential(lines, { upliftPct: fe.freightIn ? null : fe.upliftPct });
   res.json({ header, lines: ebay.lines, totals: {
     units: lines.reduce((a, l) => a + (parseInt(l.qty_ordered) || 0), 0),
     goodsValueGbp: +goods.toFixed(2), freightDutyGbp: +addOn.toFixed(2), landedValueGbp: +(goods + addOn).toFixed(2),

@@ -35,6 +35,9 @@ function ensureSchema() {
       updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
     await query(`CREATE INDEX IF NOT EXISTS onbuy_listings_sku_idx ON onbuy_listings (LOWER(sku))`);
+    // Per-part delivery template (shipping) — overrides the default in OnBuy settings.
+    await query(`CREATE TABLE IF NOT EXISTS onbuy_product_prefs (
+      product_id INTEGER PRIMARY KEY, delivery_template_id TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
     // OnBuy orders are sales on channel 'onbuy'.
     try {
       await query(`ALTER TABLE sales DROP CONSTRAINT IF EXISTS sales_channel_check`);
@@ -121,16 +124,45 @@ function validEan(code) {
 
 function listingBlock(p, s) {
   const l = { sku: p.sku, price: priceFor(p, s), stock: stockFor(p, s), handling_time: parseInt(s.handlingTime) || 1 };
-  if (s.deliveryTemplateId) l.delivery_template_id = String(s.deliveryTemplateId);
+  const tpl = p._deliveryTemplateId || s.deliveryTemplateId;
+  if (tpl) l.delivery_template_id = String(tpl);
   return l;
+}
+
+// Set the OnBuy delivery template for many parts: saved per part (used when
+// listed) and pushed straight away to the ones already on OnBuy. templateId ''
+// = back to the default from OnBuy settings.
+async function setDeliveryTemplate(productIds, templateId) {
+  await ensureSchema();
+  const ids = [...new Set((productIds || []).map(Number).filter(Boolean))];
+  const tpl = templateId ? String(templateId) : null;
+  for (const id of ids) {
+    await query(`INSERT INTO onbuy_product_prefs (product_id, delivery_template_id, updated_at) VALUES ($1,$2,now())
+      ON CONFLICT (product_id) DO UPDATE SET delivery_template_id = EXCLUDED.delivery_template_id, updated_at = now()`, [id, tpl]);
+  }
+  const s = await getSettings();
+  const effective = tpl || s.deliveryTemplateId || null;
+  const listed = (await query(`SELECT sku FROM onbuy_listings WHERE product_id = ANY($1) AND status = 'listed'`, [ids])).rows;
+  let pushed = 0, error = null;
+  if (listed.length && effective) {
+    try { await onbuy.updateBySku(listed.map(r => ({ sku: r.sku, delivery_template_id: String(effective) }))); pushed = listed.length; }
+    catch (e) { error = e.message; }
+  }
+  return { saved: ids.length, pushed, listed: listed.length, error, noTemplate: !effective };
 }
 
 // ── Listing parts on OnBuy ─────────────────────────────────────────────────
 async function findOpc(p) {
   const tries = [];
   if (validEan(p.barcode)) tries.push(['product_code', String(p.barcode).replace(/\D/g, '')]);
-  if (p.part_number) tries.push(['mpn', p.part_number]);
-  if (p.sku && p.sku !== p.part_number) tries.push(['mpn', p.sku]);
+  // Every common way the part number is written (86563-G2550 / 86563G2550 /
+  // spaced Stellantis groups), plus public alternate numbers — OnBuy's catalogue
+  // stores manufacturers' numbers in different forms.
+  const { allPnForms } = require('./part-numbers');
+  let alts = [];
+  try { alts = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 AND NOT COALESCE(private, false) ORDER BY id LIMIT 5`, [p.id])).rows.map(r => r.code); } catch (_) {}
+  const forms = allPnForms(p.part_number || null, [p.sku !== p.part_number ? p.sku : null, ...alts].filter(Boolean), { cap: 8 });
+  for (const f of forms) tries.push(['mpn', f]);
   for (const [field, value] of tries) {
     const hits = await onbuy.searchProducts(field, value, { limit: 5 }).catch(() => []);
     if (hits.length === 1) return { opc: hits[0].opc, name: hits[0].name, via: field };
@@ -164,7 +196,8 @@ async function listProducts(productIds) {
   await ensureSchema();
   const s = await pricingSettings();
   const out = [];
-  const rows = (await query(`SELECT * FROM products WHERE id = ANY($1) AND active = true`, [productIds])).rows;
+  const rows = (await query(`SELECT p.*, pp.delivery_template_id AS "_deliveryTemplateId" FROM products p
+    LEFT JOIN onbuy_product_prefs pp ON pp.product_id = p.id WHERE p.id = ANY($1) AND p.active = true`, [productIds])).rows;
   for (const p of rows) {
     const r = { productId: p.id, sku: p.sku };
     try {
@@ -185,7 +218,7 @@ async function listProducts(productIds) {
         await upsert(p, { status: 'queued', queue_id: qid ? String(qid) : null, price: priceFor(p, s), stock_pushed: stockFor(p, s), price_pushed: priceFor(p, s), error: null });
         r.result = 'queued'; r.queueId = qid;
       } else {
-        await upsert(p, { status: 'needs_ean', error: 'Not in the OnBuy catalogue and no EAN-13 barcode — OnBuy needs an EAN to create a new product.' });
+        await upsert(p, { status: 'needs_ean', error: 'Not in OnBuy\'s catalogue yet (searched by barcode and every form of the part number). OnBuy only creates new products that have an EAN-13 barcode.' });
         r.result = 'needs_ean';
       }
     } catch (e) {
@@ -367,5 +400,5 @@ async function runAll() {
   } finally { _running = false; }
 }
 
-module.exports = { ensureSchema, getSettings, pricingSettings, saveSettings, priceFor, floorFor, marginFor, stockFor, validEan, findOpc, listProducts, checkQueues,
+module.exports = { setDeliveryTemplate, ensureSchema, getSettings, pricingSettings, saveSettings, priceFor, floorFor, marginFor, stockFor, validEan, findOpc, listProducts, checkQueues,
   pushStockAndPrices, removeListing, importOrders, importOne, pushDispatch, runAll };
