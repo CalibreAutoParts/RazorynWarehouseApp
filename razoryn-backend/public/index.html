@@ -23712,6 +23712,7 @@ async function renderOnBuy() {
           <div class="seg" id="ob-filter">${[['all','All'],['listed','On OnBuy'],['unlisted','Not listed (in stock)'],['problems','Needs attention']].map(([k,l]) => `<button class="${OB.filter===k?'active':''}" onclick="OB.filter='${k}';obLoadProducts()">${l}</button>`).join('')}</div>
           <input type="search" class="search-input" placeholder="Search SKU, title, part number, barcode…" value="${escapeAttr(OB.q)}" oninput="clearTimeout(OB._t);OB._t=setTimeout(()=>{OB.q=this.value;obLoadProducts()},300)" style="flex:1;min-width:200px">
         </div>
+        <div id="ob-bulk" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px"></div>
         <div id="ob-products" style="overflow-x:auto"></div>
       </div></div>
   </div>`;
@@ -23763,6 +23764,8 @@ function obPaintSettings(s, configured) {
     </div>
     <div style="display:flex;justify-content:flex-end"><button class="btn btn-primary" onclick="obSaveSettings()">Save settings</button></div>`;
   if (configured) Api.get('/api/onbuy/delivery-templates').then(r => {
+    OB.templates = r.templates || [];
+    obPaintBulkBar(); if (OB.items?.length) obLoadProducts();
     const sel = el('ob-delivery'); if (!sel) return;
     sel.innerHTML = '<option value="">OnBuy default</option>' + (r.templates || []).map(t => `<option value="${escapeAttr(t.id)}" ${String(s.deliveryTemplateId) === t.id ? 'selected' : ''}>${escapeHtml(t.name)}${t.isDefault ? ' (default)' : ''}</option>`).join('');
   }).catch(() => {});
@@ -23832,24 +23835,61 @@ async function obLoadProducts() {
     : x.status === 'needs_ean' ? '<span class="pill amber"><span class="dot"></span>Needs EAN</span>'
     : x.status === 'error' ? '<span class="pill red"><span class="dot"></span>Error</span>' : '<span style="color:var(--ink-soft);font-size:12px">—</span>';
   const mc = m => m == null ? 'var(--ink-soft)' : m < 0 ? 'var(--red)' : m < 10 ? 'var(--amber)' : 'var(--green)';
+  obPaintBulkBar();
   box.innerHTML = OB.items.length ? `<table class="table" style="font-size:13px"><thead><tr>
-      <th style="width:28px"><input type="checkbox" onchange="OB.items.forEach(x=>this.checked?OB.sel.add(x.id):OB.sel.delete(x.id));obLoadProductsPaintChecks()"></th>
-      <th>Part</th><th style="text-align:right">Stock</th><th style="text-align:right">eBay £</th><th style="text-align:right">OnBuy £</th><th style="text-align:right">Margin</th><th>EAN</th><th>OnBuy</th><th></th></tr></thead><tbody>
+      <th style="width:28px"><input type="checkbox" title="Tick every product shown (whole search result)" onchange="OB.items.forEach(x=>this.checked?OB.sel.add(x.id):OB.sel.delete(x.id));obLoadProductsPaintChecks();obPaintBulkBar()"></th>
+      <th>Part</th><th style="text-align:right">Stock</th><th style="text-align:right">eBay £</th><th style="text-align:right">OnBuy £</th><th style="text-align:right">Margin</th><th>EAN</th><th>Delivery</th><th>OnBuy</th><th></th></tr></thead><tbody>
     ${OB.items.slice(0, 500).map(x => `<tr>
-      <td><input type="checkbox" class="ob-cb" data-id="${x.id}" ${OB.sel.has(x.id) ? 'checked' : ''} onchange="this.checked?OB.sel.add(${x.id}):OB.sel.delete(${x.id})"></td>
+      <td><input type="checkbox" class="ob-cb" data-id="${x.id}" ${OB.sel.has(x.id) ? 'checked' : ''} onchange="this.checked?OB.sel.add(${x.id}):OB.sel.delete(${x.id});obPaintBulkBar()"></td>
       <td><div style="font-weight:600;max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(x.title || '')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(x.sku || '')}${x.partNumber && x.partNumber !== x.sku ? ' · ' + escapeHtml(x.partNumber) : ''}</div>
-        ${x.error ? `<div style="font-size:11px;color:var(--red);max-width:420px">${escapeHtml(x.error)}</div>` : ''}</td>
+        ${x.error ? `<div style="font-size:11px;color:${x.status === 'needs_ean' ? 'var(--ink-soft)' : 'var(--red)'};max-width:420px">${escapeHtml(x.error)}</div>` : ''}</td>
       <td style="text-align:right">${x.stock}${x.qty !== x.stock ? `<span style="color:var(--ink-soft);font-size:11px"> /${x.qty}</span>` : ''}</td>
       <td style="text-align:right">${x.priceEbay != null ? ctMoney(x.priceEbay) : '—'}</td>
       <td style="text-align:right;font-weight:600">${x.price != null ? ctMoney(x.price) : '—'}${x.floor && x.price != null && x.price <= x.floor + 1 ? '<div style="font-size:10.5px;color:var(--amber)">at margin floor</div>' : ''}</td>
       <td style="text-align:right;color:${mc(x.marginPct)}">${x.marginPct != null ? x.marginPct.toFixed(1) + '%' : '—'}${x.net != null ? `<div style="font-size:10.5px">${ctMoney(x.net)}</div>` : ''}</td>
       <td>${x.hasEan ? '✓' : '<span style="color:var(--ink-soft)">—</span>'}</td>
+      <td style="font-size:12px;white-space:nowrap">${obTplName(x.deliveryTemplateId)}</td>
       <td>${st(x)}</td>
       <td style="white-space:nowrap">${['listed','queued'].includes(x.status) ? `<button class="btn btn-outline btn-sm" onclick="obRemove(${x.id})">Remove</button>` : `<button class="btn btn-outline btn-sm" onclick="obList([${x.id}])">List</button>`}</td>
     </tr>`).join('')}</tbody></table>${OB.items.length > 500 ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Showing 500 of ${OB.items.length} — search to narrow down.</div>` : ''}`
     : '<div class="empty" style="padding:18px"><div class="t">Nothing here</div></div>';
 }
 function obLoadProductsPaintChecks() { document.querySelectorAll('.ob-cb').forEach(c => { c.checked = OB.sel.has(+c.dataset.id); }); }
+// Delivery template name for a part (its own, else the default from settings).
+function obTplName(id) {
+  const t = (OB.templates || []);
+  const def = OB.status?.settings?.deliveryTemplateId;
+  if (id) return escapeHtml(t.find(x => x.id === String(id))?.name || 'Template ' + id);
+  const d = def ? (t.find(x => x.id === String(def))?.name || 'Template ' + def) : (t.find(x => x.isDefault)?.name || 'OnBuy default');
+  return `<span style="color:var(--ink-soft)">${escapeHtml(d)} <span style="font-size:10.5px">(default)</span></span>`;
+}
+// Bulk bar: tick (or search "bonnet" + tick all) → one delivery template for all.
+function obPaintBulkBar() {
+  const box = el('ob-bulk'); if (!box) return;
+  const n = OB.sel.size, shown = (OB.items || []).length;
+  const opts = (OB.templates || []).map(t => `<option value="${escapeAttr(t.id)}">${escapeHtml(t.name)}${t.isDefault ? ' (OnBuy default)' : ''}</option>`).join('');
+  box.innerHTML = `
+    <span><b>${n}</b> ticked</span>
+    ${shown ? `<a href="#" onclick="OB.items.forEach(x=>OB.sel.add(x.id));obLoadProductsPaintChecks();obPaintBulkBar();return false">Tick all ${shown} shown</a>` : ''}
+    ${n ? `<a href="#" onclick="OB.sel.clear();obLoadProductsPaintChecks();obPaintBulkBar();return false">Clear</a>` : ''}
+    <span style="flex:1"></span>
+    <span>🚚 Delivery template</span>
+    <select id="ob-bulk-tpl" style="min-width:200px">${opts ? '<option value="">— default from settings —</option>' + opts : '<option value="">(test connection to load templates)</option>'}</select>
+    <button class="btn btn-primary btn-sm" ${n ? '' : 'disabled'} onclick="obSetDelivery()">Apply to ${n} ticked</button>`;
+}
+async function obSetDelivery() {
+  const ids = [...OB.sel]; if (!ids.length) return;
+  const tpl = el('ob-bulk-tpl')?.value || '';
+  const name = tpl ? ((OB.templates || []).find(t => t.id === tpl)?.name || tpl) : 'the default';
+  if (!confirm(`Set the OnBuy delivery template to "${name}" for ${ids.length} product(s)?\n\nListings already on OnBuy are updated now; the rest use it when they're listed.`)) return;
+  const t = Task.start(`Updating delivery for ${ids.length}…`);
+  try {
+    const r = await Api.post('/api/onbuy/delivery', { productIds: ids, templateId: tpl });
+    Task.done(t, 'Done');
+    toast(`🚚 ${r.saved} set to "${name}"${r.pushed ? ` · ${r.pushed} updated on OnBuy` : ''}${r.error ? ' · OnBuy: ' + r.error : ''}`, r.error ? 'warn' : 'success', 8000);
+    OB.sel.clear(); obLoadProducts();
+  } catch (e) { Task.fail(t, 'Failed'); toast(e.data?.message || e.message, 'error', 8000); }
+}
 async function obList(ids, all = false) {
   if (!OB.status?.configured) { toast('Connect OnBuy first (keys in Railway) — see the box at the top', 'warn', 8000); return; }
   const t = Task.start(all ? 'Listing everything in stock on OnBuy…' : `Listing ${ids.length} on OnBuy…`);

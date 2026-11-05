@@ -48,8 +48,10 @@ router.get('/products', safe(async (req, res) => {
   else if (f === 'unlisted') where.push(`(ol.product_id IS NULL OR ol.status = 'removed') AND p.qty_on_hand > 0`);
   else if (f === 'problems') where.push(`ol.status IN ('error','needs_ean')`);
   const rows = (await query(`SELECT p.*, ol.status AS ob_status, ol.opc AS ob_opc, ol.error AS ob_error,
-       ol.stock_pushed AS ob_stock_pushed, ol.price_pushed AS ob_price_pushed, ol.updated_at AS ob_updated
+       ol.stock_pushed AS ob_stock_pushed, ol.price_pushed AS ob_price_pushed, ol.updated_at AS ob_updated,
+       pp.delivery_template_id AS ob_delivery
      FROM products p LEFT JOIN onbuy_listings ol ON ol.product_id = p.id
+     LEFT JOIN onbuy_product_prefs pp ON pp.product_id = p.id
      WHERE ${where.join(' AND ')}
      ORDER BY (ol.status IS NULL), p.qty_on_hand DESC, p.title LIMIT 2000`, params)).rows;
   const items = rows.map(p => {
@@ -61,6 +63,7 @@ router.get('/products', safe(async (req, res) => {
       price, floor: ob.floorFor(p, s), net: m?.net ?? null, marginPct: m?.marginPct ?? null,
       hasEan: ob.validEan(p.barcode), status: p.ob_status || null, opc: p.ob_opc || null, error: p.ob_error || null,
       stockPushed: p.ob_stock_pushed, pricePushed: p.ob_price_pushed != null ? Number(p.ob_price_pushed) : null,
+      deliveryTemplateId: p.ob_delivery || null,
     };
   });
   res.json({ items });
@@ -83,6 +86,15 @@ router.post('/list', safe(async (req, res) => {
   const summary = results.reduce((a, r) => (a[r.result] = (a[r.result] || 0) + 1, a), {});
   await audit(req, 'onbuy_list', null, null, { count: ids.length, summary });
   res.json({ results, summary, more: !!req.body?.allInStock && ids.length === 200 });
+}));
+
+// POST /api/onbuy/delivery { productIds, templateId } — shipping for many parts at once.
+router.post('/delivery', safe(async (req, res) => {
+  const ids = Array.isArray(req.body?.productIds) ? req.body.productIds : [];
+  if (!ids.length) return res.status(400).json({ error: 'no_products', message: 'Tick some products first.' });
+  const r = await ob.setDeliveryTemplate(ids.slice(0, 5000), req.body?.templateId || '');
+  await audit(req, 'onbuy_delivery_template', null, null, { count: ids.length, templateId: req.body?.templateId || null, pushed: r.pushed });
+  res.json(r);
 }));
 
 router.post('/push', safe(async (req, res) => { res.json(await ob.pushStockAndPrices({ all: !!req.body?.all })); }));
