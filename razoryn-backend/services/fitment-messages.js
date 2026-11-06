@@ -13,12 +13,16 @@
 
 const { query } = require('../db');
 
-// ⛔ HARD-DISABLED (Oct 2026): eBay restricted an account after automated
-// buyer messages tripped its member-to-member contact policy. Automated
-// messages to eBay buyers are switched off in CODE — no setting, cron or
-// "run now" button can send them. Don't re-enable without reviewing eBay's
-// messaging policy first.
-const AUTO_EBAY_MESSAGES_DISABLED = true;
+// Oct 2026: eBay restricted an account after automated buyer messages tripped
+// its member-to-member contact policy, and this was hard-disabled. Re-opened
+// (Nov 2026) at the owner's request with guards: OFF by default, an explicit
+// warning to switch on, a per-eBay-account choice (leave a restricted account
+// out), and every subject/body checked by lib/ebay-message-guard (no phone,
+// email, website, "buy direct", discount codes) on save AND on send.
+const AUTO_EBAY_MESSAGES_DISABLED = false;
+const guard = require('../lib/ebay-message-guard');
+// Only message orders from the eBay accounts ticked in settings (empty = none).
+const channelAllowed = (cfg, ch) => Array.isArray(cfg.channels) && cfg.channels.includes(ch);
 
 const DEFAULT_SUBJECT = 'Quick check so your part fits first time';
 const DEFAULT_BODY =
@@ -51,6 +55,7 @@ async function getConfig() {
     windowDays: Number.isFinite(+c.windowDays) ? Math.min(90, Math.max(1, +c.windowDays)) : 14,
     delayHours: Number.isFinite(+c.delayHours) ? Math.min(240, Math.max(0, +c.delayHours)) : 0,
     maxPerRun: Number.isFinite(+c.maxPerRun) ? Math.min(200, Math.max(1, +c.maxPerRun)) : 40,
+    channels: Array.isArray(c.channels) ? c.channels.map(String) : [],
     DEFAULT_SUBJECT, DEFAULT_BODY,
   };
 }
@@ -65,6 +70,9 @@ async function saveConfig(patch = {}) {
   if (patch.windowDays !== undefined) next.windowDays = Math.min(90, Math.max(1, parseInt(patch.windowDays) || 14));
   if (patch.delayHours !== undefined) next.delayHours = Math.min(240, Math.max(0, parseInt(patch.delayHours) || 0));
   if (patch.maxPerRun !== undefined)  next.maxPerRun = Math.min(200, Math.max(1, parseInt(patch.maxPerRun) || 40));
+  if (patch.channels !== undefined)   next.channels = (Array.isArray(patch.channels) ? patch.channels : []).map(String).filter(c => /^ebay_/.test(c));
+  // Refuse wording eBay's member-to-member policy forbids before it's ever stored.
+  guard.assertClean(next.subject || DEFAULT_SUBJECT, next.body || DEFAULT_BODY);
   const data = { ...cur, fitmentMsg: next };
   await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify(data)]);
   return getConfig();
@@ -191,6 +199,7 @@ async function sendForSale(saleId) {
           AND NOT (COALESCE(refunded_amount,0) > 0)
           AND NOT EXISTS (SELECT 1 FROM returns r WHERE r.sale_id = sales.id)`, [saleId]);
     if (!rows[0]) return { ok: false, skipped: 'not_eligible' };
+    if (!channelAllowed(cfg, rows[0].channel)) return { ok: false, skipped: 'account_not_selected' };
     return await sendOneSale(rows[0], cfg);
   } catch (e) {
     console.warn('[fitment-msg] sendForSale failed:', e.message);
@@ -216,6 +225,7 @@ async function sendFitmentMessagesCore({ allowDisabled = false } = {}) {
   let sent = 0, skipped = 0, failed = 0;
   const results = [];
   for (const sale of rows) {
+    if (!channelAllowed(cfg, sale.channel)) { skipped++; continue; }
     const r = await sendOneSale(sale, cfg);
     if (r.ok) sent++; else if (r.error) failed++; else skipped++;
     results.push(r);
