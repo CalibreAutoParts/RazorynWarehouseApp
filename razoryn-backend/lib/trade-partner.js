@@ -103,7 +103,45 @@ async function catalogue(link, { q = '', inStock = false, offset = 0 } = {}) {
     const l = local.find(x => x.partner_link_id === link.id && x.partner_sku === i.sku) || local.find(x => x.sku.toUpperCase() === i.sku.toUpperCase());
     return { ...i, local: l ? { id: l.id, sku: l.sku, qty: l.qty_on_hand, linked: l.partner_link_id === link.id } : null };
   });
+  try { r.items = await withMargins(r.items); } catch (e) { console.warn('[partner] margins:', e.message); }
   return r;
+}
+
+// What WE would make listing each partner part — eBay, Shopify and cash — using
+// our own fees, VAT, packaging and overhead. Cost = their trade price: ex VAT when
+// we're VAT registered (we claim their VAT back), plus VAT when we aren't.
+// Selling prices start from their retail prices (a guide — you set your own).
+async function withMargins(items) {
+  const PF = require('./pricing-floor');
+  const row = (await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0] || {};
+  const S = PF.resolveCostSettings(row);
+  const shopPct = row.price_link_pct != null ? parseFloat(row.price_link_pct) : (row.bank_transfer_pct != null ? parseFloat(row.bank_transfer_pct) : 10);
+  const cashPct = row.cash_discount_pct != null ? parseFloat(row.cash_discount_pct) : 10;
+  const vPart = S.vatRegistered ? (S.vatRate / 100) / (1 + S.vatRate / 100) : 0;
+  return items.map(it => {
+    if (it.price == null) return it;
+    const cost = Number(it.price) * (S.vatRegistered ? 1 : 1 + (Number(it.vat_rate) || 0) / 100);
+    const pc = it.parcel || {};
+    const item = pc.postage != null ? { band: 'custom', shippingCost: pc.postage, isLarge: !!pc.large } : { isLarge: !!pc.large };
+    const pack = pc.packaged === true ? 0 : (pc.packaging_cost != null ? Number(pc.packaging_cost) : S.packagingCost);
+    const ebay = Number(it.rrp_ebay ?? it.rrp) || null;
+    let cash = ebay ? ebay * (1 - cashPct / 100) : null;
+    if (cash > 20) cash = Math.floor(cash / 5) * 5;
+    const prices = { ebay, shopify: Number(it.rrp_shopify) || (ebay ? ebay * (1 - shopPct / 100) : null), cash };
+    const margins = {};
+    for (const [k, B] of Object.entries(prices)) {
+      if (!(B > 0)) { margins[k] = null; continue; }
+      const ch = PF.channelParams(k === 'cash' ? 'direct' : k, item, S);
+      const v = k === 'cash' ? 0 : vPart;                          // cash sales are VAT-free
+      const fees = B * ((ch.feePct + ch.adRatePct) / 100) * ch.feeVatMult + ch.fixedFee * ch.feeVatMult
+        + (k === 'cash' ? 0 : B * (Number(S.externalAdPct) || 0) / 100);
+      const inPrice = !pc.large;                                     // big panels usually charge postage on top
+      const postage = k === 'cash' ? 0 : (inPrice ? ch.postage : 0); // cash = collected
+      const net = B - B * v - fees - postage - pack - (Number(S.overheadPerUnit) || 0) - cost;
+      margins[k] = { price: +B.toFixed(2), net: +net.toFixed(2), pct: +(net / B * 100).toFixed(1) };
+    }
+    return { ...it, cost: +cost.toFixed(2), margins };
+  });
 }
 
 // Write partner details onto a local product (and cost, when the product is

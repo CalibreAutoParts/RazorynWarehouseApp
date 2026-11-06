@@ -24611,7 +24611,7 @@ async function trPartnerList(linkId, sku) {
   const placements = []; for (const sp of (L.item_specifics || [])) if (sp && /placement/i.test(sp.name || '')) (Array.isArray(sp.value) ? sp.value : String(sp.value || '').split(/,\s*/)).forEach(v => v && placements.push(v));
   const fields = {
     'cl-title': it.title || '', 'cl-partnumber': it.part_number || '', 'ce-title': it.title || '',
-    'ce-price': it.rrp != null ? (+it.rrp).toFixed(2) : '', 'ce-qty': it.available ?? 0,
+    'ce-price': (it.rrp_ebay ?? it.rrp) != null ? (+(it.rrp_ebay ?? it.rrp)).toFixed(2) : '', 'ce-qty': it.available ?? 0,
     'cl-cost': it.price != null ? (+it.price).toFixed(2) : '', 'cl-cost-cur': 'GBP', 'cl-cost-foreign': it.price != null ? (+it.price).toFixed(2) : '',
     'ce-desc': L.description || '',
     'cl-pkg-l': pc.length_cm ?? '', 'cl-pkg-w': pc.width_cm ?? '', 'cl-pkg-h': pc.height_cm ?? '', 'cl-pkg-g': pc.weight_g != null ? +(pc.weight_g / 1000).toFixed(2) : '',
@@ -24647,14 +24647,16 @@ async function trPartnerSearch(id) {
   const box = el('trpc-res'); box.innerHTML = '<div style="color:var(--ink-soft);font-size:13px">Searching…</div>';
   try {
     const r = await Api.get(`/api/trade/partners/${id}/catalogue?q=${encodeURIComponent(el('trpc-q').value.trim())}${el('trpc-in').checked ? '&in_stock=1' : ''}`);
-    box.innerHTML = r.items.length ? `<table class="table" style="margin:0"><thead><tr><th><input type="checkbox" title="Select all shown" onchange="document.querySelectorAll('[data-trimp]:not(:disabled)').forEach(c=>c.checked=this.checked)"></th><th>Part</th><th style="text-align:right">Their stock</th><th style="text-align:right">Your price</th><th>Here</th><th></th></tr></thead><tbody>
+    box.innerHTML = r.items.length ? `<table class="table" style="margin:0"><thead><tr><th><input type="checkbox" title="Select all shown" onchange="document.querySelectorAll('[data-trimp]:not(:disabled)').forEach(c=>c.checked=this.checked)"></th><th>Part</th><th style="text-align:right">Their stock</th><th style="text-align:right">Your cost</th><th style="text-align:right" title="Your profit per sale at their retail price, after your fees, VAT, postage and packaging">eBay</th><th style="text-align:right">Shopify</th><th style="text-align:right" title="Cash on collection — no VAT, no postage">Cash</th><th>Here</th><th></th></tr></thead><tbody>
       ${r.items.map(i => `<tr><td><input type="checkbox" data-trimp="${escapeAttr(i.sku)}" ${i.local?.linked ? 'disabled' : ''}></td>
         <td><b>${escapeHtml(i.sku)}</b><div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(i.title)}</div></td><td style="text-align:right">${escapeHtml(i.available_display)}</td>
         <td style="text-align:right">${trMoney(i.price)}${i.our_cost != null ? `<div style="font-size:10px;color:var(--ink-soft)">their cost ${trMoney(i.our_cost)}</div>` : ''}</td>
+        ${['ebay', 'shopify', 'cash'].map(k => { const m = i.margins?.[k]; return `<td style="text-align:right;white-space:nowrap">${m ? `<b style="color:${m.net < 0 ? 'var(--red)' : 'var(--green)'}">${m.net < 0 ? '−' : ''}${trMoney(Math.abs(m.net))}</b><div style="font-size:10px;color:var(--ink-soft)">${m.pct}% · sell ${trMoney(m.price)}</div>` : '<span style="color:var(--ink-soft)">—</span>'}</td>`; }).join('')}
         <td style="font-size:11px">${i.local ? (i.local.linked ? '✓ linked' : `same SKU (${i.local.qty} in stock) — will link`) : 'new'}</td>
         <td>${i.local ? '' : `<button class="btn btn-primary btn-sm" onclick="trPartnerList(${id}, '${escapeAttr(i.sku)}')" title="Open Create listing filled in from their listing — photos, category, specifics, parcel, cost">List</button>`}</td></tr>`).join('')}</tbody></table>
       <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">${r.total} match(es)${r.total > r.items.length ? ' — showing first ' + r.items.length : ''}.
-        <b>Your price is ex VAT.</b> On a VAT account their invoice adds VAT, which you claim back (you're both VAT registered), so the ex-VAT price is your real cost and it's what goes in as cost price. On a cash account there's no VAT to claim — the price is the price.</div>` : '<div style="font-size:13px;color:var(--ink-soft)">No matches.</div>';
+        <b>eBay / Shopify / Cash</b> = your profit per sale at their retail prices (Shopify and cash use your own % rules), after your fees, VAT, postage and packaging — cash is collected, no VAT.
+        <b>Your cost is ex VAT.</b> On a VAT account their invoice adds VAT, which you claim back (you're both VAT registered), so the ex-VAT price is your real cost and it's what goes in as cost price. On a cash account there's no VAT to claim — the price is the price.</div>` : '<div style="font-size:13px;color:var(--ink-soft)">No matches.</div>';
   } catch (e) { box.innerHTML = `<div style="color:var(--red);font-size:13px">${escapeHtml(e.data?.message || e.message)}</div>`; }
 }
 async function trPartnerImport(id) {
