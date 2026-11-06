@@ -293,6 +293,7 @@ function present(account, p, rules, settings, { detail = false } = {}) {
     price_breaks: priceBreaks(account, p, rules, settings),
     image: p.image_url || null,
     rrp: num(p.price_shopify) || num(p.price_ebay),
+    rrp_ebay: num(p.price_ebay), rrp_shopify: num(p.price_shopify),
     updated_at: p.stock_changed_at || p.updated_at,
   };
   if (account.show_cost) {

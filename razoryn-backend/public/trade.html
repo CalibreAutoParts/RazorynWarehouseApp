@@ -50,7 +50,12 @@ code{background:rgba(127,127,127,.15);padding:1px 5px;border-radius:4px;font-siz
 <div id="toast"></div>
 <div class="modal" id="modal" onclick="if(event.target===this)closeModal()"><div class="box" id="modal-box"></div></div>
 <script>
-const S = { key: null, me: null, tab: 'stock', items: [], total: 0, q: '', make: '', inStock: true, basket: {}, brand: null };
+const S = { key: null, me: null, tab: 'stock', items: [], total: 0, q: '', make: '', inStock: true, basket: {}, brand: null, incVat: false };
+try { S.incVat = localStorage.getItem('trade_inc_vat') === '1'; } catch (_) {}
+// Shown price: ex VAT (what the API returns) or inc VAT, per the toggle.
+const vatRate = () => Number(S.me?.pricing?.vat_rate) || 0;
+const shown = n => n == null ? null : (S.incVat ? n * (1 + vatRate() / 100) : n);
+function setIncVat(on) { S.incVat = !!on; try { localStorage.setItem('trade_inc_vat', on ? '1' : '0'); } catch (_) {} renderStock(); }
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const money = n => n == null ? 'POA' : '£' + Number(n).toFixed(2);
@@ -141,8 +146,11 @@ async function renderStock() {
     <input id="mk" placeholder="Make (e.g. Tesla)" value="${esc(S.make)}" style="width:150px" onkeydown="if(event.key==='Enter')searchStock()">
     <label class="row" style="gap:4px"><input type="checkbox" id="ins" ${S.inStock ? 'checked' : ''} onchange="searchStock()"> In stock only</label>
     <button class="btn" onclick="searchStock()">Search</button>
+    ${vat ? `<span class="row" style="gap:0;margin-left:auto" role="group" aria-label="Show prices">
+      <button class="btn ${S.incVat ? 'o' : ''}" style="border-radius:8px 0 0 8px" onclick="setIncVat(false)">Ex VAT</button>
+      <button class="btn ${S.incVat ? '' : 'o'}" style="border-radius:0 8px 8px 0" onclick="setIncVat(true)">Inc VAT</button></span>` : ''}
   </div>
-  <div class="muted" style="margin:0 2px 8px">Prices are ${vat ? `ex VAT (+${vat}% VAT)` : 'net'} · stock is live — it updates the moment anything sells on any of our channels.</div>
+  <div class="muted" style="margin:0 2px 8px">${vat ? (S.incVat ? `Prices shown <b>including ${vat}% VAT</b> — orders and invoices are worked out ex VAT + VAT.` : `Prices shown <b>ex VAT</b> (+${vat}% VAT)`) : 'Prices are net — no VAT on this account'} · stock is live — it updates the moment anything sells on any of our channels.</div>
   <div id="items" class="items"></div>
   <div style="text-align:center;margin:14px"><button class="btn o" id="more" style="display:none" onclick="searchStock(true)">Load more</button></div>`;
   if (!S.items.length) searchStock(); else paintItems();
@@ -164,10 +172,10 @@ function paintItems() {
       <div class="t">${esc(it.title)}</div>
       <div class="mono">${esc(it.sku)}${it.part_number && it.part_number !== it.sku ? ' · ' + esc(it.part_number) : ''}</div>
       <div class="row" style="justify-content:space-between">
-        <span class="price">${money(it.price)}</span>
+        <span class="price">${money(shown(it.price))}${vatRate() && it.price != null ? `<span class="muted" style="font-size:11px;font-weight:400"> ${S.incVat ? 'inc' : 'ex'} VAT<br>${money(S.incVat ? it.price : it.price * (1 + vatRate() / 100))} ${S.incVat ? 'ex' : 'inc'}</span>` : ''}</span>
         <span class="pill ${it.available > 0 ? 'g' : 'r'}">${it.available > 0 ? esc(it.available_display) + ' in stock' : 'Out of stock'}</span>
       </div>
-      ${it.price_breaks && it.price_breaks.length > 1 ? `<div class="muted">${it.price_breaks.map(b => `${b.min_qty}+ ${money(b.price)}`).join(' · ')}</div>` : ''}
+      ${it.price_breaks && it.price_breaks.length > 1 ? `<div class="muted">${it.price_breaks.map(b => `${b.min_qty}+ ${money(shown(b.price))}`).join(' · ')}</div>` : ''}
       ${it.our_cost != null ? `<div class="muted">Our cost ${money(it.our_cost)} · margin ${it.margin_pct}%</div>` : ''}
       ${it.location ? `<div class="muted">📍 ${esc(it.location.code || '')} ${esc(it.location.name || it.location.note || '')}${it.barcode ? ' · ▮ ' + esc(it.barcode) : ''}</div>` : ''}
       <div class="row">
