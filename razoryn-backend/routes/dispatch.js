@@ -1094,6 +1094,7 @@ async function syncShopifyCancellationsCore({ days = 14 } = {}) {
 }
 module.exports = router;
 module.exports.trackingUrlFor = trackingUrlFor;
+module.exports.pushDispatchToChannel = pushDispatchToChannel;
 module.exports.CARRIERS = CARRIERS;
 module.exports.EBAY_NATIVE_CARRIERS = EBAY_NATIVE_CARRIERS;
 module.exports.syncEbayDispatchCore = syncEbayDispatchCore;

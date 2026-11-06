@@ -503,9 +503,10 @@ async function containerPnl(ref) {
         const fees = B * ((ch.feePct + ch.adRatePct) / 100) * ch.feeVatMult + ch.fixedFee * ch.feeVatMult + (k === 'cash' || k === 'bank' ? 0 : B * (Number(S.externalAdPct) || 0) / 100);
         const cost = freightIn && l.landed_unit_cost_gbp != null ? parseFloat(l.landed_unit_cost_gbp) : goods * (1 + (upliftPct || 0) * f.up / 100);
         const retCost = (returnsPct * f.ret / 100) * (2 * (k === 'cash' ? 0 : ch.postage) + pack);   // per unit sold: postage both ways + re-pack
-        const net = B - B * v - fees - postage - pack - (Number(S.overheadPerUnit) || 0) - cost - retCost;
+        const vk = k === 'cash' ? 0 : v;   // cash sales are VAT-free
+        const net = B - B * vk - fees - postage - pack - (Number(S.overheadPerUnit) || 0) - cost - retCost;
         const t = out[k].scenarios[sc];
-        t.revenue += B * qty; t.vat += B * v * qty; t.fees += fees * qty; t.postage += postage * qty; t.packaging += pack * qty;
+        t.revenue += B * qty; t.vat += B * vk * qty; t.fees += fees * qty; t.postage += postage * qty; t.packaging += pack * qty;
         t.returns += retCost * qty; t.cost += (cost + (Number(S.overheadPerUnit) || 0)) * qty; t.net += net * qty;
       }
     }

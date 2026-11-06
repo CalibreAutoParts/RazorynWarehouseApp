@@ -2085,6 +2085,18 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
     } catch (e) { console.warn('[create-listing] cost record warning:', e.message); }
   }
 
+  // Listed from a partner warehouse's stock: no own stock — it sells from theirs
+  // (own + partner qty on every channel) and is ordered from them when it sells.
+  if (b.partnerLinkId && b.partnerSku) {
+    try {
+      await require('../lib/trade').ensureSchema();
+      await query(`UPDATE products SET qty_on_hand = 0, partner_link_id = $2, source_partner_id = $2, partner_sku = $3,
+          partner_qty = $4, partner_cost = $5, partner_synced_at = now(), landed_cost = COALESCE(landed_cost, $5) WHERE id = $1`,
+        [productId, parseInt(b.partnerLinkId), String(b.partnerSku), Math.max(0, parseInt(b.partnerQty) || 0), costPrice]);
+      result.partnerSourced = true;
+    } catch (e) { console.warn('[create-listing] partner link:', e.message); }
+  }
+
   // Incoming lines for this SKU (entered before the listing existed) link up now
   // and hand over their landed cost.
   try { await require('./incoming').linkProductToIncoming(productId); } catch (e) { console.warn('[create-listing] incoming link:', e.message); }
@@ -4527,7 +4539,8 @@ router.post('/clone-to-store/run', requireAdmin, async (req, res) => {
     }
     // Real stock — never invented. 0-stock items are skipped unless the run
     // opted to list them at quantity 0.
-    const qty = Number.isFinite(parseInt(p.qty_on_hand)) ? parseInt(p.qty_on_hand) : 0;
+    // Own stock (+ the partner's live stock for partner-sourced parts).
+    const qty = await require('../lib/stock-qty').sellableQty(p);
     if (qty <= 0 && oosMode === 'skip') {
       results.push({ productId: pid, sku: p.sku, skipped: true, reason: 'out_of_stock' });
       continue;

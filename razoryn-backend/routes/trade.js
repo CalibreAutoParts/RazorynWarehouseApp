@@ -133,6 +133,74 @@ router.post('/accounts/:id/test-webhook', aw(async (req, res) => {
 }));
 
 // Price check for one part + quantity (shows how the price was reached).
+// ── Parts & prices dashboard (per trade account) ──────────────────────────
+// GET /api/trade/accounts/:id/catalogue?q=&show=all|shared|not&limit=
+// Every active part with: shared with this account?, our cost, retail, the
+// price they pay (and how it's worked out), margin, and any item-specific rule.
+router.get('/accounts/:id/catalogue', aw(async (req, res) => {
+  await trade.ensureSchema();
+  const a = (await query(`SELECT * FROM trade_accounts WHERE id = $1`, [req.params.id])).rows[0];
+  if (!a) return res.status(404).json({ error: 'not_found' });
+  const settings = await trade.getSettings();
+  const rules = await trade.loadRules(a.id);
+  const params = [a.id], where = ['p.active = true'];
+  const q = String(req.query.q || '').trim();
+  if (q) { params.push(`%${q}%`); where.push(`(p.sku ILIKE $${params.length} OR p.title ILIKE $${params.length} OR p.part_number ILIKE $${params.length})`); }
+  if (req.query.show === 'shared') where.push('tap.product_id IS NOT NULL');
+  if (req.query.show === 'not') where.push('tap.product_id IS NULL');
+  if (req.query.inStock === '1') where.push('p.qty_on_hand > 0');
+  const lim = Math.min(2000, Math.max(1, parseInt(req.query.limit) || 500));
+  const rows = (await query(`SELECT p.*, (tap.product_id IS NOT NULL) AS shared FROM products p
+      LEFT JOIN trade_account_products tap ON tap.account_id = $1 AND tap.product_id = p.id
+      WHERE ${where.join(' AND ')} ORDER BY p.title, p.sku LIMIT ${lim}`, params)).rows;
+  const items = rows.map(p => {
+    const pr = trade.priceFor(a, p, 1, rules, settings);
+    const own = rules.find(r => r.account_id === a.id && r.product_id === p.id && (r.min_qty || 1) === 1);
+    return { id: p.id, sku: p.sku, title: p.title, qty: p.qty_on_hand, cost: pr.cost != null ? Number(pr.cost.toFixed(2)) : null,
+      retail: Number(p.price_ebay) || Number(p.price_shopify) || null, price: pr.net, basis: pr.basis, clamped: pr.clamped,
+      marginPct: pr.net && pr.cost ? +((pr.net - pr.cost) / pr.net * 100).toFixed(1) : null,
+      itemRule: own ? { id: own.id, kind: own.kind, value: Number(own.value) } : null,
+      shared: a.catalogue_mode === 'selected' ? !!p.shared : true, picked: !!p.shared };
+  });
+  res.json({ mode: a.catalogue_mode || 'all', vatRate: trade.vatRateFor(a, settings), accountType: a.account_type,
+    defaults: { markupPct: a.markup_pct != null ? Number(a.markup_pct) : Number(settings.defaultMarkupPct ?? 25) }, items });
+}));
+// PUT /api/trade/accounts/:id/catalogue-mode { mode: 'all' | 'selected' }
+router.put('/accounts/:id/catalogue-mode', aw(async (req, res) => {
+  await trade.ensureSchema();
+  const mode = req.body?.mode === 'selected' ? 'selected' : 'all';
+  await query(`UPDATE trade_accounts SET catalogue_mode = $2 WHERE id = $1`, [req.params.id, mode]);
+  await audit(req, 'trade_catalogue_mode', 'trade_account', req.params.id, { mode });
+  res.json({ ok: true, mode });
+}));
+// POST /api/trade/accounts/:id/catalogue { productIds, shared: true|false }
+router.post('/accounts/:id/catalogue', aw(async (req, res) => {
+  await trade.ensureSchema();
+  const ids = (Array.isArray(req.body?.productIds) ? req.body.productIds : []).map(Number).filter(Boolean).slice(0, 10000);
+  if (!ids.length) return res.status(400).json({ error: 'no_products', message: 'Tick some parts first.' });
+  if (req.body?.shared === false) await query(`DELETE FROM trade_account_products WHERE account_id = $1 AND product_id = ANY($2)`, [req.params.id, ids]);
+  else await query(`INSERT INTO trade_account_products (account_id, product_id) SELECT $1, x FROM unnest($2::int[]) x ON CONFLICT DO NOTHING`, [req.params.id, ids]);
+  await audit(req, 'trade_catalogue_share', 'trade_account', req.params.id, { count: ids.length, shared: req.body?.shared !== false });
+  res.json({ ok: true, count: ids.length });
+}));
+// POST /api/trade/accounts/:id/price-items { productIds, kind: 'default'|'markup'|'discount'|'fixed', value }
+// Item prices for this account: + % on cost, − % off retail, or a fixed £ (net);
+// 'default' removes the item's own price so the account's normal rate applies.
+router.post('/accounts/:id/price-items', aw(async (req, res) => {
+  const ids = (Array.isArray(req.body?.productIds) ? req.body.productIds : []).map(Number).filter(Boolean).slice(0, 10000);
+  if (!ids.length) return res.status(400).json({ error: 'no_products', message: 'Tick some parts first.' });
+  const kind = String(req.body?.kind || '');
+  const value = parseFloat(req.body?.value);
+  if (kind !== 'default' && (!['markup', 'discount', 'fixed'].includes(kind) || !Number.isFinite(value))) return res.status(400).json({ error: 'value_required', message: 'Pick how to price them and enter the % or £.' });
+  await query(`DELETE FROM trade_price_rules WHERE account_id = $1 AND product_id = ANY($2) AND COALESCE(min_qty, 1) = 1`, [req.params.id, ids]);
+  if (kind !== 'default') {
+    await query(`INSERT INTO trade_price_rules (account_id, product_id, min_qty, kind, value, note) SELECT $1, x, 1, $3, $4, 'Set on Parts & prices' FROM unnest($2::int[]) x`,
+      [req.params.id, ids, kind, value]);
+  }
+  await audit(req, 'trade_price_items', 'trade_account', req.params.id, { count: ids.length, kind, value });
+  res.json({ ok: true, count: ids.length });
+}));
+
 router.get('/accounts/:id/quote', aw(async (req, res) => {
   const a = (await query(`SELECT * FROM trade_accounts WHERE id = $1`, [req.params.id])).rows[0];
   if (!a) return res.status(404).json({ error: 'not_found' });
@@ -352,6 +420,13 @@ router.put('/partners/:id', aw(async (req, res) => {
   await query(`UPDATE trade_partner_links SET name = $2, base_url = $3, api_key = $4, auto_update_cost = $5 WHERE id = $1`,
     [l.id, b.name || l.name, b.baseUrl ? partner.origin(b.baseUrl) : l.base_url, b.apiKey ? String(b.apiKey).trim() : l.api_key,
      b.autoUpdateCost === undefined ? l.auto_update_cost : !!b.autoUpdateCost]);
+  // Automatic ordering: switching it on starts from NOW (never re-orders past sales).
+  if (b.autoOrder !== undefined) {
+    await query(`UPDATE trade_partner_links SET auto_order = $2, auto_order_since = CASE WHEN $2 AND NOT auto_order THEN now() ELSE auto_order_since END WHERE id = $1`, [l.id, !!b.autoOrder]);
+  }
+  if (b.autoOrderDelivery && ['collect', 'ship', 'dropship'].includes(b.autoOrderDelivery)) {
+    await query(`UPDATE trade_partner_links SET auto_order_delivery = $2 WHERE id = $1`, [l.id, b.autoOrderDelivery]);
+  }
   res.json({ partner: partner.publicLink(await partner.getLink(l.id)) });
 }));
 router.delete('/partners/:id', aw(async (req, res) => {
@@ -367,6 +442,13 @@ router.get('/partners/:id/catalogue', aw(async (req, res) => {
     res.json(await partner.catalogue(await partner.getLink(req.params.id), {
       q: String(req.query.q || ''), inStock: req.query.in_stock === '1', offset: parseInt(req.query.offset) || 0 }));
   } catch (e) { fail(res, e); }
+}));
+// One partner part in full (photos, category, specifics, description, parcel) — to list it.
+router.get('/partners/:id/item/:sku', aw(async (req, res) => {
+  const link = await partner.getLink(req.params.id);
+  const it = await partner.call(link, 'GET', '/stock/' + encodeURIComponent(req.params.sku));
+  const local = (await query(`SELECT id, sku FROM products WHERE upper(sku) = upper($1) LIMIT 1`, [it.sku])).rows[0] || null;
+  res.json({ item: it, local, link: { id: link.id, name: link.name } });
 }));
 router.post('/partners/:id/import', aw(async (req, res) => {
   try {

@@ -71,6 +71,11 @@ async function _migrate() {
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
+  // Which parts each trade account can see: 'all' (default) or only the ones picked.
+  await query(`ALTER TABLE trade_accounts ADD COLUMN IF NOT EXISTS catalogue_mode TEXT NOT NULL DEFAULT 'all'`).catch(() => {});
+  await query(`CREATE TABLE IF NOT EXISTS trade_account_products (
+    account_id INTEGER NOT NULL, product_id INTEGER NOT NULL, added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (account_id, product_id))`);
   await query(`CREATE TABLE IF NOT EXISTS trade_price_rules (
     id          SERIAL PRIMARY KEY,
     account_id  INTEGER,                 -- NULL = every trade customer
@@ -149,13 +154,16 @@ async function _migrate() {
 // ─── Settings ──────────────────────────────────────────────────────────────
 const DEFAULT_SETTINGS = { defaultMarkupPct: 25, stockBuffer: 0, allowBelowCost: false, portalMessage: '', autoEmailInvoices: true };
 async function getSettings() {
-  const r = await query(`SELECT data, vat_rate, vat_registered FROM app_settings WHERE id = 1`);
+  const r = await query(`SELECT * FROM app_settings WHERE id = 1`);
   const row = r.rows[0] || {};
   const t = (row.data && row.data.trade) || {};
+  let cost = null;   // Costs & margins (postage bands) — for the parcel info shared with buyers
+  try { cost = require('./pricing-floor').resolveCostSettings(row); } catch (_) {}
   return {
     ...DEFAULT_SETTINGS, ...t,
     vatRegistered: !!row.vat_registered,
     vatRate: num(row.vat_rate) ?? 20,
+    _cost: cost,
   };
 }
 async function saveSettings(patch = {}) {
@@ -265,7 +273,9 @@ function availableFor(account, p, settings) {
 const PRODUCT_COLS = `p.id, p.sku, p.title, p.brand, p.model, p.part_number, p.position, p.barcode,
   p.qty_on_hand, p.price_shopify, p.price_ebay, p.cost_price, p.landed_cost, p.image_url,
   p.shopify_product_id, p.updated_at, p.location_id, p.location_note, l.code AS location_code, l.name AS location_name,
-  ts.changed_at AS stock_changed_at`;
+  ts.changed_at AS stock_changed_at,
+  p.pkg_length_cm, p.pkg_width_cm, p.pkg_height_cm, p.pkg_weight_g, p.packaging_included, p.packaging_cost,
+  p.shipping_band, p.shipping_cost, p.large_panel, p.postage_in_price, p.ebay_category_id, p.ebay_item_specifics, p.ebay_description`;
 
 // One product as a trade customer sees it.
 function present(account, p, rules, settings, { detail = false } = {}) {
@@ -293,7 +303,20 @@ function present(account, p, rules, settings, { detail = false } = {}) {
     out.barcode = p.barcode || null;
     out.location = p.location_code ? { code: p.location_code, name: p.location_name, note: p.location_note || null } : (p.location_note ? { note: p.location_note } : null);
   }
-  if (detail) out.alternate_part_numbers = p.alternates || [];
+  // Parcel + postage, so the buyer's own profit maths and shipping are right.
+  let postage = null;
+  try { if (settings._cost) postage = round2(require('./pricing-floor').postageFor(settings._cost, { band: p.shipping_band, isLarge: !!p.large_panel, shippingCost: p.shipping_cost })); } catch (_) {}
+  out.parcel = {
+    length_cm: num(p.pkg_length_cm), width_cm: num(p.pkg_width_cm), height_cm: num(p.pkg_height_cm), weight_g: num(p.pkg_weight_g),
+    packaged: p.packaging_included == null ? null : !!p.packaging_included, packaging_cost: num(p.packaging_cost),
+    large: !!p.large_panel, postage,
+  };
+  if (detail) {
+    out.alternate_part_numbers = p.alternates || [];
+    // What's needed to list it without retyping (their category, specifics, description).
+    out.listing = { ebay_category_id: p.ebay_category_id || null, item_specifics: Array.isArray(p.ebay_item_specifics) ? p.ebay_item_specifics : [],
+      description: p.ebay_description ? String(p.ebay_description).replace(/<!--\/?RZN_DESC_BODY-->/g, '') : null };
+  }
   return out;
 }
 
@@ -310,6 +333,7 @@ async function stockList(account, { q = '', make = '', inStock = false, changedS
   }
   if (make) { params.push(make); where.push(`lower(p.brand) = lower($${params.length})`); }
   if (inStock) { params.push(bufferFor(account, settings)); where.push(`p.qty_on_hand > $${params.length}`); }
+  if (account.catalogue_mode === 'selected') { params.push(account.id); where.push(`EXISTS (SELECT 1 FROM trade_account_products tap WHERE tap.account_id = $${params.length} AND tap.product_id = p.id)`); }
   if (changedSince) { params.push(changedSince); where.push(`GREATEST(p.updated_at, COALESCE(ts.changed_at, p.updated_at)) > $${params.length}::timestamptz`); }
   const lim = Math.min(500, Math.max(1, parseInt(limit) || 100));
   const off = Math.max(0, parseInt(offset) || 0);
@@ -327,12 +351,18 @@ async function stockList(account, { q = '', make = '', inStock = false, changedS
   return { total, limit: lim, offset: off, items: rows.map(p => present(account, p, rules, settings)) };
 }
 
-async function productBySku(sku) {
+// Can this trade account see (and order) this part?
+async function visibleTo(account, productId) {
+  if (!account || account.catalogue_mode !== 'selected') return true;
+  return !!(await query(`SELECT 1 FROM trade_account_products WHERE account_id = $1 AND product_id = $2`, [account.id, productId])).rows[0];
+}
+async function productBySku(sku, account = null) {
   const r = await query(`SELECT ${PRODUCT_COLS} FROM products p LEFT JOIN locations l ON l.id = p.location_id
     LEFT JOIN trade_stock_state ts ON ts.product_id = p.id
     WHERE upper(p.sku) = upper($1) AND p.active = true LIMIT 1`, [String(sku || '').trim()]);
   const p = r.rows[0];
   if (!p) return null;
+  if (account && !(await visibleTo(account, p.id))) return null;   // not shared with this account
   try { await require('./part-numbers').ensurePrivateCol(); p.alternates = (await query(`SELECT code FROM product_part_numbers WHERE product_id = $1 AND NOT private ORDER BY id`, [p.id])).rows.map(x => x.code); }
   catch (_) { p.alternates = []; }
   return p;
@@ -468,7 +498,7 @@ async function createOrder(account, input = {}, ctx = {}) {
         `SELECT * FROM products WHERE ${ln.productId ? 'id = $1' : 'upper(sku) = upper($1)'} AND active = true FOR UPDATE`,
         [ln.productId || String(ln.sku || '').trim()]);
       const p = pr.rows[0];
-      if (!p) throw new TradeError('unknown_sku', `Unknown part: ${ln.sku || ln.productId}`);
+      if (!p || (!staff && !(await visibleTo(account, p.id)))) throw new TradeError('unknown_sku', `Unknown part: ${ln.sku || ln.productId}`);
       const avail = staff ? (parseInt(p.qty_on_hand) || 0) : availableFor(account, p, settings);
       if (avail < qty) { shortages.push({ sku: p.sku, title: p.title, requested: qty, available: Math.max(0, avail) }); continue; }
       let net;
@@ -501,7 +531,7 @@ async function createOrder(account, input = {}, ctx = {}) {
     }
 
     const channel = account.account_type === 'cash' ? 'direct_cash' : 'direct_bank';
-    const ref = await salesMod.buildSaleReference(c, { channel });
+    const ref = await salesMod.buildSaleReference(c, { channel, trade: true });
     const notes = [input.notes ? String(input.notes).slice(0, 1000) : null,
       `Trade order (${ctx.source || 'api'}) — ${account.name}`].filter(Boolean).join('\n');
     const sale = (await c.query(
@@ -932,7 +962,7 @@ async function detectChanges() {
 module.exports = {
   ensureSchema, getSettings, saveSettings, vatRateFor,
   issueApiKey, accountByKey, hashKey, sign,
-  costOf, priceFor, priceBreaks, loadRules, pickRule, availableFor, present, stockList, productBySku,
+  costOf, priceFor, priceBreaks, loadRules, pickRule, availableFor, present, stockList, productBySku, visibleTo,
   imagesFor, brandedImages, cleanImages, publicCleanImageUrls, cleanSig,
   accountSummary, topProducts,
   createOrder, getOrder, listOrders, cancelOrder, formatOrder, publicOrderStatus, TradeError,
