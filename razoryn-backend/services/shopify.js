@@ -362,7 +362,8 @@ async function* iterateAllProductsAndVariants() {
 
 async function pushStockForProduct(product) {
   if (!product.shopify_inventory_id) return { skipped: 'no_inventory_id' };
-  await setInventoryLevel(product.shopify_inventory_id, product.qty_on_hand);
+  // Own stock, plus the partner's live stock for partner-sourced parts.
+  await setInventoryLevel(product.shopify_inventory_id, await require('../lib/stock-qty').sellableQty(product));
   return { ok: true };
 }
 

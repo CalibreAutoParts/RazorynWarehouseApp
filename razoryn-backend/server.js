@@ -759,6 +759,11 @@ cron.schedule('20 6 * * *', async () => {
 cron.schedule('*/30 * * * *', async () => {
   try { await require('./lib/trade-partner').syncAll(); } catch (e) { console.warn('[cron trade] partner sync:', e.message); }
 });
+// Order from partner warehouses automatically for their parts we've sold
+// (eBay / Shopify orders arrive through the sync, so this sweeps every 2 min too).
+cron.schedule('*/2 * * * *', async () => {
+  try { await require('./lib/trade-partner').autoOrderSweep(); } catch (e) { console.warn('[cron trade] auto-order:', e.message); }
+});
 
 // OnBuy: import orders, pick up new-product results, push stock + prices — every
 // 10 min (does nothing until the keys are set and OnBuy is switched on).

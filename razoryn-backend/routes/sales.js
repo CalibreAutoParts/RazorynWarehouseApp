@@ -113,8 +113,16 @@ const CHANNELS = ['shopify', 'ebay_em', 'ebay_cl', 'ebay_r3', 'onbuy', 'direct_c
 //   eBay sale    → <PREFIX>-E-<eBay order #>
 //   Shopify sale → <PREFIX>-S-<Shopify order #>
 //   Direct sale  → <PREFIX>-#### (brand-shared sequence from 0700)
-async function buildSaleReference(client, { channel, orderNumber }) {
+async function buildSaleReference(client, { channel, orderNumber, trade }) {
   const prefix = brand.invoicePrefix || 'REP';
+  // Trade / partner orders (business-to-business, settled on a statement) run
+  // their own sequence so they're easy to tell apart: <PREFIX>-T-0001.
+  if (trade) {
+    const runQuery = client ? client.query.bind(client) : query;
+    const r = await runQuery(`SELECT COALESCE(MAX(SUBSTRING(payment_reference FROM ('^' || $1 || '-T-([0-9]{4,})$'))::int), 0) + 1 AS next
+       FROM sales WHERE payment_reference ~ ('^' || $1 || '-T-[0-9]{4,}$')`, [prefix]);
+    return `${prefix}-T-${String(r.rows[0].next).padStart(4, '0')}`;
+  }
   const isEbay = String(channel || '').startsWith('ebay_');
   const isShopify = channel === 'shopify';
   if (isEbay && orderNumber) return `${prefix}-E-${orderNumber}`;
@@ -149,7 +157,7 @@ async function backfillDirectReferences() {
     const { rows } = await query(
       `SELECT id FROM sales
         WHERE channel IN ('direct_cash','direct_bank')
-          AND (payment_reference IS NULL OR payment_reference !~ ('^' || $1 || '-[0-9]{4,}$'))
+          AND (payment_reference IS NULL OR payment_reference !~ ('^' || $1 || '-(T-)?[0-9]{4,}$'))
         ORDER BY occurred_at ASC, id ASC`,
       [prefix]
     );
@@ -174,7 +182,8 @@ router.get('/', requireAdmin, async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(2000, parseInt(req.query.pageSize) || 50);
   const where = [], params = [];
-  if (channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
+  if (channel === 'trade') where.push(`s.trade_account_id IS NOT NULL`);
+  else if (channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
   if (from)    { params.push(from); where.push(`s.occurred_at >= $${params.length}`); }
   if (to)      { params.push(to); where.push(`s.occurred_at <= $${params.length}`); }
   if (status)  { params.push(status); where.push(`s.status = $${params.length}`); }
@@ -315,7 +324,8 @@ router.get('/reconcile-refunds/status', requireAdmin, (req, res) => res.json(rec
 router.get('/export.csv', requireAdmin, async (req, res) => {
   const { channel, from, to } = req.query;
   const where = [], params = [];
-  if (channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
+  if (channel === 'trade') where.push(`s.trade_account_id IS NOT NULL`);
+  else if (channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
   if (from)    { params.push(from); where.push(`s.occurred_at >= $${params.length}`); }
   if (to)      { params.push(to); where.push(`s.occurred_at <= $${params.length}`); }
   const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -658,15 +668,18 @@ router.post('/', requireAdmin, async (req, res) => {
       if (it.productId) {
         // Inventory-backed item
         const p = await c.query(
-          'SELECT id, sku, title, qty_on_hand FROM products WHERE id = $1 FOR UPDATE',
+          'SELECT * FROM products WHERE id = $1 FOR UPDATE',
           [it.productId]
         );
         if (!p.rows[0]) return { error: 'product_not_found', productId: it.productId };
         // For non-estimate paid sales, validate stock. Estimates and pre-orders
         // don't touch stock at all (a pre-order is expressly for items not yet in).
-        if (!isEstimate && !isPreorder && p.rows[0].qty_on_hand < it.qty) {
+        // Parts sold from a partner's stock count their stock too (own goes
+        // negative and the shortfall is ordered from the partner).
+        const avail = await require('../lib/stock-qty').sellableQty(p.rows[0]);
+        if (!isEstimate && !isPreorder && avail < it.qty) {
           shortages.push({ productId: p.rows[0].id, sku: p.rows[0].sku, title: p.rows[0].title,
-                           requested: parseInt(it.qty), available: p.rows[0].qty_on_hand });
+                           requested: parseInt(it.qty), available: avail });
           continue;
         }
         const lineTotal = +(parseFloat(it.unitPrice) * parseInt(it.qty)).toFixed(2);

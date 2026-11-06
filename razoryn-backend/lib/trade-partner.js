@@ -33,6 +33,13 @@ function ensureSchema() {
       account_info    JSONB,
       created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
+    // Order from the partner automatically when we sell one of their parts.
+    await query(`ALTER TABLE trade_partner_links ADD COLUMN IF NOT EXISTS auto_order BOOLEAN NOT NULL DEFAULT false`);
+    await query(`ALTER TABLE trade_partner_links ADD COLUMN IF NOT EXISTS auto_order_delivery TEXT NOT NULL DEFAULT 'collect'`);   // collect | ship | dropship
+    await query(`ALTER TABLE trade_partner_links ADD COLUMN IF NOT EXISTS auto_order_since TIMESTAMPTZ`);
+    await query(`CREATE TABLE IF NOT EXISTS partner_auto_orders (
+      sale_item_id INTEGER PRIMARY KEY, link_id INTEGER NOT NULL, sale_id INTEGER, product_id INTEGER,
+      qty INTEGER NOT NULL DEFAULT 0, partner_ref TEXT, delivery TEXT, note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
   })().catch(e => { _ready = null; throw e; });
   return _ready;
 }
@@ -109,6 +116,18 @@ async function applyItem(link, productId, item, { setCost = false } = {}) {
       landed_cost = CASE WHEN $6::boolean AND $3::numeric IS NOT NULL THEN $3::numeric ELSE landed_cost END,
       updated_at = now()
     WHERE id = $1`, [productId, item.available ?? null, item.price ?? null, loc, item.barcode || null, !!setCost]);
+  // Their carton size / weight / packaging / postage → ours, where we have none.
+  const pc = item.parcel || {};
+  if (Object.keys(pc).length) {
+    await query(`UPDATE products SET
+        pkg_length_cm = COALESCE(pkg_length_cm, $2), pkg_width_cm = COALESCE(pkg_width_cm, $3), pkg_height_cm = COALESCE(pkg_height_cm, $4),
+        pkg_weight_g = COALESCE(pkg_weight_g, $5), packaging_included = COALESCE(packaging_included, $6), packaging_cost = COALESCE(packaging_cost, $7),
+        large_panel = COALESCE(large_panel, $8),
+        shipping_cost = CASE WHEN shipping_band IS NULL AND $9::numeric IS NOT NULL THEN $9 ELSE shipping_cost END,
+        shipping_band = CASE WHEN shipping_band IS NULL AND $9::numeric IS NOT NULL THEN 'custom' ELSE shipping_band END
+      WHERE id = $1`, [productId, pc.length_cm ?? null, pc.width_cm ?? null, pc.height_cm ?? null, pc.weight_g != null ? Math.round(pc.weight_g) : null,
+        pc.packaged ?? null, pc.packaging_cost ?? null, pc.large ?? null, pc.postage ?? null]).catch(e => console.warn('[partner] parcel:', e.message));
+  }
 }
 
 // Import / link parts. Existing local product (same SKU, or already linked) is
@@ -151,8 +170,9 @@ async function importItems(link, skus = [], userId = null) {
 // Refresh partner stock + cost + location for every linked product.
 async function sync(link) {
   await ensureSchema();
-  const linked = (await query(`SELECT id, partner_sku, source_partner_id, cost_price FROM products
+  const linked = (await query(`SELECT id, partner_sku, source_partner_id, cost_price, partner_qty FROM products
       WHERE partner_link_id = $1 AND partner_sku IS NOT NULL`, [link.id])).rows;
+  const changedStock = [];
   if (!linked.length) { await query(`UPDATE trade_partner_links SET last_sync_at = now(), last_error = NULL WHERE id = $1`, [link.id]); return { updated: 0, costChanged: 0 }; }
   const bySku = new Map(linked.map(p => [p.partner_sku.toUpperCase(), p]));
   let updated = 0, costChanged = 0;
@@ -164,12 +184,14 @@ async function sync(link) {
         if (!p) continue;
         const setCost = link.auto_update_cost && p.source_partner_id === link.id;
         if (setCost && it.price != null && Number(p.cost_price) !== Number(it.price)) costChanged++;
+        if (p.source_partner_id === link.id && Number(p.partner_qty) !== Number(it.available)) changedStock.push(p.id);
         await applyItem(link, p.id, it, { setCost });
         updated++;
       }
       if (page.items.length < 500) break;
     }
     await query(`UPDATE trade_partner_links SET last_sync_at = now(), last_error = NULL WHERE id = $1`, [link.id]);
+    pushPartnerStock(changedStock);
   } catch (e) {
     await query(`UPDATE trade_partner_links SET last_error = $2 WHERE id = $1`, [link.id, e.message.slice(0, 300)]);
     throw e;
@@ -187,7 +209,7 @@ async function syncAll() {
 
 // Place an order with the partner and book the matching Incoming lines here.
 // lines: [{ productId, qty }]
-async function placeOrder(link, { lines = [], poRef = '', notes = '', delivery = 'ship' } = {}, userId = null) {
+async function placeOrder(link, { lines = [], poRef = '', notes = '', delivery = 'ship', shippingAddress = null, idempotencyKey = null, noIncoming = false } = {}, userId = null) {
   await ensureSchema();
   const prods = (await query(`SELECT id, sku, title, part_number, partner_sku FROM products WHERE id = ANY($1) AND partner_link_id = $2`,
     [lines.map(l => parseInt(l.productId)), link.id])).rows;
@@ -199,11 +221,14 @@ async function placeOrder(link, { lines = [], poRef = '', notes = '', delivery =
   }
   const order = await call(link, 'POST', '/orders', {
     lines: payload.map(x => ({ sku: x.sku, qty: x.qty })), po_ref: poRef || undefined, notes, delivery,
-    idempotency_key: 'wh-' + crypto.createHash('sha1').update(JSON.stringify(payload.map(x => [x.sku, x.qty])) + (poRef || '') + Date.now().toString().slice(0, -4)).digest('hex').slice(0, 20),
+    shipping_address: shippingAddress || undefined,
+    idempotency_key: idempotencyKey || 'wh-' + crypto.createHash('sha1').update(JSON.stringify(payload.map(x => [x.sku, x.qty])) + (poRef || '') + Date.now().toString().slice(0, -4)).digest('hex').slice(0, 20),
   });
   // Incoming lines in OUR app, costed at the price they charged us (net).
+  // (Not for dropship — the goods go straight to our customer.)
   const today = new Date().toISOString().slice(0, 10);
   const incoming = [];
+  if (noIncoming) return { order, incoming };
   for (const it of order.items || []) {
     const mine = payload.find(x => x.sku.toUpperCase() === String(it.sku).toUpperCase());
     if (!mine) continue;
@@ -218,15 +243,133 @@ async function placeOrder(link, { lines = [], poRef = '', notes = '', delivery =
   return { order, incoming };
 }
 
+// ── Automatic ordering ─────────────────────────────────────────────────────
+// When we sell a part we stock from a partner and don't have enough of our own,
+// order it from them straight away. State-based (each sale line is ordered at
+// most once — partner_auto_orders), so it's safe to run often and from anywhere.
+//   collect  → one order per run; we collect it (Incoming line here)
+//   ship     → one order per run; they send it to us (Incoming line here)
+//   dropship → one order per sale, sent to OUR customer's address; their
+//              tracking marks our order dispatched (and goes to eBay / Shopify).
+let _autoRunning = false;
+async function autoOrderSweep() {
+  if (_autoRunning) return { skipped: 'running' };
+  _autoRunning = true;
+  const out = [];
+  try {
+    await ensureSchema();
+    const links = (await query(`SELECT * FROM trade_partner_links WHERE auto_order = true`)).rows;
+    for (const link of links) {
+      try { out.push({ link: link.id, ...(await autoOrderFor(link)) }); }
+      catch (e) { out.push({ link: link.id, error: e.message }); console.warn('[partner] auto-order', link.name, e.message); }
+    }
+  } finally { _autoRunning = false; }
+  return out;
+}
+async function autoOrderFor(link) {
+  const cands = (await query(`
+    SELECT si.id AS sale_item_id, si.sale_id, si.qty, si.product_id, p.qty_on_hand, p.sku, p.partner_sku, p.title,
+           s.invoice_number, s.channel, s.customer_name, s.customer_phone, s.shipping_address, s.occurred_at
+      FROM sale_items si JOIN sales s ON s.id = si.sale_id JOIN products p ON p.id = si.product_id
+     WHERE p.partner_link_id = $1 AND p.source_partner_id = $1 AND p.partner_sku IS NOT NULL
+       AND s.status NOT IN ('refunded','cancelled') AND COALESCE(s.is_estimate, false) = false
+       AND s.trade_account_id IS NULL
+       AND ($2::timestamptz IS NULL OR s.occurred_at >= $2)
+       AND NOT EXISTS (SELECT 1 FROM partner_auto_orders pa WHERE pa.sale_item_id = si.id)
+     ORDER BY s.occurred_at, si.id LIMIT 200`, [link.id, link.auto_order_since])).rows;
+  if (!cands.length) return { ordered: 0 };
+  // How much of each product still has to come from the partner: what our own
+  // stock can't cover, less what's already on order from them.
+  const need = new Map();
+  for (const pid of new Set(cands.map(c => c.product_id))) {
+    const own = parseInt(cands.find(c => c.product_id === pid).qty_on_hand) || 0;
+    const pending = parseInt((await query(`SELECT COALESCE(SUM(GREATEST(qty_ordered - qty_received, 0)), 0)::int AS q FROM incoming_stock
+        WHERE product_id = $1 AND supplier = $2 AND status NOT IN ('received','cancelled')`, [pid, link.name])).rows[0].q) || 0;
+    need.set(pid, Math.max(0, -own - pending));
+  }
+  const mark = (c, qty, ref, note) => query(`INSERT INTO partner_auto_orders (sale_item_id, link_id, sale_id, product_id, qty, partner_ref, delivery, note)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (sale_item_id) DO NOTHING`, [c.sale_item_id, link.id, c.sale_id, c.product_id, qty, ref, link.auto_order_delivery, note]);
+  const plan = [];
+  for (const c of cands) {
+    const n = need.get(c.product_id) || 0;
+    const q = Math.min(parseInt(c.qty) || 0, n);
+    need.set(c.product_id, n - q);
+    if (q > 0) plan.push({ ...c, orderQty: q });
+    else await mark(c, 0, null, 'covered by own stock / already on order');
+  }
+  if (!plan.length) return { ordered: 0 };
+  const delivery = link.auto_order_delivery || 'collect';
+  const groups = delivery === 'dropship'
+    ? [...new Set(plan.map(c => c.sale_id))].map(id => plan.filter(c => c.sale_id === id))
+    : [plan];
+  let ordered = 0;
+  for (const g of groups) {
+    const lines = []; for (const c of g) { const l = lines.find(x => x.productId === c.product_id); if (l) l.qty += c.orderQty; else lines.push({ productId: c.product_id, qty: c.orderQty }); }
+    const first = g[0];
+    // Dropship: our customer's delivery address, as the plain text the partner stores.
+    const ship = delivery === 'dropship' ? [first.customer_name, first.shipping_address, first.customer_phone ? 'Tel ' + first.customer_phone : null].filter(Boolean).join('\n') || null : null;
+    const key = 'auto-' + crypto.createHash('sha1').update(g.map(c => c.sale_item_id).join(',')).digest('hex').slice(0, 24);
+    try {
+      const r = await placeOrder(link, {
+        lines, delivery: delivery === 'collect' ? 'collect' : 'ship', shippingAddress: ship,
+        poRef: delivery === 'dropship' ? first.invoice_number : `AUTO ${new Date().toISOString().slice(0, 10)}`,
+        notes: delivery === 'dropship' ? `Dropship to our customer for ${first.invoice_number} (${first.channel})` : `Sold by us: ${g.map(c => c.invoice_number).join(', ')}`,
+        idempotencyKey: key, noIncoming: delivery === 'dropship',
+      });
+      for (const c of g) await mark(c, c.orderQty, r.order.ref, null);
+      if (delivery === 'dropship') {
+        // Their stock fulfils our sale directly: our own count goes back to where it was.
+        for (const c of g) {
+          await query(`UPDATE products SET qty_on_hand = qty_on_hand + $1, updated_at = now() WHERE id = $2`, [c.orderQty, c.product_id]);
+          await query(`INSERT INTO stock_movements (product_id, delta, reason, reference_id) VALUES ($1,$2,'partner_dropship',$3)`, [c.product_id, c.orderQty, c.sale_id]).catch(() => {});
+        }
+        await query(`UPDATE sales SET notes = TRIM(COALESCE(notes, '') || ' ' || $2), updated_at = now() WHERE id = $1`,
+          [first.sale_id, `[Dropshipped by ${link.name}, their order ${r.order.ref}]`]).catch(() => {});
+      }
+      ordered += lines.reduce((a, l) => a + l.qty, 0);
+      require('./notify').notifyEvent({ type: 'partner_order', title: `🔁 Ordered from ${link.name}: ${r.order.ref}`,
+        body: `${g.map(c => `${c.orderQty}× ${c.title || c.sku}`).join(', ')} — sold on ${[...new Set(g.map(c => c.invoice_number))].join(', ')}` + (delivery === 'dropship' ? ' · dropship' : delivery === 'collect' ? ' · to collect' : ' · they ship to us'),
+        audience: 'staff', url: '/#incoming' }).catch(() => {});
+    } catch (e) {
+      require('./notify').notifyEvent({ type: 'partner_order', title: `⚠ Couldn't order from ${link.name}`, body: `${g.map(c => c.sku).join(', ')}: ${e.message}`, audience: 'admin', url: '/#trade' }).catch(() => {});
+      throw e;
+    }
+  }
+  return { ordered };
+}
+// Dropship: their dispatch (with tracking) marks OUR customer's order dispatched.
+async function dropshipDispatched(link, o) {
+  const rows = (await query(`SELECT DISTINCT sale_id FROM partner_auto_orders WHERE link_id = $1 AND partner_ref = $2 AND delivery = 'dropship'`, [link.id, o.ref])).rows;
+  for (const r of rows) {
+    const t = o.tracking || {};
+    const upd = (await query(`UPDATE sales SET status = CASE WHEN status IN ('paid','pending') THEN 'dispatched' ELSE status END,
+        dispatched_at = COALESCE(dispatched_at, now()), tracking_number = COALESCE($2, tracking_number), carrier = COALESCE($3, carrier)
+      WHERE id = $1 AND dispatched_at IS NULL RETURNING *`, [r.sale_id, t.number || null, t.carrier || null])).rows[0];
+    if (upd) { try { await require('../routes/dispatch').pushDispatchToChannel(upd); } catch (_) {} }
+  }
+}
+
+// Partner stock changed on parts we sell from their stock → push to our channels.
+function pushPartnerStock(productIds) {
+  const ids = [...new Set((productIds || []).filter(Boolean))];
+  if (!ids.length) return;
+  setImmediate(() => {
+    require('../services/sync').pushStockForSaleItems(ids.map(id => ({ productId: id }))).catch(e => console.warn('[partner] stock push:', e.message));
+    try { require('./onbuy-sync').pushStockAndPrices().catch(() => {}); } catch (_) {}
+  });
+}
+
 // Partner pushed an event to us (signature checked by the caller).
 async function handleEvent(link, evt) {
   if (evt.event === 'stock.updated') {
-    let n = 0;
+    let n = 0; const ids = [];
     for (const it of evt.data?.items || []) {
       const r = await query(`UPDATE products SET partner_qty = $3, partner_synced_at = now()
-        WHERE partner_link_id = $1 AND upper(partner_sku) = upper($2)`, [link.id, it.sku, it.available]);
+        WHERE partner_link_id = $1 AND upper(partner_sku) = upper($2) RETURNING id, source_partner_id`, [link.id, it.sku, it.available]);
       n += r.rowCount || 0;
+      for (const row of r.rows) if (row.source_partner_id === link.id) ids.push(row.id);
     }
+    pushPartnerStock(ids);   // their stock is what we sell → update our eBay / Shopify / OnBuy now
     return { updated: n };
   }
   if (evt.event === 'order.updated' && evt.data?.ref) {
@@ -234,6 +377,7 @@ async function handleEvent(link, evt) {
     const note = `${link.name} order ${o.ref}: ${o.status}${o.tracking ? ' · tracking ' + o.tracking.number : ''}`;
     await query(`UPDATE incoming_stock SET notes = $2, status = CASE WHEN $3 AND status = 'on_order' THEN 'shipped' ELSE status END, updated_at = now()
       WHERE container_ref = $1 AND qty_received < qty_ordered`, [`${link.name} ${o.ref}`, note, o.status === 'dispatched']).catch(() => {});
+    if (o.status === 'dispatched') { await dropshipDispatched(link, o).catch(e => console.warn('[partner] dropship dispatch:', e.message)); }
     if (o.status === 'dispatched') {
       require('./notify').notifyEvent({ type: 'partner_order', title: `🚚 ${link.name} dispatched ${o.ref}`, body: note, audience: 'staff', url: '/#incoming' }).catch(() => {});
     }
@@ -247,4 +391,4 @@ async function handleEvent(link, evt) {
   return { ignored: true };
 }
 
-module.exports = { ensureSchema, call, getLink, publicLink, connect, catalogue, importItems, sync, syncAll, placeOrder, handleEvent, origin };
+module.exports = { ensureSchema, call, getLink, publicLink, connect, catalogue, importItems, sync, syncAll, placeOrder, handleEvent, origin, autoOrderSweep };

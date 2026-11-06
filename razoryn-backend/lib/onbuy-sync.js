@@ -111,7 +111,12 @@ function marginFor(p, s, price) {
     isLarge: !!p.large_panel, band: p.shipping_band || null, shippingCost: p.shipping_cost,
     postageInPrice: p.postage_in_price ?? null, channel: 'onbuy', settings: s._cost });
 }
-function stockFor(p, s) { return Math.max(0, (parseInt(p.qty_on_hand) || 0) - (parseInt(s.stockBuffer) || 0)); }
+function stockFor(p, s) {
+  // Partner-sourced part: their live stock counts too (own + partner).
+  const own = parseInt(p.qty_on_hand) || 0;
+  const avail = (p.source_partner_id && p.source_partner_id === p.partner_link_id) ? Math.max(0, own) + Math.max(0, parseInt(p.partner_qty) || 0) : own;
+  return Math.max(0, avail - (parseInt(s.stockBuffer) || 0));
+}
 
 // EAN-13 / GTIN check digit.
 function validEan(code) {

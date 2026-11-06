@@ -535,10 +535,12 @@ async function pushStockForProduct(product) {
 
   if (links.length) {
     const results = [];
+    // Own stock, plus the partner's live stock for partner-sourced parts.
+    const qty = await require('../lib/stock-qty').sellableQty(product);
     for (const link of links) {
       const store = link.store_code || undefined;
       try {
-        await setQuantityTradingAPI(link.ebay_item_id, product.qty_on_hand, store);
+        await setQuantityTradingAPI(link.ebay_item_id, qty, store);
         results.push({ itemId: link.ebay_item_id, store, ok: true });
       } catch (e) {
         results.push({ itemId: link.ebay_item_id, store, error: e.message });

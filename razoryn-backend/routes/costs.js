@@ -6,7 +6,7 @@ const { query, withTx } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 const fx = require('../lib/fx');
-const { computeFloor, marginAtPrice, marginAtOffer, effectiveCost, resolveCostSettings } = require('../lib/pricing-floor');
+const { computeFloor, marginAtPrice, marginAtOffer, effectiveCost, resolveCostSettings, postageFor } = require('../lib/pricing-floor');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -469,9 +469,16 @@ router.get('/floors', requireAdmin, async (req, res) => {
       costPrice: cost,
       floorEbay: fe.floor, floorShopify: fs.floor, floorDirect: fd.floor,
       breakevenEbay: fe.breakeven, breakevenShopify: fs.breakeven, breakevenDirect: fd.breakeven,
+      // Cash / bank sales: no marketplace fees — just landed cost, packing,
+      // overhead, and postage when it's sent out. VAT is applied client-side
+      // (bank = VAT inside the price when registered; cash = VAT-free).
+      direct: {
+        cost: +(effectiveCost(cost, landedCost, S) + S.packagingCost + (Number(S.overheadPerUnit) || 0)).toFixed(2),
+        postage: +Number(postageFor(S, { band, isLarge, shippingCost }) || 0).toFixed(2),
+      },
     };
   }
-  res.json({ floors, targetMarginPct: S.targetMarginPct });
+  res.json({ floors, targetMarginPct: S.targetMarginPct, vatRegistered: !!S.vatRegistered, vatRate: S.vatRate });
 });
 
 router.shareCostWithSiblings = shareCostWithSiblings;

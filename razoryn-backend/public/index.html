@@ -1612,6 +1612,7 @@ function adaptSale(s) {
     externalOrderId: s.external_order_id || '',
     invoice: s.invoice_number || s.payment_reference || (s.external_order_id ? '#' + s.external_order_id : '—'),
     apiChannel: s.channel,
+    isTrade: !!s.trade_account_id, tradeAccountId: s.trade_account_id || null,
     isEstimate: !!s.is_estimate,
     paymentMethod: s.payment_method,
     fulfillmentMethod: s.fulfillment_method || (s.payment_method === 'cash' ? 'collect' : 'ship'),
@@ -4344,7 +4345,7 @@ function renderDashboard() {
               ${todaySales.length ? todaySales.map(s => `
                 <tr>
                   <td>${new Date(s.date).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</td>
-                  <td>${channelPill(s.channel)}</td>
+                  <td>${channelPill(s.channel, s)}</td>
                   <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
                   <td>${s.customer}</td>
                   <td class="num">${s.isPartlyRefunded
@@ -4378,14 +4379,20 @@ function matchesKeywords(query, ...parts) {
   return tokens.every(t => hay.includes(t));
 }
 
-function channelPill(ch) {
+function channelPill(ch, sale) {
+  // Trade / partner orders are their own channel on screen (they still book as
+  // bank or cash underneath, so VAT + accounts are unchanged).
+  if (sale && (sale.trade_account_id || sale.isTrade) && ch !== 'trade') {
+    const how = /cash/.test(ch || '') ? 'cash' : 'bank';
+    return channelPill('trade') + `<span style="font-size:10px;color:var(--ink-soft);margin-left:4px">${how}</span>`;
+  }
   // Map raw channel codes to (colour, label) pairs. eBay store codes look up
   // the human-readable store name from the brand config so e.g. ebay_em →
   // "EVBODYPARTS" for Calibre or "eBay" for Razoryn.
   const stores = (State.brand?.allStores || State.brand?.stores || []);
   // A colour picked for this channel in Settings wins over the default.
   const key = ch === 'cash' ? 'direct_cash' : ch === 'bank' ? 'direct_bank' : ch;
-  const custom = (State.brand?.channelColors || {})[key] || (key === 'onbuy' ? '#0d9488' : '');
+  const custom = (State.brand?.channelColors || {})[key] || (key === 'onbuy' ? '#0d9488' : key === 'trade' ? '#7c3aed' : '');
   const style = custom ? ` style="background:${custom}26;color:${custom};border:1px solid ${custom}66"` : '';
   // Try to find a store whose channelCode matches
   if (ch && ch.startsWith('ebay')) {
@@ -4402,6 +4409,7 @@ const CHANNEL_DEFAULTS = {
   direct_bank:  ['amber', 'Bank'],
   direct_card:  ['amber', 'Card'],
   onbuy:        ['', 'OnBuy'],
+  trade:        ['', 'Trade'],
   cash:         ['amber', 'Cash'],
   bank:         ['amber', 'Bank'],
 };
@@ -4410,6 +4418,7 @@ function colorableChannels() {
   const st = (State.brand?.allStores || State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
   return [...st.map(s => ({ key: s.channelCode, label: `eBay — ${s.name}` })),
     { key: 'shopify', label: 'Store (Shopify)' }, { key: 'onbuy', label: 'OnBuy' },
+    { key: 'trade', label: 'Trade (partner / trade accounts)' },
     { key: 'direct_bank', label: 'Bank' }, { key: 'direct_cash', label: 'Cash' }, { key: 'direct_card', label: 'Card' }];
 }
 async function loadChannelColors() {
@@ -7951,7 +7960,7 @@ function filterReturns(f) {
         <div style="display:flex;align-items:flex-start;gap:12px">
           <div style="flex:1;min-width:0">
             <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
-              ${channelPill(r.channel)}
+              ${channelPill(r.channel, r)}
               <span class="pill ${statusPill(r.status)}">${statusLabel(r.status)}</span>
               ${deadlineBadge(r.respondBy)}
               ${r.photoCount ? `<span class="pill" style="background:var(--bg-soft);color:var(--ink-soft)">📷 ${r.photoCount}</span>` : ''}
@@ -7994,7 +8003,7 @@ async function openReturnDetail(id) {
     title: r.title ? `Return: ${r.title.slice(0, 60)}` : 'Return details',
     body: `
       <div style="display:flex;gap:6px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
-        ${channelPill(r.channel)}
+        ${channelPill(r.channel, r)}
         <span class="pill ${statusPill(r.status)}">${statusLabel(r.status)}</span>
         ${deadlineBadge(r.respondBy)}
         ${r.externalState ? `<span class="pill" style="background:var(--bg-soft);color:var(--ink-soft);font-size:10px">eBay: ${r.externalState}</span>` : ''}
@@ -8513,7 +8522,7 @@ function renderShipmentRow(s) {
   const pushWarn = s.channel_push_state === 'error' ? `<div style="font-size:10px;color:var(--red)">⚠ channel push failed <a href="#" onclick="retryPush('${s.id}');return false">retry</a></div>` : '';
   return `<tr>
     <td><div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div><div style="font-size:11px;color:var(--ink-soft);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(s.first_item_title || '')}</div></td>
-    <td>${channelPill(s.channel)}</td>
+    <td>${channelPill(s.channel, s)}</td>
     <td>${escapeHtml(s.customer_name || '—')}</td>
     <td><div>${escapeHtml(s.carrier || '—')}</div><div>${track}</div>${pushWarn}</td>
     <td style="white-space:nowrap;font-size:12px">${when}${transit}</td>
@@ -8784,7 +8793,7 @@ function renderDispatchRow(s, kind) {
           ${s.order_number && s.order_number !== ref ? `<div style="font-size:10px;color:var(--ink-soft)">${escapeHtml(s.order_number)}</div>` : ''}
           ${s.dropfleet_pushed_at ? `<div style="margin-top:3px"><span class="pill green" style="font-size:9px" title="Sent to DropFleet ${escapeAttr(fmtDate(s.dropfleet_pushed_at))}">🚚 Sent to DropFleet</span></div>` : ''}
         </td>
-        <td>${channelPill(s.channel)}</td>
+        <td>${channelPill(s.channel, s)}</td>
         <td>${escapeHtml(s.customer_name || '—')}</td>
         <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div></td>
         <td class="num"><strong>${gbp(s.total)}</strong></td>
@@ -8810,7 +8819,7 @@ function renderDispatchRow(s, kind) {
         <td>
           <div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div>
           ${s.order_number && s.order_number !== ref ? `<div style="font-size:10px;color:var(--ink-soft)">${escapeHtml(s.order_number)}</div>` : ''}
-          <div style="margin-top:2px">${channelPill(s.channel)}</div>
+          <div style="margin-top:2px">${channelPill(s.channel, s)}</div>
         </td>
         <td>${escapeHtml(s.customer_name || '—')}<div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(s.customer_phone || '')}</div></td>
         <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div></td>
@@ -8844,7 +8853,7 @@ function renderRecentRow(s) {
   return `
     <tr>
       <td><div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div></td>
-      <td>${channelPill(s.channel)}</td>
+      <td>${channelPill(s.channel, s)}</td>
       <td>${escapeHtml(s.customer_name || '—')}</td>
       <td>${isCollected ? '💰 Cash collection' : (s.carrier ? `<div style="font-size:12px">${escapeHtml(s.carrier)}</div>${s.tracking_number ? `<div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--ink-soft)">${escapeHtml(s.tracking_number)}</div>` : ''}` : '—')}</td>
       <td><div style="font-size:12px">${whenDate ? whenDate.toLocaleDateString('en-GB', { day:'2-digit', month:'short' }) : '—'}</div><div style="font-size:10px;color:var(--ink-soft)">${whenDate ? whenDate.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' }) : ''}</div></td>
@@ -9056,7 +9065,7 @@ function openDispatchModal(saleId) {
       <div style="background:var(--bg-soft);padding:12px;border-radius:8px;margin-bottom:14px">
         <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Order</div>
         <div style="font-family:ui-monospace,monospace;font-size:13px;margin-bottom:4px">${escapeHtml(ref)}</div>
-        <div style="font-size:13px">${escapeHtml(sale.customer_name || '—')} · ${gbp(sale.total)} · ${channelPill(sale.channel)}</div>
+        <div style="font-size:13px">${escapeHtml(sale.customer_name || '—')} · ${gbp(sale.total)} · ${channelPill(sale.channel, sale)}</div>
         ${sale.shipping_address ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:6px;white-space:pre-line;line-height:1.5">${escapeHtml(sale.shipping_address)}</div>` : ''}
       </div>
       <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">How did it leave?</div>
@@ -9772,6 +9781,7 @@ function renderSales() {
         <button data-sf="cash">Cash</button>
         <button data-sf="bank">Bank</button>
         <button data-sf="card">Card</button>
+        <button data-sf="trade" title="Trade / partner orders (REP-T-…)">Trade</button>
         <button data-sf="unpaid">⏳ Unpaid${(State.sales||[]).filter(s=>s.unpaid).length ? ' (' + (State.sales||[]).filter(s=>s.unpaid).length + ')' : ''}</button>
         <button data-sf="fitment">🔧 Needs fitment${(State.sales||[]).filter(s=>s.needsFitment && !s.isEstimate && !s.dispatchedAt && !s.collectedAt).length ? ' (' + (State.sales||[]).filter(s=>s.needsFitment && !s.isEstimate && !s.dispatchedAt && !s.collectedAt).length + ')' : ''}</button>
         <button data-sf="estimates">Estimates</button>
@@ -9830,7 +9840,8 @@ function renderSales() {
     // 'ebay' is the legacy single-store bucket — matches any ebay_* channel.
     else if (filter === 'ebay') list = State.sales.filter(s => (s.channel || '').startsWith('ebay') && !s.isEstimate);
     // Cash / Bank / Card buckets are by payment method (channels are direct_cash/bank/card).
-    else if (filter === 'cash' || filter === 'bank' || filter === 'card') list = State.sales.filter(s => s.paymentMethod === filter && !s.isEstimate);
+    else if (filter === 'trade') list = State.sales.filter(s => s.isTrade && !s.isEstimate);
+    else if (filter === 'cash' || filter === 'bank' || filter === 'card') list = State.sales.filter(s => s.paymentMethod === filter && !s.isEstimate && !s.isTrade);
     else list = State.sales.filter(s => s.channel === filter && !s.isEstimate);
     const q = (State.salesSearch || '').trim();
     if (q) {
@@ -9972,7 +9983,7 @@ function renderSales() {
         <td onclick="event.stopPropagation()"><input type="checkbox" class="sale-row-check" data-sid="${s.id}" ${State.salesSelected.has(s.id)?'checked':''} onchange="salesToggleRow('${s.id}',this.checked)"></td>
         <td>${fmtDate(s.date)}</td>
         <td style="font-family:ui-monospace,monospace;font-size:12px">${s.invoice||'—'}</td>
-        <td>${channelPill(s.channel)}${estimateBadge}${dispatchBadge}${unpaidBadge}${preorderBadge}${fitmentBadge}${lpBadge}${refundBadge}${openReturnBadge}</td>
+        <td>${channelPill(s.channel, s)}${estimateBadge}${dispatchBadge}${unpaidBadge}${preorderBadge}${fitmentBadge}${lpBadge}${refundBadge}${openReturnBadge}</td>
         <td><div style="font-weight:500">${s.title}</div><div style="color:var(--ink-soft);font-size:11px">${s.sku}</div></td>
         <td>${s.customer}</td>
         <td class="num">${amountCell}</td>
@@ -11257,7 +11268,7 @@ function manualSaleRecalc() {
     subtotal += qty * price;
     // Cost-floor warning per line (direct sale).
     const fw = r.querySelector('.ms-floor-warn');
-    if (fw) fw.innerHTML = (r.dataset.productId && price) ? floorWarnHtml(r.dataset.productId, price, 'direct') : '';
+    if (fw) { const pm = el('ms-payment')?.value || 'cash'; fw.innerHTML = (r.dataset.productId && price) ? directProfitHtml(r.dataset.productId, price, pm === 'card' ? 'bank' : pm, (el('ms-fulfil')?.value || 'collect') !== 'collect', qty) : ''; }
   }
   const shipping = parseFloat(el('ms-shipping')?.value || 0);
   const cfg = State.pricingConfig || {};
@@ -11722,7 +11733,8 @@ function qbSelectProduct(id) {
           : `<div style="font-size:11px;color:var(--amber);background:var(--amber-light);padding:8px 12px;border-radius:6px;margin-bottom:12px">⚠️ Not linked to an eBay listing yet — using Shopify price as the basis. Link via Listing Mirror → Link Status.</div>`
         ) : ''}
         <div class="pt-result">
-          ${floorWarnHtml(p.id, Math.min(prices.cash || Infinity, prices.bank || Infinity), 'direct')}
+          ${(() => { const c = directProfit(p.id, prices.cash, 'cash', false), b = directProfit(p.id, prices.bank, 'bank', true);
+            return canSeeMoney() && (c || b) ? `<div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Profit — ${c ? `cash: <b style="color:${c.net < 0 ? 'var(--red)' : 'var(--green)'}">£${c.net.toFixed(2)}</b>` : ''}${c && b ? ' · ' : ''}${b ? `bank (VAT out, posted): <b style="color:${b.net < 0 ? 'var(--red)' : 'var(--green)'}">£${b.net.toFixed(2)}</b>` : ''}</div>` : ''; })()}
           <!-- Cash on collection -->
           <div class="pt-row ${cashAddable ? 'clickable' : 'info-only'} ${pm === 'cash' ? 'matches-lock' : ''}"
                ${cashAddable ? `onclick="qbAddToQuote('${p.id}', 'cash')"` : ''}>
@@ -14402,7 +14414,7 @@ async function renderCreateListing() {
   CL.categoryId = ''; CL.categoryName = ''; CL.categoryAuto = false; CL._catResults = []; CL.images = []; CL.studio = null;
   CL.editProductId = null; CL.imagesReadonly = false;   // create mode (not edit)
   CL.draftId = null;   // set when resuming a saved draft
-  if (!CL_REPEAT) CL._incomingId = null;
+  if (!CL_REPEAT) { CL._incomingId = null; CL._partner = null; }
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
   if (el('cl-core')) { el('cl-core').innerHTML = clCoreHtml(); clRenderPhotos(); }
   _clCompFor = '';
@@ -15095,6 +15107,8 @@ async function submitUnifiedCreate(btn, overrides = {}) {
       packagingCost: (el('cl-pack-cost')?.value || '') !== '' ? parseFloat(el('cl-pack-cost').value) : null,
       shippingBand: el('cl-ship-band')?.value || undefined,
       shippingCost: (el('cl-ship-cost')?.value || '') !== '' ? parseFloat(el('cl-ship-cost').value) : undefined,
+      // Listed from a partner warehouse: sells from their stock, ordered from them when sold.
+      partnerLinkId: CL._partner?.linkId || undefined, partnerSku: CL._partner?.sku || undefined, partnerQty: CL._partner?.qty ?? undefined,
       taxable: el('cl-taxable') ? el('cl-taxable').checked : true,
       templateSuffix: el('cl-template')?.value || null,
       shippingProfileId: el('cl-shipprofile')?.value || null,
@@ -17483,7 +17497,7 @@ function stRenderOrders(q) {
     return `<div onclick="stPickOrder('${s.id}')" style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-bottom:6px;cursor:pointer">
       <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escapeHtml(ref)}</div>
       <div style="font-weight:600;font-size:13px">${itemLabel}</div>
-      <div style="font-size:12px;color:var(--ink-soft)">${escapeHtml(s.customer_name || '—')} · ${channelPill(s.channel)}</div>
+      <div style="font-size:12px;color:var(--ink-soft)">${escapeHtml(s.customer_name || '—')} · ${channelPill(s.channel, s)}</div>
     </div>`;
   }).join('');
 }
@@ -19373,7 +19387,7 @@ async function ctSaveSettings() {
 // notes wherever a price is set. No per-keystroke network calls.
 async function refreshCostFloors() {
   if (State.user?.role !== 'admin') return;
-  try { const r = await Api.get('/api/costs/floors'); State.costFloors = r.floors || {}; }
+  try { const r = await Api.get('/api/costs/floors'); State.costFloors = r.floors || {}; State.costFloorsVat = { registered: !!r.vatRegistered, rate: r.vatRate ?? 20 }; }
   catch (e) { /* 403 / not configured — ignore */ }
 }
 function costFloorFor(productId) { return (State.costFloors || {})[productId] || null; }
@@ -19383,7 +19397,26 @@ function floorFor(f, channel) {
   if (channel === 'direct') return { floor: f.floorDirect, be: f.breakevenDirect };
   return { floor: f.floorEbay, be: f.breakevenEbay };
 }
+// Cash / bank sale profit for one unit — no marketplace fees, so no "floor".
+// Bank: VAT is inside the price (when VAT registered). Cash: VAT-free.
+// Postage only counts when the part is sent out (not collected).
+function directProfit(productId, price, payment, delivered) {
+  const f = costFloorFor(productId); const d = f?.direct; const p = parseFloat(price);
+  if (!d || !(p > 0)) return null;
+  const V = State.costFloorsVat || {};
+  const exVat = payment !== 'cash' && V.registered ? p / (1 + (V.rate || 20) / 100) : p;
+  const net = exVat - d.cost - (delivered ? d.postage : 0);
+  return { net: +net.toFixed(2), pct: +(net / p * 100).toFixed(1), vat: +(p - exVat).toFixed(2) };
+}
+function directProfitHtml(productId, price, payment, delivered, qty) {
+  if (!canSeeMoney()) return '';
+  const r = directProfit(productId, price, payment, delivered); if (!r) return '';
+  const q = Math.max(1, parseFloat(qty) || 1);
+  const how = payment === 'cash' ? 'cash, no VAT' : (r.vat ? `${payment}, after £${(r.vat * q).toFixed(2)} VAT` : payment);
+  return `<div style="font-size:11px;margin-top:3px;color:${r.net < 0 ? 'var(--red)' : 'var(--ink-soft)'}">${r.net < 0 ? '⚠ Loss' : 'Profit'} <b style="color:${r.net < 0 ? 'var(--red)' : 'var(--green)'}">£${Math.abs(r.net * q).toFixed(2)}</b> (${r.pct}%) <span>· ${how}${delivered ? ', incl. postage' : ''}</span></div>`;
+}
 function floorWarnHtml(productId, price, channel) {
+  if (channel === 'direct') return '';   // cash / bank sales show profit instead (directProfitHtml)
   const f = costFloorFor(productId); if (!f) return '';
   const { floor, be } = floorFor(f, channel);
   const p = parseFloat(price);
@@ -24126,6 +24159,94 @@ async function trSaveAccount(id) {
 }
 
 // ── Account detail ──
+// ── Parts & prices for one trade account: what they can see + what they pay ──
+const TRPP = { sel: new Set(), items: [], q: '', show: 'all', inStock: false };
+async function trPartsPrices(id, keepSel) {
+  if (!keepSel) TRPP.sel = new Set();
+  TRPP.id = id;
+  const a = TR.detail?.account || {};
+  el('tr-body').innerHTML = `
+    <div style="margin-bottom:10px"><a href="#" onclick="trGo('accounts',{accountId:${id}});return false" style="font-size:13px">← ${escapeHtml(a.name || 'Account')}</a></div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+      <div><h2 style="margin:0">Parts &amp; prices — ${escapeHtml(a.name || '')}</h2>
+        <div style="font-size:12.5px;color:var(--ink-soft)">Choose which parts they can see and order, and set what they pay. Prices are <b>ex VAT</b>${a.account_type === 'cash' ? ' — cash account: no VAT is added' : ' — VAT is added on their invoice'}.</div></div>
+      <div class="seg" id="trpp-mode"></div>
+    </div>
+    <div class="card"><div class="card-body">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <input type="search" id="trpp-q" placeholder="Search SKU, title, part number…" value="${escapeAttr(TRPP.q)}" style="flex:1;min-width:220px"
+          oninput="clearTimeout(TRPP.t);TRPP.t=setTimeout(()=>{TRPP.q=this.value;trppLoad()},300)">
+        <select id="trpp-show" onchange="TRPP.show=this.value;trppLoad()" aria-label="Show">
+          <option value="all">All parts</option><option value="shared">Shared with them</option><option value="not">Not shared</option></select>
+        <label style="font-size:13px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="trpp-instock" ${TRPP.inStock ? 'checked' : ''} onchange="TRPP.inStock=this.checked;trppLoad()"> In stock only</label>
+      </div>
+      <div id="trpp-bar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--line);border-radius:8px;margin-bottom:10px;font-size:13px"></div>
+      <div id="trpp-list" style="overflow:auto;max-height:62vh"><div style="color:var(--ink-soft)">Loading…</div></div>
+    </div></div>`;
+  el('trpp-show').value = TRPP.show;
+  trppLoad();
+}
+async function trppLoad() {
+  let r;
+  try { r = await Api.get(`/api/trade/accounts/${TRPP.id}/catalogue?q=${encodeURIComponent(TRPP.q)}&show=${TRPP.show}${TRPP.inStock ? '&inStock=1' : ''}`); }
+  catch (e) { el('trpp-list').innerHTML = `<div style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  TRPP.items = r.items; TRPP.mode = r.mode; TRPP.defaults = r.defaults;
+  el('trpp-mode').innerHTML = [['all', 'They see all my parts'], ['selected', 'Only parts I pick']].map(([v, l]) =>
+    `<button class="${r.mode === v ? 'active' : ''}" onclick="trppMode('${v}')">${l}</button>`).join('');
+  const basis = (x) => x.basis === 'fixed' ? 'fixed £' : x.basis === 'retail_discount' ? '% off retail' : x.basis === 'cost_plus' ? 'cost + %' : '—';
+  const rule = (x) => !x.itemRule ? `<span style="color:var(--ink-soft)">account default</span>`
+    : x.itemRule.kind === 'fixed' ? `<b>£${x.itemRule.value.toFixed(2)}</b> fixed` : x.itemRule.kind === 'markup' ? `<b>cost +${x.itemRule.value}%</b>` : `<b>−${x.itemRule.value}%</b> off retail`;
+  el('trpp-list').innerHTML = r.items.length ? `<table class="table" style="font-size:13px"><thead><tr>
+      <th style="width:28px"><input type="checkbox" title="Select all shown" onchange="TRPP.items.forEach(x=>this.checked?TRPP.sel.add(x.id):TRPP.sel.delete(x.id));trppPaintChecks();trppBar()"></th>
+      <th>Part</th><th style="text-align:right">Stock</th><th style="text-align:right">Our cost</th><th style="text-align:right">Retail</th>
+      <th style="text-align:right">They pay (ex VAT)</th><th style="text-align:right">Margin</th><th>Item price</th>${r.mode === 'selected' ? '<th>Shared</th>' : ''}</tr></thead><tbody>
+    ${r.items.map(x => `<tr style="${r.mode === 'selected' && !x.picked ? 'opacity:.6' : ''}">
+      <td><input type="checkbox" class="trpp-cb" data-id="${x.id}" ${TRPP.sel.has(x.id) ? 'checked' : ''} onchange="this.checked?TRPP.sel.add(${x.id}):TRPP.sel.delete(${x.id});trppBar()"></td>
+      <td><div style="font-weight:600;max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(x.title || '')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(x.sku || '')}</div></td>
+      <td style="text-align:right">${x.qty ?? 0}</td>
+      <td style="text-align:right">${x.cost != null ? trMoney(x.cost) : '<span style="color:var(--ink-soft)">—</span>'}</td>
+      <td style="text-align:right">${x.retail ? trMoney(x.retail) : '—'}</td>
+      <td style="text-align:right;font-weight:700">${x.price != null ? trMoney(x.price) : '<span style="color:var(--amber)">no price</span>'}<div style="font-size:10.5px;color:var(--ink-soft);font-weight:400">${basis(x)}${x.clamped ? ' · raised to cost' : ''}</div></td>
+      <td style="text-align:right;color:${x.marginPct == null ? 'var(--ink-soft)' : x.marginPct < 5 ? 'var(--red)' : 'var(--green)'}">${x.marginPct != null ? x.marginPct + '%' : '—'}</td>
+      <td style="font-size:12px">${rule(x)}</td>
+      ${r.mode === 'selected' ? `<td>${x.picked ? '<span class="pill green" style="font-size:10px">shared</span>' : '<span style="font-size:11px;color:var(--ink-soft)">hidden</span>'}</td>` : ''}
+    </tr>`).join('')}</tbody></table>
+    <div style="font-size:11.5px;color:var(--ink-soft);margin-top:6px">${r.items.length} part(s) shown${r.items.length >= 500 ? ' (first 500 — search to narrow down)' : ''}. Account default: our cost + ${TRPP.defaults.markupPct}%.</div>`
+    : '<div class="empty" style="padding:18px"><div class="t">No parts match</div></div>';
+  trppBar();
+}
+function trppPaintChecks() { document.querySelectorAll('.trpp-cb').forEach(c => { c.checked = TRPP.sel.has(+c.dataset.id); }); }
+function trppBar() {
+  const n = TRPP.sel.size, shown = TRPP.items.length;
+  el('trpp-bar').innerHTML = `
+    <b>${n}</b> ticked
+    ${shown ? `<a href="#" onclick="TRPP.items.forEach(x=>TRPP.sel.add(x.id));trppPaintChecks();trppBar();return false">Select all ${shown} shown</a>` : ''}
+    ${n ? `<a href="#" onclick="TRPP.sel.clear();trppPaintChecks();trppBar();return false">Clear</a>` : ''}
+    <span style="flex:1"></span>
+    ${TRPP.mode === 'selected' ? `<button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trppShare(true)">✓ Share ticked</button>
+      <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trppShare(false)">Hide ticked</button><span style="width:10px"></span>` : ''}
+    <span>Price ticked:</span>
+    <select id="trpp-kind" onchange="el('trpp-val').style.display=this.value==='default'?'none':'';el('trpp-val').placeholder=this.value==='fixed'?'£ each':'%'">
+      <option value="markup">Our cost + %</option><option value="discount">% off retail</option><option value="fixed">Fixed £ (ex VAT)</option><option value="default">Back to account default</option></select>
+    <input id="trpp-val" type="number" step="0.01" min="0" placeholder="%" style="width:90px">
+    <button class="btn btn-primary btn-sm" ${n ? '' : 'disabled'} onclick="trppPrice()">Apply to ${n}</button>`;
+}
+async function trppMode(mode) {
+  if (mode === 'selected' && !confirm('Only parts you pick will be visible to them (and orderable). Start with none shared and tick the ones to share?')) return;
+  try { await Api.put(`/api/trade/accounts/${TRPP.id}/catalogue-mode`, { mode }); toast(mode === 'selected' ? 'They now see only the parts you share' : 'They now see all your parts', 'success'); trppLoad(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+async function trppShare(on) {
+  try { const r = await Api.post(`/api/trade/accounts/${TRPP.id}/catalogue`, { productIds: [...TRPP.sel], shared: on }); toast(`${r.count} part(s) ${on ? 'shared' : 'hidden'}`, 'success'); TRPP.sel.clear(); trppLoad(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+async function trppPrice() {
+  const kind = el('trpp-kind').value, value = el('trpp-val').value;
+  if (kind !== 'default' && value === '') { toast('Enter the % or £', 'warn'); return; }
+  try { const r = await Api.post(`/api/trade/accounts/${TRPP.id}/price-items`, { productIds: [...TRPP.sel], kind, value }); toast(`Prices set for ${r.count} part(s)`, 'success'); TRPP.sel.clear(); trppLoad(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+
 async function trAccountDetail(id) {
   let d;
   try { d = await Api.get('/api/trade/accounts/' + id); } catch (e) { el('tr-body').innerHTML = `<div class="card"><div class="card-body" style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div></div>`; return; }
@@ -24140,6 +24261,7 @@ async function trAccountDetail(id) {
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
       <button class="btn btn-primary" onclick="trNewOrder(${a.id})">+ Take an order</button>
+      <button class="btn btn-outline" onclick="trPartsPrices(${a.id})" title="Choose which parts they can see and set their prices (% or fixed, per item)">🧩 Parts &amp; prices</button>
       <button class="btn btn-outline" onclick="trPayment(${a.id})">£ Record payment</button>
       ${a.terms === 'account' && a.invoice_period !== 'per_order' ? `<button class="btn btn-outline" onclick="trInvoiceNow(${a.id})">🧾 Invoice now</button>` : ''}
       <button class="btn btn-outline" onclick="trApiKey(${a.id}, ${a.has_key})">🔑 ${a.has_key ? 'New access key' : 'Give portal / API access'}</button>
@@ -24441,6 +24563,18 @@ async function trPartnerDetail(id) {
       <button class="btn btn-outline btn-sm" onclick="trPartnerAction(${id},'sync')">↻ Sync stock &amp; costs</button>
       <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="trPartnerDelete(${id})">Unlink</button>
     </div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Selling their parts</h3><div class="card-desc">Parts you list from ${escapeHtml(p.name)} show <b>their live stock</b> (plus any of your own) on your eBay, Shopify and OnBuy, and update as their stock changes.</div></div>
+      <div class="card-body" style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+        <label style="display:flex;gap:8px;align-items:center;font-size:13px;cursor:pointer"><label class="switch"><input type="checkbox" id="trp-auto" ${p.auto_order ? 'checked' : ''}><span></span></label> <span><b>Order automatically</b> when you sell one of their parts</span></label>
+        <div class="field" style="margin:0"><label style="font-size:12px">How it gets to the customer</label>
+          <select id="trp-auto-del">
+            <option value="collect" ${p.auto_order_delivery === 'collect' ? 'selected' : ''}>We collect it from ${escapeHtml(p.name)}</option>
+            <option value="ship" ${p.auto_order_delivery === 'ship' ? 'selected' : ''}>${escapeHtml(p.name)} sends it to us</option>
+            <option value="dropship" ${p.auto_order_delivery === 'dropship' ? 'selected' : ''}>${escapeHtml(p.name)} sends it straight to our customer</option>
+          </select></div>
+        <button class="btn btn-primary btn-sm" onclick="trPartnerAutoSave(${id})">Save</button>
+        <div style="flex-basis:100%;font-size:11.5px;color:var(--ink-soft)">The order is placed in their app the moment your sale comes in (they're notified, their stock comes off and your listings update). It goes on your account with them and is invoiced on your agreed terms. Collect / send-to-us orders land in your Incoming; dropship orders take their tracking back to your eBay / Shopify order. Only sales after you switch this on are ordered.</div>
+      </div></div>
     <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Their stock</h3><div class="card-desc">Search their catalogue at your trade price, tick parts and import them — existing products with the same SKU are linked, new ones are created (0 own stock, tagged with ${escapeHtml(p.name)} as source).</div></div>
       <div class="card-body"><div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
         <input id="trpc-q" placeholder="Search their parts…" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')trPartnerSearch(${id})">
@@ -24460,6 +24594,45 @@ async function trPartnerDetail(id) {
           <div class="field" style="margin:0"><label style="font-size:12px">Delivery</label><select id="trpo-del"><option value="ship">Deliver</option><option value="collect">We collect</option></select></div>
           <button class="btn btn-primary" onclick="trPartnerOrder(${id})">Order from ${escapeHtml(p.name)}</button></div>` : '<div style="padding:16px;color:var(--ink-soft);font-size:13px">Nothing linked yet — search their stock above and import.</div>'}</div></div>`;
 }
+// List a partner's part on OUR channels: Create listing pre-filled from their
+// listing; it sells from their live stock (no own stock) and is ordered from
+// them when it sells.
+async function trPartnerList(linkId, sku) {
+  const t = Task.start('Fetching their listing…');
+  let r;
+  try { r = await Api.get(`/api/trade/partners/${linkId}/item/${encodeURIComponent(sku)}`); Task.done(t, 'Ready'); }
+  catch (e) { Task.fail(t, 'Failed'); toast(e.data?.message || e.message, 'error'); return; }
+  if (r.local) { toast(`You already have ${r.local.sku} — open it from Inventory`, 'info', 6000); return; }
+  const it = r.item, pc = it.parcel || {}, L = it.listing || {};
+  const specs = {};
+  for (const sp of (L.item_specifics || [])) if (sp && sp.name && !/placement/i.test(sp.name)) specs[sp.name] = Array.isArray(sp.value) ? sp.value.join(', ') : (sp.value ?? sp.values ?? '');
+  const placements = []; for (const sp of (L.item_specifics || [])) if (sp && /placement/i.test(sp.name || '')) (Array.isArray(sp.value) ? sp.value : String(sp.value || '').split(/,\s*/)).forEach(v => v && placements.push(v));
+  const fields = {
+    'cl-title': it.title || '', 'cl-partnumber': it.part_number || '', 'ce-title': it.title || '',
+    'ce-price': it.rrp != null ? (+it.rrp).toFixed(2) : '', 'ce-qty': it.available ?? 0,
+    'cl-cost': it.price != null ? (+it.price).toFixed(2) : '', 'cl-cost-cur': 'GBP', 'cl-cost-foreign': it.price != null ? (+it.price).toFixed(2) : '',
+    'ce-desc': L.description || '',
+    'cl-pkg-l': pc.length_cm ?? '', 'cl-pkg-w': pc.width_cm ?? '', 'cl-pkg-h': pc.height_cm ?? '', 'cl-pkg-g': pc.weight_g != null ? +(pc.weight_g / 1000).toFixed(2) : '',
+    'cl-pack-cost': pc.packaging_cost ?? '',
+  };
+  if (pc.postage != null) { fields['cl-ship-band'] = 'custom'; fields['cl-ship-cost'] = pc.postage; }
+  CL_REPEAT = { fields, checks: pc.packaged != null ? { 'cl-pack-inc': !!pc.packaged } : {}, specs, placements, metafields: [],
+    ebayCategoryId: L.ebay_category_id || '', clCategoryId: '', clCategoryName: '',
+    images: (it.images_public && it.images_public.length ? it.images_public : (it.images || []).map(x => x.url)).filter(u => u && /^https?:\/\//.test(u)) };
+  const partnerInfo = { linkId, sku: it.sku, qty: it.available ?? 0, name: r.link.name };
+  routeTo('createlisting');
+  if (State.page !== 'createlisting') { CL_REPEAT = null; return; }
+  CL._partner = partnerInfo;
+  setTimeout(() => { const s2 = el('cl-sku'); if (s2 && !s2.value) s2.value = it.sku; }, 200);
+  toast(`Filled in from ${r.link.name}'s listing — it sells from their stock (${partnerInfo.qty} available) and is ordered from them when it sells. Check the price and create.` +
+    (it.images_clean ? ' Photos are clean (no watermark) — run them through your photo studio to add yours.' : ` ⚠ Photos carry ${r.link.name}'s watermark — ask them to switch your account to clean photos, or use your own.`), 'info', 12000);
+}
+async function trPartnerAutoSave(id) {
+  try {
+    await Api.put(`/api/trade/partners/${id}`, { autoOrder: !!el('trp-auto')?.checked, autoOrderDelivery: el('trp-auto-del')?.value });
+    toast(el('trp-auto')?.checked ? '🔁 Automatic ordering on' : 'Automatic ordering off', 'success', 4000);
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
 async function trPartnerAction(id, act) {
   try {
     const r = await Api.post(`/api/trade/partners/${id}/${act}`, {});
@@ -24472,12 +24645,14 @@ async function trPartnerSearch(id) {
   const box = el('trpc-res'); box.innerHTML = '<div style="color:var(--ink-soft);font-size:13px">Searching…</div>';
   try {
     const r = await Api.get(`/api/trade/partners/${id}/catalogue?q=${encodeURIComponent(el('trpc-q').value.trim())}${el('trpc-in').checked ? '&in_stock=1' : ''}`);
-    box.innerHTML = r.items.length ? `<table class="table" style="margin:0"><thead><tr><th></th><th>Part</th><th style="text-align:right">Their stock</th><th style="text-align:right">Your price</th><th>Here</th></tr></thead><tbody>
+    box.innerHTML = r.items.length ? `<table class="table" style="margin:0"><thead><tr><th><input type="checkbox" title="Select all shown" onchange="document.querySelectorAll('[data-trimp]:not(:disabled)').forEach(c=>c.checked=this.checked)"></th><th>Part</th><th style="text-align:right">Their stock</th><th style="text-align:right">Your price</th><th>Here</th><th></th></tr></thead><tbody>
       ${r.items.map(i => `<tr><td><input type="checkbox" data-trimp="${escapeAttr(i.sku)}" ${i.local?.linked ? 'disabled' : ''}></td>
         <td><b>${escapeHtml(i.sku)}</b><div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(i.title)}</div></td><td style="text-align:right">${escapeHtml(i.available_display)}</td>
         <td style="text-align:right">${trMoney(i.price)}${i.our_cost != null ? `<div style="font-size:10px;color:var(--ink-soft)">their cost ${trMoney(i.our_cost)}</div>` : ''}</td>
-        <td style="font-size:11px">${i.local ? (i.local.linked ? '✓ linked' : `same SKU (${i.local.qty} in stock) — will link`) : 'new'}</td></tr>`).join('')}</tbody></table>
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">${r.total} match(es)${r.total > r.items.length ? ' — showing first ' + r.items.length : ''}</div>` : '<div style="font-size:13px;color:var(--ink-soft)">No matches.</div>';
+        <td style="font-size:11px">${i.local ? (i.local.linked ? '✓ linked' : `same SKU (${i.local.qty} in stock) — will link`) : 'new'}</td>
+        <td>${i.local ? '' : `<button class="btn btn-primary btn-sm" onclick="trPartnerList(${id}, '${escapeAttr(i.sku)}')" title="Open Create listing filled in from their listing — photos, category, specifics, parcel, cost">List</button>`}</td></tr>`).join('')}</tbody></table>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">${r.total} match(es)${r.total > r.items.length ? ' — showing first ' + r.items.length : ''}.
+        <b>Your price is ex VAT.</b> On a VAT account their invoice adds VAT, which you claim back (you're both VAT registered), so the ex-VAT price is your real cost and it's what goes in as cost price. On a cash account there's no VAT to claim — the price is the price.</div>` : '<div style="font-size:13px;color:var(--ink-soft)">No matches.</div>';
   } catch (e) { box.innerHTML = `<div style="color:var(--red);font-size:13px">${escapeHtml(e.data?.message || e.message)}</div>`; }
 }
 async function trPartnerImport(id) {

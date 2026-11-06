@@ -104,7 +104,7 @@ router.get('/stock', aw(async (req, res) => {
 }));
 
 router.get('/stock/:sku', aw(async (req, res) => {
-  const p = await trade.productBySku(req.params.sku);
+  const p = await trade.productBySku(req.params.sku, req.trade);
   if (!p) return res.status(404).json({ error: 'not_found' });
   const settings = await trade.getSettings();
   const rules = await trade.loadRules(req.trade.id);
@@ -112,6 +112,13 @@ router.get('/stock/:sku', aw(async (req, res) => {
   const imgs = await trade.imagesFor(req.trade, p);
   out.images = imgs.urls.map((u, i) => ({ n: i + 1, url: /^https?:\/\//.test(u) ? u : `/api/trade/v1/images/${encodeURIComponent(p.sku)}/${i + 1}` }));
   out.images_clean = imgs.clean;
+  // Clean photos stored here have no public URL — hand out signed public links
+  // so a partner can list with them directly (they add their own watermark).
+  if (imgs.clean) {
+    const base = `${req.protocol}://${req.get('host')}`;
+    const pub = await trade.publicCleanImageUrls(p.id, base).catch(() => []);
+    if (pub.length) out.images_public = pub;
+  }
   res.json(out);
 }));
 
@@ -227,7 +234,7 @@ async function zipImages(req, res, skus) {
   const archiver = require('archiver');
   const list = [];
   for (const sku of skus.slice(0, 50)) {
-    const p = await trade.productBySku(sku);
+    const p = await trade.productBySku(sku, req.trade);
     if (!p) continue;
     const imgs = await trade.imagesFor(req.trade, p);
     imgs.urls.forEach((u, i) => list.push({ sku: p.sku, n: i + 1, u }));
@@ -254,14 +261,14 @@ router.post('/images/zip', aw(async (req, res) => {
 router.get('/images/:sku', aw(async (req, res) => {
   const zipM = req.params.sku.match(/^(.+)\.zip$/i);
   if (zipM) return zipImages(req, res, [zipM[1]]);
-  const p = await trade.productBySku(req.params.sku);
+  const p = await trade.productBySku(req.params.sku, req.trade);
   if (!p) return res.status(404).json({ error: 'not_found' });
   const imgs = await trade.imagesFor(req.trade, p);
   res.json({ sku: p.sku, clean: imgs.clean, images: imgs.urls.map((u, i) => ({ n: i + 1, download: `/api/trade/v1/images/${encodeURIComponent(p.sku)}/${i + 1}`, url: /^https?:\/\//.test(u) ? u : null })) });
 }));
 
 router.get('/images/:sku/:n', aw(async (req, res) => {
-  const p = await trade.productBySku(req.params.sku);
+  const p = await trade.productBySku(req.params.sku, req.trade);
   if (!p) return res.status(404).end();
   const imgs = await trade.imagesFor(req.trade, p);
   const u = imgs.urls[(parseInt(req.params.n) || 1) - 1];

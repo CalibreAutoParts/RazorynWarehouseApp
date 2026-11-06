@@ -755,6 +755,8 @@ async function pullEbay(opts = {}) {
 // --------- PUSH: stock levels for sale items ---------
 // Called immediately after a direct sale so eBay/Shopify reflect the new stock.
 async function pushStockForSaleItems(items) {
+  // Parts we sell from a partner's stock → order them from the partner now.
+  setImmediate(() => { try { require('../lib/trade-partner').autoOrderSweep().catch(e => console.warn('[partner] auto-order:', e.message)); } catch (_) {} });
   for (const it of items) {
     if (!it.productId) continue;
     const p = await query('SELECT * FROM products WHERE id = $1', [it.productId]);
