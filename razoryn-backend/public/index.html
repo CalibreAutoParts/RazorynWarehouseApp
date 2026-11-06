@@ -22617,8 +22617,10 @@ function renderSettings() {
           </p>
           <div class="perm-row">
             <div><div class="perm-name">Enabled</div><div class="perm-desc">Master switch. When on, the sweep runs automatically every 2 hours.</div></div>
-            <label class="switch"><input type="checkbox" id="fm-enabled"><span></span></label>
+            <label class="switch"><input type="checkbox" id="fm-enabled" onchange="fmEnabledChanged(this)"><span></span></label>
           </div>
+          <div class="field" style="margin-top:10px"><label>Send from these eBay accounts <span style="font-weight:400;color:var(--ink-soft)">— leave out any account eBay has restricted</span></label>
+            <div id="fm-stores" style="display:flex;gap:14px;flex-wrap:wrap;font-size:13px"></div></div>
           <div class="field" style="margin-top:10px"><label>Subject <span style="font-weight:400;color:var(--ink-soft)">— optional; the message threads under the item they bought. eBay needs a short subject, so a default is used if left blank.</span></label><input id="fm-subject" placeholder="Quick check so your part fits first time"></div>
           <div class="field"><label>Message</label><textarea id="fm-body" rows="7" placeholder="Message body…"></textarea>
             <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Keep it friendly. No placeholders needed — it's sent per order.</div>
@@ -24820,18 +24822,21 @@ async function loadFitmentConfig() {
     if (el('fm-delay')) el('fm-delay').value = c.delayHours ?? 2;
     if (el('fm-window')) el('fm-window').value = c.windowDays ?? 14;
     if (el('fm-max')) el('fm-max').value = c.maxPerRun ?? 40;
-    if (el('fm-status')) el('fm-status').textContent = c.enabled ? `On — ${c.pending} order(s) awaiting a message` : `Off — ${c.pending} eligible order(s)`;
-    if (c.hardDisabled) {
-      // Switched off in code after an eBay messaging-policy restriction.
-      if (el('fm-enabled')) { el('fm-enabled').checked = false; el('fm-enabled').disabled = true; }
-      if (el('fm-status')) el('fm-status').innerHTML = '<span style="color:var(--red);font-weight:600">⛔ Disabled — automated eBay buyer messages are switched off permanently after eBay restricted an account under its member-to-member messaging policy. Ask buyers for their VIN through the listing/checkout instead.</span>';
-    }
+    const stores = (State.brand?.allStores || State.brand?.stores || []).filter(st => st.channelCode && st.channelCode.startsWith('ebay_'));
+    if (el('fm-stores')) el('fm-stores').innerHTML = stores.length ? stores.map(st => `<label style="display:flex;gap:6px;align-items:center;white-space:nowrap"><input type="checkbox" data-fmch="${escapeAttr(st.channelCode)}" ${(c.channels || []).includes(st.channelCode) ? 'checked' : ''}> ${escapeHtml(st.name)}</label>`).join('') : '<span style="color:var(--ink-soft)">No eBay accounts set up</span>';
+    if (el('fm-status')) el('fm-status').innerHTML = c.enabled
+      ? `On — ${c.pending} order(s) awaiting a message${(c.channels || []).length ? '' : ' <span style="color:var(--amber);font-weight:600">· no eBay account ticked, so nothing will send</span>'}`
+      : `Off — ${c.pending} eligible order(s)`;
   } catch (_) {}
+}
+function fmEnabledChanged(cb) {
+  if (cb.checked && !confirm('Switch on automatic eBay messages?\n\nIn October eBay restricted one of your accounts under its member-to-member contact policy after these messages went out. Turning them on again carries a real risk for the accounts you tick.\n\nKeep the message about this order only — no phone numbers, emails, website, WhatsApp or "buy direct". The app blocks those.\n\nSwitch on?')) cb.checked = false;
 }
 async function saveFitmentConfig(btn) {
   if (btn) btn.disabled = true;
   try {
     const c = await Api.put('/api/messages/fitment/config', {
+      channels: [...document.querySelectorAll('[data-fmch]:checked')].map(x => x.dataset.fmch),
       enabled: el('fm-enabled').checked,
       subject: (el('fm-subject').value || '').trim(),
       body: (el('fm-body').value || '').trim(),
@@ -24839,7 +24844,7 @@ async function saveFitmentConfig(btn) {
       windowDays: parseInt(el('fm-window').value) || 14,
       maxPerRun: parseInt(el('fm-max').value) || 40,
     });
-    if (el('fm-status')) el('fm-status').textContent = c.enabled ? `On — ${c.pending ?? '?'} awaiting` : 'Off';
+    if (el('fm-status')) el('fm-status').textContent = c.enabled ? `On — ${c.pending ?? '?'} awaiting${(c.channels || []).length ? '' : ' · no eBay account ticked, so nothing will send'}` : 'Off';
     toast('Fitment-message settings saved', 'success');
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
   finally { if (btn) btn.disabled = false; }

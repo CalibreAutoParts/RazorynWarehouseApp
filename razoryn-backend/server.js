@@ -672,9 +672,10 @@ async function runFitmentSweep() {
   }
 }
 
-// eBay fitment-message sweep: NOT scheduled — automated eBay buyer messages are
-// hard-disabled after an eBay messaging-policy restriction (services/fitment-messages.js).
-console.log('[boot] eBay fitment-message sweep DISABLED (eBay messaging policy)');
+// eBay fitment-message catch-up sweep — every 2 hours (new orders are messaged
+// as they import). Does nothing unless switched on in Settings for an account.
+cron.schedule('17 */2 * * *', runFitmentSweep);
+console.log('[boot] eBay fitment-message sweep scheduled: every 2h (only if switched on)');
 
 // Email digests + scheduled reports — hourly tick: batches new notifications to
 // opted-in staff and sends daily/weekly/monthly/quarterly reports at ~07:00 UK

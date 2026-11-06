@@ -627,7 +627,7 @@ async function importEbayOrderRow(order, store, { vatRegistered, vatRate, adjust
   // Fire the automated fitment-confirmation message the moment a LIVE order lands
   // (not on backfill). Fire-and-forget + fully guarded (enabled/eligible) inside.
   if (adjustStock && newSaleId) {
-    // Automated eBay fitment messages: hard-disabled (eBay messaging policy).
+    setImmediate(() => require('./fitment-messages').sendForSale(newSaleId).catch(() => {}));
     // 💷 "Sold" alert (batched; never for backfill).
     try {
       require('../lib/notify').saleSold({

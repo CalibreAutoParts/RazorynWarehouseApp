@@ -742,13 +742,16 @@ router.put('/fitment/config', requireAdmin, async (req, res) => {
   try {
     const b = req.body || {};
     const patch = {};
-    for (const k of ['enabled', 'subject', 'body', 'windowDays', 'delayHours', 'maxPerRun']) {
+    for (const k of ['enabled', 'subject', 'body', 'windowDays', 'delayHours', 'maxPerRun', 'channels']) {
       if (b[k] !== undefined) patch[k] = b[k];
     }
     const c = await fitment.saveConfig(patch);
-    await audit(req, 'update_fitment_msg_config', null, null, { enabled: c.enabled });
+    await audit(req, 'update_fitment_msg_config', null, null, { enabled: c.enabled, channels: c.channels });
     res.json({ ok: true, ...c });
-  } catch (e) { res.status(500).json({ error: 'save_failed', message: e.message }); }
+  } catch (e) {
+    if (e.code === 'ebay_message_policy') return res.status(422).json({ error: e.code, message: e.message });
+    res.status(500).json({ error: 'save_failed', message: e.message });
+  }
 });
 
 // Manual trigger — runs a send pass now even if the auto toggle is off, so an
