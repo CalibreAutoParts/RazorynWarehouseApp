@@ -266,24 +266,22 @@ router.get('/products/:id/history', requireAdmin, async (req, res) => {
   res.json({ history });
 });
 
-// POST /api/costs/products/:id/cost — set current cost (writes history + cost_price).
-router.post('/products/:id/cost', requireAdmin, async (req, res) => {
-  await ensureCostSchema();
-  const id = parseInt(req.params.id);
+// Save one product's cost (history + cost_price + siblings + supplier code).
+// Returns { gbp, fxRate, history, sharedWith, row } or throws { status, body }.
+async function saveProductCost(id, b, req) {
   const pr = await query(`SELECT id, sku, large_panel, shipping_band, shipping_cost, postage_in_price FROM products WHERE id = $1`, [id]);
-  if (!pr.rows[0]) return res.status(404).json({ error: 'not_found' });
-  const b = req.body || {};
+  if (!pr.rows[0]) throw { status: 404, body: { error: 'not_found' } };
   const currency = String(b.currency || 'CNY').toUpperCase();
   const purchaseDate = b.purchaseDate || today();
   const foreign = (b.unitCostForeign != null && b.unitCostForeign !== '') ? parseFloat(b.unitCostForeign) : null;
   let gbp = (b.unitCostGbp != null && b.unitCostGbp !== '') ? parseFloat(b.unitCostGbp) : null;
   let fxRate = (b.fxRate != null && b.fxRate !== '') ? parseFloat(b.fxRate) : null;
   if (gbp == null) {
-    if (foreign == null) return res.status(400).json({ error: 'cost_required', message: 'Enter a foreign unit cost or a GBP cost.' });
+    if (foreign == null) throw { status: 400, body: { error: 'cost_required', message: 'Enter a foreign unit cost or a GBP cost.' } };
     if (currency === 'GBP') { gbp = foreign; fxRate = 1; }
     else {
       try { const conv = await fx.convert(foreign, currency, 'GBP', purchaseDate, { override: fxRate }); gbp = conv.gbp; fxRate = conv.rate; }
-      catch (e) { return res.status(502).json({ error: 'fx_unavailable', message: 'Could not get an exchange rate — enter the rate manually.' }); }
+      catch (e) { throw { status: 502, body: { error: 'fx_unavailable', message: 'Could not get an exchange rate — enter the rate manually.' } }; }
     }
   }
   const history = await withTx(async (c) => {
@@ -310,6 +308,25 @@ router.post('/products/:id/cost', requireAdmin, async (req, res) => {
     userId: req.user.id, sourceSku: pr.rows[0].sku,
   });
   if (b.supplier) { try { await require('./suppliers').ensureSupplierByName(b.supplier, { currency }); } catch (_) {} }
+  // Their code for this part (supplier SKU) — remembered against the supplier,
+  // so the next price list / invoice matches on it. Never shown on eBay/Shopify.
+  const supplierSku = String(b.supplierSku || '').trim();
+  if (b.supplier && supplierSku) {
+    try { await require('./suppliers').upsertSupplierCode(id, b.supplier, supplierSku, { unitCost: foreign, currency }); }
+    catch (e) { console.warn('[costs] supplier code:', e.message); }
+  }
+  return { gbp, fxRate, history, sharedWith, row: pr.rows[0] };
+}
+
+// POST /api/costs/products/:id/cost — set current cost (writes history + cost_price).
+router.post('/products/:id/cost', requireAdmin, async (req, res) => {
+  await ensureCostSchema();
+  const id = parseInt(req.params.id);
+  let r;
+  try { r = await saveProductCost(id, req.body || {}, req); }
+  catch (e) { if (e && e.status) return res.status(e.status).json(e.body); throw e; }
+  const { gbp, history, sharedWith } = r;
+  const pr = { rows: [r.row] };
   const S = resolveCostSettings(await settingsRow());
   const isLarge = !!pr.rows[0].large_panel;
   const band = pr.rows[0].shipping_band || null;
@@ -323,6 +340,31 @@ router.post('/products/:id/cost', requireAdmin, async (req, res) => {
       shopify: computeFloor({ costPrice: gbp, isLarge, band, shippingCost, postageInPrice, channel: 'shopify', settings: S }),
     },
   });
+});
+
+// POST /api/costs/bulk — costs from a supplier price list in one go.
+//   { supplier, currency, fxRate?, purchaseDate?, priceBasis?,
+//     lines: [{ productId, unitCost, supplierSku? }] }
+router.post('/bulk', requireAdmin, async (req, res) => {
+  await ensureCostSchema();
+  const b = req.body || {};
+  const lines = Array.isArray(b.lines) ? b.lines.slice(0, 2000) : [];
+  if (!lines.length) return res.status(400).json({ error: 'no_lines', message: 'Tick at least one line.' });
+  const done = [], failed = [];
+  for (const l of lines) {
+    const id = parseInt(l.productId);
+    if (!id || !(parseFloat(l.unitCost) > 0)) { failed.push({ productId: l.productId, error: 'missing_cost' }); continue; }
+    try {
+      const r = await saveProductCost(id, {
+        supplier: b.supplier || null, purchaseDate: b.purchaseDate || null, currency: b.currency || 'CNY',
+        unitCostForeign: l.unitCost, fxRate: b.fxRate || null, priceBasis: b.priceBasis || null,
+        supplierSku: l.supplierSku || null, note: b.note || 'Supplier price list',
+      }, req);
+      done.push({ productId: id, sku: r.row.sku, gbp: r.gbp });
+    } catch (e) { failed.push({ productId: id, error: (e && e.body && (e.body.message || e.body.error)) || e.message }); }
+  }
+  await audit(req, 'cost_bulk', null, null, { supplier: b.supplier || null, currency: b.currency, saved: done.length, failed: failed.length });
+  res.json({ ok: true, saved: done.length, failed, done });
 });
 
 // GET /api/costs/products/:id — one product: cost, floors + components, recent history.

@@ -68,6 +68,7 @@ router.post('/parse', upload.single('file'), async (req, res) => {
     const sheetRows = wb.SheetNames.map(n => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: null }));
     const offsets = wb.SheetNames.map(n => { try { return XLSX.utils.decode_range(wb.Sheets[n]['!ref'] || 'A1').s.r; } catch (_) { return 0; } });
     const meta = guessMeta(sheetRows);
+    const priceList = req.body?.mode === 'pricelist';   // no quantities — costs only
     const supplierHint = OS.clean(req.body?.supplier || '') || meta.supplier || '';
     // A mapping corrected on the review screen: { sheet, headerRow (1-based), mapping: field->col, extras: {header: label}, ignore: [header] }
     let override = null;
@@ -96,12 +97,12 @@ router.post('/parse', upload.single('file'), async (req, res) => {
       return ex;
     };
     for (const sh of parsedSheets) {
-      sh.lines = OS.buildLines(sh.rows, sh.loc.headerIdx, sh.loc.map, extrasFor(sh), photos[sh.name] || {}, sh.offset);
+      sh.lines = OS.buildLines(sh.rows, sh.loc.headerIdx, sh.loc.map, extrasFor(sh), photos[sh.name] || {}, sh.offset, { priceList });
     }
     parsedSheets.sort((a, z) => z.lines.length - a.lines.length
       || z.lines.filter(l => l.unitPrice != null).length - a.lines.filter(l => l.unitPrice != null).length);
     const primary = parsedSheets[0];
-    if (!primary.lines.length) return res.status(422).json({ error: 'no_lines_found', message: 'Found a header row but no item lines under it (each item needs a quantity).' });
+    if (!primary.lines.length) return res.status(422).json({ error: 'no_lines_found', message: priceList ? 'Found a header row but no lines with a price under it.' : 'Found a header row but no item lines under it (each item needs a quantity).' });
 
     // New layout (built-in rules only)? Let Claude check the mapping, fill any
     // gaps and say what the extra columns are — then rebuild the lines.
@@ -125,7 +126,7 @@ router.post('/parse', upload.single('file'), async (req, res) => {
             primary.loc.source = 'ai';
             primary.loc.extras = Object.fromEntries(v.extras.filter(x => headers[x.col]).map(x => [headers[x.col], x.label]));
             aiNotes = v.notes; currency = v.currency;
-            primary.lines = OS.buildLines(primary.rows, primary.loc.headerIdx, merged, primary.loc.extras, photos[primary.name] || {}, primary.offset);
+            primary.lines = OS.buildLines(primary.rows, primary.loc.headerIdx, merged, primary.loc.extras, photos[primary.name] || {}, primary.offset, { priceList });
           }
         } catch (e) { aiNotes = 'AI column check unavailable: ' + e.message; }
       }
@@ -230,7 +231,18 @@ router.post('/parse', upload.single('file'), async (req, res) => {
         sheet: primary.name, headerRow: primary.loc.headerIdx + 1,
         headers, mapping: primary.loc.map,
         extras: primary.loc.extras || (primary.loc.format && primary.loc.format.extras) || {},
-        aiNotes, currency,
+        aiNotes,
+        // Currency: the AI's read, else spotted in the price column's header
+        // ("Unit Price (USD)", "单价 RMB", "$") — the review screen preselects it.
+        currency: currency || (() => {
+          const h = headers.join(' ').toUpperCase();
+          if (/\bUSD\b|US\$|\(\$\)/.test(h)) return 'USD';
+          if (/\bEUR\b|€/.test(h)) return 'EUR';
+          if (/\bGBP\b|£/.test(h)) return 'GBP';
+          if (/\bKRW\b|₩/.test(h)) return 'KRW';
+          if (/\bRMB\b|\bCNY\b|¥|元/.test(h)) return 'CNY';
+          return null;
+        })(),
       },
       fields: OS.FIELDS, coreFields: OS.CORE,
     });
