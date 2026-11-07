@@ -16875,8 +16875,9 @@ function renderCosts() {
   el('content').innerHTML = `
     <div class="page">
       <div class="page-head">
-        <div><h1>Costs &amp; margins</h1><div class="desc">True landed cost per item (entered in RMB, converted to GBP at the purchase date), the lowest safe price per channel, supplier cost trends and overstock clearance prices.</div></div>
+        <div><h1>Costs &amp; margins</h1><div class="desc">True landed cost per item (entered in the supplier's currency — RMB, USD, EUR… — converted to GBP at the purchase date), the lowest safe price per channel, supplier cost trends and overstock clearance prices.</div></div>
         <div class="actions">
+          <button class="btn btn-primary" onclick="ctOpenPriceList()" title="Upload a supplier's price list (.xlsx/.csv) — matched by their codes and part numbers">⬆ Supplier price list</button>
           <button class="btn btn-outline" onclick="ctOpenSettings()">⚙️ Cost settings</button>
           <button class="btn btn-outline" onclick="loadCosts()">⟳ Refresh</button>
         </div>
@@ -18204,7 +18205,7 @@ async function simpParse(mappingOverride) {
     const sup = (el('simp-supplier')?.value || '').trim();
     if (sup) fd.append('supplier', sup);
     if (mappingOverride) fd.append('mapping', JSON.stringify(mappingOverride));
-    const r = await fetch('/api/supplier-import/parse', { method: 'POST', body: fd, credentials: 'include' });
+    const r = await fetch('/api/supplier-import/parse', { method: 'POST', body: fd, credentials: 'include', headers: API_TOKEN ? { Authorization: 'Bearer ' + API_TOKEN } : {} });
     data = await r.json();
     if (!r.ok) throw new Error(data?.message || data?.error || ('HTTP ' + r.status));
     Task.done(taskId, data.lines.length + ' lines');
@@ -18890,6 +18891,123 @@ async function loadCtOverstock() {
     </div>`;
 }
 
+// ---- Supplier price list → costs in bulk ----
+// Upload the supplier's list (any layout — the same reader as the invoice
+// import). Lines match our parts by part number → sub part numbers →
+// remembered supplier codes → our SKU. Review, then save: each ticked line
+// becomes that part's cost (converted at the rate shown) and its supplier code
+// is remembered for next time.
+const CTPL = { lines: [] };
+function ctOpenPriceList() {
+  loadSuppliersOnce();
+  CTPL.lines = []; CTPL.file = null;
+  modal({
+    title: '⬆ Supplier price list → costs', size: 'xl',
+    body: `
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Drop in the supplier's price list (<b>.xlsx</b>, .xls or .csv — any layout). Lines are matched to your parts by <b>part number → sub part numbers → their supplier codes → your SKU</b>. You check the matches, then the ticked lines are saved as each part's cost and their supplier codes are remembered (only ever shown in this app).</div>
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px">
+        <div class="field"><label>Supplier</label>${supplierComboHtml('ctpl-supplier', '', 'Supplier name')}</div>
+        <div class="field"><label>Currency</label><select id="ctpl-cur" onchange="ctplRate(true)"><option value="CNY">CNY (RMB)</option><option value="USD">USD</option><option value="EUR">EUR</option><option value="GBP">GBP</option><option value="HKD">HKD</option><option value="KRW">KRW (won)</option></select></div>
+        <div class="field"><label>Price date</label><input id="ctpl-date" type="date" value="${ctToday()}" onchange="ctplRate(true)"></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 2fr;gap:10px">
+        <div class="field"><label>Rate → GBP</label><input id="ctpl-rate" type="number" step="0.00001" min="0" oninput="ctplPaint()"></div>
+        <div class="field"><label>Price basis</label><select id="ctpl-basis"><option value="">— not set —</option><option value="FOB">FOB</option><option value="EXW">EXW</option></select></div>
+        <div class="field"><label>File</label><input type="file" id="ctpl-file" accept=".xlsx,.xls,.csv"></div>
+      </div>
+      <div id="ctpl-review"></div>`,
+    actions: [
+      { label: 'Cancel', onClick: closeModal },
+      { label: '⬆ Read the file', primary: true, onClick: ctplParse },
+    ],
+  });
+  ctplRate(true);
+}
+async function ctplRate(force) {
+  const cur = el('ctpl-cur')?.value || 'CNY', box = el('ctpl-rate'); if (!box) return;
+  if (cur === 'GBP') { box.value = '1'; ctplPaint(); return; }
+  if (force) box.value = '';
+  try {
+    const r = await Api.get(`/api/costs/fx?from=${encodeURIComponent(cur)}&to=GBP&date=${encodeURIComponent(el('ctpl-date')?.value || ctToday())}`);
+    if ((el('ctpl-cur')?.value || 'CNY') === cur) box.value = Number(r.rate).toFixed(5);
+  } catch (_) { toast(`Couldn't get the ${cur} → GBP rate — type it in`, 'warn'); }
+  ctplPaint();
+}
+async function ctplParse() {
+  const f = el('ctpl-file')?.files?.[0];
+  if (!f) { toast('Pick the price list file first', 'warn'); return; }
+  const t = Task.start('Reading price list');
+  let data;
+  try {
+    const fd = new FormData(); fd.append('file', f);
+    const sup = (el('ctpl-supplier')?.value || '').trim(); if (sup) fd.append('supplier', sup);
+    fd.append('mode', 'pricelist');
+    const r = await fetch('/api/supplier-import/parse', { method: 'POST', body: fd, credentials: 'include', headers: API_TOKEN ? { Authorization: 'Bearer ' + API_TOKEN } : {} });
+    data = await r.json();
+    if (!r.ok) throw new Error(data?.message || data?.error || ('HTTP ' + r.status));
+    Task.done(t, data.lines.length + ' lines');
+  } catch (e) { Task.fail(t); toast("Couldn't read it: " + e.message, 'error', 8000); return; }
+  if (data.supplierGuess && el('ctpl-supplier') && !el('ctpl-supplier').value) el('ctpl-supplier').value = data.supplierGuess;
+  const guessCur = String(data.format?.currency || '').toUpperCase();
+  if (guessCur && el('ctpl-cur') && [...el('ctpl-cur').options].some(o => o.value === guessCur) && el('ctpl-cur').value !== guessCur) { el('ctpl-cur').value = guessCur; ctplRate(true); }
+  CTPL.lines = (data.lines || []).map(l => ({ ...l, choice: l.autoProductId || (l.candidates[0]?.productId ?? ''), include: !!(l.autoProductId || l.candidates.length) && l.unitPrice > 0 }));
+  ctplPaint();
+}
+function ctplPaint() {
+  const box = el('ctpl-review'); if (!box || !CTPL.lines.length) return;
+  const rate = el('ctpl-cur')?.value === 'GBP' ? 1 : parseFloat(el('ctpl-rate')?.value) || 0;
+  const matched = CTPL.lines.filter(l => l.candidates.length).length;
+  const cur = (pid) => (CT.items || []).find(x => x.id === +pid);
+  box.innerHTML = `
+    <div style="border-top:1px solid var(--line);margin-top:6px;padding-top:10px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;font-size:12px">
+        <span class="pill" style="background:var(--bg-soft)">${CTPL.lines.length} lines</span>
+        <span class="pill green">${matched} matched</span>
+        ${CTPL.lines.length - matched ? `<span class="pill amber">${CTPL.lines.length - matched} not found</span>` : ''}
+        <span style="margin-left:auto;display:flex;gap:6px">
+          <button class="btn btn-ghost btn-sm" onclick="CTPL.lines.forEach(l=>l.include=!!l.choice&&l.unitPrice>0);ctplPaint()">Tick all matched</button>
+          <button class="btn btn-ghost btn-sm" onclick="CTPL.lines.forEach(l=>l.include=false);ctplPaint()">Clear</button></span>
+      </div>
+      <div style="max-height:46vh;overflow:auto"><table class="table" style="margin:0;font-size:12px">
+        <thead><tr><th></th><th>Their code</th><th>Part no.</th><th>Their description</th><th style="text-align:right">Price</th><th>Your part</th><th style="text-align:right">Now</th><th style="text-align:right">New £</th></tr></thead>
+        <tbody>${CTPL.lines.map((l, i) => {
+          const c = cur(l.choice); const gbp = l.unitPrice > 0 && rate ? l.unitPrice * rate : null;
+          const diff = c?.costPrice != null && gbp != null ? (gbp - c.costPrice) / c.costPrice * 100 : null;
+          return `<tr style="${l.include ? '' : 'opacity:.6'}">
+            <td><input type="checkbox" ${l.include ? 'checked' : ''} ${l.choice && l.unitPrice > 0 ? '' : 'disabled'} onchange="CTPL.lines[${i}].include=this.checked;ctplPaint()"></td>
+            <td style="font-family:ui-monospace,monospace;white-space:nowrap">${escapeHtml(l.supplierSku || '—')}</td>
+            <td style="font-family:ui-monospace,monospace;white-space:nowrap">${escapeHtml(l.partNumber || '—')}</td>
+            <td style="max-width:220px">${escapeHtml(l.title || '')}</td>
+            <td style="text-align:right;white-space:nowrap">${l.unitPrice != null ? Number(l.unitPrice).toFixed(2) : '—'}</td>
+            <td>${l.candidates.length
+              ? `<select onchange="CTPL.lines[${i}].choice=this.value;ctplPaint()" style="max-width:240px;font-size:12px">${l.candidates.map(cd => `<option value="${cd.productId}" ${String(cd.productId) === String(l.choice) ? 'selected' : ''}>${escapeHtml(cd.sku)} — ${escapeHtml((cd.title || '').slice(0, 40))}${cd.fitMismatch ? ' ⚠ fit?' : ''}</option>`).join('')}</select>`
+              : '<span style="color:var(--ink-soft)">no match</span>'}</td>
+            <td style="text-align:right">${c ? ctMoney(c.costPrice) : '—'}</td>
+            <td style="text-align:right;font-weight:600">${gbp != null ? '£' + gbp.toFixed(2) : '—'}${diff != null && Math.abs(diff) >= 0.5 ? `<div style="font-size:10px;color:${diff > 0 ? 'var(--red)' : 'var(--green)'}">${diff > 0 ? '▲' : '▼'} ${Math.abs(diff).toFixed(0)}%</div>` : ''}</td></tr>`;
+        }).join('')}</tbody></table></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;align-items:center">
+        <span style="font-size:12px;color:var(--ink-soft)">${CTPL.lines.filter(l => l.include).length} ticked</span>
+        <button class="btn btn-primary" onclick="ctplSave(this)">Save costs + supplier codes</button>
+      </div>
+    </div>`;
+}
+async function ctplSave(btn) {
+  const supplier = (el('ctpl-supplier')?.value || '').trim();
+  if (!supplier) { toast('Enter the supplier name', 'warn'); return; }
+  const lines = CTPL.lines.filter(l => l.include && l.choice && l.unitPrice > 0)
+    .map(l => ({ productId: +l.choice, unitCost: l.unitPrice, supplierSku: l.supplierSku || null }));
+  if (!lines.length) { toast('Tick at least one matched line', 'warn'); return; }
+  const cur = el('ctpl-cur').value, rate = el('ctpl-rate').value;
+  if (cur !== 'GBP' && !(parseFloat(rate) > 0)) { toast('Enter the exchange rate', 'warn'); return; }
+  btn.disabled = true;
+  try {
+    const r = await Api.post('/api/costs/bulk', { supplier, currency: cur, fxRate: rate || null, purchaseDate: el('ctpl-date').value, priceBasis: el('ctpl-basis').value || null, lines });
+    toast(`Saved ${r.saved} cost(s)${r.failed.length ? ` · ${r.failed.length} failed` : ''} — supplier codes remembered`, r.failed.length ? 'warn' : 'success', 6000);
+    State._suppliersLoaded = false;
+    closeModal(); await loadCosts(); await refreshCostFloors();
+  } catch (e) { toast(e.data?.message || e.message, 'error'); btn.disabled = false; }
+}
+
 // ---- Per-product cost editor (FX preview + history) ----
 async function ctOpenEditor(productId) {
   const p = CT.items.find(x => x.id === productId) || {};
@@ -18906,9 +19024,10 @@ async function ctOpenEditor(productId) {
       ${noOwnEntry && p.costShared ? `<div style="font-size:12px;background:var(--bg-soft);border:1px solid var(--amber,orange);border-radius:8px;padding:8px 10px;margin-bottom:10px">🔗 This listing has <strong>no saved cost of its own</strong> — the £${(+p.costPrice).toFixed(2)} on the page is borrowed from ${p.costSharedFrom ? '<strong>' + escapeHtml(p.costSharedFrom) + '</strong>' : 'another listing'} (same part number). It's pre-filled below: hit <strong>Save cost</strong> to make it this listing's own, or adjust it first.</div>` : ''}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field"><label>Supplier <span style="color:var(--ink-soft);font-weight:400">— pick a saved one or type a new</span></label>${supplierComboHtml('ct-supplier', p.lastSupplier || '', 'e.g. Guangzhou XYZ')}</div>
+        <div class="field"><label>Supplier code <span style="color:var(--ink-soft);font-weight:400">— their SKU for this part (only shown in this app)</span></label><input id="ct-supsku" placeholder="e.g. LW-20931" autocomplete="off"></div>
         <div class="field"><label>Purchase date</label><input id="ct-date" type="date" value="${ctToday()}"></div>
         <div class="field"><label>Currency</label>
-          <select id="ct-cur"><option value="CNY"${defCur === 'CNY' ? ' selected' : ''}>CNY (RMB)</option><option value="GBP"${defCur === 'GBP' ? ' selected' : ''}>GBP</option><option value="USD"${defCur === 'USD' ? ' selected' : ''}>USD</option><option value="EUR"${defCur === 'EUR' ? ' selected' : ''}>EUR</option></select></div>
+          <select id="ct-cur"><option value="CNY"${defCur === 'CNY' ? ' selected' : ''}>CNY (RMB)</option><option value="GBP"${defCur === 'GBP' ? ' selected' : ''}>GBP</option><option value="USD"${defCur === 'USD' ? ' selected' : ''}>USD</option><option value="EUR"${defCur === 'EUR' ? ' selected' : ''}>EUR</option><option value="HKD"${defCur === 'HKD' ? ' selected' : ''}>HKD</option><option value="KRW"${defCur === 'KRW' ? ' selected' : ''}>KRW (won)</option></select></div>
         <div class="field"><label>Price basis <span style="color:var(--ink-soft);font-weight:400">— what the quote includes</span></label>
           <select id="ct-basis">
             <option value=""${!p.lastPriceBasis ? ' selected' : ''}>— not set —</option>
@@ -18917,7 +19036,7 @@ async function ctOpenEditor(productId) {
           </select></div>
         <div class="field"><label>Unit cost <span style="color:var(--ink-soft);font-weight:400">(in the currency above)</span></label><input id="ct-foreign" type="number" step="0.01" min="0" value="${defUnit}" placeholder="e.g. 80"></div>
         <div class="field"><label>FX rate → GBP <span style="color:var(--ink-soft);font-weight:400">auto</span></label>
-          <div style="display:flex;gap:6px"><input id="ct-rate" type="number" step="0.00001" min="0" placeholder="auto" style="flex:1"><button type="button" class="btn btn-outline btn-sm" onclick="ctFetchRate()">↻</button></div></div>
+          <div style="display:flex;gap:6px"><input id="ct-rate" type="number" step="0.00001" min="0" placeholder="auto" style="flex:1"><button type="button" class="btn btn-outline btn-sm" onclick="ctFetchRate(true)" title="Get the rate for this currency and date">↻</button></div></div>
         <div class="field"><label>= GBP unit cost</label><input id="ct-gbp" disabled style="background:var(--bg-soft);font-weight:700"></div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -18949,7 +19068,12 @@ async function ctOpenEditor(productId) {
   });
   // live GBP preview
   ['ct-foreign', 'ct-rate', 'ct-cur'].forEach(id => { const e = el(id); if (e) e.addEventListener('input', ctUpdateGbpPreview); });
+  // A new currency or date needs a new rate — never keep the old currency's rate.
+  ['ct-cur', 'ct-date'].forEach(id => { const e = el(id); if (e) e.addEventListener('change', () => ctFetchRate(true)); });
   setTimeout(() => { ctFetchRate(); }, 80);
+  ctLoadSupplierCode(productId);
+  el('ct-supplier')?.addEventListener('change', () => ctLoadSupplierCode(productId, true));
+  el('ct-supplier')?.addEventListener('blur', () => setTimeout(() => ctLoadSupplierCode(productId, true), 250));
   ctWireTestPrice(p);     // "test a price" → live fee breakdown
   ctLoadHistory(productId);
 }
@@ -19195,15 +19319,32 @@ function ctWireTestPrice(p) {
   run();
 }
 
-async function ctFetchRate() {
+// force = the currency/date changed (or ↻ pressed): replace whatever rate is
+// there. Without it a rate typed by hand is kept.
+async function ctFetchRate(force) {
   const cur = el('ct-cur')?.value || 'CNY';
   if (cur === 'GBP') { if (el('ct-rate')) el('ct-rate').value = '1'; ctUpdateGbpPreview(); return; }
+  if (force === true && el('ct-rate')) { el('ct-rate').value = ''; ctUpdateGbpPreview(); }
   const date = el('ct-date')?.value || ctToday();
   try {
     const r = await Api.get(`/api/costs/fx?from=${encodeURIComponent(cur)}&to=GBP&date=${encodeURIComponent(date)}`);
-    if (el('ct-rate') && !el('ct-rate').value) el('ct-rate').value = Number(r.rate).toFixed(5);
+    if ((el('ct-cur')?.value || 'CNY') !== cur) return;   // changed again while loading
+    if (el('ct-rate') && (force !== undefined || !el('ct-rate').value)) el('ct-rate').value = Number(r.rate).toFixed(5);
     ctUpdateGbpPreview();
-  } catch (e) { /* leave blank for manual entry */ }
+  } catch (e) { if (force) toast(`Couldn't get today's ${cur} → GBP rate — type it in`, 'warn'); }
+}
+// Fill the supplier-code box with what we already hold for this supplier.
+async function ctLoadSupplierCode(productId, onlyIfEmpty) {
+  const box = el('ct-supsku'); if (!box) return;
+  if (onlyIfEmpty && box.dataset.touched) return;
+  box.oninput = () => { box.dataset.touched = '1'; };
+  try {
+    const r = await Api.get('/api/suppliers/links/' + productId);
+    const sup = (el('ct-supplier')?.value || '').trim().toLowerCase();
+    const links = r.links || [];
+    const hit = links.find(l => (l.supplier_name || '').toLowerCase() === sup) || (!sup ? links[0] : null);
+    if (!box.dataset.touched) box.value = hit?.supplier_sku || '';
+  } catch (_) {}
 }
 
 async function ctSaveCost(productId) {
@@ -19222,7 +19363,9 @@ async function ctSaveCost(productId) {
     qty: el('ct-qty')?.value || null,
     note: el('ct-note')?.value || null,
     priceBasis: el('ct-basis')?.value || null,
+    supplierSku: (el('ct-supsku')?.value || '').trim() || null,
   };
+  if (payload.supplierSku && !payload.supplier) { toast('Pick the supplier this code belongs to', 'warn'); return; }
   try {
     const r = await Api.post('/api/costs/products/' + productId + '/cost', payload);
     toast('Cost saved — £' + Number(r.costPrice).toFixed(2) + ' landed'

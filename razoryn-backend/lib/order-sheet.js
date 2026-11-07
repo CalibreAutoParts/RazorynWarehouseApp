@@ -225,7 +225,9 @@ function extractImages(buffer, wb, uploadDir) {
 }
 
 // ── Lines from a mapped sheet ──────────────────────────────────────────────
-function buildLines(rows, headerIdx, map, extras, photos, rowOffset) {
+// opts.priceList: a supplier PRICE LIST (no quantities) — keep any line with a
+// unit price; qty comes back null.
+function buildLines(rows, headerIdx, map, extras, photos, rowOffset, opts = {}) {
   const lines = [];
   const header = rows[headerIdx] || [];
   const mappedCols = new Set(Object.values(map));
@@ -234,9 +236,12 @@ function buildLines(rows, headerIdx, map, extras, photos, rowOffset) {
   for (let r = headerIdx + 1; r < rows.length; r++) {
     const row = rows[r] || [];
     const cell = (f) => map[f] !== undefined ? clean(row[map[f]]) : '';
-    const qty = Math.round(num(cell('qty')) ?? NaN);
+    let qty = Math.round(num(cell('qty')) ?? NaN);
     const partNumber = cell('partNumber'), supplierSku = cell('supplierSku'), title = cell('title');
-    if (!Number.isInteger(qty) || qty <= 0) continue;                 // totals/footer/blank rows
+    if (!Number.isInteger(qty) || qty <= 0) {
+      if (!(opts.priceList && num(cell('unitPrice')) > 0)) continue;  // totals/footer/blank rows
+      qty = null;
+    }
     if (!partNumber && !supplierSku && !title) continue;
     if (/^(total|sum|grand total|合计)/i.test(title)) continue;
     const unitPrice = num(cell('unitPrice'));
@@ -251,7 +256,7 @@ function buildLines(rows, headerIdx, map, extras, photos, rowOffset) {
       const v = clean(row[x.i]);
       if (v) ext[(extras && extras[x.h]) || x.h] = v;
     }
-    const expected = unitPrice != null ? +(unitPrice * qty).toFixed(2) : null;
+    const expected = unitPrice != null && qty ? +(unitPrice * qty).toFixed(2) : null;
     lines.push({
       row: absRow + 1,
       photo, title: title || null, partNumber: partNumber || null, supplierSku: supplierSku || null,
