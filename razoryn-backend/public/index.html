@@ -24370,6 +24370,7 @@ function trppBar() {
     <span style="flex:1"></span>
     ${TRPP.mode === 'selected' ? `<button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trppShare(true)">✓ Share ticked</button>
       <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trppShare(false)">Hide ticked</button><span style="width:10px"></span>` : ''}
+    <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trCleanFromStudio([...TRPP.sel])" title="Fetch the ticked parts' photos from the photo studio with no watermark, logo or vehicle — what accounts on 'clean photos' get">📸 Clean photos from studio</button><span style="width:10px"></span>
     <span>Price ticked:</span>
     <select id="trpp-kind" onchange="el('trpp-val').style.display=this.value==='default'?'none':'';el('trpp-val').placeholder=this.value==='fixed'?'£ each':'%'">
       <option value="markup">Our cost + %</option><option value="discount">% off retail</option><option value="fixed">Fixed £ (ex VAT)</option><option value="default">Back to account default</option></select>
@@ -24841,8 +24842,12 @@ async function trSettings() {
     </div></div>
     <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Price rules for every trade customer</h3><div class="card-desc">e.g. "10+ units → cost + 15%" for everyone. A customer's own rules beat these.</div></div>
       <div class="card-body">${trRulesTable(g.rules, null)}${trRuleForm(null)}</div></div>
-    <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Clean photos (no branding) for trade</h3><div class="card-desc">Customers set to "clean photos" get these instead of the listing photos. Upload the originals, or paste links (e.g. from the Thumbnail Maker).</div></div>
-      <div class="card-body"><div style="display:flex;gap:8px;flex-wrap:wrap"><input id="trci-sku" placeholder="SKU" style="width:180px" onkeydown="if(event.key==='Enter')trCleanLoad()"><button class="btn btn-outline" onclick="trCleanLoad()">Load</button></div><div id="trci-box" style="margin-top:10px"></div></div></div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Clean photos (no branding) for trade</h3><div class="card-desc">Customers set to "clean photos" get these instead of the listing photos — so another business can put its own watermark on. They come from the photo studio automatically (every push sends an unbranded copy), or upload / paste your own.</div></div>
+      <div class="card-body">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+          <button class="btn btn-primary" onclick="trCleanFromStudio(null)">📸 Get clean photos from the photo studio</button>
+          <span style="font-size:12px;color:var(--ink-soft)">for every part you share with trade accounts — matched by SKU, then part number</span></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap"><input id="trci-sku" placeholder="SKU" style="width:180px" onkeydown="if(event.key==='Enter')trCleanLoad()"><button class="btn btn-outline" onclick="trCleanLoad()">Load</button></div><div id="trci-box" style="margin-top:10px"></div></div></div>
     <div class="card"><div class="card-head"><h3>How it works</h3></div><div class="card-body" style="font-size:13px;line-height:1.65">
       <b>Customers see stock + prices</b> in the trade portal <a href="${escapeAttr(portal)}" target="_blank">${escapeHtml(portal)}</a>, a live CSV feed (Google Sheets <code>=IMPORTDATA</code>), the API, or webhooks pushed to their system. Stock is the same number eBay/Shopify use, minus any hold-back.<br>
       <b>Orders</b> (portal, API or taken here) come off stock immediately and the new level is pushed to eBay + Shopify — exactly like a counter sale. They show in Dispatch to pick &amp; ship; cancelling puts the stock back.<br>
@@ -24875,7 +24880,18 @@ function trCleanPaint() {
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
       <input type="file" id="trci-files" accept="image/*" multiple>
       <input id="trci-url" placeholder="or paste https:// image link" style="flex:1;min-width:200px">
+      <button class="btn btn-outline" onclick="trCleanFromStudio([TR.clean.pid])">📸 From photo studio</button>
       <button class="btn btn-primary" onclick="trCleanSave()">Save clean photos</button></div>`;
+}
+// ids = product ids, or null for every part shared with trade accounts.
+async function trCleanFromStudio(ids) {
+  const t = Task.start('Fetching clean photos from the photo studio');
+  try {
+    const r = await Api.post('/api/trade/clean-images/from-studio', ids ? { productIds: ids } : { shared: true });
+    Task.done(t, `${r.found} of ${r.checked} part(s)`);
+    toast(`Clean photos for ${r.found} of ${r.checked} part(s) (${r.photos} photos)` + (r.missingCount ? ` · ${r.missingCount} not in the studio yet${r.missing.length ? ' (e.g. ' + r.missing.slice(0, 5).join(', ') + ')' : ''}` : ''), r.found ? 'success' : 'warn', 9000);
+    if (TR.clean?.pid) trCleanLoad();
+  } catch (e) { Task.fail(t); toast(e.data?.message || e.message, 'error', 8000); }
 }
 async function trCleanSave() {
   const c = TR.clean;

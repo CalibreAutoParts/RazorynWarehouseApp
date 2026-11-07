@@ -389,6 +389,40 @@ router.put('/products/:id/clean-images', aw(async (req, res) => {
   await audit(req, 'trade_clean_images', 'product', pid, { count: urls.length });
   res.json({ ok: true, count: urls.length });
 }));
+// POST /api/trade/clean-images/from-studio { productIds?: [], shared?: true }
+// Pull clean (unbranded) photos from the photo studio by SKU / part number —
+// for the ticked parts, or every part shared with a trade account.
+router.post('/clean-images/from-studio', aw(async (req, res) => {
+  const { studioFetch } = require('./thumbnail');
+  await trade.ensureSchema();
+  let ids = Array.isArray(req.body?.productIds) ? req.body.productIds.map(Number).filter(Boolean) : [];
+  if (!ids.length && req.body?.shared) {
+    ids = (await query(`SELECT p.id FROM products p WHERE p.active = true AND (
+        EXISTS (SELECT 1 FROM trade_account_products tap WHERE tap.product_id = p.id)
+        OR EXISTS (SELECT 1 FROM trade_accounts a WHERE a.active AND COALESCE(a.catalogue_mode, 'all') = 'all'))
+      ORDER BY p.qty_on_hand DESC, p.id LIMIT 1000`)).rows.map(r => r.id);
+  }
+  ids = ids.slice(0, 1000);
+  if (!ids.length) return res.status(400).json({ error: 'no_products', message: 'Tick some parts first.' });
+  const rows = (await query(`SELECT id, sku, part_number FROM products WHERE id = ANY($1)`, [ids])).rows;
+  let found = 0, photos = 0, missing = [];
+  for (const p of rows) {
+    try {
+      const qs = new URLSearchParams({ sku: p.sku || '', part_number: p.part_number || '' });
+      const r = await studioFetch('/clean-photos?' + qs);
+      if (r.status === 400 && !r.headers.get('content-type')?.includes('json')) throw Object.assign(new Error('studio_not_configured'), { status: 400 });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) { if (r.status === 401) return res.status(502).json({ error: 'studio_key', message: 'The photo studio rejected the integration key — check Settings → Photo studio.' }); missing.push(p.sku); continue; }
+      const n = await trade.setStudioCleanImages(p.id, body.images || []);
+      if (n) { found++; photos += n; } else missing.push(p.sku);
+    } catch (e) {
+      if (e.status === 400 || /studio_not_configured/.test(e.message)) return res.status(400).json({ error: 'studio_not_configured', message: 'Set up the photo studio link first (Settings → Photo studio integration).' });
+      missing.push(p.sku);
+    }
+  }
+  await audit(req, 'trade_clean_from_studio', null, null, { checked: rows.length, found, photos });
+  res.json({ ok: true, checked: rows.length, found, photos, missing: missing.slice(0, 50), missingCount: missing.length });
+}));
 router.get('/clean-image', aw(async (req, res) => {
   const ref = String(req.query.ref || '');
   if (!/^local:trade-clean\/\d+\/[\w.-]+$/.test(ref)) return res.status(400).end();

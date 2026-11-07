@@ -377,6 +377,16 @@ router.post('/products/:sku/images', async (req, res) => {
     : [];
   const idempotencyKey = String(body.idempotencyKey || '').trim();
 
+  // Unbranded copies of the same photos → this part's clean photos (what
+  // trade partners get, so they can add their own watermark). Never listed.
+  // Saved first — independent of the Shopify/eBay update below.
+  if (Array.isArray(body.cleanImages) && body.cleanImages.length) {
+    try {
+      const t = require('../lib/trade'); await t.ensureSchema();
+      const pid = (await query(`SELECT id FROM products WHERE upper(sku) = upper($1)`, [skuParam])).rows[0]?.id;
+      if (pid) await t.setStudioCleanImages(pid, body.cleanImages);
+    } catch (e) { console.warn('[thumbnail] clean images:', e.message); }
+  }
   if (!images.length) return res.status(400).json({ error: 'images_required' });
   if (images.some(u => !/^https:\/\//i.test(u))) {
     return res.status(400).json({ error: 'https_urls_only' });
@@ -504,3 +514,4 @@ router.post('/products/:sku/images', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.studioFetch = studioFetch;

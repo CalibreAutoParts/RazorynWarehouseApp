@@ -387,6 +387,17 @@ async function brandedImages(p) {
     ON CONFLICT (product_id) DO UPDATE SET urls = EXCLUDED.urls, fetched_at = now()`, [p.id, JSON.stringify(urls)]).catch(() => {});
   return urls;
 }
+// Clean photos sent by the photo studio (its signed /public/clean/ links):
+// replace the studio's previous set, keep anything added by hand after them.
+const isStudioClean = u => /\/public\/clean\/\d+-[0-9a-f]+\.jpg$/i.test(String(u));
+async function setStudioCleanImages(productId, urls) {
+  const studio = (Array.isArray(urls) ? urls : []).map(String).filter(u => /^https:\/\//.test(u)).slice(0, 24);
+  if (!productId || !studio.length) return 0;
+  const manual = (await cleanImages(productId)).filter(u => !isStudioClean(u));
+  await query(`INSERT INTO product_clean_images (product_id, urls, updated_at) VALUES ($1, $2::jsonb, now())
+    ON CONFLICT (product_id) DO UPDATE SET urls = EXCLUDED.urls, updated_at = now()`, [productId, JSON.stringify([...studio, ...manual].slice(0, 30))]);
+  return studio.length;
+}
 async function cleanImages(productId) {
   const r = (await query(`SELECT urls FROM product_clean_images WHERE product_id = $1`, [productId])).rows[0];
   return Array.isArray(r?.urls) ? r.urls : [];
@@ -964,7 +975,7 @@ module.exports = {
   ensureSchema, getSettings, saveSettings, vatRateFor,
   issueApiKey, accountByKey, hashKey, sign,
   costOf, priceFor, priceBreaks, loadRules, pickRule, availableFor, present, stockList, productBySku, visibleTo,
-  imagesFor, brandedImages, cleanImages, publicCleanImageUrls, cleanSig,
+  imagesFor, brandedImages, cleanImages, publicCleanImageUrls, cleanSig, setStudioCleanImages,
   accountSummary, topProducts,
   createOrder, getOrder, listOrders, cancelOrder, formatOrder, publicOrderStatus, TradeError,
   periodEnd, londonToday, issueInvoice, runDueInvoices, voidInvoice, invoiceDetail, emailInvoice, emailInvite,
