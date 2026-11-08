@@ -146,8 +146,9 @@ router.get('/accounts/:id/catalogue', aw(async (req, res) => {
   const params = [a.id], where = ['p.active = true'];
   const q = String(req.query.q || '').trim();
   if (q) { params.push(`%${q}%`); where.push(`(p.sku ILIKE $${params.length} OR p.title ILIKE $${params.length} OR p.part_number ILIKE $${params.length})`); }
-  if (req.query.show === 'shared') where.push('tap.product_id IS NOT NULL');
+  if (req.query.show === 'shared') where.push('tap.product_id IS NOT NULL AND NOT COALESCE(p.trade_excluded, false)');
   if (req.query.show === 'not') where.push('tap.product_id IS NULL');
+  if (req.query.show === 'excluded') where.push('COALESCE(p.trade_excluded, false)');
   if (req.query.inStock === '1') where.push('p.qty_on_hand > 0');
   const lim = Math.min(2000, Math.max(1, parseInt(req.query.limit) || 500));
   const rows = (await query(`SELECT p.*, (tap.product_id IS NOT NULL) AS shared FROM products p
@@ -160,7 +161,8 @@ router.get('/accounts/:id/catalogue', aw(async (req, res) => {
       retail: Number(p.price_ebay) || Number(p.price_shopify) || null, price: pr.net, basis: pr.basis, clamped: pr.clamped,
       marginPct: pr.net && pr.cost ? +((pr.net - pr.cost) / pr.net * 100).toFixed(1) : null,
       itemRule: own ? { id: own.id, kind: own.kind, value: Number(own.value) } : null,
-      shared: a.catalogue_mode === 'selected' ? !!p.shared : true, picked: !!p.shared };
+      excluded: !!p.trade_excluded,
+      shared: p.trade_excluded ? false : (a.catalogue_mode === 'selected' ? !!p.shared : true), picked: !!p.shared };
   });
   res.json({ mode: a.catalogue_mode || 'all', vatRate: trade.vatRateFor(a, settings), accountType: a.account_type,
     defaults: { markupPct: a.markup_pct != null ? Number(a.markup_pct) : Number(settings.defaultMarkupPct ?? 25) }, items });
@@ -182,6 +184,18 @@ router.post('/accounts/:id/catalogue', aw(async (req, res) => {
   else await query(`INSERT INTO trade_account_products (account_id, product_id) SELECT $1, x FROM unnest($2::int[]) x ON CONFLICT DO NOTHING`, [req.params.id, ids]);
   await audit(req, 'trade_catalogue_share', 'trade_account', req.params.id, { count: ids.length, shared: req.body?.shared !== false });
   res.json({ ok: true, count: ids.length });
+}));
+// POST /api/trade/catalogue-exclude { productIds, excluded: true|false }
+// "Not for trade": hidden from EVERY trade account (portal, API, feed,
+// partner apps) and can't be ordered. Untick to offer them again.
+router.post('/catalogue-exclude', aw(async (req, res) => {
+  await trade.ensureSchema();
+  const ids = (Array.isArray(req.body?.productIds) ? req.body.productIds : []).map(Number).filter(Boolean).slice(0, 10000);
+  if (!ids.length) return res.status(400).json({ error: 'no_products', message: 'Tick some parts first.' });
+  const excluded = req.body?.excluded !== false;
+  await query(`UPDATE products SET trade_excluded = $2 WHERE id = ANY($1)`, [ids, excluded]);
+  await audit(req, 'trade_exclude', null, null, { count: ids.length, excluded });
+  res.json({ ok: true, count: ids.length, excluded });
 }));
 // POST /api/trade/accounts/:id/price-items { productIds, kind: 'default'|'markup'|'discount'|'fixed', value }
 // Item prices for this account: + % on cost, − % off retail, or a fixed £ (net);
