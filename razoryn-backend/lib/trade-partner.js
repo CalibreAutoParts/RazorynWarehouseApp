@@ -220,12 +220,14 @@ async function sync(link) {
   if (!linked.length) { await query(`UPDATE trade_partner_links SET last_sync_at = now(), last_error = NULL WHERE id = $1`, [link.id]); return { updated: 0, costChanged: 0 }; }
   const bySku = new Map(linked.map(p => [p.partner_sku.toUpperCase(), p]));
   let updated = 0, costChanged = 0;
+  const seen = new Set();
   try {
     for (let off = 0; off < 20000; off += 500) {
       const page = await call(link, 'GET', `/stock?limit=500&offset=${off}`);
       for (const it of page.items) {
         const p = bySku.get(String(it.sku).toUpperCase());
         if (!p) continue;
+        seen.add(p.id);
         const setCost = link.auto_update_cost && p.source_partner_id === link.id;
         if (setCost && it.price != null && Number(p.cost_price) !== Number(it.price)) costChanged++;
         if (p.source_partner_id === link.id && Number(p.partner_qty) !== Number(it.available)) changedStock.push(p.id);
@@ -233,6 +235,13 @@ async function sync(link) {
         updated++;
       }
       if (page.items.length < 500) break;
+    }
+    // Parts they no longer offer us (hidden / not for trade / withdrawn):
+    // nothing left to sell from their stock.
+    for (const p of linked) {
+      if (seen.has(p.id) || !(Number(p.partner_qty) > 0)) continue;
+      await query(`UPDATE products SET partner_qty = 0, partner_synced_at = now() WHERE id = $1`, [p.id]);
+      if (p.source_partner_id === link.id) changedStock.push(p.id);
     }
     await query(`UPDATE trade_partner_links SET last_sync_at = now(), last_error = NULL WHERE id = $1`, [link.id]);
     pushPartnerStock(changedStock);

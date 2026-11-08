@@ -128,6 +128,8 @@ async function _migrate() {
     product_id INTEGER PRIMARY KEY, urls JSONB NOT NULL DEFAULT '[]', updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
   // Last time we asked the photo studio for a part's clean photos (so a part
   // the studio doesn't have isn't re-asked on every request).
+  // A part that's never offered to trade (hidden from every account).
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS trade_excluded BOOLEAN NOT NULL DEFAULT false`);
   await query(`CREATE TABLE IF NOT EXISTS product_clean_fetch (
     product_id INTEGER PRIMARY KEY, tried_at TIMESTAMPTZ NOT NULL DEFAULT now(), found INTEGER NOT NULL DEFAULT 0)`);
   // Same ledger the sales page uses for part payments.
@@ -338,6 +340,7 @@ async function stockList(account, { q = '', make = '', inStock = false, changedS
   }
   if (make) { params.push(make); where.push(`lower(p.brand) = lower($${params.length})`); }
   if (inStock) { params.push(bufferFor(account, settings)); where.push(`p.qty_on_hand > $${params.length}`); }
+  where.push('COALESCE(p.trade_excluded, false) = false');   // "not for trade" parts never show
   if (account.catalogue_mode === 'selected') { params.push(account.id); where.push(`EXISTS (SELECT 1 FROM trade_account_products tap WHERE tap.account_id = $${params.length} AND tap.product_id = p.id)`); }
   if (changedSince) { params.push(changedSince); where.push(`GREATEST(p.updated_at, COALESCE(ts.changed_at, p.updated_at)) > $${params.length}::timestamptz`); }
   const lim = Math.min(500, Math.max(1, parseInt(limit) || 100));
@@ -367,7 +370,10 @@ async function stockList(account, { q = '', make = '', inStock = false, changedS
 
 // Can this trade account see (and order) this part?
 async function visibleTo(account, productId) {
-  if (!account || account.catalogue_mode !== 'selected') return true;
+  if (!account) return true;   // staff
+  const ex = (await query(`SELECT COALESCE(trade_excluded, false) AS x FROM products WHERE id = $1`, [productId])).rows[0];
+  if (ex && ex.x) return false;
+  if (account.catalogue_mode !== 'selected') return true;
   return !!(await query(`SELECT 1 FROM trade_account_products WHERE account_id = $1 AND product_id = $2`, [account.id, productId])).rows[0];
 }
 async function productBySku(sku, account = null) {
