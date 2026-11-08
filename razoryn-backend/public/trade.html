@@ -203,7 +203,7 @@ async function showPhotos(sku) {
       return;
     }
     const note = r.clean ? '' : (S.me.photos === 'clean'
-      ? `<div class="muted" style="margin-top:6px">⚠ Clean versions of this part's photos aren't available yet, so these carry our watermark.</div>`
+      ? `<div class="muted" style="margin-top:6px">Our listing photos — this part hasn't been through our photo studio yet.</div>`
       : `<div class="muted" style="margin-top:6px">These are our listing photos (with our watermark). Ask us to switch your account to clean photos if you list them yourself.</div>`);
     $('modal-box').innerHTML = `<div class="row" style="justify-content:space-between"><b>${esc(sku)} — ${r.images.length} photo(s)${r.clean ? ' · clean (no branding)' : ''}</b>
       <span class="row"><button class="btn" onclick="download('/images/${encodeURIComponent(sku)}.zip','${esc(sku)}-photos.zip')">⬇ Download all (ZIP)</button><button class="btn o" onclick="closeModal()">Close</button></span></div>
