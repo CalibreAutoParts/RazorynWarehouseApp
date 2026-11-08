@@ -52,6 +52,20 @@ router.post('/messages/:id/mark', requirePermission('dispatch'), aw(async (req, 
   res.json(await hub.mark(parseInt(req.params.id), String(req.body?.as || '')));
 }));
 
+// POST /messages/poll — called every 30 s by every open app. The server checks
+// eBay at most once per 30 s (shared by everyone) and answers with what's new.
+let _pollAt = 0;
+router.post('/messages/poll', requirePermission('dispatch'), aw(async (req, res) => {
+  await hub.ensureSchema();
+  let added = 0;
+  if (Date.now() - _pollAt > 28000) {
+    _pollAt = Date.now();
+    const r = await hub.syncAll({ days: 2 });
+    if (Array.isArray(r)) added = r.reduce((a, x) => a + (x.added || 0), 0);
+  }
+  const toAnswer = (await query(`SELECT COUNT(*)::int AS n FROM (${hub.LATEST_SQL}) m WHERE ${hub.NEEDS_REPLY_SQL}`)).rows[0].n;
+  res.json({ added, toAnswer, lastCheck: new Date(_pollAt).toISOString() });
+}));
 router.put('/schedule', requireAdmin, aw(async (req, res) => res.json(await hub.saveScheduleSettings(req.body || {}))));
 router.post('/messages/sync', requirePermission('dispatch'), aw(async (req, res) => {
   const r = await hub.syncAll({ days: Math.min(30, Math.max(1, parseInt(req.body?.days) || 5)) });
@@ -76,24 +90,24 @@ router.get('/messages/:id', requirePermission('dispatch'), aw(async (req, res) =
   // Open the conversation from its newest email (it carries the history).
   const latest = convRows[convRows.length - 1] || m;
   // Merge every email in the conversation (each carries some history; the
-  // newest may only hold the last message), oldest first, no repeats.
+  // newest may only hold the last message), oldest first, no repeats. A
+  // buyer email that's only a photo becomes its own photo bubble.
   const nrm = t => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const conv = [];
+  const hasMedia = url => conv.some(c => (c.media || []).some(x => x.url === url));
   for (const r of convRows.length ? convRows : [m]) {
     const parts = hub.parseConversation(r.body, m.sender);
+    const own = String(r.body || '').split(/\nNew message from/i)[0].trim();
     parts.forEach((x, i) => {
-      if (conv.some(c => nrm(c.text) === nrm(x.text))) return;
+      if (!x.text || conv.some(c => c.text && nrm(c.text) === nrm(x.text))) return;
       if (i === parts.length - 1 && x.from === 'buyer' && !x.at) x.at = r.received_at;
       conv.push({ ...x });
     });
-  }
-  // Photos from every email in the conversation, on the buyer message each came with.
-  const norm0 = t => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
-  for (const r of convRows) {
-    if (!Array.isArray(r.media) || !r.media.length) continue;
-    const own = hub.parseConversation(r.body, r.sender).filter(x => x.from === 'buyer').slice(-1)[0];
-    const target = (own && conv.find(x => x.from === 'buyer' && norm0(x.text) === norm0(own.text))) || [...conv].reverse().find(x => x.from === 'buyer');
-    if (target) target.media = [...(target.media || []), ...r.media.filter(mm => !(target.media || []).some(t => t.url === mm.url))];
+    const media = (Array.isArray(r.media) ? r.media : []).filter(x => !hasMedia(x.url));
+    if (!media.length) continue;
+    const target = own ? conv.find(c => c.from === 'buyer' && nrm(c.text) === nrm(own)) : null;
+    if (target) target.media = [...(target.media || []), ...media];
+    else conv.push({ from: 'buyer', text: '', media, at: r.received_at });
   }
   const norm = t => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const known = new Set(conv.map(x => norm(x.text)));
