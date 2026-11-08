@@ -112,6 +112,7 @@ router.get('/stock/:sku', aw(async (req, res) => {
   const imgs = await trade.imagesFor(req.trade, p);
   out.images = imgs.urls.map((u, i) => ({ n: i + 1, url: /^https?:\/\//.test(u) ? u : `/api/trade/v1/images/${encodeURIComponent(p.sku)}/${i + 1}` }));
   out.images_clean = imgs.clean;
+  if (imgs.clean) out.image = imgs.urls.find(u => /^https:\/\//.test(u)) || null;   // never the watermarked listing photo
   // Clean photos stored here have no public URL — hand out signed public links
   // so a partner can list with them directly (they add their own watermark).
   if (imgs.clean) {
@@ -264,7 +265,7 @@ router.get('/images/:sku', aw(async (req, res) => {
   const p = await trade.productBySku(req.params.sku, req.trade);
   if (!p) return res.status(404).json({ error: 'not_found' });
   const imgs = await trade.imagesFor(req.trade, p);
-  res.json({ sku: p.sku, clean: imgs.clean, images: imgs.urls.map((u, i) => ({ n: i + 1, download: `/api/trade/v1/images/${encodeURIComponent(p.sku)}/${i + 1}`, url: /^https?:\/\//.test(u) ? u : null })) });
+  res.json({ sku: p.sku, clean: imgs.clean, clean_missing: !!imgs.missing, images: imgs.urls.map((u, i) => ({ n: i + 1, download: `/api/trade/v1/images/${encodeURIComponent(p.sku)}/${i + 1}`, url: /^https?:\/\//.test(u) ? u : null })) });
 }));
 
 router.get('/images/:sku/:n', aw(async (req, res) => {

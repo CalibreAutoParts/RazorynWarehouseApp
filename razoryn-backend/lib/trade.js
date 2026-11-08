@@ -359,7 +359,7 @@ async function stockList(account, { q = '', make = '', inStock = false, changedS
     try {
       const ci = (await query(`SELECT product_id, urls FROM product_clean_images WHERE product_id = ANY($1)`, [rows.map(r => r.id)])).rows;
       const first = new Map(ci.map(r => [r.product_id, (Array.isArray(r.urls) ? r.urls : []).find(u => /^https:\/\//.test(u))]));
-      rows.forEach((p, i) => { const u = first.get(p.id); if (u) items[i].image = u; items[i].image_clean = !!u; });
+      rows.forEach((p, i) => { const u = first.get(p.id); items[i].image = u || null; items[i].image_clean = !!u; });
     } catch (_) {}
   }
   return { total, limit: lim, offset: off, items };
@@ -452,7 +452,9 @@ async function imagesFor(account, p) {
   if (account.photo_access === 'clean') {
     let clean = await cleanImages(p.id);
     if (!clean.length) clean = await fetchCleanFromStudio(p);
-    if (clean.length) return { urls: clean, clean: true };
+    // Never fall back to the watermarked listing photos for a clean account —
+    // no clean photos yet means no photos (they're told why).
+    return { urls: clean, clean: true, missing: !clean.length };
   }
   return { urls: await brandedImages(p), clean: false };
 }
