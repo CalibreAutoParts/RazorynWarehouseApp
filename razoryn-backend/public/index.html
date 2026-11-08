@@ -9155,10 +9155,22 @@ async function dLoadLabelInfo(saleId) {
     <div style="margin-top:6px"><button class="btn btn-outline btn-sm" onclick="copyText(DLABEL.map(f => f[0] + ': ' + f[1]).join('\\n'))">Copy all</button></div>`;
 }
 let DLABEL = [];
+// Copy text — synchronously inside the click (works everywhere), clipboard
+// API as the fallback. Pass a textarea/input element to copy what's in it.
 function copyText(t) {
-  const done = () => toast('Copied', 'success', 1500);
-  try { navigator.clipboard.writeText(String(t)).then(done, () => { fallback(); }); } catch (_) { fallback(); }
-  function fallback() { const a = document.createElement('textarea'); a.value = String(t); document.body.appendChild(a); a.select(); try { document.execCommand('copy'); done(); } catch (_) {} a.remove(); }
+  const fieldEl = t && t.tagName ? t : null;
+  const text = fieldEl ? fieldEl.value : String(t ?? '');
+  let ok = false;
+  try {
+    let ta = fieldEl;
+    if (!ta) { ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0'; (el('modal-overlay') || document.body).appendChild(ta); }
+    ta.focus(); ta.select(); try { ta.setSelectionRange(0, text.length); } catch (_) {}
+    ok = document.execCommand('copy');
+    if (!fieldEl) ta.remove();
+  } catch (_) {}
+  if (ok) { toast('Copied', 'success', 1500); return; }
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(() => toast('Copied', 'success', 1500), () => toast('Couldn\'t copy — select the text and press Ctrl+C', 'warn'));
+  else toast('Couldn\'t copy — select the text and press Ctrl+C', 'warn');
 }
 // After dispatch: a ready-to-send message for the customer.
 function dShowCustomerMessage(sale, carrier, tracking, url) {
@@ -9172,7 +9184,7 @@ function dShowCustomerMessage(sale, carrier, tracking, url) {
   modal({ title: 'Dispatched — message for the customer', body: `
     <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:8px">Copy and paste this into eBay messages, email or WhatsApp.</div>
     <textarea id="d-msg" rows="8" style="width:100%;font-size:13px">${escapeHtml(msg)}</textarea>`,
-    actions: [{ label: 'Close', onClick: closeModal }, { label: '📋 Copy message', primary: true, onClick: () => copyText(el('d-msg').value) }] });
+    actions: [{ label: 'Close', onClick: closeModal }, { label: '📋 Copy message', primary: true, onClick: () => copyText(el('d-msg')) }] });
 }
 let DMSG = '';
 
@@ -24158,6 +24170,8 @@ async function ebOpen(id) {
     : `<div style="display:flex;justify-content:flex-start;margin:8px 0"><div style="max-width:78%;background:var(--bg-soft);border:1px solid var(--line);border-radius:14px 14px 14px 4px;padding:10px 13px;font-size:14px;line-height:1.5"><div style="white-space:pre-wrap">${escapeHtml(x.text)}</div>${imgs(x.media)}
         <div style="font-size:10.5px;color:var(--ink-soft);margin-top:4px">${escapeHtml(m.sender || 'Buyer')}${x.at ? ' · ' + when(x.at) : ''}</div></div></div>`;
   const canReply = m.response_enabled || m.item_id;
+  const os = r.order?.sale;
+  EB.trackMsg = os ? `Hi, your order has been dispatched with ${os.carrier || 'our courier'}.` + (os.tracking_number ? ` Tracking number: ${os.tracking_number}.` : '') + (os.tracking_url ? ` You can track it here: ${os.tracking_url}` : '') : '';
   const title = String(m.item_title || m.subject || '').replace(/^Re:\s*/i, '');
   box.innerHTML = `
     <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:6px">
@@ -24165,6 +24179,16 @@ async function ebOpen(id) {
         ${m.item_id ? `<a href="https://www.ebay.co.uk/itm/${encodeURIComponent(m.item_id)}" target="_blank" rel="noopener" style="font-size:12.5px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(title)} ↗</a>` : `<div style="font-size:12.5px;color:var(--ink-soft)">${escapeHtml(m.subject || '')}</div>`}</div>
       <span style="font-size:11px;color:var(--ink-soft);white-space:nowrap">${m.replied ? '✓ answered' : canReply ? 'needs reply' : ''}</span>
     </div>
+    ${r.order ? `<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:12.5px;background:var(--bg-soft);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:6px">
+      <span>🧾 Order <b>${escapeHtml(r.order.number)}</b></span>
+      ${r.order.status ? `<span class="pill" style="font-size:10.5px">${escapeHtml(r.order.status)}</span>` : ''}
+      ${r.order.sale ? (r.order.sale.dispatched_at
+        ? `<span>📦 Dispatched ${escapeHtml(r.order.sale.carrier || '')}${r.order.sale.tracking_number ? ' · ' + escapeHtml(r.order.sale.tracking_number) : ''}</span>
+           ${r.order.sale.tracking_number || r.order.sale.tracking_url ? `<button class="btn btn-ghost btn-sm" onclick="el('eb-reply').value=EB.trackMsg;el('eb-reply').focus()">Insert tracking</button>` : ''}`
+        : '<span style="color:var(--amber)">not dispatched yet</span>')
+        + ' <span style="color:var(--green);font-size:11.5px">· tracking links allowed in replies</span>'
+        : '<span style="color:var(--ink-soft)">not found in your sales</span>'}
+    </div>` : ''}
     <div id="eb-chat" style="max-height:52vh;overflow-y:auto;padding:4px 2px">
       ${r.conversation.length ? r.conversation.map(bubble).join('') : bubble({ from: 'buyer', text: m.body || '(message not downloaded yet)', at: m.received_at, media: m.media })}
     </div>
@@ -24175,7 +24199,7 @@ async function ebOpen(id) {
         <div id="eb-photos" style="display:flex;gap:6px;flex-wrap:wrap"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
           <label class="btn btn-outline btn-sm" style="cursor:pointer">📷 Add photos<input type="file" accept="image/*" multiple style="display:none" onchange="ebAddPhotos(this.files);this.value=''"></label>
-          <span style="font-size:11px;color:var(--ink-soft);flex:1">No phone numbers, emails, links or "buy direct" — the app blocks them. Ctrl+Enter sends.</span>
+          <span style="font-size:11px;color:var(--ink-soft);flex:1">No phone numbers, emails, website links or "buy direct" — the app blocks them${r.order?.sale ? ' (courier tracking links are fine — they have an order)' : ''}. Ctrl+Enter sends.</span>
           <button class="btn btn-primary" id="eb-send" onclick="ebReply(${m.id}, this)">Send</button></div>
       </div>`
       : `<div style="font-size:12.5px;color:var(--ink-soft);border-top:1px solid var(--line);padding-top:10px">eBay doesn't allow replies to this message from here${m.item_id ? '' : " (it isn't about one of your listings)"} — open it on eBay to respond.</div>`}

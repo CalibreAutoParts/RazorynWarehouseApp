@@ -157,15 +157,55 @@ async function markRead(row) {
 // eBay sends each message as an email with the earlier conversation pasted
 // underneath ("Your previous message" = ours, the buyer's name = theirs).
 // Turn that into separate messages, oldest first.
+// eBay's email around a message: order details, account notices, footer.
+// Pull out the order (number / status / item) and drop the rest.
+const BOILER = /^(We scan messages|Email reference ID|We don'?t check replies|eBay sent this message|This email was sent by eBay|(?:&copy;|©)\s*\d{4}|Learn more about|If you have a question, go to|Only purchases on eBay|Asking to complete a transaction)/i;
+function cleanBody(body) {
+  let lines = String(body || '').replace(/&copy;/g, '©').split('\n').map(l => l.trim()).filter(Boolean);
+  const cut = lines.findIndex(l => BOILER.test(l));
+  if (cut >= 0) lines = lines.slice(0, cut);
+  const order = {};
+  const si = lines.findIndex(l => /^Order status:/i.test(l));
+  lines = lines.filter((l, i) => {
+    let m;
+    if ((m = l.match(/^Order status:\s*(.+)$/i))) { order.status = m[1]; return false; }
+    if ((m = l.match(/^Order number:\s*([\d-]+)/i))) { order.number = m[1]; return false; }
+    if (/^View order details$/i.test(l) || /^Reply$/i.test(l) || /^→$/.test(l) || /^\(\s*\d+\s*\)$/.test(l)) return false;
+    if (si > 0 && i === si - 1) { order.title = l; return false; }   // item title above "Order status"
+    return true;
+  });
+  return { lines, order: order.number || order.status ? order : null };
+}
+// Every order number mentioned anywhere in the message (e.g. 17-15385-84786).
+function orderNumbersIn(body) {
+  return [...new Set((String(body || '').match(/\b\d{2}-\d{5}-\d{5}\b/g) || []))];
+}
+
+// eBay sends each message as an email with the earlier conversation pasted
+// underneath ("Your previous message" = ours, the buyer's name = theirs).
+// Turn that into separate messages, oldest first.
 function parseConversation(body, buyer) {
-  const lines = String(body || '').split('\n').map(l => l.trim()).filter(Boolean);
-  const nm = lines.findIndex(l => /^New message from:?$/i.test(l));
-  if (nm < 0) return [{ from: 'buyer', text: String(body || '').trim() }];
-  const newest = lines.slice(0, nm).join('\n');
+  const { lines } = cleanBody(body);
   const isBuyer = l => buyer && l.toLowerCase() === String(buyer).toLowerCase();
+  const nm = lines.findIndex(l => /^New message from:?$/i.test(l));
+  if (nm < 0) {
+    // No eBay header (e.g. the copy of a message WE sent): split on
+    // "Dear X, … - Y" blocks; Y = the buyer → theirs, otherwise ours.
+    const out = []; let cur = [];
+    for (const l of lines) {
+      const sig = l.match(/^-\s+(\S+)$/);
+      if (sig) { const text = cur.filter(x => !/^Dear\s.+,$/.test(x)).join('\n').trim(); if (text) out.push({ from: isBuyer(sig[1]) ? 'buyer' : 'us', text }); cur = []; }
+      else cur.push(l);
+    }
+    const rest = cur.filter(x => !/^Dear\s.+,$/.test(x)).join('\n').trim();
+    if (rest) out.push({ from: 'buyer', text: rest });
+    return out.length ? out.reverse() : [{ from: 'buyer', text: lines.join('\n') }];
+  }
+  const newest = lines.slice(0, nm).join('\n');
   const isOurs = l => /^your previous message$/i.test(l);
   const blocks = [];
   let i = nm + 1;
+  if (isBuyer(lines[i])) i++;                                   // "New message from: <name>"
   while (i < lines.length) {
     const l = lines[i];
     if (isBuyer(l) || isOurs(l)) {
@@ -183,6 +223,17 @@ function parseConversation(body, buyer) {
   const out = blocks.reverse();
   if (newest && !(out.length && out[out.length - 1].from === 'buyer' && out[out.length - 1].text === newest)) out.push({ from: 'buyer', text: newest });
   return out.filter((m, idx) => idx === 0 || !(m.text === out[idx - 1].text && m.from === out[idx - 1].from));
+}
+
+// The buyer's order this message is about (by the order number eBay puts in
+// the message) — so a reply may include the courier's tracking link.
+async function orderForMessage(row) {
+  const nums = orderNumbersIn(row.body);
+  if (!nums.length) return null;
+  const s = (await query(`SELECT id, invoice_number, external_order_id, status, dispatched_at, carrier, tracking_number,
+      ${'tracking_url'} FROM sales WHERE external_order_id = ANY($1) AND channel LIKE 'ebay_%' ORDER BY occurred_at DESC LIMIT 1`, [nums]).catch(() => ({ rows: [] }))).rows[0];
+  const info = cleanBody(row.body).order || {};
+  return { number: nums[0], status: info.status || null, title: info.title || null, sale: s || null };
 }
 
 // Photos for a reply: bytes → eBay Picture Services. Returns [{url,name}].
@@ -207,7 +258,9 @@ async function reply(rowId, body, userId, media = []) {
   if (!row) throw Object.assign(new Error('Message not found'), { status: 404 });
   const text = String(body || '').trim() || ((media || []).length ? 'Photos attached.' : '');
   if (!text) throw Object.assign(new Error('Write a reply first'), { status: 400 });
-  require('./ebay-message-guard').assertClean('', text);
+  // Courier tracking links are fine when it's about an order they've placed.
+  const order = await orderForMessage(row);
+  require('./ebay-message-guard').assertClean('', text, { allowTracking: !!(order && order.sale) });
   if (!row.item_id) throw Object.assign(new Error("eBay only lets you reply from here to messages about one of your listings — reply to this one on eBay."), { status: 400 });
   if (!row.external_id) throw Object.assign(new Error('This message has no reply reference — reply on eBay.'), { status: 400 });
   const E = ebay();
@@ -346,4 +399,4 @@ async function messageIntervalMins() {
   return h >= s.workStart && h < s.workEnd ? s.workMins : s.offHoursMins;
 }
 
-module.exports = { parseConversation, uploadPhotos, scheduleSettings, saveScheduleSettings, messageIntervalMins, ensureSchema, syncAll, syncStore, reply, markRead, eligibleItems, sendOffers, overview, messageText, stripHtml };
+module.exports = { orderForMessage, cleanBody, parseConversation, uploadPhotos, scheduleSettings, saveScheduleSettings, messageIntervalMins, ensureSchema, syncAll, syncStore, reply, markRead, eligibleItems, sendOffers, overview, messageText, stripHtml };

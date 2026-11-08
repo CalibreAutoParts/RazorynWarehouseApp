@@ -58,7 +58,8 @@ router.get('/messages/:id', requirePermission('dispatch'), aw(async (req, res) =
   const known = new Set(conv.map(x => norm(x.text)));
   for (const rp of replies) if (!known.has(norm(rp.body))) conv.push({ from: 'us', text: rp.body, at: rp.sent_at, by: rp.sent_by, ok: rp.ok, error: rp.error, media: rp.media || [] });
   conv.forEach(x => { if (x.from === 'buyer' && !x.at && x === conv.filter(y => y.from === 'buyer').slice(-1)[0]) x.at = m.received_at; });
-  res.json({ message: { ...m, is_read: true }, conversation: conv, replies, thread });
+  const order = await hub.orderForMessage(m);
+  res.json({ message: { ...m, is_read: true }, conversation: conv, replies, thread, order });
 }));
 
 // Photos for a reply → eBay Picture Services; returns their eBay URLs.
