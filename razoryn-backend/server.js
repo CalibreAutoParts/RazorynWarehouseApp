@@ -92,6 +92,7 @@ app.use('/api/devices',      require('./routes/devices'));
 app.use('/api/pricing',      require('./routes/pricing'));
 app.use('/api/settings',     require('./routes/settings'));
 app.use('/api/onbuy',        require('./routes/onbuy'));
+app.use('/api/ebayhub',      require('./routes/ebayhub'));
 app.use('/api/costs',        require('./routes/costs'));
 app.use('/api/listings',     require('./routes/listings'));
 app.use('/api/bundles',      require('./routes/bundles'));
@@ -676,6 +677,10 @@ async function runFitmentSweep() {
 // as they import). Does nothing unless switched on in Settings for an account.
 cron.schedule('17 */2 * * *', runFitmentSweep);
 console.log('[boot] eBay fitment-message sweep scheduled: every 2h (only if switched on)');
+
+// eBay buyer messages — pull every account's inbox every 10 minutes (read only;
+// replies are only ever sent by a person from the eBay page).
+cron.schedule('*/10 * * * *', () => { require('./lib/ebay-hub').syncAll({ days: 3 }).catch(e => console.warn('[cron ebay messages]', e.message)); });
 
 // Email digests + scheduled reports — hourly tick: batches new notifications to
 // opted-in staff and sends daily/weekly/monthly/quarterly reports at ~07:00 UK

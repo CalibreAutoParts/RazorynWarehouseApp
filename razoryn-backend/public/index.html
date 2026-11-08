@@ -1197,6 +1197,11 @@
           Dispatch
           <span class="ct" id="nav-dispatch-count">0</span>
         </button>
+        <button class="nav-item" data-page="ebay">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          eBay
+          <span class="ct" id="nav-ebay-count" style="display:none">0</span>
+        </button>
         <button class="nav-item" data-page="returns">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
           Returns
@@ -3494,6 +3499,7 @@ function routeTo(page) {
     disputes: renderDisputes,
     trade: renderTrade,
     onbuy: renderOnBuy,
+    ebay: renderEbay,
     printstation: renderPrintStation
   };
   // The handheld's Home is the plain task workbench, not the money dashboard.
@@ -4177,6 +4183,11 @@ function refreshNavCounts() {
   const sales = Array.isArray(State.sales) ? State.sales : [];
   document.getElementById('nav-inv-count').textContent = products.length;
   document.getElementById('nav-ret-count').textContent = returns.filter(r => r.status === 'open' || r.status === 'pending').length;
+  // eBay messages waiting for an answer (checked at most every 2 minutes).
+  if (State.user && (!refreshNavCounts._eb || Date.now() - refreshNavCounts._eb > 120000)) {
+    refreshNavCounts._eb = Date.now();
+    Api.get('/api/ebayhub/overview').then(r => { const n = (r.accounts || []).reduce((a, x) => a + (x.toAnswer || 0), 0); const b = el('nav-ebay-count'); if (b) { b.textContent = n; b.style.display = n ? '' : 'none'; } }).catch(() => {});
+  }
   const unread = notifications.filter(n => !n.read).length;
   document.getElementById('nav-notif-count').textContent = unread;
   document.getElementById('notif-badge').textContent = unread;
@@ -24042,6 +24053,189 @@ const trStatusPill = st => {
 
 // ── OnBuy marketplace ──────────────────────────────────────────────────────
 const OB = { filter: 'all', q: '', items: [], sel: new Set(), status: null };
+// ── eBay page: overview per account, buyer messages (read + reply), offers ──
+const EB = { tab: 'overview', store: '', filter: 'answer', q: '', sel: null, msgs: [], offers: [], offerSel: new Set() };
+async function renderEbay() {
+  const tabs = [['overview', 'Overview'], ['messages', 'Messages']].concat(canSeeMoney() ? [['offers', 'Offers to watchers']] : []);
+  if (!tabs.some(t => t[0] === EB.tab)) EB.tab = 'overview';
+  el('content').innerHTML = `<div class="page">
+    <div class="page-head"><div><h1>eBay</h1><div class="desc">Every eBay account in one place — what needs doing, buyer messages you can read and answer here, and offers to people watching your listings.</div></div>
+      <div class="actions"><button class="btn btn-outline" onclick="ebSync(this)">⟳ Check for new messages</button></div></div>
+    <div class="seg" style="margin-bottom:14px">${tabs.map(([k, l]) => `<button class="${EB.tab === k ? 'active' : ''}" onclick="EB.tab='${k}';renderEbay()">${l}</button>`).join('')}</div>
+    <div id="eb-body"><div class="card"><div class="card-body" style="color:var(--ink-soft)">Loading…</div></div></div></div>`;
+  if (EB.tab === 'overview') ebOverview();
+  else if (EB.tab === 'messages') ebMessages();
+  else ebOffers();
+}
+async function ebSync(btn) {
+  if (btn) btn.disabled = true;
+  const t = Task.start('Checking eBay for new messages');
+  try {
+    const r = await Api.post('/api/ebayhub/messages/sync', { days: 7 });
+    const added = r.results.reduce((a, x) => a + (x.added || 0), 0), errs = r.results.filter(x => x.error);
+    Task.done(t, `${added} new`);
+    toast(`${added} new message(s)` + (errs.length ? ` · ${errs.map(e => e.store + ': ' + e.error).join('; ')}` : ''), errs.length ? 'warn' : 'success', errs.length ? 9000 : 3000);
+    renderEbay();
+  } catch (e) { Task.fail(t); toast(e.data?.message || e.message, 'error'); }
+  if (btn) btn.disabled = false;
+}
+
+async function ebOverview() {
+  let r; try { r = await Api.get('/api/ebayhub/overview'); } catch (e) { el('eb-body').innerHTML = `<div class="card"><div class="card-body" style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div></div>`; return; }
+  const tile = (n, label, onclick, warn) => `<a href="#" onclick="${onclick};return false" style="text-decoration:none;color:inherit;display:block;border:1px solid var(--line);border-radius:10px;padding:10px 12px">
+    <div style="font-size:22px;font-weight:700;color:${n ? (warn ? 'var(--red)' : 'var(--ink)') : 'var(--ink-soft)'}">${n}</div><div style="font-size:12px;color:var(--ink-soft)">${label}</div></a>`;
+  el('eb-body').innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px">
+    ${r.accounts.map(a => `<div class="card"><div class="card-head"><h3>${escapeHtml(a.name)}${a.primary ? ' <span class="pill" style="font-size:10px">main</span>' : ''}</h3>
+      <div class="card-desc">${a.disabled ? '<span style="color:var(--amber)">switched off</span>' : a.connected ? '<span style="color:var(--green)">● connected</span>' : '<span style="color:var(--red)">not connected</span>'}</div></div>
+      <div class="card-body" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        ${tile(a.toAnswer, 'messages to answer', `EB.tab='messages';EB.store='${a.code}';EB.filter='answer';renderEbay()`, true)}
+        ${tile(a.unread, 'unread messages', `EB.tab='messages';EB.store='${a.code}';EB.filter='unread';renderEbay()`)}
+        ${tile(a.toDispatch, 'orders to dispatch', `routeTo('dispatch')`, true)}
+        ${tile(a.openReturns, 'open returns', `routeTo('returns')`)}
+      </div></div>`).join('')}
+  </div>
+  <div style="font-size:12px;color:var(--ink-soft);margin-top:10px">Messages are checked every 10 minutes${r.lastMessageSync ? ' · newest saved ' + new Date(r.lastMessageSync).toLocaleString('en-GB') : ''}. Replies are only ever sent by a person — nothing is messaged automatically.</div>`;
+}
+
+// ── Messages ──
+async function ebMessages() {
+  const stores = (State.brand?.allStores || State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
+  el('eb-body').innerHTML = `<div style="display:grid;grid-template-columns:minmax(300px,420px) minmax(0,1fr);gap:14px;align-items:start" class="eb-msg-grid">
+    <div class="card"><div class="card-body" style="padding:10px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+        <select id="eb-store" onchange="EB.store=this.value;ebLoadList()" style="flex:1;min-width:120px"><option value="">All accounts</option>${stores.map(s => `<option value="${escapeAttr(s.code)}" ${EB.store === s.code ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}</select>
+        <select id="eb-filter" onchange="EB.filter=this.value;ebLoadList()"><option value="answer">To answer</option><option value="unread">Unread</option><option value="all">All</option></select>
+      </div>
+      <input type="search" id="eb-q" placeholder="Search buyer, item, text…" value="${escapeAttr(EB.q)}" style="width:100%;margin-bottom:8px" oninput="clearTimeout(EB.t);EB.t=setTimeout(()=>{EB.q=this.value;ebLoadList()},300)">
+      <div id="eb-list" style="max-height:68vh;overflow:auto"></div>
+    </div></div>
+    <div class="card"><div class="card-body" id="eb-msg"><div style="color:var(--ink-soft)">Pick a message.</div></div></div>
+  </div>
+  <style>@media(max-width:860px){.eb-msg-grid{grid-template-columns:1fr!important}}</style>`;
+  el('eb-filter').value = EB.filter;
+  ebLoadList();
+  if (EB.sel) ebOpen(EB.sel);
+}
+async function ebLoadList() {
+  const box = el('eb-list'); if (!box) return;
+  let r; try { r = await Api.get(`/api/ebayhub/messages?store=${encodeURIComponent(EB.store)}&filter=${EB.filter}&q=${encodeURIComponent(EB.q)}`); }
+  catch (e) { box.innerHTML = `<div style="color:var(--red);font-size:13px">${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  EB.msgs = r.messages;
+  const storeName = c => ((State.brand?.allStores || State.brand?.stores || []).find(s => s.code === c) || {}).name || c;
+  box.innerHTML = r.messages.length ? r.messages.map(m => `<div onclick="ebOpen(${m.id})" style="cursor:pointer;padding:9px 8px;border-bottom:1px solid var(--line);${EB.sel === m.id ? 'background:var(--bg-soft);' : ''}">
+      <div style="display:flex;justify-content:space-between;gap:8px;font-size:13px"><b style="${m.is_read ? 'font-weight:500' : ''}">${m.is_read ? '' : '● '}${escapeHtml(m.sender || 'eBay')}</b><span style="font-size:11px;color:var(--ink-soft);white-space:nowrap">${m.received_at ? new Date(m.received_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''}</span></div>
+      <div style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(m.subject || '')}</div>
+      <div style="font-size:11.5px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(m.preview || '')}</div>
+      <div style="font-size:10.5px;color:var(--ink-soft);margin-top:2px">${escapeHtml(storeName(m.store_code))}${m.replied ? ' · <span style="color:var(--green)">✓ answered</span>' : m.response_enabled ? ' · <span style="color:var(--amber)">needs reply</span>' : ''}</div></div>`).join('')
+    : `<div style="font-size:13px;color:var(--ink-soft);padding:8px">${EB.filter === 'answer' ? 'Nothing waiting for an answer 🎉' : 'No messages.'} Press "Check for new messages" to pull the latest.</div>`;
+}
+const EB_QUICK = [
+  ['Thanks', 'Hi, thanks for your message. '],
+  ['Fitment', 'Hi, thanks for your message. To check this fits, could you send your vehicle registration or VIN? We\'ll confirm the fit straight away.'],
+  ['Dispatched', 'Hi, your order has been dispatched. You can follow it with the tracking on your eBay order. Thanks for your purchase!'],
+  ['In stock', 'Hi, yes — this is in stock and ready to go. Orders placed before noon are dispatched the same day.'],
+];
+async function ebOpen(id) {
+  EB.sel = id;
+  const box = el('eb-msg'); if (!box) return;
+  box.innerHTML = '<div style="color:var(--ink-soft)">Loading…</div>';
+  let r; try { r = await Api.get('/api/ebayhub/messages/' + id); } catch (e) { box.innerHTML = `<div style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div>`; return; }
+  const m = r.message;
+  box.innerHTML = `
+    <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap">
+      <div><div style="font-size:16px;font-weight:700">${escapeHtml(m.subject || '')}</div>
+        <div style="font-size:12.5px;color:var(--ink-soft)">From <b>${escapeHtml(m.sender || '')}</b> · ${m.received_at ? new Date(m.received_at).toLocaleString('en-GB') : ''}</div>
+        ${m.item_id ? `<div style="font-size:12.5px;margin-top:2px">Item: <a href="https://www.ebay.co.uk/itm/${encodeURIComponent(m.item_id)}" target="_blank" rel="noopener">${escapeHtml(m.item_title || m.item_id)} ↗</a></div>` : ''}</div>
+    </div>
+    <div style="white-space:pre-wrap;font-size:14px;line-height:1.55;background:var(--bg-soft);border-radius:10px;padding:12px;margin:12px 0">${escapeHtml(m.body || '(message text not downloaded yet — press Check for new messages)')}</div>
+    ${r.replies.map(x => `<div style="margin:0 0 8px 40px;background:${x.ok ? 'var(--green-light,#e9f7ef)' : 'var(--red-light,#fdecec)'};border-radius:10px;padding:10px 12px;font-size:13.5px;white-space:pre-wrap">${escapeHtml(x.body)}<div style="font-size:11px;color:var(--ink-soft);margin-top:4px">${x.ok ? 'Sent' : '✗ Not sent — ' + escapeHtml(x.error || '')} · ${escapeHtml(x.sent_by || '')} · ${new Date(x.sent_at).toLocaleString('en-GB')}</div></div>`).join('')}
+    ${m.response_enabled || m.item_id ? `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0">${EB_QUICK.map(([l, t], i) => `<button class="btn btn-ghost btn-sm" onclick="el('eb-reply').value=EB_QUICK[${i}][1];el('eb-reply').focus()">${l}</button>`).join('')}</div>
+      <textarea id="eb-reply" rows="5" style="width:100%" placeholder="Write your reply…"></textarea>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+        <div style="font-size:11.5px;color:var(--ink-soft)">eBay rules: no phone numbers, emails, website links or "buy direct" — the app blocks them.</div>
+        <button class="btn btn-primary" onclick="ebReply(${m.id}, this)">Send reply on eBay</button></div>`
+      : `<div style="font-size:12.5px;color:var(--ink-soft)">eBay doesn't allow replies to this message from here${m.item_id ? '' : ' (it isn\'t about one of your listings)'} — open it on eBay to respond.</div>`}
+    ${r.thread.length ? `<div style="margin-top:16px;border-top:1px solid var(--line);padding-top:10px"><div style="font-size:12px;font-weight:600;margin-bottom:6px">Earlier from ${escapeHtml(m.sender)}</div>
+      ${r.thread.map(t => `<div onclick="ebOpen(${t.id})" style="cursor:pointer;font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--line-2,var(--line))"><b>${escapeHtml(t.subject || '')}</b> <span style="color:var(--ink-soft)">· ${t.received_at ? new Date(t.received_at).toLocaleDateString('en-GB') : ''}${t.replied ? ' · ✓' : ''}</span><div style="color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.body || '')}</div></div>`).join('')}</div>` : ''}`;
+  const li = EB.msgs.find(x => x.id === id); if (li && !li.is_read) { li.is_read = true; ebLoadList(); }
+}
+async function ebReply(id, btn) {
+  const body = (el('eb-reply')?.value || '').trim();
+  if (!body) return toast('Write a reply first', 'warn');
+  btn.disabled = true;
+  try { await Api.post(`/api/ebayhub/messages/${id}/reply`, { body }); toast('Reply sent on eBay', 'success'); ebOpen(id); ebLoadList(); }
+  catch (e) { toast(e.data?.message || e.message, 'error', 9000); btn.disabled = false; }
+}
+
+// ── Offers to watchers (admins) ──
+async function ebOffers() {
+  const off = Math.max(10, Number(typeof CT !== 'undefined' && CT.settings?.offerDiscountPct) || 10);
+  el('eb-body').innerHTML = `<div class="card"><div class="card-head"><h3>Send offers to interested buyers</h3>
+      <div class="card-desc">Listings eBay says have interested buyers (watchers, recent viewers). An offer goes to all of them and lasts 2 days.</div></div>
+    <div class="card-body">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;font-size:13px">
+        <span>Offer</span><input id="eb-off-pct" type="number" min="5" max="80" step="1" value="${off}" style="width:70px" oninput="ebOffersPaint()"><span>% off the eBay price</span>
+        <span style="width:12px"></span>
+        <input id="eb-off-msg" placeholder="Message to buyers (optional) — e.g. 'Thanks for watching — here's a little off'" style="flex:1;min-width:240px">
+        <label style="display:flex;gap:5px;align-items:center"><input type="checkbox" id="eb-off-counter"> Allow counter offers</label>
+      </div>
+      <div id="eb-off-bar" style="display:flex;gap:8px;align-items:center;margin-bottom:8px;font-size:13px"></div>
+      <div id="eb-off-list" style="max-height:60vh;overflow:auto"><div style="color:var(--ink-soft)">Asking eBay which listings have interested buyers…</div></div>
+    </div></div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><h3>Offers sent</h3></div><div class="card-body" id="eb-off-sent" style="font-size:13px">Loading…</div></div>`;
+  try { const r = await Api.get('/api/ebayhub/offers/eligible'); EB.offers = r.items; EB.offerSel = new Set(); ebOffersPaint(); }
+  catch (e) { el('eb-off-list').innerHTML = `<div style="color:var(--red);font-size:13px">${escapeHtml(e.data?.message || e.message)}</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Offers use eBay's newer (OAuth) connection, which only the account linked with the app's eBay refresh token has.</div>`; }
+  try {
+    const s = await Api.get('/api/ebayhub/offers/sent');
+    el('eb-off-sent').innerHTML = s.offers.length ? `<table class="table" style="margin:0"><thead><tr><th>When</th><th>Part</th><th style="text-align:right">Offer</th><th>Result</th><th>By</th></tr></thead><tbody>
+      ${s.offers.map(o => `<tr><td style="white-space:nowrap">${new Date(o.sent_at).toLocaleString('en-GB')}</td><td>${escapeHtml(o.title || o.listing_id)}<div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(o.sku || '')} · ${escapeHtml(o.listing_id)}</div></td>
+        <td style="text-align:right">${o.price != null ? '£' + Number(o.price).toFixed(2) : o.discount_pct != null ? o.discount_pct + '% off' : '—'}</td>
+        <td>${o.ok ? `<span style="color:var(--green)">✓ sent to ${o.offers ?? '?'} buyer(s)</span>` : `<span style="color:var(--red)">✗ ${escapeHtml(o.error || '')}</span>`}</td><td>${escapeHtml(o.sent_by_name || '')}</td></tr>`).join('')}</tbody></table>`
+      : '<span style="color:var(--ink-soft)">None yet.</span>';
+  } catch (_) {}
+}
+function ebOfferPrice(i) {
+  const pct = Number(el('eb-off-pct')?.value) || 0;
+  return i.price != null ? Math.round(i.price * (1 - pct / 100) * 100) / 100 : null;
+}
+function ebOffersPaint() {
+  const list = el('eb-off-list'); if (!list) return;
+  const items = EB.offers.filter(i => !i.unknown);
+  const unknown = EB.offers.length - items.length;
+  const n = EB.offerSel.size;
+  el('eb-off-bar').innerHTML = `<b>${n}</b> ticked <a href="#" onclick="EB.offers.filter(i=>!i.unknown).forEach(i=>EB.offerSel.add(i.listingId));ebOffersPaint();return false">Select all ${items.length}</a>
+    ${n ? `<a href="#" onclick="EB.offerSel.clear();ebOffersPaint();return false">Clear</a>` : ''}<span style="flex:1"></span>
+    <button class="btn btn-primary btn-sm" ${n ? '' : 'disabled'} onclick="ebSendOffers(this)">Send offers to ${n}</button>`;
+  list.innerHTML = items.length ? `<table class="table" style="margin:0"><thead><tr><th></th><th>Listing</th><th style="text-align:right">Stock</th><th style="text-align:right">eBay price</th><th style="text-align:right">Offer</th><th style="text-align:right" title="The lowest price that still makes your target margin">Safe minimum</th><th>Last offer</th></tr></thead><tbody>
+    ${items.map(i => { const o = ebOfferPrice(i); const low = o != null && i.floor != null && o < i.floor; const loss = o != null && i.breakeven != null && o < i.breakeven;
+      return `<tr><td><input type="checkbox" ${EB.offerSel.has(i.listingId) ? 'checked' : ''} onchange="this.checked?EB.offerSel.add('${i.listingId}'):EB.offerSel.delete('${i.listingId}');ebOffersPaint()"></td>
+        <td><div style="font-weight:600;max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(i.title || '')}</div><div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(i.sku || '')} · <a href="https://www.ebay.co.uk/itm/${i.listingId}" target="_blank" rel="noopener">${i.listingId} ↗</a></div></td>
+        <td style="text-align:right">${i.qty ?? '—'}</td><td style="text-align:right">${i.price != null ? '£' + i.price.toFixed(2) : '—'}</td>
+        <td style="text-align:right;font-weight:700;color:${loss ? 'var(--red)' : low ? 'var(--amber)' : 'inherit'}">${o != null ? '£' + o.toFixed(2) : '—'}${loss ? '<div style="font-size:10.5px;font-weight:400">loses money</div>' : low ? '<div style="font-size:10.5px;font-weight:400">below safe minimum</div>' : ''}</td>
+        <td style="text-align:right;color:var(--ink-soft)">${i.floor != null ? '£' + Number(i.floor).toFixed(2) : 'no cost'}</td>
+        <td style="font-size:11.5px;color:var(--ink-soft)">${i.lastOfferAt ? new Date(i.lastOfferAt).toLocaleDateString('en-GB') : '—'}</td></tr>`; }).join('')}</tbody></table>
+    ${unknown ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:6px">+ ${unknown} eligible listing(s) not linked to a part here.</div>` : ''}`
+    : '<div style="font-size:13px;color:var(--ink-soft)">No listings with interested buyers right now.</div>';
+}
+async function ebSendOffers(btn) {
+  const pct = Number(el('eb-off-pct').value) || 0;
+  if (pct < 5) return toast('eBay offers must be at least 5% off', 'warn');
+  const items = EB.offers.filter(i => EB.offerSel.has(i.listingId)).map(i => ({ listingId: i.listingId, productId: i.productId, price: ebOfferPrice(i) ?? undefined, discountPct: i.price == null ? pct : undefined }));
+  const losing = EB.offers.filter(i => EB.offerSel.has(i.listingId) && i.breakeven != null && ebOfferPrice(i) < i.breakeven);
+  if (losing.length && !confirm(`${losing.length} offer(s) are below breakeven and would lose money (e.g. ${losing[0].sku}). Send anyway?`)) return;
+  if (!confirm(`Send a ${pct}% offer to everyone interested in ${items.length} listing(s)? It lasts 2 days.`)) return;
+  btn.disabled = true;
+  const t = Task.start('Sending offers');
+  try {
+    const r = await Api.post('/api/ebayhub/offers/send', { items, message: el('eb-off-msg').value, allowCounterOffer: el('eb-off-counter').checked });
+    const ok = r.results.filter(x => x.ok), bad = r.results.filter(x => !x.ok);
+    Task.done(t, `${ok.length} sent`);
+    toast(`Offers sent on ${ok.length} listing(s) to ${ok.reduce((a, x) => a + (x.offers || 0), 0)} buyer(s)` + (bad.length ? ` · ${bad.length} failed: ${bad[0].error}` : ''), bad.length ? 'warn' : 'success', 9000);
+    ebOffers();
+  } catch (e) { Task.fail(t); toast(e.data?.message || e.message, 'error', 9000); btn.disabled = false; }
+}
+
 async function renderOnBuy() {
   el('content').innerHTML = `<div class="page">
     <div class="page-head"><div><h1>OnBuy</h1><div class="desc">Sell on OnBuy alongside eBay &amp; Shopify — one warehouse stock, prices set from your eBay price (never below your margin floor), orders land in Sales &amp; Dispatch like any other channel.</div></div>
