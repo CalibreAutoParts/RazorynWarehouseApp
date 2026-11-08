@@ -2,7 +2,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const { pool, query } = require('../db');
 
 async function run() {

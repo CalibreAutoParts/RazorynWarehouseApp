@@ -1,6 +1,6 @@
 // routes/staff.js — feature 4: staff & access management (admin)
 const express = require('express');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const { query } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');

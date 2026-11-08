@@ -1,6 +1,6 @@
 // scripts/seed.js — demo data, mirroring the front-end prototype
 require('dotenv').config();
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const { query, withTx } = require('../db');
 
 async function run({ skipIfNotEmpty = false } = {}) {
