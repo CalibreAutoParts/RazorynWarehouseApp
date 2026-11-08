@@ -5927,34 +5927,38 @@ function invUpdateBulkBar() {
 async function bulkDeleteSelected() {
   const ids = Array.from(State.invSelected);
   if (!ids.length) return;
-  const choice = await promptInput({
-    title: `Delete ${ids.length} product${ids.length>1?'s':''}`,
-    label: 'Type 1 or 2',
-    help: '1 = remove from warehouse only (keep on Shopify). 2 = remove from BOTH warehouse and Shopify.',
-    okLabel: 'Continue',
-  });
-  if (choice !== '1' && choice !== '2') return;
-  const removeFromShopify = choice === '2';
-  const ok = confirm(
-    removeFromShopify
-      ? `Confirm: PERMANENTLY delete ${ids.length} product${ids.length>1?'s':''} from BOTH warehouse and Shopify. This cannot be undone.`
-      : `Confirm: remove ${ids.length} product${ids.length>1?'s':''} from the warehouse only. Shopify untouched.`
-  );
-  if (!ok) return;
-  toast(`Deleting ${ids.length} products…`, 'info');
-  try {
-    const r = await Api.post('/api/products/bulk-delete', { ids, hard: true, shopify: removeFromShopify });
-    let msg = `Deleted ${r.deleted} from warehouse`;
-    if (removeFromShopify) msg += ` · ${r.shopifyDeleted} from Shopify`;
-    if (r.errors?.length) msg += ` · ${r.errors.length} errors`;
-    toast(msg, r.errors?.length ? 'warn' : 'success');
-    if (r.errors?.length) console.warn('Bulk delete errors:', r.errors);
-    State.invSelected.clear();
-    await Store.refresh('products');
-    repaintInventoryList();
-  } catch (e) {
-    toast('Bulk delete failed: ' + (e.data?.message || e.message), 'error');
-  }
+  let pv = { count: ids.length, shopifyCount: 0, ebay: [] };
+  try { pv = await Api.post('/api/products/bulk-delete-preview', { ids }); } catch (_) {}
+  const n = ids.length, pl = n > 1 ? 's' : '';
+  modal({ title: `Delete ${n} product${pl}`, body: `
+    <div style="font-size:13px;margin-bottom:10px">Where should they be removed from?</div>
+    <label style="display:flex;gap:8px;align-items:center;font-size:14px;margin:6px 0;opacity:.8"><input type="checkbox" checked disabled> Warehouse app <span style="color:var(--ink-soft);font-size:12px">(always — ${n} part${pl})</span></label>
+    ${pv.shopifyCount ? `<label style="display:flex;gap:8px;align-items:center;font-size:14px;margin:6px 0"><input type="checkbox" id="bdel-shopify" checked> Shopify <span style="color:var(--ink-soft);font-size:12px">— ${pv.shopifyCount} product${pv.shopifyCount > 1 ? 's' : ''} deleted</span></label>` : '<div style="font-size:12.5px;color:var(--ink-soft);margin:6px 0">None of them are on Shopify.</div>'}
+    ${pv.ebay.length ? pv.ebay.map(e => `<label style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:14px;margin:6px 0"><input type="checkbox" class="bdel-ebay" value="${escapeAttr(e.storeCode)}" checked> eBay — ${escapeHtml(e.storeName)} <span style="color:${e.canEnd ? 'var(--ink-soft)' : 'var(--amber)'};font-size:12px">— ${e.listings} listing${e.listings > 1 ? 's' : ''} ${e.canEnd ? 'ended' : '(account switched off — links just removed)'}</span></label>`).join('')
+      : '<div style="font-size:12.5px;color:var(--ink-soft);margin:6px 0">None of them have eBay listings linked.</div>'}
+    <div style="font-size:12px;color:var(--ink-soft);margin-top:10px">Ending eBay listings can't be undone. A part whose eBay listing won't end is kept (not deleted anywhere) and listed in the result.</div>`,
+    actions: [{ label: 'Cancel', onClick: closeModal }, { label: '🗑 Delete', primary: true, className: 'btn-danger', onClick: async () => {
+      const shopify = !!el('bdel-shopify')?.checked;
+      const ebayStores = [...document.querySelectorAll('.bdel-ebay:checked')].map(x => x.value);
+      const where = ['the warehouse'].concat(shopify ? ['Shopify'] : [], ebayStores.length ? ['eBay (' + pv.ebay.filter(e => ebayStores.includes(e.storeCode)).map(e => e.storeName).join(', ') + ')'] : []);
+      if (!confirm(`Permanently delete ${n} product${pl} from ${where.join(', ')}? This cannot be undone.`)) return;
+      const t = Task.start(`Deleting ${n} product${pl}`);
+      try {
+        const r = await Api.post('/api/products/bulk-delete', { ids, hard: true, shopify, ebayStores });
+        Task.done(t, 'Done'); closeModal();
+        let msg = `Deleted ${r.deleted} from the warehouse`;
+        if (shopify) msg += ` · ${r.shopifyDeleted} from Shopify`;
+        if (r.ebayEnded) msg += ` · ${r.ebayEnded} eBay listing${r.ebayEnded > 1 ? 's' : ''} ended`;
+        if (r.ebayUnlinked) msg += ` · ${r.ebayUnlinked} eBay link${r.ebayUnlinked > 1 ? 's' : ''} removed`;
+        if (r.kept?.length) msg += ` · kept ${r.kept.length} (eBay wouldn't end: ${r.kept.slice(0, 5).join(', ')})`;
+        else if (r.errors?.length) msg += ` · ${r.errors.length} error(s)`;
+        toast(msg, r.errors?.length ? 'warn' : 'success', r.errors?.length ? 12000 : 6000);
+        if (r.errors?.length) console.warn('Bulk delete errors:', r.errors);
+        State.invSelected.clear();
+        await Store.refresh('products');
+        repaintInventoryList();
+      } catch (e) { Task.fail(t); toast('Bulk delete failed: ' + (e.data?.message || e.message), 'error'); }
+    } }] });
 }
 
 // Hide (park) / unhide a listing. Hidden = kept in inventory but excluded from
