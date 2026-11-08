@@ -126,6 +126,10 @@ async function _migrate() {
     product_id INTEGER PRIMARY KEY, urls JSONB, fetched_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
   await query(`CREATE TABLE IF NOT EXISTS product_clean_images (
     product_id INTEGER PRIMARY KEY, urls JSONB NOT NULL DEFAULT '[]', updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  // Last time we asked the photo studio for a part's clean photos (so a part
+  // the studio doesn't have isn't re-asked on every request).
+  await query(`CREATE TABLE IF NOT EXISTS product_clean_fetch (
+    product_id INTEGER PRIMARY KEY, tried_at TIMESTAMPTZ NOT NULL DEFAULT now(), found INTEGER NOT NULL DEFAULT 0)`);
   // Same ledger the sales page uses for part payments.
   await query(`CREATE TABLE IF NOT EXISTS sale_payments (
     id SERIAL PRIMARY KEY, sale_id INTEGER NOT NULL, amount NUMERIC(10,2) NOT NULL,
@@ -349,7 +353,16 @@ async function stockList(account, { q = '', make = '', inStock = false, changedS
     total = (await query(`SELECT COUNT(*)::int AS n ${base}`, params)).rows[0].n;
   }
   const rows = (await query(`SELECT ${PRODUCT_COLS} ${base} ORDER BY p.title, p.sku LIMIT ${lim} OFFSET ${off}`, params)).rows;
-  return { total, limit: lim, offset: off, items: rows.map(p => present(account, p, rules, settings)) };
+  const items = rows.map(p => present(account, p, rules, settings));
+  // Clean-photo accounts: the card picture is the first clean photo too.
+  if (account.photo_access === 'clean' && rows.length) {
+    try {
+      const ci = (await query(`SELECT product_id, urls FROM product_clean_images WHERE product_id = ANY($1)`, [rows.map(r => r.id)])).rows;
+      const first = new Map(ci.map(r => [r.product_id, (Array.isArray(r.urls) ? r.urls : []).find(u => /^https:\/\//.test(u))]));
+      rows.forEach((p, i) => { const u = first.get(p.id); if (u) items[i].image = u; items[i].image_clean = !!u; });
+    } catch (_) {}
+  }
+  return { total, limit: lim, offset: off, items };
 }
 
 // Can this trade account see (and order) this part?
@@ -416,9 +429,29 @@ async function publicCleanImageUrls(productId, baseUrl) {
   }).filter(Boolean);
 }
 
+// Ask the photo studio for a part's clean (unbranded) photos and keep them.
+// At most every 6 hours per part when the studio had none.
+async function fetchCleanFromStudio(p) {
+  try {
+    const last = (await query(`SELECT tried_at FROM product_clean_fetch WHERE product_id = $1 AND tried_at > now() - interval '6 hours'`, [p.id])).rows[0];
+    if (last) return [];
+    await query(`INSERT INTO product_clean_fetch (product_id, tried_at, found) VALUES ($1, now(), 0)
+      ON CONFLICT (product_id) DO UPDATE SET tried_at = now(), found = 0`, [p.id]);
+    const { studioFetch } = require('../routes/thumbnail');
+    const qs = new URLSearchParams({ sku: p.sku || '', part_number: p.part_number || '' });
+    const r = await studioFetch('/clean-photos?' + qs);
+    if (!r.ok) return [];
+    const body = await r.json().catch(() => ({}));
+    const n = await setStudioCleanImages(p.id, body.images || []);
+    if (n) await query(`UPDATE product_clean_fetch SET found = $2 WHERE product_id = $1`, [p.id, n]);
+    return n ? cleanImages(p.id) : [];
+  } catch (_) { return []; }   // studio not linked / down — fall back quietly
+}
+
 async function imagesFor(account, p) {
   if (account.photo_access === 'clean') {
-    const clean = await cleanImages(p.id);
+    let clean = await cleanImages(p.id);
+    if (!clean.length) clean = await fetchCleanFromStudio(p);
     if (clean.length) return { urls: clean, clean: true };
   }
   return { urls: await brandedImages(p), clean: false };
