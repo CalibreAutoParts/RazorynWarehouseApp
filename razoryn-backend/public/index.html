@@ -24202,7 +24202,7 @@ async function ebOpen(id) {
     </div>
     ${canReply ? `
       <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:6px">
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">${EB_QUICK.map(([l], i) => `<button class="btn btn-ghost btn-sm" onclick="el('eb-reply').value=EB_QUICK[${i}][1];el('eb-reply').focus()">${l}</button>`).join('')}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px"><button class="btn btn-outline btn-sm" onclick="ebVinHelp()" title="Asks for the VIN and attaches a picture showing where to find it">🔎 VIN help + picture</button>${EB_QUICK.map(([l], i) => `<button class="btn btn-ghost btn-sm" onclick="el('eb-reply').value=EB_QUICK[${i}][1];el('eb-reply').focus()">${l}</button>`).join('')}</div>
         <textarea id="eb-reply" rows="3" style="width:100%" placeholder="Reply to ${escapeAttr(m.sender || 'the buyer')}…" onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey))ebReply(${m.id}, el('eb-send'))"></textarea>
         <div id="eb-photos" style="display:flex;gap:6px;flex-wrap:wrap"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
@@ -24216,6 +24216,17 @@ async function ebOpen(id) {
   const chat = el('eb-chat'); if (chat) chat.scrollTop = chat.scrollHeight;   // newest at the bottom, next to the reply box
   if (r.order) ebOrderCheck(m.id);
   const li = EB.msgs.find(x => x.id === id); if (li && !li.is_read) { li.is_read = true; ebLoadList(); }
+}
+// Preset: ask for the VIN, with a picture of where to find it (neutral
+// design, no shop branding — fine for every eBay account).
+const EB_VIN_TEXT = "Hi, thanks for your message. To make sure this part fits your exact vehicle, could you send us your VIN (Vehicle Identification Number)?\n\nIt's 17 letters and numbers. You'll find it:\n• at the bottom of the windscreen on the driver's side\n• on the sticker inside the driver's door frame\n• in section E of your V5C logbook\n\nWe've attached a picture showing where to look. Once we have it we'll confirm the fit straight away. Thanks!";
+async function ebVinHelp() {
+  const box = el('eb-reply'); if (box) { box.value = EB_VIN_TEXT; box.rows = 10; box.focus(); box.setSelectionRange(0, 0); box.scrollTop = 0; }
+  EB.photos = (EB.photos || []).filter(p => p.name !== 'where-to-find-your-vin.jpg');
+  try {
+    const blob = await (await fetch('/img/vin-locations.jpg', { cache: 'force-cache' })).blob();
+    await ebAddPhotos([new File([blob], 'where-to-find-your-vin.jpg', { type: 'image/jpeg' })]);
+  } catch (_) { toast("Couldn't attach the VIN picture — the message is filled in", 'warn'); }
 }
 // Photos for a reply: shrunk in the browser (max 1600px), up to 5.
 async function ebAddPhotos(files) {
