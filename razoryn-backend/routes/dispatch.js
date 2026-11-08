@@ -31,6 +31,7 @@ async function ensureDispatchColumns() {
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS dispatched_by      INTEGER REFERENCES users(id) ON DELETE SET NULL`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS tracking_number    TEXT`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS carrier            TEXT`);
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS tracking_url       TEXT`);   // couriers without an auto link (DropFleet, Proovia, other)
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS dispatch_notes     TEXT`);
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS channel_push_state TEXT`);   // 'pending' | 'ok' | 'error'
     await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS channel_push_error TEXT`);
@@ -213,6 +214,7 @@ router.get('/outstanding', requirePermission('dispatch'), async (req, res) => {
       toCollect: toCollect.rows,
       recent: recent.rows,
       carriers: Object.keys(CARRIERS),
+      carrierLinks: CARRIERS,   // {tracking} placeholder; null = enter the link by hand
     });
   } catch (e) {
     console.error('[dispatch.outstanding]', e);
@@ -314,11 +316,17 @@ router.post('/bulk-mark-dispatched', requireAdmin, async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────
 router.post('/:saleId/mark-dispatched', requirePermission('dispatch'), async (req, res) => {
   await ensureDispatchColumns();
-  const { carrier, trackingNumber, notes, pushToChannel } = req.body || {};
+  const { notes, pushToChannel } = req.body || {};
+  // "Other / custom courier" + a typed name → that name is the carrier
+  // (eBay and Shopify show it to the buyer instead of "Other").
+  const custom = String(req.body?.carrierName || '').trim().slice(0, 60);
+  const carrier = (req.body?.carrier === 'Other / custom courier' && custom) ? custom : req.body?.carrier;
   if (!carrier) return res.status(400).json({ error: 'carrier_required' });
   // Tracking can be empty for "collection courier organising their own tracking"
   // cases, but the column is text-typed so we accept null/empty.
-  const trackingClean = (trackingNumber || '').trim() || null;
+  const trackingClean = (trackingNumber => (trackingNumber || '').trim() || null)(req.body?.trackingNumber);
+  const typedUrl = String(req.body?.trackingUrl || '').trim();
+  const trackingUrlClean = /^https?:\/\//i.test(typedUrl) ? typedUrl.slice(0, 500) : (trackingUrlFor(carrier, trackingClean) || null);
 
   const result = await withTx(async (c) => {
     const s = await c.query(`SELECT * FROM sales WHERE id = $1 FOR UPDATE`, [req.params.saleId]);
@@ -332,11 +340,11 @@ router.post('/:saleId/mark-dispatched', requirePermission('dispatch'), async (re
         dispatched_at = now(), dispatched_by = $1,
         carrier = $2, tracking_number = $3, dispatch_notes = $4,
         channel_push_state = $5, channel_push_error = NULL,
-        status = 'dispatched'
+        status = 'dispatched', tracking_url = $7
       WHERE id = $6 RETURNING *
     `, [req.user.id, carrier, trackingClean, (notes || '').trim() || null,
         pushToChannel === false ? null : 'pending',
-        req.params.saleId]);
+        req.params.saleId, trackingUrlClean]);
     return { sale: updated.rows[0] };
   });
 
@@ -377,7 +385,7 @@ router.post('/:saleId/mark-dispatched', requirePermission('dispatch'), async (re
   res.json({
     ok: true,
     sale: result.sale,
-    trackingUrl: trackingUrlFor(carrier, trackingClean),
+    trackingUrl: trackingUrlClean,
     customerEmailQueued: emailed,
   });
 });
@@ -600,7 +608,7 @@ router.get('/shipments', requireAdmin, async (req, res) => {
       days_in_transit: dit,
       delivery_state: state,
       channel_group: channelGroup(s.channel),
-      tracking_url: trackingUrlFor(s.carrier, s.tracking_number),
+      tracking_url: s.tracking_url || trackingUrlFor(s.carrier, s.tracking_number),
       needs_followup: isException,
       is_exception: isException,
     };
@@ -719,6 +727,7 @@ async function pushDispatchToChannel(sale) {
         orderId: sale.external_order_id,
         carrier: sale.carrier,
         trackingNumber: sale.tracking_number,
+        trackingUrl: sale.tracking_url || trackingUrlFor(sale.carrier, sale.tracking_number),
       });
     } else if (channel === 'onbuy') {
       await require('../lib/onbuy-sync').pushDispatch(sale);
@@ -733,6 +742,33 @@ async function pushDispatchToChannel(sale) {
     await query(`UPDATE sales SET channel_push_state = 'error', channel_push_error = $1 WHERE id = $2`, [e.message.slice(0, 500), sale.id]);
   }
 }
+
+// GET /api/dispatch/:saleId/label-info — everything a courier site / label
+// needs, in one place: recipient, address lines, contact, parcel size and
+// weight (from the parts), contents and value.
+router.get('/:saleId/label-info', requirePermission('dispatch'), async (req, res) => {
+  await ensureDispatchColumns();
+  const s = (await query(`SELECT * FROM sales WHERE id = $1`, [req.params.saleId])).rows[0];
+  if (!s) return res.status(404).json({ error: 'not_found' });
+  const items = (await query(`SELECT si.qty, si.title, si.sku, p.pkg_length_cm, p.pkg_width_cm, p.pkg_height_cm, p.pkg_weight_g, p.large_panel
+      FROM sale_items si LEFT JOIN products p ON p.id = si.product_id WHERE si.sale_id = $1 ORDER BY si.id`, [s.id])).rows;
+  let lines = String(s.shipping_address || '').split(/\n|,\s*/).map(x => x.trim()).filter(Boolean);
+  if (lines.length > 1 && s.customer_name && lines[0].toLowerCase() === String(s.customer_name).trim().toLowerCase()) lines = lines.slice(1);
+  const pc = lines.length && /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i.test(lines[lines.length - 1]) ? lines[lines.length - 1].toUpperCase() : null;
+  const parcels = items.map(i => ({ title: i.title, sku: i.sku, qty: i.qty,
+    lengthCm: i.pkg_length_cm != null ? Number(i.pkg_length_cm) : null, widthCm: i.pkg_width_cm != null ? Number(i.pkg_width_cm) : null,
+    heightCm: i.pkg_height_cm != null ? Number(i.pkg_height_cm) : null, weightKg: i.pkg_weight_g != null ? +(Number(i.pkg_weight_g) / 1000).toFixed(2) : null,
+    large: !!i.large_panel }));
+  const totalKg = parcels.every(p => p.weightKg != null) ? +parcels.reduce((a, p) => a + p.weightKg * (p.qty || 1), 0).toFixed(2) : null;
+  res.json({
+    ref: s.invoice_number || s.payment_reference || s.external_order_id || ('#' + s.id),
+    orderNumber: s.external_order_id || null, channel: s.channel,
+    name: s.customer_name || (lines[0] || ''), phone: s.customer_phone || null, email: s.customer_email || null,
+    addressLines: pc ? lines.slice(0, -1) : lines, postcode: pc, country: 'United Kingdom',
+    parcels, totalKg, contents: items.map(i => `${i.qty} × ${i.title}`).join('; '),
+    value: Number(s.total) || 0, shippingPaid: Number(s.shipping) || 0,
+  });
+});
 
 // ──────────────────────────────────────────────────────────────────────────
 // POST /api/dispatch/:saleId/retry-push
