@@ -117,6 +117,7 @@ async function withMargins(items) {
   const S = PF.resolveCostSettings(row);
   const shopPct = row.price_link_pct != null ? parseFloat(row.price_link_pct) : (row.bank_transfer_pct != null ? parseFloat(row.bank_transfer_pct) : 10);
   const cashPct = row.cash_discount_pct != null ? parseFloat(row.cash_discount_pct) : 10;
+  const bankPct = row.bank_transfer_pct != null ? parseFloat(row.bank_transfer_pct) : 10;
   const vPart = S.vatRegistered ? (S.vatRate / 100) / (1 + S.vatRate / 100) : 0;
   return items.map(it => {
     if (it.price == null) return it;
@@ -127,18 +128,23 @@ async function withMargins(items) {
     const ebay = Number(it.rrp_ebay ?? it.rrp) || null;
     let cash = ebay ? ebay * (1 - cashPct / 100) : null;
     if (cash > 20) cash = Math.floor(cash / 5) * 5;
-    const prices = { ebay, shopify: Number(it.rrp_shopify) || (ebay ? ebay * (1 - shopPct / 100) : null), cash };
+    const prices = { ebay, shopify: Number(it.rrp_shopify) || (ebay ? ebay * (1 - shopPct / 100) : null),
+      bank: ebay ? ebay * (1 - bankPct / 100) : null, cash };
     const margins = {};
     for (const [k, B] of Object.entries(prices)) {
       if (!(B > 0)) { margins[k] = null; continue; }
-      const ch = PF.channelParams(k === 'cash' ? 'direct' : k, item, S);
+      const direct = k === 'cash' || k === 'bank';
+      const ch = PF.channelParams(direct ? 'direct' : k, item, S);
       const v = k === 'cash' ? 0 : vPart;                          // cash sales are VAT-free
       const fees = B * ((ch.feePct + ch.adRatePct) / 100) * ch.feeVatMult + ch.fixedFee * ch.feeVatMult
-        + (k === 'cash' ? 0 : B * (Number(S.externalAdPct) || 0) / 100);
+        + (direct ? 0 : B * (Number(S.externalAdPct) || 0) / 100);
       const inPrice = !pc.large;                                     // big panels usually charge postage on top
-      const postage = k === 'cash' ? 0 : (inPrice ? ch.postage : 0); // cash = collected
-      const net = B - B * v - fees - postage - pack - (Number(S.overheadPerUnit) || 0) - cost;
-      margins[k] = { price: +B.toFixed(2), net: +net.toFixed(2), pct: +(net / B * 100).toFixed(1) };
+      const postage = k === 'cash' ? 0 : (inPrice ? ch.postage : 0); // cash = collected; bank = posted
+      const overhead = Number(S.overheadPerUnit) || 0;
+      const net = B - B * v - fees - postage - pack - overhead - cost;
+      const r2 = n => +Number(n).toFixed(2);
+      margins[k] = { price: r2(B), net: r2(net), pct: +(net / B * 100).toFixed(1),
+        breakdown: { vat: r2(B * v), fees: r2(fees), postage: r2(postage), packaging: r2(pack), overhead: r2(overhead), cost: r2(cost) } };
     }
     return { ...it, cost: +cost.toFixed(2), margins };
   });

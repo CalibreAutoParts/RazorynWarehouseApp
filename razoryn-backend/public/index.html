@@ -24315,7 +24315,12 @@ async function trPartsPrices(id, keepSel) {
     <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:12px">
       <div><h2 style="margin:0">Parts &amp; prices — ${escapeHtml(a.name || '')}</h2>
         <div style="font-size:12.5px;color:var(--ink-soft)">Choose which parts they can see and order, and set what they pay. Prices are <b>ex VAT</b>${a.account_type === 'cash' ? ' — cash account: no VAT is added' : ' — VAT is added on their invoice'}.</div></div>
-      <div class="seg" id="trpp-mode"></div>
+      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+        <div class="seg" id="trpp-mode"></div>
+        <div class="seg" id="trpp-photos" title="Which photos this account gets in the portal, downloads, API and partner listings">
+          <button class="${a.photo_access !== 'clean' ? 'active' : ''}" onclick="trppPhotos('branded')">Photos: ours (watermarked)</button>
+          <button class="${a.photo_access === 'clean' ? 'active' : ''}" onclick="trppPhotos('clean')">Photos: clean — no watermark</button></div>
+      </div>
     </div>
     <div class="card"><div class="card-body">
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
@@ -24376,6 +24381,14 @@ function trppBar() {
       <option value="markup">Our cost + %</option><option value="discount">% off retail</option><option value="fixed">Fixed £ (ex VAT)</option><option value="default">Back to account default</option></select>
     <input id="trpp-val" type="number" step="0.01" min="0" placeholder="%" style="width:90px">
     <button class="btn btn-primary btn-sm" ${n ? '' : 'disabled'} onclick="trppPrice()">Apply to ${n}</button>`;
+}
+async function trppPhotos(v) {
+  try {
+    await Api.put(`/api/trade/accounts/${TRPP.id}`, { photo_access: v });
+    if (TR.detail?.account) TR.detail.account.photo_access = v;
+    [...el('trpp-photos').children].forEach((b, i) => b.classList.toggle('active', (i === 1) === (v === 'clean')));
+    toast(v === 'clean' ? 'They now get clean photos (no watermark) — fetched from the photo studio where you have them' : 'They now get your watermarked listing photos', 'success', 6000);
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
 }
 async function trppMode(mode) {
   if (mode === 'selected' && !confirm('Only parts you pick will be visible to them (and orderable). Start with none shared and tick the ones to share?')) return;
@@ -24491,15 +24504,18 @@ async function trQuote(accountId) {
 // ── Tables shared by detail + tabs ──
 function trOrdersTable(orders, withAccount) {
   if (!orders.length) return `<div style="padding:16px;color:var(--ink-soft);font-size:13px">No orders yet.</div>`;
-  return `<table class="table" style="margin:0"><thead><tr>${withAccount ? '<th>Account</th>' : ''}<th>Order</th><th>Placed</th><th>Status</th><th style="text-align:right">Total</th><th>Paid</th><th>Invoice</th><th></th></tr></thead><tbody>
+  return `<table class="table" style="margin:0"><thead><tr>${withAccount ? '<th>Account</th>' : ''}<th>Order</th><th>Placed</th><th>Status</th><th style="text-align:right">Total</th>${canSeeMoney() ? '<th style="text-align:right" title="Goods ex VAT minus the parts\' landed cost">Profit</th>' : ''}<th>Paid</th><th>Invoice</th><th></th></tr></thead><tbody>
     ${orders.map(o => `<tr>${withAccount ? `<td><a href="#" onclick="trGo('accounts',{accountId:${o.account_id}});return false">${escapeHtml(o.account_name)}</a></td>` : ''}
       <td><b>${escapeHtml(o.ref || '')}</b>${o.po_ref ? `<div style="font-size:11px;color:var(--ink-soft)">PO ${escapeHtml(o.po_ref)}</div>` : ''}<details><summary style="font-size:11px;color:var(--ink-soft)">${o.items.length} line(s)</summary>${o.items.map(i => `<div style="font-size:11px">${i.qty} × ${escapeHtml(i.sku)} — ${trMoney(i.line_total)}</div>`).join('')}</details></td>
       <td style="font-size:12px">${trDate(o.placed_at)}</td><td>${trStatusPill(o.status)}</td>
-      <td style="text-align:right">${trMoney(o.total)}</td><td style="font-size:12px">${o.paid ? '✓' : o.amount_paid > 0 ? trMoney(o.amount_paid) : '—'}</td>
+      <td style="text-align:right">${trMoney(o.total)}</td>
+      ${canSeeMoney() ? `<td style="text-align:right;white-space:nowrap">${o.profit == null ? '—' : `<b style="color:${o.profit < 0 ? 'var(--red)' : 'var(--green)'}">${o.profit < 0 ? '−' : ''}${trMoney(Math.abs(o.profit))}</b><div style="font-size:10px;color:var(--ink-soft)">${o.margin_pct != null ? o.margin_pct + '% · ' : ''}cost ${trMoney(o.cost)}${o.cost_missing ? ' <span style="color:var(--amber)" title="A part on this order has no cost — profit is overstated">⚠</span>' : ''}</div>`}</td>` : ''}
+      <td style="font-size:12px">${o.paid ? '✓' : o.amount_paid > 0 ? trMoney(o.amount_paid) : '—'}</td>
       <td style="font-size:12px">${o.invoice ? escapeHtml(o.invoice) : o.consolidated ? '<span style="color:var(--ink-soft)">next invoice</span>' : 'per order'}</td>
       <td style="text-align:right;white-space:nowrap"><button class="btn btn-ghost btn-sm" title="${o.consolidated ? 'Delivery note' : 'Invoice'}" onclick="window.open('/api/sales/${o.sale_id}/invoice.html','_blank')">🖨</button>
         ${o.status !== 'cancelled' && !o.invoice && o.status !== 'dispatched' && o.status !== 'collected' && !(o.amount_paid > 0) ? `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="trCancelOrder(${o.sale_id})">Cancel</button>` : ''}</td></tr>`).join('')}
-  </tbody></table>`;
+  </tbody></table>${canSeeMoney() && orders.some(o => o.profit != null) ? (() => { const live = orders.filter(o => o.status !== 'cancelled' && o.profit != null); const p = live.reduce((a, o) => a + o.profit, 0), g = live.reduce((a, o) => a + (o.goods_net || 0), 0);
+    return `<div style="text-align:right;font-size:13px;padding:8px 12px">Profit on these ${live.length} order(s): <b style="color:${p < 0 ? 'var(--red)' : 'var(--green)'}">${p < 0 ? '−' : ''}${trMoney(Math.abs(p))}</b>${g ? ` · ${(p / g * 100).toFixed(1)}% of ${trMoney(g)} goods ex VAT` : ''}</div>`; })() : ''}`;
 }
 function trInvoicesTable(invs, withAccount) {
   if (!invs.length) return `<div style="padding:16px;color:var(--ink-soft);font-size:13px">No consolidated invoices yet.</div>`;
@@ -24791,17 +24807,39 @@ async function trPartnerSearch(id) {
   const box = el('trpc-res'); box.innerHTML = '<div style="color:var(--ink-soft);font-size:13px">Searching…</div>';
   try {
     const r = await Api.get(`/api/trade/partners/${id}/catalogue?q=${encodeURIComponent(el('trpc-q').value.trim())}${el('trpc-in').checked ? '&in_stock=1' : ''}`);
-    box.innerHTML = r.items.length ? `<table class="table" style="margin:0"><thead><tr><th><input type="checkbox" title="Select all shown" onchange="document.querySelectorAll('[data-trimp]:not(:disabled)').forEach(c=>c.checked=this.checked)"></th><th>Part</th><th style="text-align:right">Their stock</th><th style="text-align:right">Your cost</th><th style="text-align:right" title="Your profit per sale at their retail price, after your fees, VAT, postage and packaging">eBay</th><th style="text-align:right">Shopify</th><th style="text-align:right" title="Cash on collection — no VAT, no postage">Cash</th><th>Here</th><th></th></tr></thead><tbody>
+    TR._partnerItems = r.items;
+    box.innerHTML = r.items.length ? `<table class="table" style="margin:0"><thead><tr><th><input type="checkbox" title="Select all shown" onchange="document.querySelectorAll('[data-trimp]:not(:disabled)').forEach(c=>c.checked=this.checked)"></th><th>Part</th><th style="text-align:right">Their stock</th><th style="text-align:right">Your cost</th><th style="text-align:right" title="Your profit per sale at their retail price, after your fees, VAT, postage and packaging">eBay</th><th style="text-align:right">Shopify</th><th style="text-align:right" title="Bank transfer, posted — VAT applies, no selling fees">Bank</th><th style="text-align:right" title="Cash on collection — no VAT, no postage">Cash</th><th>Here</th><th></th></tr></thead><tbody>
       ${r.items.map(i => `<tr><td><input type="checkbox" data-trimp="${escapeAttr(i.sku)}" ${i.local?.linked ? 'disabled' : ''}></td>
         <td><b>${escapeHtml(i.sku)}</b><div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(i.title)}</div></td><td style="text-align:right">${escapeHtml(i.available_display)}</td>
         <td style="text-align:right">${trMoney(i.price)}${i.our_cost != null ? `<div style="font-size:10px;color:var(--ink-soft)">their cost ${trMoney(i.our_cost)}</div>` : ''}</td>
-        ${['ebay', 'shopify', 'cash'].map(k => { const m = i.margins?.[k]; return `<td style="text-align:right;white-space:nowrap">${m ? `<b style="color:${m.net < 0 ? 'var(--red)' : 'var(--green)'}">${m.net < 0 ? '−' : ''}${trMoney(Math.abs(m.net))}</b><div style="font-size:10px;color:var(--ink-soft)">${m.pct}% · sell ${trMoney(m.price)}</div>` : '<span style="color:var(--ink-soft)">—</span>'}</td>`; }).join('')}
+        ${['ebay', 'shopify', 'bank', 'cash'].map(k => { const m = i.margins?.[k]; return `<td style="text-align:right;white-space:nowrap">${m ? `<b style="color:${m.net < 0 ? 'var(--red)' : 'var(--green)'}">${m.net < 0 ? '−' : ''}${trMoney(Math.abs(m.net))}</b><div style="font-size:10px;color:var(--ink-soft)">${m.pct}% · sell ${trMoney(m.price)}</div>` : '<span style="color:var(--ink-soft)">—</span>'}</td>`; }).join('')}
         <td style="font-size:11px">${i.local ? (i.local.linked ? '✓ linked' : `same SKU (${i.local.qty} in stock) — will link`) : 'new'}</td>
-        <td>${i.local ? '' : `<button class="btn btn-primary btn-sm" onclick="trPartnerList(${id}, '${escapeAttr(i.sku)}')" title="Open Create listing filled in from their listing — photos, category, specifics, parcel, cost">List</button>`}</td></tr>`).join('')}</tbody></table>
+        <td style="white-space:nowrap">${i.margins ? `<button class="btn btn-ghost btn-sm" onclick="trPartnerBreakdown('${escapeAttr(i.sku)}')" title="Costs and profit on each channel">£ breakdown</button>` : ''}${i.local ? '' : `<button class="btn btn-primary btn-sm" onclick="trPartnerList(${id}, '${escapeAttr(i.sku)}')" title="Open Create listing filled in from their listing — photos, category, specifics, parcel, cost">List</button>`}</td></tr>`).join('')}</tbody></table>
       <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">${r.total} match(es)${r.total > r.items.length ? ' — showing first ' + r.items.length : ''}.
-        <b>eBay / Shopify / Cash</b> = your profit per sale at their retail prices (Shopify and cash use your own % rules), after your fees, VAT, postage and packaging — cash is collected, no VAT.
+        <b>eBay / Shopify / Bank / Cash</b> = your profit per sale at their retail prices (Shopify, bank and cash use your own % rules), after your fees, VAT, postage and packaging — cash is collected, no VAT. <b>£ breakdown</b> shows every cost line.
         <b>Your cost is ex VAT.</b> On a VAT account their invoice adds VAT, which you claim back (you're both VAT registered), so the ex-VAT price is your real cost and it's what goes in as cost price. On a cash account there's no VAT to claim — the price is the price.</div>` : '<div style="font-size:13px;color:var(--ink-soft)">No matches.</div>';
   } catch (e) { box.innerHTML = `<div style="color:var(--red);font-size:13px">${escapeHtml(e.data?.message || e.message)}</div>`; }
+}
+// Full cost breakdown for one partner part on eBay / Shopify / bank / cash.
+function trPartnerBreakdown(sku) {
+  const i = (TR._partnerItems || []).find(x => x.sku === sku); if (!i || !i.margins) return;
+  const ch = [['ebay', 'eBay'], ['shopify', 'Shopify'], ['bank', 'Bank (posted)'], ['cash', 'Cash (collected)']].filter(([k]) => i.margins[k]);
+  const m = (n, neg) => n == null ? '—' : (neg && n ? '−' : '') + '£' + Math.abs(n).toFixed(2);
+  const row = (label, f, neg) => `<tr><td>${label}</td>${ch.map(([k]) => `<td style="text-align:right">${m(f(i.margins[k]), neg)}</td>`).join('')}</tr>`;
+  modal({ title: `${i.sku} — profit by channel`, size: 'lg', body: `
+    <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:8px">${escapeHtml(i.title || '')}. Your cost <b>${trMoney(i.cost)}</b> (their trade price${i.cost !== i.price ? ' + VAT, as you\'re not VAT registered' : ', ex VAT — you claim their VAT back'}). Selling prices start from their retail; Shopify, bank and cash use your own % rules.</div>
+    <table class="table" style="margin:0"><thead><tr><th></th>${ch.map(([, l]) => `<th style="text-align:right">${l}</th>`).join('')}</tr></thead><tbody>
+      ${row('Selling price', x => x.price)}
+      ${row('VAT', x => x.breakdown?.vat, true)}
+      ${row('Selling fees', x => x.breakdown?.fees, true)}
+      ${row('Postage', x => x.breakdown?.postage, true)}
+      ${row('Packaging', x => x.breakdown?.packaging, true)}
+      ${i.margins[ch[0][0]]?.breakdown?.overhead ? row('Overheads', x => x.breakdown?.overhead, true) : ''}
+      ${row('Part cost', x => x.breakdown?.cost, true)}
+      <tr style="font-weight:700;border-top:2px solid var(--line)"><td>Profit</td>${ch.map(([k]) => { const n = i.margins[k].net; return `<td style="text-align:right;color:${n < 0 ? 'var(--red)' : 'var(--green)'}">${m(n, n < 0)}<div style="font-size:11px;font-weight:400">${i.margins[k].pct}%</div></td>`; }).join('')}</tr>
+    </tbody></table>
+    <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">Fees, postage, packaging and VAT come from your Costs &amp; margins settings. Postage uses the carton size they share. Cash is collected (no postage) and VAT-free.</div>`,
+    actions: [{ label: 'Close', primary: true, onClick: closeModal }] });
 }
 async function trPartnerImport(id) {
   const skus = [...document.querySelectorAll('[data-trimp]:checked')].map(x => x.dataset.trimp);
