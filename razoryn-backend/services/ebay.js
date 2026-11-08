@@ -705,6 +705,37 @@ async function tradingCall(callName, bodyInner, storeArg) {
   }
 }
 
+// Upload one picture to eBay Picture Services (UploadSiteHostedPictures,
+// multipart with the image bytes) — for photos in buyer messages. Returns the
+// eBay-hosted URL. Needs the store's Auth'n'Auth token.
+async function uploadPicture(storeArg, buffer, name = 'photo.jpg') {
+  const token = tokenFor(storeArg);
+  if (!token) throw new Error('This eBay account has no Trading token — photos can\'t be uploaded');
+  const boundary = 'RZNBOUNDARY' + Date.now().toString(16);
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+<UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${escapeXml(token)}</eBayAuthToken></RequesterCredentials>
+  <PictureName>${escapeXml(String(name).slice(0, 80))}</PictureName>
+  <PictureSet>Supersize</PictureSet>
+</UploadSiteHostedPicturesRequest>`;
+  const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="XML Payload"\r\nContent-Type: text/xml;charset=utf-8\r\n\r\n${xml}\r\n`
+    + `--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="${String(name).replace(/[^\w.-]+/g, '_')}"\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: binary\r\n\r\n`);
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const r = await axios.post(TRADING_BASE, Buffer.concat([head, buffer, tail]), {
+    headers: {
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1349', 'X-EBAY-API-CALL-NAME': 'UploadSiteHostedPictures',
+      'X-EBAY-API-SITEID': process.env.EBAY_SITE_ID || '3', 'X-EBAY-API-DEV-NAME': process.env.EBAY_DEV_ID || '',
+      'X-EBAY-API-APP-NAME': CLIENT_ID || '', 'X-EBAY-API-CERT-NAME': CLIENT_SECRET || '',
+    },
+    timeout: 60000, maxBodyLength: 20 * 1024 * 1024,
+  });
+  const out = String(r.data || '');
+  const url = extractOne(out, 'FullURL');
+  if (!url) throw new Error('eBay photo upload failed: ' + (decodeEntities(extractOne(out, 'LongMessage') || extractOne(out, 'ShortMessage') || '') || 'no URL returned'));
+  return decodeEntities(url);
+}
+
 // Tiny XML extractor — avoids pulling in a full XML parser dep
 function extractAll(xml, tag) {
   const out = [];
@@ -2219,7 +2250,7 @@ module.exports = {
   resetAuthCaches,
   checkConnection,
   // Low-level helpers (used by lib/ebay-hub.js: messages + offers)
-  tradingCall, extractAll, extractOne, escapeXml, decodeEntities, restHttp: http,
+  tradingCall, extractAll, extractOne, escapeXml, decodeEntities, restHttp: http, uploadPicture,
   // Multi-store helpers
   listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary, standalone: !!s.standalone, disabled: !!s.disabled, disabledReason: s.disabledReason || null })),
   getPrimaryStore: () => brand.getPrimaryStore(),
