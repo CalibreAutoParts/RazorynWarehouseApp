@@ -161,7 +161,7 @@ router.get('/accounts/:id/catalogue', aw(async (req, res) => {
       retail: Number(p.price_ebay) || Number(p.price_shopify) || null, price: pr.net, basis: pr.basis, clamped: pr.clamped,
       marginPct: pr.net && pr.cost ? +((pr.net - pr.cost) / pr.net * 100).toFixed(1) : null,
       itemRule: own ? { id: own.id, kind: own.kind, value: Number(own.value) } : null,
-      excluded: !!p.trade_excluded,
+      excluded: !!p.trade_excluded, photosOk: !!p.trade_photos_ok,
       shared: p.trade_excluded ? false : (a.catalogue_mode === 'selected' ? !!p.shared : true), picked: !!p.shared };
   });
   res.json({ mode: a.catalogue_mode || 'all', vatRate: trade.vatRateFor(a, settings), accountType: a.account_type,
@@ -196,6 +196,17 @@ router.post('/catalogue-exclude', aw(async (req, res) => {
   await query(`UPDATE products SET trade_excluded = $2 WHERE id = ANY($1)`, [ids, excluded]);
   await audit(req, 'trade_exclude', null, null, { count: ids.length, excluded });
   res.json({ ok: true, count: ids.length, excluded });
+}));
+// POST /api/trade/photos-ok { productIds, ok: true|false } — these parts'
+// listing photos have no watermark, so clean-photo accounts may have them.
+router.post('/photos-ok', aw(async (req, res) => {
+  await trade.ensureSchema();
+  const ids = (Array.isArray(req.body?.productIds) ? req.body.productIds : []).map(Number).filter(Boolean).slice(0, 10000);
+  if (!ids.length) return res.status(400).json({ error: 'no_products', message: 'Tick some parts first.' });
+  const ok = req.body?.ok !== false;
+  await query(`UPDATE products SET trade_photos_ok = $2 WHERE id = ANY($1)`, [ids, ok]);
+  await audit(req, 'trade_photos_ok', null, null, { count: ids.length, ok });
+  res.json({ ok: true, count: ids.length });
 }));
 // POST /api/trade/accounts/:id/price-items { productIds, kind: 'default'|'markup'|'discount'|'fixed', value }
 // Item prices for this account: + % on cost, − % off retail, or a fixed £ (net);
