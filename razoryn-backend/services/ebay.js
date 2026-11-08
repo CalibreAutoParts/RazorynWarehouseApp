@@ -2218,6 +2218,8 @@ module.exports = {
   getStoreUserId,
   resetAuthCaches,
   checkConnection,
+  // Low-level helpers (used by lib/ebay-hub.js: messages + offers)
+  tradingCall, extractAll, extractOne, escapeXml, decodeEntities, restHttp: http,
   // Multi-store helpers
   listStores: () => brand.stores.map(s => ({ code: s.code, name: s.name, channelCode: s.channelCode, hasToken: !!s.token, primary: !!s.primary, standalone: !!s.standalone, disabled: !!s.disabled, disabledReason: s.disabledReason || null })),
   getPrimaryStore: () => brand.getPrimaryStore(),
