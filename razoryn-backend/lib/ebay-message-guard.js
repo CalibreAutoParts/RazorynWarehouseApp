@@ -22,17 +22,25 @@ const RULES = [
   { re: /\b(?:discount|promo|voucher)\s+code\b/i, why: 'a promotion / discount code' },
 ];
 
+// Couriers' tracking pages — allowed ONLY when replying about an order the
+// buyer has placed (opts.allowTracking), so they can follow their parcel.
+const COURIER_HOSTS = /(?:^|\.)(?:dropfleet\.co\.uk|proovia\.co\.uk|proovia\.com|royalmail\.com|parcelforce\.com|evri\.com|hermes-europe\.co\.uk|dpd\.co\.uk|dpdlocal\.co\.uk|dhl\.com|dhl\.co\.uk|fedex\.com|ups\.com|yodel\.co\.uk|tuffnells\.co\.uk|apc-overnight\.com|palletways\.com|parcel2go\.com|track\.aftership\.com)$/i;
+function stripCourierLinks(t) {
+  return t.replace(/\b(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})(\/[^\s]*)?/gi, (m, host) => COURIER_HOSTS.test(host) ? ' ' : m);
+}
+
 // → [] when clean, else a list of plain-English problems.
-function check(text) {
+function check(text, opts = {}) {
   // eBay's own links and domains are fine — strip them before checking.
-  const t = String(text || '').replace(/\b(?:https?:\/\/)?(?:[a-z0-9-]+\.)*ebay\.[a-z.]+[^\s]*/gi, ' ');
+  let t = String(text || '').replace(/\b(?:https?:\/\/)?(?:[a-z0-9-]+\.)*ebay\.[a-z.]+[^\s]*/gi, ' ');
+  if (opts.allowTracking) t = stripCourierLinks(t);
   const found = [];
   for (const r of RULES) if (r.re.test(t) && !found.includes(r.why)) found.push(r.why);
   return found;
 }
 
-function assertClean(subject, body) {
-  const problems = check(`${subject || ''}\n${body || ''}`);
+function assertClean(subject, body, opts = {}) {
+  const problems = check(`${subject || ''}\n${body || ''}`, opts);
   if (problems.length) {
     const e = new Error(`Not sent — eBay's messaging policy forbids ${problems.join(', ')} in messages to buyers. Remove ${problems.length > 1 ? 'them' : 'it'} and keep the message about this order only.`);
     e.code = 'ebay_message_policy';
