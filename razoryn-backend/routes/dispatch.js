@@ -853,6 +853,19 @@ async function syncEbayDispatchCore({ days = 14 } = {}) {
       await df.withdrawSales(sale.id).catch(() => {});   // clears the queue even without tracking
     });
   }
+  // Already dispatched here but with no tracking, and eBay now has tracking
+  // (uploaded on eBay afterwards) → bring the tracking in.
+  try {
+    const withTrack = Object.keys(trackingByOrder).filter(k => trackingByOrder[k].tracking);
+    if (withTrack.length) {
+      const miss = (await query(`SELECT id, external_order_id FROM sales WHERE channel LIKE 'ebay\_%' AND dispatched_at IS NOT NULL
+          AND COALESCE(tracking_number, '') = '' AND external_order_id = ANY($1)`, [withTrack])).rows;
+      for (const sale of miss) {
+        const t = trackingByOrder[sale.external_order_id];
+        await query(`UPDATE sales SET tracking_number = $2, carrier = COALESCE(carrier, $3) WHERE id = $1`, [sale.id, t.tracking, t.carrier]);
+      }
+    }
+  } catch (e) { console.warn('[dispatch] tracking backfill:', e.message); }
   // shippedReported = how many shipped orders eBay returned for the window;
   // matched = how many of those line up with an open (undispatched) sale here.
   // These let the UI explain "nothing happened" instead of failing silently.

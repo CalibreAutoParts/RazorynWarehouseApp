@@ -24,6 +24,10 @@ function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (store_code, message_id))`);
     await query(`CREATE INDEX IF NOT EXISTS ebay_messages_recv_idx ON ebay_messages (received_at DESC)`);
     await query(`ALTER TABLE ebay_messages ADD COLUMN IF NOT EXISTS media JSONB`);   // buyer's photos [{url,name}]
+    // done = handled without a reply ("no reply needed"); last_from = who wrote
+    // the last message in the conversation this email carries ('buyer'|'us').
+    await query(`ALTER TABLE ebay_messages ADD COLUMN IF NOT EXISTS done BOOLEAN NOT NULL DEFAULT false`);
+    await query(`ALTER TABLE ebay_messages ADD COLUMN IF NOT EXISTS last_from TEXT`);
     await query(`CREATE TABLE IF NOT EXISTS ebay_message_replies (
       id SERIAL PRIMARY KEY, message_row_id INTEGER NOT NULL, store_code TEXT, body TEXT NOT NULL,
       sent_by INTEGER, sent_at TIMESTAMPTZ NOT NULL DEFAULT now(), ok BOOLEAN NOT NULL DEFAULT true, error TEXT)`);
@@ -115,6 +119,10 @@ async function syncStore(store, { days = 5 } = {}) {
     if (r.inserted) added++;
     if (r.no_body) needBody.push(h.messageId);
   }
+  // Messages saved before photos / reply tracking existed: fetch again.
+  const redo = (await query(`SELECT message_id FROM ebay_messages WHERE store_code = $1 AND (media IS NULL OR last_from IS NULL)
+      AND received_at > now() - interval '45 days' ORDER BY received_at DESC LIMIT 60`, [store.code])).rows.map(r => r.message_id);
+  for (const id of redo) if (!needBody.includes(id)) needBody.push(id);
   // Bodies, 10 per call (eBay's limit for ReturnMessages).
   for (let i = 0; i < needBody.length; i += 10) {
     const ids = needBody.slice(i, i + 10);
@@ -123,8 +131,18 @@ async function syncStore(store, { days = 5 } = {}) {
         <MessageIDs>${ids.map(id => `<MessageID>${ebay().escapeXml(id)}</MessageID>`).join('')}</MessageIDs>`, store.code);
       for (const m of parseHeaders(bx)) {
         const body = m.content ? stripHtml(ebay().decodeEntities(m.content)) : messageText(m.text);
-        await query(`UPDATE ebay_messages SET body = $3, media = $4::jsonb WHERE store_code = $1 AND message_id = $2`,
-          [store.code, m.messageId, body || '', JSON.stringify(m.media || [])]);
+        // Photos: eBay's MessageMedia, else pictures the buyer uploaded that
+        // only appear in the email (eBay Picture Services "/00/s/" URLs —
+        // listing thumbnails use other paths).
+        let media = m.media || [];
+        if (!media.length && m.text) {
+          const html = ebay().decodeEntities(m.text);
+          media = [...new Set((html.match(/https:\/\/i\.ebayimg\.com\/00\/s\/[^"'\s<>)]+/g) || []))].slice(0, 10).map(u => ({ url: u.replace(/&amp;/g, '&'), name: 'Photo' }));
+        }
+        const snd = m.sender || (await query(`SELECT sender FROM ebay_messages WHERE store_code = $1 AND message_id = $2`, [store.code, m.messageId])).rows[0]?.sender || null;
+        const conv = parseConversation(body || '', snd);
+        await query(`UPDATE ebay_messages SET body = $3, media = $4::jsonb, last_from = $5 WHERE store_code = $1 AND message_id = $2`,
+          [store.code, m.messageId, body || '', JSON.stringify(media), conv.length ? conv[conv.length - 1].from : 'buyer']);
       }
     } catch (e) { console.warn('[ebay-hub] bodies', store.code, e.message); }
   }
@@ -280,7 +298,7 @@ async function reply(rowId, body, userId, media = []) {
     throw Object.assign(new Error(e.message), { status: 502 });
   }
   await query(`INSERT INTO ebay_message_replies (message_row_id, store_code, body, sent_by, media) VALUES ($1,$2,$3,$4,$5::jsonb)`, [row.id, row.store_code, text, userId || null, JSON.stringify(media || [])]);
-  await query(`UPDATE ebay_messages SET replied = true WHERE id = $1`, [row.id]);
+  await query(`UPDATE ebay_messages SET replied = true, last_from = 'us' WHERE id = $1`, [row.id]);
   await markRead(row);
   return { ok: true };
 }
@@ -351,15 +369,76 @@ async function sendOffers({ items = [], message = '', allowCounterOffer = false 
   return results;
 }
 
+// Live from eBay: is this order shipped, with what tracking? Then bring the
+// warehouse in line — shipped on eBay but not here → mark dispatched (with
+// eBay's tracking); dispatched here without tracking → add eBay's tracking.
+async function checkOrderOnEbay(storeCode, orderId) {
+  const E = ebay();
+  const xml = await tradingOk('GetOrders', `<OrderIDArray><OrderID>${E.escapeXml(orderId)}</OrderID></OrderIDArray><DetailLevel>ReturnAll</DetailLevel>`, storeCode);
+  const o = E.extractOne(xml, 'Order');
+  if (!o) return { found: false };
+  const tb = E.extractOne(o, 'ShipmentTrackingDetails') || '';
+  const ebayInfo = {
+    found: true, status: E.extractOne(o, 'OrderStatus'), shippedAt: E.extractOne(o, 'ShippedTime') || null,
+    tracking: E.decodeEntities(E.extractOne(tb, 'ShipmentTrackingNumber') || '') || null,
+    carrier: E.decodeEntities(E.extractOne(tb, 'ShippingCarrierUsed') || '') || null,
+  };
+  ebayInfo.shipped = !!(ebayInfo.shippedAt || ebayInfo.tracking);
+  const sale = (await query(`SELECT id, dispatched_at, tracking_number, carrier FROM sales WHERE external_order_id = $1 AND channel LIKE 'ebay_%' LIMIT 1`, [orderId])).rows[0];
+  let updated = null;
+  if (sale && ebayInfo.shipped && !sale.dispatched_at) {
+    await query(`UPDATE sales SET dispatched_at = COALESCE($4::timestamptz, now()), status = 'dispatched', channel_push_state = 'na',
+        carrier = COALESCE($2, carrier), tracking_number = COALESCE($3, tracking_number),
+        dispatch_notes = COALESCE(dispatch_notes, 'Shipped on eBay') WHERE id = $1`, [sale.id, ebayInfo.carrier, ebayInfo.tracking, ebayInfo.shippedAt]);
+    updated = 'dispatched';
+  } else if (sale && sale.dispatched_at && !sale.tracking_number && ebayInfo.tracking) {
+    await query(`UPDATE sales SET tracking_number = $2, carrier = COALESCE(carrier, $3) WHERE id = $1`, [sale.id, ebayInfo.tracking, ebayInfo.carrier]);
+    updated = 'tracking';
+  }
+  return { ebay: ebayInfo, saleId: sale?.id || null, updated };
+}
+
+// One row per conversation (account + buyer + item): its newest message.
+const EBAY_SQL = `(lower(sender) = 'ebay' OR sender LIKE '%@%' OR lower(sender) LIKE 'ebay %')`;
+const NEEDS_REPLY_SQL = `(response_enabled AND NOT replied AND NOT done AND COALESCE(last_from, 'buyer') = 'buyer' AND NOT ${EBAY_SQL})`;
+const LATEST_SQL = `SELECT DISTINCT ON (store_code, lower(COALESCE(sender, '')), COALESCE(item_id, message_id)) *
+  FROM ebay_messages ORDER BY store_code, lower(COALESCE(sender, '')), COALESCE(item_id, message_id), received_at DESC NULLS LAST`;
+// The whole conversation a message belongs to.
+async function conversationRows(row) {
+  return (await query(`SELECT * FROM ebay_messages WHERE store_code = $1 AND lower(COALESCE(sender, '')) = lower(COALESCE($2, ''))
+      AND COALESCE(item_id, message_id) = COALESCE($3, $4) ORDER BY received_at`, [row.store_code, row.sender, row.item_id, row.message_id])).rows;
+}
+// Staff marks: done (no reply needed) / needs reply / unread — whole conversation.
+async function mark(rowId, what) {
+  await ensureSchema();
+  const row = (await query(`SELECT * FROM ebay_messages WHERE id = $1`, [rowId])).rows[0];
+  if (!row) throw Object.assign(new Error('Message not found'), { status: 404 });
+  const ids = (await conversationRows(row)).map(r => r.id);
+  if (what === 'done') await query(`UPDATE ebay_messages SET done = true, is_read = true WHERE id = ANY($1)`, [ids]);
+  else if (what === 'reply') await query(`UPDATE ebay_messages SET done = false, replied = false WHERE id = ANY($1)`, [ids]);
+  else if (what === 'unread') await query(`UPDATE ebay_messages SET is_read = false WHERE id = $1`, [ids[ids.length - 1]]);
+  else if (what === 'read') await query(`UPDATE ebay_messages SET is_read = true WHERE id = ANY($1)`, [ids]);
+  return { ok: true };
+}
+
 // ── Overview: per account, what needs doing ──────────────────────────────
 async function overview() {
   await ensureSchema();
   const stores = (brand.allStores || brand.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
-  const msg = (await query(`SELECT store_code, COUNT(*) FILTER (WHERE NOT is_read)::int AS unread,
-      COUNT(*) FILTER (WHERE response_enabled AND NOT replied AND received_at > now() - interval '30 days')::int AS to_answer
-    FROM ebay_messages GROUP BY store_code`)).rows;
-  const disp = (await query(`SELECT channel, COUNT(*)::int AS n FROM sales WHERE channel LIKE 'ebay_%' AND is_estimate = false
-      AND dispatched_at IS NULL AND collected_at IS NULL AND status NOT IN ('refunded','cancelled','preorder') GROUP BY channel`).catch(() => ({ rows: [] }))).rows;
+  const msg = (await query(`SELECT store_code,
+      COUNT(*) FILTER (WHERE NOT is_read AND NOT ${EBAY_SQL})::int AS unread,
+      COUNT(*) FILTER (WHERE ${NEEDS_REPLY_SQL} AND received_at > now() - interval '30 days')::int AS to_answer,
+      COUNT(*) FILTER (WHERE NOT is_read AND ${EBAY_SQL})::int AS from_ebay
+    FROM (${LATEST_SQL}) m GROUP BY store_code`)).rows;
+  // Same rule as the Dispatch page: paid, to be posted, not shipped/refunded/
+  // returned, from the last 10 days (older ones were handled on eBay).
+  const disp = (await query(`SELECT s.channel, COUNT(*)::int AS n FROM sales s WHERE s.channel LIKE 'ebay_%' AND s.is_estimate = false
+      AND s.dispatched_at IS NULL AND s.collected_at IS NULL
+      AND COALESCE(s.fulfillment_method, CASE WHEN s.payment_method = 'cash' THEN 'collect' ELSE 'ship' END) = 'ship'
+      AND s.status NOT IN ('refunded','cancelled','dispatched','preorder')
+      AND NOT (COALESCE(s.refunded_amount, 0) > 0 AND COALESCE(s.refunded_amount, 0) >= s.total - 0.005)
+      AND NOT EXISTS (SELECT 1 FROM returns r WHERE r.sale_id = s.id)
+      AND s.occurred_at >= now() - interval '10 days' GROUP BY s.channel`).catch(() => ({ rows: [] }))).rows;
   let ret = [];
   try {
     ret = (await query(`SELECT s.channel, COUNT(*)::int AS n FROM returns r JOIN sales s ON s.id = r.sale_id
@@ -371,6 +450,7 @@ async function overview() {
     accounts: stores.map(s => ({
       code: s.code, name: s.name, channelCode: s.channelCode, connected: !!s.token, disabled: !!s.disabled, primary: !!s.primary,
       unread: msg.find(m => m.store_code === s.code)?.unread || 0,
+      fromEbay: msg.find(m => m.store_code === s.code)?.from_ebay || 0,
       toAnswer: msg.find(m => m.store_code === s.code)?.to_answer || 0,
       toDispatch: disp.find(d => d.channel === s.channelCode)?.n || 0,
       openReturns: ret.find(d => d.channel === s.channelCode)?.n || 0,
@@ -399,4 +479,4 @@ async function messageIntervalMins() {
   return h >= s.workStart && h < s.workEnd ? s.workMins : s.offHoursMins;
 }
 
-module.exports = { orderForMessage, cleanBody, parseConversation, uploadPhotos, scheduleSettings, saveScheduleSettings, messageIntervalMins, ensureSchema, syncAll, syncStore, reply, markRead, eligibleItems, sendOffers, overview, messageText, stripHtml };
+module.exports = { checkOrderOnEbay, EBAY_SQL, NEEDS_REPLY_SQL, LATEST_SQL, conversationRows, mark, orderForMessage, cleanBody, parseConversation, uploadPhotos, scheduleSettings, saveScheduleSettings, messageIntervalMins, ensureSchema, syncAll, syncStore, reply, markRead, eligibleItems, sendOffers, overview, messageText, stripHtml };
