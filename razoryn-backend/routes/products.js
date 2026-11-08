@@ -1307,14 +1307,47 @@ router.post('/bulk-delete', requireAdmin, async (req, res) => {
   res.json({ ok: true, ...results });
 });
 
+// GET /api/products/:id/delete-preview — where this part is listed, so the
+// delete window can offer warehouse / Shopify / each eBay listing.
+router.get('/:id/delete-preview', requireAdmin, async (req, res) => {
+  const p = (await query(`SELECT id, sku, title, shopify_product_id FROM products WHERE id = $1`, [req.params.id])).rows[0];
+  if (!p) return res.status(404).json({ error: 'not_found' });
+  const brand = require('../lib/brand');
+  const links = p.shopify_product_id ? (await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [String(p.shopify_product_id)])).rows : [];
+  const stores = brand.allStores || brand.stores || [];
+  res.json({
+    shopify: !!p.shopify_product_id,
+    ebay: links.map(l => { const st = stores.find(s => s.code === (l.store_code || (brand.getPrimaryStore?.() || {}).code)) || {}; return { itemId: l.ebay_item_id, storeCode: l.store_code || st.code || null, storeName: st.name || l.store_code || 'eBay' }; }),
+  });
+});
+
 // DELETE /api/products/:id  — soft delete by default (admin).
-// Pass ?hard=true&shopify=true to also delete from Shopify.
+// ?hard=true&shopify=true also deletes it from Shopify; &ebay=itemId,itemId
+// ends those eBay listings first (if eBay refuses, nothing is deleted here).
 router.delete('/:id', requireAdmin, async (req, res) => {
   const hard = req.query.hard === 'true';
   const removeFromShopify = req.query.shopify === 'true';
   const { rows: productRows } = await query(`SELECT * FROM products WHERE id = $1`, [req.params.id]);
   const product = productRows[0];
   if (!product) return res.status(404).json({ error: 'not_found' });
+
+  // End the ticked eBay listings first — only ones linked to THIS product.
+  const ebayIds = String(req.query.ebay || '').split(',').map(x => x.trim()).filter(Boolean);
+  const ebayEnded = [], ebayFailed = [];
+  if (ebayIds.length) {
+    const links = product.shopify_product_id ? (await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1 AND ebay_item_id = ANY($2)`,
+      [String(product.shopify_product_id), ebayIds])).rows : [];
+    const ebay = require('../services/ebay');
+    for (const l of links) {
+      try { await ebay.endItem(l.ebay_item_id, { reason: 'NotAvailable' }, l.store_code || undefined); ebayEnded.push(l.ebay_item_id);
+        await query(`DELETE FROM mirror_links WHERE ebay_item_id = $1`, [l.ebay_item_id]); }
+      catch (e) { ebayFailed.push({ itemId: l.ebay_item_id, error: e.message }); }
+    }
+    if (ebayFailed.length) {
+      await audit(req, 'delete_product_ebay_failed', 'product', req.params.id, { ebayEnded, ebayFailed });
+      return res.status(502).json({ error: 'ebay_end_failed', message: `eBay wouldn't end ${ebayFailed.map(f => f.itemId).join(', ')}: ${ebayFailed[0].error}. Nothing was deleted in the warehouse${ebayEnded.length ? ` (ended on eBay: ${ebayEnded.join(', ')})` : ''}.`, ebayEnded, ebayFailed });
+    }
+  }
 
   // Optionally delete from Shopify first
   if (removeFromShopify && product.shopify_product_id) {
@@ -1339,8 +1372,8 @@ router.delete('/:id', requireAdmin, async (req, res) => {
   } else {
     await query(`UPDATE products SET active = false WHERE id = $1`, [req.params.id]);
   }
-  await audit(req, hard ? 'hard_delete_product' : 'delete_product', 'product', req.params.id, { removeFromShopify });
-  res.json({ ok: true });
+  await audit(req, hard ? 'hard_delete_product' : 'delete_product', 'product', req.params.id, { removeFromShopify, ebayEnded });
+  res.json({ ok: true, ebayEnded });
 });
 
 // POST /api/products/:id/hide  { reason? }  — "park" a listing.

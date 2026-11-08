@@ -5975,31 +5975,31 @@ async function toggleHideProduct(id, hide) {
   } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 
+// Delete a part: tick where it goes from — the warehouse (always), Shopify,
+// and each eBay listing it's linked to (ended on eBay).
 async function deleteProduct(id, title) {
-  // Two-step confirm: first ask local-only or also remove from Shopify
-  const choice = await promptInput({
-    title: `Delete "${title}"`,
-    label: 'Type 1 or 2',
-    help: '1 = remove from warehouse only (keep on Shopify). 2 = remove from BOTH warehouse and Shopify.',
-    okLabel: 'Continue',
-  });
-  if (choice !== '1' && choice !== '2') return;
-  const removeFromShopify = choice === '2';
-  const confirmed = confirm(
-    removeFromShopify
-      ? `Confirm: PERMANENTLY delete "${title}" from Shopify and the warehouse. This cannot be undone.`
-      : `Confirm: remove "${title}" from the warehouse (Shopify untouched).`
-  );
-  if (!confirmed) return;
-  try {
-    const url = `/api/products/${id}?hard=true${removeFromShopify ? '&shopify=true' : ''}`;
-    await Api.delete(url);
-    await Store.refresh('products');
-    repaintInventoryList();
-    toast(removeFromShopify ? 'Deleted from warehouse and Shopify' : 'Removed from warehouse', 'success');
-  } catch (e) {
-    toast('Delete failed: ' + (e.data?.message || e.message), 'error');
-  }
+  let pv = { shopify: false, ebay: [] };
+  try { pv = await Api.get(`/api/products/${id}/delete-preview`); } catch (_) {}
+  modal({ title: `Delete "${title}"`, body: `
+    <div style="font-size:13px;margin-bottom:10px">Where should it be removed from?</div>
+    <label style="display:flex;gap:8px;align-items:center;font-size:14px;margin:6px 0;opacity:.8"><input type="checkbox" checked disabled> Warehouse app <span style="color:var(--ink-soft);font-size:12px">(always)</span></label>
+    ${pv.shopify ? `<label style="display:flex;gap:8px;align-items:center;font-size:14px;margin:6px 0"><input type="checkbox" id="del-shopify" checked> Shopify <span style="color:var(--ink-soft);font-size:12px">— product deleted</span></label>` : '<div style="font-size:12.5px;color:var(--ink-soft);margin:6px 0">Not on Shopify.</div>'}
+    ${pv.ebay.length ? pv.ebay.map(e => `<label style="display:flex;gap:8px;align-items:center;font-size:14px;margin:6px 0"><input type="checkbox" class="del-ebay" value="${escapeAttr(e.itemId)}" checked> eBay — ${escapeHtml(e.storeName)} <a href="https://www.ebay.co.uk/itm/${encodeURIComponent(e.itemId)}" target="_blank" rel="noopener" style="font-size:12px">${escapeHtml(e.itemId)} ↗</a> <span style="color:var(--ink-soft);font-size:12px">— listing ended</span></label>`).join('')
+      : '<div style="font-size:12.5px;color:var(--ink-soft);margin:6px 0">No eBay listings linked to this part.</div>'}
+    <div style="font-size:12px;color:var(--ink-soft);margin-top:10px">Ending an eBay listing can't be undone (you'd relist it). If eBay refuses, nothing is deleted here.</div>`,
+    actions: [{ label: 'Cancel', onClick: closeModal }, { label: '🗑 Delete', primary: true, className: 'btn-danger', onClick: async () => {
+      const shopify = !!el('del-shopify')?.checked;
+      const ebayIds = [...document.querySelectorAll('.del-ebay:checked')].map(x => x.value);
+      const where = ['the warehouse'].concat(shopify ? ['Shopify'] : [], ebayIds.length ? [`${ebayIds.length} eBay listing(s)`] : []);
+      if (!confirm(`Permanently delete "${title}" from ${where.join(', ')}? This cannot be undone.`)) return;
+      const t = Task.start('Deleting');
+      try {
+        const r = await Api.delete(`/api/products/${id}?hard=true${shopify ? '&shopify=true' : ''}${ebayIds.length ? '&ebay=' + encodeURIComponent(ebayIds.join(',')) : ''}`);
+        Task.done(t, 'Deleted'); closeModal();
+        await Store.refresh('products'); repaintInventoryList();
+        toast(`Deleted from ${where.join(', ')}` + ((r.ebayEnded || []).length ? ` — ended on eBay: ${r.ebayEnded.join(', ')}` : ''), 'success', 6000);
+      } catch (e) { Task.fail(t); toast('Delete failed: ' + (e.data?.message || e.message), 'error', 10000); }
+    } }] });
 }
 
 // Turn a channelPush result from the backend into a human toast message,
