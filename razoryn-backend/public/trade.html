@@ -197,10 +197,13 @@ async function showPhotos(sku) {
   openModal(`<div class="row" style="justify-content:space-between"><b>${esc(sku)}</b><button class="btn o" onclick="closeModal()">Close</button></div><div class="muted" style="margin:6px 0">Loading photos…</div>`);
   try {
     const r = await api('/images/' + encodeURIComponent(sku));
+    const note = r.clean ? '' : (S.me.photos === 'clean'
+      ? `<div class="muted" style="margin-top:6px">⚠ Clean versions of this part's photos aren't available yet, so these carry our watermark.</div>`
+      : `<div class="muted" style="margin-top:6px">These are our listing photos (with our watermark). Ask us to switch your account to clean photos if you list them yourself.</div>`);
     $('modal-box').innerHTML = `<div class="row" style="justify-content:space-between"><b>${esc(sku)} — ${r.images.length} photo(s)${r.clean ? ' · clean (no branding)' : ''}</b>
       <span class="row"><button class="btn" onclick="download('/images/${encodeURIComponent(sku)}.zip','${esc(sku)}-photos.zip')">⬇ Download all (ZIP)</button><button class="btn o" onclick="closeModal()">Close</button></span></div>
       <div class="items" style="margin-top:10px">${r.images.map(im => `<div class="item">${im.url ? `<img src="${esc(im.url)}" style="height:200px">` : ''}
-        <button class="btn o" onclick="download('/images/${encodeURIComponent(sku)}/${im.n}','${esc(sku)}-${im.n}.jpg')">⬇ Photo ${im.n}</button></div>`).join('')}</div>`;
+        <button class="btn o" onclick="download('/images/${encodeURIComponent(sku)}/${im.n}','${esc(sku)}-${im.n}.jpg')">⬇ Photo ${im.n}</button></div>`).join('')}</div>${note}`;
   } catch (e) { toast(e.message); }
 }
 

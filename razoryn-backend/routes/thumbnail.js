@@ -77,6 +77,7 @@ async function studioFetch(path, { method = 'GET' } = {}) {
   const res = await fetch(`${appUrl}/api/integration/warehouse${path}`, {
     method,
     headers: { 'X-Integration-Key': key },
+    signal: AbortSignal.timeout(20000),
   });
   return res;
 }
