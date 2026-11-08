@@ -92,7 +92,7 @@ router.get('/accounts/:id', aw(async (req, res) => {
            WHERE r.account_id = $1 ORDER BY r.product_id NULLS LAST, r.brand NULLS LAST, r.min_qty`, [a.id]).then(r => r.rows),
     query(`SELECT * FROM trade_invoices WHERE account_id = $1 ORDER BY issued_at DESC LIMIT 100`, [a.id]).then(r => r.rows),
     query(`SELECT * FROM trade_payments WHERE account_id = $1 ORDER BY paid_at DESC LIMIT 100`, [a.id]).then(r => r.rows),
-    trade.listOrders(a.id, { limit: 100 }),
+    trade.listOrders(a.id, { limit: 100 }).then(os => trade.addOrderProfit(os.map(o => ({ ...o, sale_id: o.id })))),
     trade.topProducts(a.id),
   ]);
   res.json({ account: cleanAccount(a), summary, rules, invoices, payments, orders, top, portalUrl: `${baseUrl(req)}/trade` });
@@ -271,7 +271,7 @@ router.get('/orders', aw(async (req, res) => {
       FROM sales s JOIN trade_accounts ta ON ta.id = s.trade_account_id LEFT JOIN trade_invoices ti ON ti.id = s.trade_invoice_id
      WHERE ${where} ORDER BY s.occurred_at DESC LIMIT 300`, params)).rows;
   const items = rows.length ? (await query(`SELECT sale_id, sku, title, qty, unit_price, line_total FROM sale_items WHERE sale_id = ANY($1) ORDER BY id`, [rows.map(r => r.id)])).rows : [];
-  res.json({ orders: rows.map(s => ({ ...trade.formatOrder(s, items.filter(i => i.sale_id === s.id)), account_id: s.trade_account_id, account_name: s.account_name, sale_id: s.id })) });
+  res.json({ orders: await trade.addOrderProfit(rows.map(s => ({ ...trade.formatOrder(s, items.filter(i => i.sale_id === s.id)), account_id: s.trade_account_id, account_name: s.account_name, sale_id: s.id }))) });
 }));
 
 router.post('/orders', aw(async (req, res) => {

@@ -661,6 +661,28 @@ function formatOrder(s, items = []) {
       unit_price: round2(Number(i.unit_price) * vatFactor), line_total: round2(Number(i.line_total) * vatFactor) })),
   };
 }
+// STAFF ONLY (never in the trade API): what each trade order made us.
+// Profit = goods ex VAT − the parts' landed cost (landed cost when known,
+// else cost price). Delivery charged is left out (it covers postage).
+async function addOrderProfit(orders) {
+  const ids = orders.map(o => o.sale_id || o.id).filter(Boolean);
+  if (!ids.length) return orders;
+  const rows = (await query(`SELECT si.sale_id,
+      SUM(si.qty * COALESCE(p.landed_cost, p.cost_price)) AS cost,
+      BOOL_OR(COALESCE(p.landed_cost, p.cost_price) IS NULL) AS missing
+    FROM sale_items si LEFT JOIN products p ON p.id = si.product_id
+    WHERE si.sale_id = ANY($1) GROUP BY si.sale_id`, [ids])).rows;
+  const by = new Map(rows.map(r => [r.sale_id, r]));
+  for (const o of orders) {
+    const r = by.get(o.sale_id || o.id); if (!r) continue;
+    const goods = (o.items || []).reduce((a, i) => a + (Number(i.line_total) || 0), 0);
+    const cost = round2(Number(r.cost) || 0);
+    o.goods_net = round2(goods); o.cost = cost; o.cost_missing = !!r.missing;
+    o.profit = o.status === 'cancelled' ? 0 : round2(goods - cost);
+    o.margin_pct = goods > 0 && o.status !== 'cancelled' ? round2((goods - cost) / goods * 100) : null;
+  }
+  return orders;
+}
 async function listOrders(accountId, { status = null, since = null, limit = 50, offset = 0 } = {}) {
   const params = [accountId];
   let where = 's.trade_account_id = $1 AND s.is_estimate = false';
@@ -1008,7 +1030,7 @@ module.exports = {
   ensureSchema, getSettings, saveSettings, vatRateFor,
   issueApiKey, accountByKey, hashKey, sign,
   costOf, priceFor, priceBreaks, loadRules, pickRule, availableFor, present, stockList, productBySku, visibleTo,
-  imagesFor, brandedImages, cleanImages, publicCleanImageUrls, cleanSig, setStudioCleanImages,
+  addOrderProfit, imagesFor, brandedImages, cleanImages, publicCleanImageUrls, cleanSig, setStudioCleanImages,
   accountSummary, topProducts,
   createOrder, getOrder, listOrders, cancelOrder, formatOrder, publicOrderStatus, TradeError,
   periodEnd, londonToday, issueInvoice, runDueInvoices, voidInvoice, invoiceDetail, emailInvoice, emailInvite,
