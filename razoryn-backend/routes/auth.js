@@ -1,6 +1,6 @@
 // routes/auth.js — login (PIN + email/password), logout, /me
 const express = require('express');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const { query } = require('../db');
 const { sign, requireAuth } = require('../middleware/auth');
