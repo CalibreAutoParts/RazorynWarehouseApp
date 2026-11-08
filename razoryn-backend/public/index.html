@@ -24084,7 +24084,18 @@ async function ebSaveSchedule(v) {
   catch (e) { toast(e.data?.message || e.message, 'error'); }
 }
 // While the Messages tab is open, keep the list fresh (the server pulls from eBay).
-setInterval(() => { if (State.page === 'ebay' && EB.tab === 'messages' && !document.hidden && el('eb-list')) ebLoadList(); }, 60000);
+// While the app is open: every 30 s ask the server for new eBay messages (the
+// server checks eBay at most once per 30 s however many people are on), then
+// update the eBay list, the open conversation and the sidebar badge.
+async function ebPoll() {
+  if (!State.user || document.hidden) return;
+  let r; try { r = await Api.post('/api/ebayhub/messages/poll', {}); } catch (_) { return; }
+  const b = el('nav-ebay-count'); if (b) { b.textContent = r.toAnswer; b.style.display = r.toAnswer ? '' : 'none'; }
+  if (r.added > 0) toast(`${r.added} new eBay message${r.added > 1 ? 's' : ''}`, 'info', 4000);
+  if (State.page === 'ebay' && EB.tab === 'messages' && el('eb-list')) { ebLoadList(); ebRefreshOpen(); }
+}
+setInterval(ebPoll, 30000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) ebPoll(); });
 async function ebSync(btn) {
   if (btn) btn.disabled = true;
   const t = Task.start('Checking eBay for new messages');
@@ -24157,19 +24168,36 @@ const EB_QUICK = [
   ['Dispatched', 'Hi, your order has been dispatched. You can follow it with the tracking on your eBay order. Thanks for your purchase!'],
   ['In stock', 'Hi, yes — this is in stock and ready to go. Orders placed before noon are dispatched the same day.'],
 ];
+// One chat bubble: buyer left, ours right.
+function ebBubble(x, m) {
+  const when = t => t ? new Date(t).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+  const imgs = list => (list || []).length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:${x.text ? 8 : 0}px">${list.map(i => `<a href="${escapeAttr(i.url)}" target="_blank" rel="noopener"><img src="${escapeAttr(i.url)}" alt="" style="width:140px;height:140px;object-fit:cover;border-radius:8px;border:1px solid var(--line)"></a>`).join('')}</div>` : '';
+  const text = x.text ? `<div style="white-space:pre-wrap">${escapeHtml(x.text)}</div>` : '';
+  return x.from === 'us'
+    ? `<div style="display:flex;justify-content:flex-end;margin:8px 0"><div style="max-width:78%;background:var(--brand-primary);color:#fff;border-radius:14px 14px 4px 14px;padding:10px 13px;font-size:14px;line-height:1.5;${x.ok === false ? 'opacity:.6;outline:2px solid var(--red)' : ''}">${text}${imgs(x.media)}
+        <div style="font-size:10.5px;opacity:.8;margin-top:4px;text-align:right">${x.ok === false ? '✗ not sent — ' + escapeHtml(x.error || '') : 'You' + (x.by ? ' · ' + escapeHtml(x.by) : '')}${x.at ? ' · ' + when(x.at) : ''}</div></div></div>`
+    : `<div style="display:flex;justify-content:flex-start;margin:8px 0"><div style="max-width:78%;background:var(--bg-soft);border:1px solid var(--line);border-radius:14px 14px 14px 4px;padding:10px 13px;font-size:14px;line-height:1.5">${text}${imgs(x.media)}
+        <div style="font-size:10.5px;color:var(--ink-soft);margin-top:4px">${escapeHtml(m.sender || 'Buyer')}${x.at ? ' · ' + when(x.at) : ''}</div></div></div>`;
+}
+const ebConvKey = r => JSON.stringify((r.conversation || []).map(x => [x.from, x.text, (x.media || []).length, x.ok]));
+// Refresh the open conversation in place — the reply being typed is untouched.
+async function ebRefreshOpen() {
+  const id = EB.sel, chat = el('eb-chat'); if (!id || !chat) return;
+  let r; try { r = await Api.get('/api/ebayhub/messages/' + id + '?quiet=1'); } catch (_) { return; }
+  if (EB.sel !== id || !el('eb-chat')) return;
+  const key = ebConvKey(r); if (key === EB.convKey) return;
+  EB.convKey = key;
+  const atBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 60;
+  chat.innerHTML = r.conversation.map(x => ebBubble(x, r.message)).join('');
+  if (atBottom) chat.scrollTop = chat.scrollHeight;
+}
 async function ebOpen(id) {
   EB.sel = id; EB.photos = [];
   const box = el('eb-msg'); if (!box) return;
   box.innerHTML = '<div style="color:var(--ink-soft)">Loading…</div>';
   let r; try { r = await Api.get('/api/ebayhub/messages/' + id); } catch (e) { box.innerHTML = `<div style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div>`; return; }
   const m = r.message;
-  const when = t => t ? new Date(t).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
-  const imgs = list => (list || []).length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${list.map(x => `<a href="${escapeAttr(x.url)}" target="_blank" rel="noopener"><img src="${escapeAttr(x.url)}" alt="" style="width:96px;height:96px;object-fit:cover;border-radius:8px;border:1px solid var(--line)"></a>`).join('')}</div>` : '';
-  const bubble = x => x.from === 'us'
-    ? `<div style="display:flex;justify-content:flex-end;margin:8px 0"><div style="max-width:78%;background:var(--brand-primary);color:#fff;border-radius:14px 14px 4px 14px;padding:10px 13px;font-size:14px;line-height:1.5;${x.ok === false ? 'opacity:.6;outline:2px solid var(--red)' : ''}"><div style="white-space:pre-wrap">${escapeHtml(x.text)}</div>${imgs(x.media)}
-        <div style="font-size:10.5px;opacity:.8;margin-top:4px;text-align:right">${x.ok === false ? '✗ not sent — ' + escapeHtml(x.error || '') : 'You' + (x.by ? ' · ' + escapeHtml(x.by) : '')}${x.at ? ' · ' + when(x.at) : ''}</div></div></div>`
-    : `<div style="display:flex;justify-content:flex-start;margin:8px 0"><div style="max-width:78%;background:var(--bg-soft);border:1px solid var(--line);border-radius:14px 14px 14px 4px;padding:10px 13px;font-size:14px;line-height:1.5"><div style="white-space:pre-wrap">${escapeHtml(x.text)}</div>${imgs(x.media)}
-        <div style="font-size:10.5px;color:var(--ink-soft);margin-top:4px">${escapeHtml(m.sender || 'Buyer')}${x.at ? ' · ' + when(x.at) : ''}</div></div></div>`;
+  const bubble = x => ebBubble(x, m);
   const canReply = m.response_enabled || m.item_id;
   const os = r.order?.sale;
   EB.trackMsg = os ? `Hi, your order has been dispatched with ${os.carrier || 'our courier'}.` + (os.tracking_number ? ` Tracking number: ${os.tracking_number}.` : '') + (os.tracking_url ? ` You can track it here: ${os.tracking_url}` : '') : '';
@@ -24213,6 +24241,7 @@ async function ebOpen(id) {
       : `<div style="font-size:12.5px;color:var(--ink-soft);border-top:1px solid var(--line);padding-top:10px">eBay doesn't allow replies to this message from here${m.item_id ? '' : " (it isn't about one of your listings)"} — open it on eBay to respond.</div>`}
     ${r.thread.length ? `<details style="margin-top:12px"><summary style="cursor:pointer;font-size:12px;color:var(--ink-soft)">Other conversations with ${escapeHtml(m.sender)} (${r.thread.length})</summary>
       ${r.thread.map(t => `<div onclick="ebOpen(${t.id})" style="cursor:pointer;font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--line)"><b>${escapeHtml(t.subject || '')}</b> <span style="color:var(--ink-soft)">· ${t.received_at ? new Date(t.received_at).toLocaleDateString('en-GB') : ''}</span></div>`).join('')}</details>` : ''}`;
+  EB.convKey = ebConvKey(r);
   const chat = el('eb-chat'); if (chat) chat.scrollTop = chat.scrollHeight;   // newest at the bottom, next to the reply box
   if (r.order) ebOrderCheck(m.id);
   const li = EB.msgs.find(x => x.id === id); if (li && !li.is_read) { li.is_read = true; ebLoadList(); }
