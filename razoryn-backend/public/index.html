@@ -9079,15 +9079,22 @@ function openDispatchModal(saleId) {
       </div>
       <div id="d-ship-fields">
         <div class="field"><label>Carrier *</label>
-          <select id="d-carrier" style="font-size:14px">
+          <select id="d-carrier" style="font-size:14px" onchange="dCarrierChanged()">
             <option value="">— Select carrier —</option>
             ${carriers.map(c => `<option value="${escapeAttr(c)}">${escapeHtml(c)}</option>`).join('')}
           </select>
         </div>
+        <div class="field" id="d-cname-wrap" style="display:none"><label>Courier company name *</label>
+          <input id="d-cname" placeholder="e.g. Tuffnells, Palletways" maxlength="60">
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Shown to the buyer on eBay and Shopify instead of "Other".</div></div>
         <div class="field"><label>Tracking number</label>
-          <input id="d-tracking" placeholder="Optional for some courier collections">
+          <input id="d-tracking" placeholder="Optional for some courier collections" oninput="dCarrierChanged()">
           <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Type or scan the tracking number. Leave blank if your courier hasn't generated one yet.</div>
         </div>
+        <div class="field" id="d-url-wrap" style="display:none"><label>Tracking link</label>
+          <input id="d-url" placeholder="https://… the courier's tracking page">
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Sent to Shopify (it needs a link for couriers it doesn't know) and used in the message to the customer.</div></div>
+        <details style="margin:4px 0 8px"><summary style="cursor:pointer;font-size:13px;font-weight:600" onclick="dLoadLabelInfo(${saleId})">🏷 Label details — everything the courier needs</summary><div id="d-label-info" style="margin-top:8px;font-size:12.5px">Loading…</div></details>
         ${isExternalChannel ? `
           <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:8px">
             <input type="checkbox" id="d-push" checked>
@@ -9106,6 +9113,57 @@ function openDispatchModal(saleId) {
   });
   dDispatchMode();
 }
+
+// Couriers without an automatic tracking link (DropFleet, Proovia, other):
+// ask for the link; "Other" also asks for the company's name.
+function dCarrierChanged() {
+  const c = el('d-carrier')?.value || '';
+  const links = State.dispatch?.carrierLinks || {};
+  const other = c === 'Other / custom courier';
+  if (el('d-cname-wrap')) el('d-cname-wrap').style.display = other ? '' : 'none';
+  const native = ['Royal Mail', 'Evri', 'FedEx', 'DHL'].includes(c);
+  if (el('d-url-wrap')) el('d-url-wrap').style.display = c && !native ? '' : 'none';
+  const url = el('d-url');
+  if (url && !url.dataset.touched) {
+    const tpl = links[c]; const t = (el('d-tracking')?.value || '').trim();
+    url.value = tpl ? tpl.replace('{tracking}', encodeURIComponent(t)) : '';
+  }
+  if (url) url.oninput = () => { url.dataset.touched = '1'; };
+}
+// One-click copy of the details a courier site / label needs.
+async function dLoadLabelInfo(saleId) {
+  const box = el('d-label-info'); if (!box || box.dataset.loaded) return;
+  let r; try { r = await Api.get(`/api/dispatch/${saleId}/label-info`); } catch (e) { box.textContent = e.data?.message || e.message; return; }
+  box.dataset.loaded = '1';
+  const fields = [['Name', r.name], ...r.addressLines.map((l, i) => ['Address ' + (i + 1), l]), ['Postcode', r.postcode], ['Country', r.country],
+    ['Phone', r.phone], ['Email', r.email], ['Reference', r.ref], ['Contents', r.contents], ['Value', '£' + Number(r.value).toFixed(2)],
+    ...r.parcels.map((p, i) => [`Parcel ${r.parcels.length > 1 ? i + 1 : ''}`.trim(), [p.lengthCm && p.widthCm && p.heightCm ? `${p.lengthCm} × ${p.widthCm} × ${p.heightCm} cm` : 'size not set', p.weightKg != null ? `${p.weightKg} kg` : 'weight not set', p.qty > 1 ? `× ${p.qty}` : '', p.large ? 'large' : ''].filter(Boolean).join(' · ')]),
+    ...(r.totalKg != null && r.parcels.length > 1 ? [['Total weight', r.totalKg + ' kg']] : [])].filter(([, v]) => v);
+  DLABEL = fields;
+  box.innerHTML = `<table class="table" style="margin:0;font-size:12.5px"><tbody>${fields.map(([k, v], i) => `<tr><td style="color:var(--ink-soft);white-space:nowrap">${escapeHtml(k)}</td><td>${escapeHtml(v)}</td><td style="text-align:right"><button class="btn btn-ghost btn-sm" onclick="copyText(DLABEL[${i}][1])">Copy</button></td></tr>`).join('')}</tbody></table>
+    <div style="margin-top:6px"><button class="btn btn-outline btn-sm" onclick="copyText(DLABEL.map(f => f[0] + ': ' + f[1]).join('\\n'))">Copy all</button></div>`;
+}
+let DLABEL = [];
+function copyText(t) {
+  const done = () => toast('Copied', 'success', 1500);
+  try { navigator.clipboard.writeText(String(t)).then(done, () => { fallback(); }); } catch (_) { fallback(); }
+  function fallback() { const a = document.createElement('textarea'); a.value = String(t); document.body.appendChild(a); a.select(); try { document.execCommand('copy'); done(); } catch (_) {} a.remove(); }
+}
+// After dispatch: a ready-to-send message for the customer.
+function dShowCustomerMessage(sale, carrier, tracking, url) {
+  const first = String(sale.customer_name || '').trim().split(/\s+/)[0] || 'there';
+  const ref = sale.invoice_number || sale.external_order_id || sale.payment_reference || '';
+  const shop = State.brand?.name || 'us';
+  const msg = `Hi ${first},\n\nGood news — your order${ref ? ' ' + ref : ''} has been dispatched with ${carrier}.`
+    + (tracking ? `\nTracking number: ${tracking}` : '') + (url ? `\nTrack it here: ${url}` : '')
+    + `\n\nThanks for shopping with ${shop}!`;
+  DMSG = msg;
+  modal({ title: 'Dispatched — message for the customer', body: `
+    <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:8px">Copy and paste this into eBay messages, email or WhatsApp.</div>
+    <textarea id="d-msg" rows="8" style="width:100%;font-size:13px">${escapeHtml(msg)}</textarea>`,
+    actions: [{ label: 'Close', onClick: closeModal }, { label: '📋 Copy message', primary: true, onClick: () => copyText(el('d-msg').value) }] });
+}
+let DMSG = '';
 
 // Toggle the dispatch modal between posted (carrier) and collected (no carrier).
 function dDispatchMode() {
@@ -9135,12 +9193,16 @@ async function submitDispatch(saleId, isExternalChannel) {
   const carrier = el('d-carrier').value;
   const trackingNumber = el('d-tracking').value.trim();
   if (!carrier) { toast('Carrier is required — or choose "Customer collected"', 'warn'); return; }
+  const carrierName = (el('d-cname')?.value || '').trim();
+  if (carrier === 'Other / custom courier' && !carrierName) { toast('Type the courier company name', 'warn'); return; }
+  const trackingUrl = (el('d-url')?.value || '').trim();
   const pushToChannel = isExternalChannel ? el('d-push').checked : false;
+  const sale = (State.dispatch?.toShip || []).find(s => String(s.id) === String(saleId)) || {};
 
   const taskId = Task.start('Marking dispatched');
   try {
     const r = await Api.post(`/api/dispatch/${saleId}/mark-dispatched`, {
-      carrier, trackingNumber, notes, pushToChannel,
+      carrier, carrierName, trackingNumber, trackingUrl, notes, pushToChannel,
     });
     Task.done(taskId, 'Dispatched');
     let toastMsg = 'Order marked dispatched';
@@ -9148,6 +9210,7 @@ async function submitDispatch(saleId, isExternalChannel) {
     if (r.customerEmailQueued) toastMsg += ' · emailing customer';
     toast(toastMsg, 'success', 6000);
     closeModal();
+    dShowCustomerMessage(sale, r.sale?.carrier || carrierName || carrier, trackingNumber, r.sale?.tracking_url || trackingUrl);
     await loadDispatch(); await loadShipments();
     await Store.refresh('sales');
   } catch (e) {

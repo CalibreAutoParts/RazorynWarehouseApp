@@ -1182,9 +1182,10 @@ async function completeSale(storeArg, opts = {}) {
     'Tuffnells':             'Tuffnells',
     'Yodel':                 'Yodel',
     'APC Overnight':         'APC Overnight',
-    // URL-tracked specialists eBay doesn't list natively → send as 'Other'.
-    'Proovia':               'Other',
-    'Dropfleet':             'Other',
+    // Couriers eBay doesn't list: send the company's NAME (eBay accepts free
+    // text and shows it to the buyer) rather than a bare "Other".
+    'Proovia':               'Proovia',
+    'Dropfleet':             'DropFleet',
     'Other / custom courier': 'Other',
     'Already shipped (channel)': null,  // shouldn't get here — dispatch route filters this
   };

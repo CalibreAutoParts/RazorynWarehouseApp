@@ -1102,7 +1102,7 @@ async function findProductsBySkus(skus) {
 // Already-fulfilled orders are treated as success.
 // ──────────────────────────────────────────────────────────────────────────
 async function fulfillOrder(opts = {}) {
-  const { orderId, trackingNumber, carrier, notifyCustomer = true } = opts;
+  const { orderId, trackingNumber, carrier, trackingUrl = null, notifyCustomer = true } = opts;
   if (!orderId) throw new Error('orderId required');
 
   // Carrier mapping → Shopify's `tracking_company`. Shopify accepts arbitrary
@@ -1120,6 +1120,7 @@ async function fulfillOrder(opts = {}) {
     'Tuffnells':              'Tuffnells',
     'Yodel':                  'Yodel',
     'APC Overnight':          'APC Overnight',
+    'Dropfleet':              'DropFleet',
     'Other / custom courier': 'Other',
     'Already shipped (channel)': null,
   };
@@ -1162,6 +1163,9 @@ async function fulfillOrder(opts = {}) {
     payload.fulfillment.tracking_info = {};
     if (trackingNumber)  payload.fulfillment.tracking_info.number  = trackingNumber;
     if (shopifyCarrier)  payload.fulfillment.tracking_info.company = shopifyCarrier;
+    // Couriers Shopify doesn't know need the tracking page link, or the
+    // customer's "track" button goes nowhere.
+    if (trackingUrl && /^https?:\/\//i.test(trackingUrl)) payload.fulfillment.tracking_info.url = trackingUrl;
   }
 
   try {
