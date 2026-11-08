@@ -24067,6 +24067,12 @@ async function renderEbay() {
   else if (EB.tab === 'messages') ebMessages();
   else ebOffers();
 }
+async function ebSaveSchedule(v) {
+  try { await Api.put('/api/ebayhub/schedule', { offHoursMins: Number(v) }); toast('Saved', 'success', 1500); ebOverview(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+// While the Messages tab is open, keep the list fresh (the server pulls from eBay).
+setInterval(() => { if (State.page === 'ebay' && EB.tab === 'messages' && !document.hidden && el('eb-list')) ebLoadList(); }, 60000);
 async function ebSync(btn) {
   if (btn) btn.disabled = true;
   const t = Task.start('Checking eBay for new messages');
@@ -24094,7 +24100,10 @@ async function ebOverview() {
         ${tile(a.openReturns, 'open returns', `routeTo('returns')`)}
       </div></div>`).join('')}
   </div>
-  <div style="font-size:12px;color:var(--ink-soft);margin-top:10px">Messages are checked every 10 minutes${r.lastMessageSync ? ' · newest saved ' + new Date(r.lastMessageSync).toLocaleString('en-GB') : ''}. Replies are only ever sent by a person — nothing is messaged automatically.</div>`;
+  <div style="font-size:12.5px;color:var(--ink-soft);margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <span>New messages are checked in the background: <b>every ${r.schedule.workMins} minutes from ${r.schedule.workStart}am to ${r.schedule.workEnd - 12}pm</b>, otherwise every</span>
+    ${State.user?.role === 'admin' ? `<select onchange="ebSaveSchedule(this.value)" style="padding:2px 6px">${[[30, '30 minutes'], [60, 'hour'], [120, '2 hours']].map(([v, l]) => `<option value="${v}" ${r.schedule.offHoursMins === v ? 'selected' : ''}>${l}</option>`).join('')}</select>` : `<b>${r.schedule.offHoursMins} minutes</b>`}
+    <span>· right now every ${r.checkEveryMins} min${r.lastCheck ? ' · last checked ' + new Date(r.lastCheck).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''}. Replies are only ever sent by a person.</span></div>`;
 }
 
 // ── Messages ──
@@ -24185,7 +24194,12 @@ async function ebOffers() {
     </div></div>
     <div class="card" style="margin-top:14px"><div class="card-head"><h3>Offers sent</h3></div><div class="card-body" id="eb-off-sent" style="font-size:13px">Loading…</div></div>`;
   try { const r = await Api.get('/api/ebayhub/offers/eligible'); EB.offers = r.items; EB.offerSel = new Set(); ebOffersPaint(); }
-  catch (e) { el('eb-off-list').innerHTML = `<div style="color:var(--red);font-size:13px">${escapeHtml(e.data?.message || e.message)}</div><div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Offers use eBay's newer (OAuth) connection, which only the account linked with the app's eBay refresh token has.</div>`; }
+  catch (e) {
+    const m = e.data?.message || e.message, expired = /invalid_grant|refresh token/i.test(m);
+    el('eb-off-list').innerHTML = `<div style="color:var(--red);font-size:13px">${escapeHtml(m)}</div>` + (expired
+      ? `<div style="font-size:12.5px;margin-top:8px;line-height:1.6"><b>The eBay OAuth refresh token needs renewing.</b> In the eBay developer portal → <i>User Tokens</i> → choose <b>OAuth (new security)</b> → <i>Sign in to Production</i> with the eBay account you want offers on (tick the <b>sell.inventory</b> scope, and <b>sell.marketing</b> for promoted listings) → copy the <b>Refresh token</b> → paste it into Railway as <code>EBAY_REFRESH_TOKEN</code> → redeploy. It lasts 18 months. It must come from the same eBay app as <code>EBAY_APP_ID</code>.</div>`
+      : `<div style="font-size:12px;color:var(--ink-soft);margin-top:6px">Offers use eBay's newer (OAuth) connection, which only the account linked with the app's eBay refresh token has.</div>`);
+  }
   try {
     const s = await Api.get('/api/ebayhub/offers/sent');
     el('eb-off-sent').innerHTML = s.offers.length ? `<table class="table" style="margin:0"><thead><tr><th>When</th><th>Part</th><th style="text-align:right">Offer</th><th>Result</th><th>By</th></tr></thead><tbody>
