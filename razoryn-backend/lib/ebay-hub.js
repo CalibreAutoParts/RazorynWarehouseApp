@@ -127,10 +127,10 @@ async function syncStore(store, { days = 5 } = {}) {
   return { store: store.code, fetched: heads.length, added };
 }
 
-let _syncing = false;
+let _syncing = false, _lastSyncAt = null;
 async function syncAll(opts = {}) {
   if (_syncing) return { skipped: 'running' };
-  _syncing = true;
+  _syncing = true; _lastSyncAt = new Date();
   const out = [];
   try {
     for (const s of messageStores()) {
@@ -262,7 +262,7 @@ async function overview() {
   } catch (_) {}
   const last = (await query(`SELECT MAX(created_at) AS t FROM ebay_messages`)).rows[0]?.t || null;
   return {
-    lastMessageSync: last,
+    lastMessageSync: last, lastCheck: _lastSyncAt, schedule: await scheduleSettings(), checkEveryMins: await messageIntervalMins(),
     accounts: stores.map(s => ({
       code: s.code, name: s.name, channelCode: s.channelCode, connected: !!s.token, disabled: !!s.disabled, primary: !!s.primary,
       unread: msg.find(m => m.store_code === s.code)?.unread || 0,
@@ -273,4 +273,25 @@ async function overview() {
   };
 }
 
-module.exports = { ensureSchema, syncAll, syncStore, reply, markRead, eligibleItems, sendOffers, overview, messageText, stripHtml };
+// ── Background check schedule ────────────────────────────────────────────
+async function scheduleSettings() {
+  const d = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data?.ebayMessages || {};
+  const off = [30, 60, 120].includes(Number(d.offHoursMins)) ? Number(d.offHoursMins) : 30;
+  return { workStart: 9, workEnd: 15, workMins: 5, offHoursMins: off };
+}
+async function saveScheduleSettings({ offHoursMins }) {
+  const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+  const v = [30, 60, 120].includes(Number(offHoursMins)) ? Number(offHoursMins) : 30;
+  await query(`UPDATE app_settings SET data = $1::jsonb WHERE id = 1`, [JSON.stringify({ ...cur, ebayMessages: { ...(cur.ebayMessages || {}), offHoursMins: v } })]);
+  return scheduleSettings();
+}
+function ukHour(d = new Date()) {
+  return parseInt(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', hourCycle: 'h23' }).format(d), 10);
+}
+async function messageIntervalMins() {
+  const s = await scheduleSettings();
+  const h = ukHour();
+  return h >= s.workStart && h < s.workEnd ? s.workMins : s.offHoursMins;
+}
+
+module.exports = { scheduleSettings, saveScheduleSettings, messageIntervalMins, ensureSchema, syncAll, syncStore, reply, markRead, eligibleItems, sendOffers, overview, messageText, stripHtml };

@@ -678,9 +678,20 @@ async function runFitmentSweep() {
 cron.schedule('17 */2 * * *', runFitmentSweep);
 console.log('[boot] eBay fitment-message sweep scheduled: every 2h (only if switched on)');
 
-// eBay buyer messages — pull every account's inbox every 10 minutes (read only;
-// replies are only ever sent by a person from the eBay page).
-cron.schedule('*/10 * * * *', () => { require('./lib/ebay-hub').syncAll({ days: 3 }).catch(e => console.warn('[cron ebay messages]', e.message)); });
+// eBay buyer messages — pull every account's inbox in the background (read
+// only; replies are only ever sent by a person from the eBay page). Every
+// 5 min during work hours (09:00–15:00 UK), otherwise every 30/60/120 min
+// (eBay page → Overview). Ticks each minute, runs when the interval is due.
+let _ebMsgLast = 0;
+cron.schedule('* * * * *', async () => {
+  try {
+    const hub = require('./lib/ebay-hub');
+    const mins = await hub.messageIntervalMins();
+    if (Date.now() - _ebMsgLast < mins * 60000 - 15000) return;
+    _ebMsgLast = Date.now();
+    await hub.syncAll({ days: 3 });
+  } catch (e) { console.warn('[cron ebay messages]', e.message); }
+});
 
 // Email digests + scheduled reports — hourly tick: batches new notifications to
 // opted-in staff and sends daily/weekly/monthly/quarterly reports at ~07:00 UK

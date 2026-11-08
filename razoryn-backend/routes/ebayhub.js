@@ -31,8 +31,10 @@ router.get('/messages', requirePermission('dispatch'), aw(async (req, res) => {
   res.json({ messages: rows });
 }));
 
+router.put('/schedule', requireAdmin, aw(async (req, res) => res.json(await hub.saveScheduleSettings(req.body || {}))));
 router.post('/messages/sync', requirePermission('dispatch'), aw(async (req, res) => {
-  res.json({ results: await hub.syncAll({ days: Math.min(30, Math.max(1, parseInt(req.body?.days) || 5)) }) });
+  const r = await hub.syncAll({ days: Math.min(30, Math.max(1, parseInt(req.body?.days) || 5)) });
+  res.json({ results: Array.isArray(r) ? r : [] , running: !Array.isArray(r) });
 }));
 
 // One message in full (marks it read here and on eBay), with our replies and
