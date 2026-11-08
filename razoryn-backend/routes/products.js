@@ -1317,7 +1317,12 @@ router.get('/:id/delete-preview', requireAdmin, async (req, res) => {
   const stores = brand.allStores || brand.stores || [];
   res.json({
     shopify: !!p.shopify_product_id,
-    ebay: links.map(l => { const st = stores.find(s => s.code === (l.store_code || (brand.getPrimaryStore?.() || {}).code)) || {}; return { itemId: l.ebay_item_id, storeCode: l.store_code || st.code || null, storeName: st.name || l.store_code || 'eBay' }; }),
+    ebay: links.map(l => {
+      const st = stores.find(s => s.code === (l.store_code || (brand.getPrimaryStore?.() || {}).code)) || {};
+      const canEnd = !!(st.token && !st.disabled);
+      return { itemId: l.ebay_item_id, storeCode: l.store_code || st.code || null, storeName: st.name || l.store_code || 'eBay', canEnd,
+        note: canEnd ? null : (st.disabled ? 'account switched off — the link is just removed (nothing is sent to eBay)' : 'account not connected — the link is just removed') };
+    }),
   });
 });
 
@@ -1338,7 +1343,17 @@ router.delete('/:id', requireAdmin, async (req, res) => {
     const links = product.shopify_product_id ? (await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1 AND ebay_item_id = ANY($2)`,
       [String(product.shopify_product_id), ebayIds])).rows : [];
     const ebay = require('../services/ebay');
+    const brand = require('../lib/brand');
+    const stores = brand.allStores || brand.stores || [];
     for (const l of links) {
+      // A switched-off / unconnected account (e.g. one eBay restricted) can't be
+      // reached — just drop the link; eBay has already taken those listings down.
+      const st = stores.find(x => x.code === (l.store_code || (brand.getPrimaryStore?.() || {}).code)) || {};
+      if (!(st.token && !st.disabled)) {
+        await query(`DELETE FROM mirror_links WHERE ebay_item_id = $1`, [l.ebay_item_id]);
+        ebayEnded.push(l.ebay_item_id + ' (link removed)');
+        continue;
+      }
       try { await ebay.endItem(l.ebay_item_id, { reason: 'NotAvailable' }, l.store_code || undefined); ebayEnded.push(l.ebay_item_id);
         await query(`DELETE FROM mirror_links WHERE ebay_item_id = $1`, [l.ebay_item_id]); }
       catch (e) { ebayFailed.push({ itemId: l.ebay_item_id, error: e.message }); }
