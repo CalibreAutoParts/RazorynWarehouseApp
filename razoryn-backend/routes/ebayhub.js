@@ -26,7 +26,8 @@ router.get('/messages', requirePermission('dispatch'), aw(async (req, res) => {
   if (req.query.q) { params.push(`%${String(req.query.q).trim()}%`); where.push(`(m.sender ILIKE $${params.length} OR m.subject ILIKE $${params.length} OR m.item_title ILIKE $${params.length} OR m.item_id ILIKE $${params.length} OR m.body ILIKE $${params.length})`); }
   const lim = Math.min(300, Math.max(1, parseInt(req.query.limit) || 100));
   const rows = (await query(`SELECT m.id, m.store_code, m.sender, m.subject, m.item_id, m.item_title, m.message_type, m.received_at,
-      m.is_read, m.replied, m.response_enabled, m.high_priority, LEFT(COALESCE(m.body, ''), 160) AS preview
+      m.is_read, m.replied, m.response_enabled, m.high_priority,
+      LEFT(BTRIM(split_part(COALESCE(m.body, ''), E'\nNew message from', 1)), 160) AS preview
     FROM ebay_messages m ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY m.received_at DESC NULLS LAST LIMIT ${lim}`, params)).rows;
   res.json({ messages: rows });
 }));
@@ -44,16 +45,29 @@ router.get('/messages/:id', requirePermission('dispatch'), aw(async (req, res) =
   const m = (await query(`SELECT * FROM ebay_messages WHERE id = $1`, [req.params.id])).rows[0];
   if (!m) return res.status(404).json({ error: 'not_found' });
   await hub.markRead(m);
-  const replies = (await query(`SELECT r.body, r.sent_at, r.ok, r.error, u.name AS sent_by FROM ebay_message_replies r LEFT JOIN users u ON u.id = r.sent_by
+  const replies = (await query(`SELECT r.body, r.sent_at, r.ok, r.error, r.media, u.name AS sent_by FROM ebay_message_replies r LEFT JOIN users u ON u.id = r.sent_by
     WHERE r.message_row_id = $1 ORDER BY r.sent_at`, [m.id])).rows;
   const thread = (await query(`SELECT id, subject, LEFT(COALESCE(body,''), 400) AS body, received_at, replied FROM ebay_messages
     WHERE store_code = $1 AND sender = $2 AND id <> $3 AND (item_id = $4 OR $4 IS NULL) ORDER BY received_at DESC LIMIT 10`,
     [m.store_code, m.sender, m.id, m.item_id])).rows;
-  res.json({ message: { ...m, is_read: true }, replies, thread });
+  // One conversation, oldest first: what eBay's email carries + replies sent
+  // from here since (until eBay's next email includes them).
+  const conv = hub.parseConversation(m.body, m.sender).map(x => ({ ...x }));
+  if (conv.length && Array.isArray(m.media) && m.media.length) { const lastBuyer = [...conv].reverse().find(x => x.from === 'buyer'); if (lastBuyer) lastBuyer.media = m.media; }
+  const norm = t => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const known = new Set(conv.map(x => norm(x.text)));
+  for (const rp of replies) if (!known.has(norm(rp.body))) conv.push({ from: 'us', text: rp.body, at: rp.sent_at, by: rp.sent_by, ok: rp.ok, error: rp.error, media: rp.media || [] });
+  conv.forEach(x => { if (x.from === 'buyer' && !x.at && x === conv.filter(y => y.from === 'buyer').slice(-1)[0]) x.at = m.received_at; });
+  res.json({ message: { ...m, is_read: true }, conversation: conv, replies, thread });
 }));
 
+// Photos for a reply → eBay Picture Services; returns their eBay URLs.
+router.post('/messages/:id/photos', requirePermission('dispatch'), express.json({ limit: '40mb' }), aw(async (req, res) => {
+  res.json({ photos: await hub.uploadPhotos(parseInt(req.params.id), Array.isArray(req.body?.files) ? req.body.files : []) });
+}));
 router.post('/messages/:id/reply', requirePermission('dispatch'), aw(async (req, res) => {
-  const r = await hub.reply(parseInt(req.params.id), req.body?.body, req.user.id);
+  const media = (Array.isArray(req.body?.media) ? req.body.media : []).filter(x => x && /^https:\/\/i\.ebayimg\.com\//.test(String(x.url || '')));
+  const r = await hub.reply(parseInt(req.params.id), req.body?.body, req.user.id, media);
   await audit(req, 'ebay_message_reply', 'ebay_message', req.params.id, {});
   res.json(r);
 }));

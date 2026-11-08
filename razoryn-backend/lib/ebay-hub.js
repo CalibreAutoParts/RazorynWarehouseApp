@@ -23,9 +23,11 @@ function ensureSchema() {
       response_enabled BOOLEAN NOT NULL DEFAULT false, high_priority BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (store_code, message_id))`);
     await query(`CREATE INDEX IF NOT EXISTS ebay_messages_recv_idx ON ebay_messages (received_at DESC)`);
+    await query(`ALTER TABLE ebay_messages ADD COLUMN IF NOT EXISTS media JSONB`);   // buyer's photos [{url,name}]
     await query(`CREATE TABLE IF NOT EXISTS ebay_message_replies (
       id SERIAL PRIMARY KEY, message_row_id INTEGER NOT NULL, store_code TEXT, body TEXT NOT NULL,
       sent_by INTEGER, sent_at TIMESTAMPTZ NOT NULL DEFAULT now(), ok BOOLEAN NOT NULL DEFAULT true, error TEXT)`);
+    await query(`ALTER TABLE ebay_message_replies ADD COLUMN IF NOT EXISTS media JSONB`);
     await query(`CREATE TABLE IF NOT EXISTS ebay_offers_sent (
       id SERIAL PRIMARY KEY, listing_id TEXT NOT NULL, product_id INTEGER, price NUMERIC(10,2), discount_pct NUMERIC(6,2),
       message TEXT, sent_by INTEGER, sent_at TIMESTAMPTZ NOT NULL DEFAULT now(), ok BOOLEAN NOT NULL DEFAULT true,
@@ -76,6 +78,7 @@ function parseHeaders(xml) {
     highPriority: E.extractOne(b, 'HighPriority') === 'true',
     text: E.extractOne(b, 'Text'),
     content: E.extractOne(b, 'Content'),
+    media: E.extractAll(b, 'MessageMedia').map(mm => ({ url: E.decodeEntities(E.extractOne(mm, 'MediaURL') || ''), name: E.decodeEntities(E.extractOne(mm, 'MediaName') || '') })).filter(x => /^https?:\/\//.test(x.url)),
   })).filter(m => m.messageId);
 }
 
@@ -120,7 +123,8 @@ async function syncStore(store, { days = 5 } = {}) {
         <MessageIDs>${ids.map(id => `<MessageID>${ebay().escapeXml(id)}</MessageID>`).join('')}</MessageIDs>`, store.code);
       for (const m of parseHeaders(bx)) {
         const body = m.content ? stripHtml(ebay().decodeEntities(m.content)) : messageText(m.text);
-        await query(`UPDATE ebay_messages SET body = $3 WHERE store_code = $1 AND message_id = $2`, [store.code, m.messageId, body || '']);
+        await query(`UPDATE ebay_messages SET body = $3, media = $4::jsonb WHERE store_code = $1 AND message_id = $2`,
+          [store.code, m.messageId, body || '', JSON.stringify(m.media || [])]);
       }
     } catch (e) { console.warn('[ebay-hub] bodies', store.code, e.message); }
   }
@@ -150,11 +154,58 @@ async function markRead(row) {
 
 // Reply to a buyer's message (AddMemberMessageRTQ). Checked against eBay's
 // member-to-member rules first; nothing is sent if it fails the check.
-async function reply(rowId, body, userId) {
+// eBay sends each message as an email with the earlier conversation pasted
+// underneath ("Your previous message" = ours, the buyer's name = theirs).
+// Turn that into separate messages, oldest first.
+function parseConversation(body, buyer) {
+  const lines = String(body || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const nm = lines.findIndex(l => /^New message from:?$/i.test(l));
+  if (nm < 0) return [{ from: 'buyer', text: String(body || '').trim() }];
+  const newest = lines.slice(0, nm).join('\n');
+  const isBuyer = l => buyer && l.toLowerCase() === String(buyer).toLowerCase();
+  const isOurs = l => /^your previous message$/i.test(l);
+  const blocks = [];
+  let i = nm + 1;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (isBuyer(l) || isOurs(l)) {
+      const from = isOurs(l) ? 'us' : 'buyer';
+      let j = i + 1;
+      while (j < lines.length && !/^Dear\s.+,$/.test(lines[j])) j++;
+      let k = j + 1;
+      while (k < lines.length && !/^-\s\S+/.test(lines[k])) k++;
+      const text = (j + 1 < k ? lines.slice(j + 1, k) : lines.slice(i + 1, j)).join('\n').trim();
+      if (text) blocks.push({ from, text });
+      i = k + 1; continue;
+    }
+    i++;
+  }
+  const out = blocks.reverse();
+  if (newest && !(out.length && out[out.length - 1].from === 'buyer' && out[out.length - 1].text === newest)) out.push({ from: 'buyer', text: newest });
+  return out.filter((m, idx) => idx === 0 || !(m.text === out[idx - 1].text && m.from === out[idx - 1].from));
+}
+
+// Photos for a reply: bytes → eBay Picture Services. Returns [{url,name}].
+async function uploadPhotos(rowId, files = []) {
+  await ensureSchema();
+  const row = (await query(`SELECT store_code FROM ebay_messages WHERE id = $1`, [rowId])).rows[0];
+  if (!row) throw Object.assign(new Error('Message not found'), { status: 404 });
+  const out = [];
+  for (const f of files.slice(0, 5)) {
+    const m = String(f.data || '').match(/^data:image\/(png|jpe?g|gif|webp);base64,(.+)$/);
+    if (!m) continue;
+    const buf = Buffer.from(m[2], 'base64');
+    if (buf.length > 7 * 1024 * 1024) throw Object.assign(new Error(`${f.name || 'Photo'} is over 7MB`), { status: 400 });
+    out.push({ url: await ebay().uploadPicture(row.store_code, buf, f.name || 'photo.jpg'), name: String(f.name || 'Photo').slice(0, 60) });
+  }
+  return out;
+}
+
+async function reply(rowId, body, userId, media = []) {
   await ensureSchema();
   const row = (await query(`SELECT * FROM ebay_messages WHERE id = $1`, [rowId])).rows[0];
   if (!row) throw Object.assign(new Error('Message not found'), { status: 404 });
-  const text = String(body || '').trim();
+  const text = String(body || '').trim() || ((media || []).length ? 'Photos attached.' : '');
   if (!text) throw Object.assign(new Error('Write a reply first'), { status: 400 });
   require('./ebay-message-guard').assertClean('', text);
   if (!row.item_id) throw Object.assign(new Error("eBay only lets you reply from here to messages about one of your listings — reply to this one on eBay."), { status: 400 });
@@ -168,13 +219,14 @@ async function reply(rowId, body, userId) {
         <EmailCopyToSender>true</EmailCopyToSender>
         <ParentMessageID>${E.escapeXml(row.external_id)}</ParentMessageID>
         <RecipientID>${E.escapeXml(row.sender)}</RecipientID>
+        ${(media || []).slice(0, 5).filter(x => /^https:\/\//.test(x.url || '')).map(x => `<MessageMedia><MediaURL>${E.escapeXml(x.url)}</MediaURL><MediaName>${E.escapeXml(String(x.name || 'Photo').slice(0, 60))}</MediaName></MessageMedia>`).join('')}
       </MemberMessage>`, row.store_code);
   } catch (e) {
     await query(`INSERT INTO ebay_message_replies (message_row_id, store_code, body, sent_by, ok, error) VALUES ($1,$2,$3,$4,false,$5)`,
       [row.id, row.store_code, text, userId || null, e.message.slice(0, 500)]);
     throw Object.assign(new Error(e.message), { status: 502 });
   }
-  await query(`INSERT INTO ebay_message_replies (message_row_id, store_code, body, sent_by) VALUES ($1,$2,$3,$4)`, [row.id, row.store_code, text, userId || null]);
+  await query(`INSERT INTO ebay_message_replies (message_row_id, store_code, body, sent_by, media) VALUES ($1,$2,$3,$4,$5::jsonb)`, [row.id, row.store_code, text, userId || null, JSON.stringify(media || [])]);
   await query(`UPDATE ebay_messages SET replied = true WHERE id = $1`, [row.id]);
   await markRead(row);
   return { ok: true };
@@ -294,4 +346,4 @@ async function messageIntervalMins() {
   return h >= s.workStart && h < s.workEnd ? s.workMins : s.offHoursMins;
 }
 
-module.exports = { scheduleSettings, saveScheduleSettings, messageIntervalMins, ensureSchema, syncAll, syncStore, reply, markRead, eligibleItems, sendOffers, overview, messageText, stripHtml };
+module.exports = { parseConversation, uploadPhotos, scheduleSettings, saveScheduleSettings, messageIntervalMins, ensureSchema, syncAll, syncStore, reply, markRead, eligibleItems, sendOffers, overview, messageText, stripHtml };
