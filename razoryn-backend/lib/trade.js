@@ -130,6 +130,9 @@ async function _migrate() {
   // the studio doesn't have isn't re-asked on every request).
   // A part that's never offered to trade (hidden from every account).
   await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS trade_excluded BOOLEAN NOT NULL DEFAULT false`);
+  // The listing's own photos carry no watermark (e.g. supplier photos) — fine
+  // to give clean-photo accounts when the studio has no clean set.
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS trade_photos_ok BOOLEAN NOT NULL DEFAULT false`);
   await query(`CREATE TABLE IF NOT EXISTS product_clean_fetch (
     product_id INTEGER PRIMARY KEY, tried_at TIMESTAMPTZ NOT NULL DEFAULT now(), found INTEGER NOT NULL DEFAULT 0)`);
   // Same ledger the sales page uses for part payments.
@@ -281,7 +284,8 @@ const PRODUCT_COLS = `p.id, p.sku, p.title, p.brand, p.model, p.part_number, p.p
   p.shopify_product_id, p.updated_at, p.location_id, p.location_note, l.code AS location_code, l.name AS location_name,
   ts.changed_at AS stock_changed_at,
   p.pkg_length_cm, p.pkg_width_cm, p.pkg_height_cm, p.pkg_weight_g, p.packaging_included, p.packaging_cost,
-  p.shipping_band, p.shipping_cost, p.large_panel, p.postage_in_price, p.ebay_category_id, p.ebay_item_specifics, p.ebay_description`;
+  p.shipping_band, p.shipping_cost, p.large_panel, p.postage_in_price, p.ebay_category_id, p.ebay_item_specifics, p.ebay_description,
+  p.trade_photos_ok`;
 
 // One product as a trade customer sees it.
 function present(account, p, rules, settings, { detail = false } = {}) {
@@ -362,7 +366,7 @@ async function stockList(account, { q = '', make = '', inStock = false, changedS
     try {
       const ci = (await query(`SELECT product_id, urls FROM product_clean_images WHERE product_id = ANY($1)`, [rows.map(r => r.id)])).rows;
       const first = new Map(ci.map(r => [r.product_id, (Array.isArray(r.urls) ? r.urls : []).find(u => /^https:\/\//.test(u))]));
-      rows.forEach((p, i) => { const u = first.get(p.id); items[i].image = u || null; items[i].image_clean = !!u; });
+      rows.forEach((p, i) => { const u = first.get(p.id) || (p.trade_photos_ok ? p.image_url : null); items[i].image = u || null; items[i].image_clean = !!u; });
     } catch (_) {}
   }
   return { total, limit: lim, offset: off, items };
@@ -458,6 +462,8 @@ async function imagesFor(account, p) {
   if (account.photo_access === 'clean') {
     let clean = await cleanImages(p.id);
     if (!clean.length) clean = await fetchCleanFromStudio(p);
+    // Listing photos marked as unwatermarked (supplier photos) are clean too.
+    if (!clean.length && p.trade_photos_ok) return { urls: await brandedImages(p), clean: true };
     // Never fall back to the watermarked listing photos for a clean account —
     // no clean photos yet means no photos (they're told why).
     return { urls: clean, clean: true, missing: !clean.length };

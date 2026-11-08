@@ -24352,7 +24352,7 @@ async function trppLoad() {
       <th style="text-align:right">They pay (ex VAT)</th><th style="text-align:right">Margin</th><th>Item price</th>${r.mode === 'selected' ? '<th>Shared</th>' : ''}</tr></thead><tbody>
     ${r.items.map(x => `<tr style="${r.mode === 'selected' && !x.picked ? 'opacity:.6' : ''}">
       <td><input type="checkbox" class="trpp-cb" data-id="${x.id}" ${TRPP.sel.has(x.id) ? 'checked' : ''} onchange="this.checked?TRPP.sel.add(${x.id}):TRPP.sel.delete(${x.id});trppBar()"></td>
-      <td style="${x.excluded ? 'opacity:.55' : ''}"><div style="font-weight:600;max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(x.title || '')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(x.sku || '')}${x.excluded ? ' <span class="pill red" style="font-size:9.5px;font-family:inherit">🚫 not for trade</span>' : ''}</div></td>
+      <td style="${x.excluded ? 'opacity:.55' : ''}"><div style="font-weight:600;max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(x.title || '')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(x.sku || '')}${x.excluded ? ' <span class="pill red" style="font-size:9.5px;font-family:inherit">🚫 not for trade</span>' : ''}${x.photosOk ? ' <span class="pill" style="font-size:9.5px;font-family:inherit" title="Listing photos have no watermark — shared with clean-photo accounts">📷 photos OK</span>' : ''}</div></td>
       <td style="text-align:right">${x.qty ?? 0}</td>
       <td style="text-align:right">${x.cost != null ? trMoney(x.cost) : '<span style="color:var(--ink-soft)">—</span>'}</td>
       <td style="text-align:right">${x.retail ? trMoney(x.retail) : '—'}</td>
@@ -24377,12 +24377,22 @@ function trppBar() {
       <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trppShare(false)">Hide ticked</button><span style="width:10px"></span>` : ''}
     <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trppExclude(true)" title="Hide the ticked parts from EVERY trade account — portal, API, feed and partner apps — and stop them being ordered">🚫 Not for trade</button>
     <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trppExclude(false)" title="Offer the ticked parts to trade again">Allow for trade</button><span style="width:10px"></span>
+    <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trppPhotosOk(true)" title="These parts' listing photos have no watermark (e.g. supplier photos) — clean-photo accounts get them when the studio has none">📷 Photos have no watermark</button>
+    <button class="btn btn-ghost btn-sm" ${n ? '' : 'disabled'} onclick="trppPhotosOk(false)" title="Undo — treat their listing photos as watermarked">undo</button><span style="width:10px"></span>
     <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trCleanFromStudio([...TRPP.sel])" title="Fetch the ticked parts' photos from the photo studio with no watermark, logo or vehicle — what accounts on 'clean photos' get">📸 Clean photos from studio</button><span style="width:10px"></span>
     <span>Price ticked:</span>
     <select id="trpp-kind" onchange="el('trpp-val').style.display=this.value==='default'?'none':'';el('trpp-val').placeholder=this.value==='fixed'?'£ each':'%'">
       <option value="markup">Our cost + %</option><option value="discount">% off retail</option><option value="fixed">Fixed £ (ex VAT)</option><option value="default">Back to account default</option></select>
     <input id="trpp-val" type="number" step="0.01" min="0" placeholder="%" style="width:90px">
     <button class="btn btn-primary btn-sm" ${n ? '' : 'disabled'} onclick="trppPrice()">Apply to ${n}</button>`;
+}
+async function trppPhotosOk(ok) {
+  const ids = [...TRPP.sel];
+  try {
+    await Api.post('/api/trade/photos-ok', { productIds: ids, ok });
+    toast(ok ? `${ids.length} part(s): listing photos will be shared with clean-photo accounts` : `${ids.length} part(s): listing photos treated as watermarked again`, 'success', 6000);
+    TRPP.sel.clear(); trppLoad();
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
 }
 async function trppExclude(excluded) {
   const ids = [...TRPP.sel];
