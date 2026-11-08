@@ -1261,18 +1261,74 @@ router.post('/pull-ebay-stock', requireAdmin, async (req, res) => {
   res.json({ ok: true, checked, updated, unchanged, skippedCapped, errors: errors.slice(0, 20) });
 });
 // Body: { ids: [..], hard: true|false, shopify: true|false }
-router.post('/bulk-delete', requireAdmin, async (req, res) => {
+// eBay listings linked to these products, with each one's account.
+async function ebayLinksFor(products) {
+  const brand = require('../lib/brand');
+  const stores = brand.allStores || brand.stores || [];
+  const sids = products.filter(p => p.shopify_product_id).map(p => String(p.shopify_product_id));
+  if (!sids.length) return [];
+  const rows = (await query(`SELECT ebay_item_id, store_code, shopify_product_id::text AS sid FROM mirror_links WHERE shopify_product_id::text = ANY($1)`, [sids])).rows;
+  const primary = (brand.getPrimaryStore?.() || {}).code;
+  return rows.map(r => {
+    const code = r.store_code || primary;
+    const st = stores.find(x => x.code === code) || {};
+    const p = products.find(x => String(x.shopify_product_id) === r.sid);
+    return { itemId: r.ebay_item_id, productId: p?.id, storeCode: code, storeName: st.name || code || 'eBay', canEnd: !!(st.token && !st.disabled) };
+  });
+}
+
+// POST /api/products/bulk-delete-preview { ids } — where the ticked parts are
+// listed: Shopify count and, per eBay account, how many listings.
+router.post('/bulk-delete-preview', requireAdmin, async (req, res) => {
   const ids = (req.body.ids || []).map(String);
+  const products = (await query(`SELECT id, shopify_product_id FROM products WHERE id = ANY($1)`, [ids])).rows;
+  const links = await ebayLinksFor(products);
+  const byStore = {};
+  for (const l of links) {
+    const b = byStore[l.storeCode] || (byStore[l.storeCode] = { storeCode: l.storeCode, storeName: l.storeName, canEnd: l.canEnd, listings: 0, parts: new Set() });
+    b.listings++; b.parts.add(l.productId);
+  }
+  res.json({ count: products.length, shopifyCount: products.filter(p => p.shopify_product_id).length,
+    ebay: Object.values(byStore).map(b => ({ ...b, parts: b.parts.size })) });
+});
+
+router.post('/bulk-delete', requireAdmin, async (req, res) => {
+  let ids = (req.body.ids || []).map(String);
   const hard = !!req.body.hard;
   const removeFromShopify = !!req.body.shopify;
   if (!ids.length) return res.status(400).json({ error: 'no_ids' });
 
-  const results = { deleted: 0, shopifyDeleted: 0, errors: [] };
+  const results = { deleted: 0, shopifyDeleted: 0, ebayEnded: 0, ebayUnlinked: 0, kept: [], errors: [] };
 
   // Pre-fetch products so we have their Shopify IDs even if we hard-delete the rows
-  const { rows: products } = await query(
+  let { rows: products } = await query(
     `SELECT id, shopify_product_id, sku FROM products WHERE id = ANY($1)`, [ids]
   );
+
+  // eBay first, on the ticked accounts. A part whose eBay listing won't end is
+  // KEPT (not deleted anywhere) so it can't vanish here while live on eBay.
+  const ebayStores = Array.isArray(req.body.ebayStores) ? req.body.ebayStores.map(String) : [];
+  if (ebayStores.length) {
+    const ebay = require('../services/ebay');
+    const links = (await ebayLinksFor(products)).filter(l => ebayStores.includes(l.storeCode));
+    const failed = new Set();
+    for (const l of links) {
+      try {
+        if (l.canEnd) { await ebay.endItem(l.itemId, { reason: 'NotAvailable' }, l.storeCode); results.ebayEnded++; }
+        else results.ebayUnlinked++;   // switched-off account — just drop the link
+        await query(`DELETE FROM mirror_links WHERE ebay_item_id = $1`, [l.itemId]);
+      } catch (e) {
+        failed.add(String(l.productId));
+        const p = products.find(x => x.id === l.productId);
+        results.errors.push({ id: l.productId, sku: p?.sku, error: `eBay ${l.itemId}: ${e.message}` });
+      }
+    }
+    if (failed.size) {
+      results.kept = products.filter(p => failed.has(String(p.id))).map(p => p.sku);
+      products = products.filter(p => !failed.has(String(p.id)));
+      ids = ids.filter(id => !failed.has(String(id)));
+    }
+  }
 
   if (removeFromShopify) {
     const shopify = require('../services/shopify');
@@ -1295,6 +1351,7 @@ router.post('/bulk-delete', requireAdmin, async (req, res) => {
   }
 
   // Delete from DB
+  if (!ids.length) { await audit(req, 'bulk_delete_product', 'product', null, results); return res.json({ ok: true, ...results }); }
   if (hard) {
     const r = await query(`DELETE FROM products WHERE id = ANY($1)`, [ids]);
     results.deleted = r.rowCount || 0;
