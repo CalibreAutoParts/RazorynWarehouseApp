@@ -42,7 +42,11 @@ async function ensureBundleTables() {
 async function computeAvailable(bundleId, client) {
   const q = client ? client.query.bind(client) : query;
   const { rows } = await q(
-    `SELECT bc.qty AS need, p.qty_on_hand AS have, p.active
+    // Parts sold from a partner's stock count their stock too (own + partner).
+    `SELECT bc.qty AS need, p.active,
+            CASE WHEN p.source_partner_id IS NOT NULL AND p.source_partner_id = p.partner_link_id
+                 THEN GREATEST(p.qty_on_hand, 0) + GREATEST(COALESCE(p.partner_qty, 0), 0)
+                 ELSE p.qty_on_hand END AS have
        FROM bundle_components bc
        LEFT JOIN products p ON p.id = bc.product_id
       WHERE bc.bundle_id = $1`,

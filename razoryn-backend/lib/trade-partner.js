@@ -144,7 +144,10 @@ async function withMargins(items) {
       const net = B - B * v - fees - postage - pack - overhead - cost;
       const r2 = n => +Number(n).toFixed(2);
       margins[k] = { price: r2(B), net: r2(net), pct: +(net / B * 100).toFixed(1),
-        breakdown: { vat: r2(B * v), fees: r2(fees), postage: r2(postage), packaging: r2(pack), overhead: r2(overhead), cost: r2(cost) } };
+        breakdown: { vat: r2(B * v), fees: r2(fees), postage: r2(postage), packaging: r2(pack), overhead: r2(overhead), cost: r2(cost) },
+        // The rates behind it, so the buyer can test other prices / rates.
+        params: { vatPart: v, feePct: +(((ch.feePct + ch.adRatePct) * ch.feeVatMult) + (direct ? 0 : (Number(S.externalAdPct) || 0))).toFixed(3),
+          fixedFee: r2(ch.fixedFee * ch.feeVatMult), postage: r2(postage), packaging: r2(pack), overhead: r2(overhead), cost: r2(cost) } };
     }
     return { ...it, cost: +cost.toFixed(2), margins };
   });
@@ -329,7 +332,19 @@ async function autoOrderFor(link) {
        AND s.trade_account_id IS NULL
        AND ($2::timestamptz IS NULL OR s.occurred_at >= $2)
        AND NOT EXISTS (SELECT 1 FROM partner_auto_orders pa WHERE pa.sale_item_id = si.id)
-     ORDER BY s.occurred_at, si.id LIMIT 200`, [link.id, link.auto_order_since])).rows;
+    UNION ALL
+    -- Their part sold inside a BUNDLE: the sale line is the bundle, the part
+    -- comes off through a stock movement (keyed by -movement id).
+    SELECT -sm.id AS sale_item_id, s.id AS sale_id, -sm.delta AS qty, sm.product_id, p.qty_on_hand, p.sku, p.partner_sku, p.title,
+           s.invoice_number, s.channel, s.customer_name, s.customer_phone, s.shipping_address, s.occurred_at
+      FROM stock_movements sm JOIN products p ON p.id = sm.product_id JOIN sales s ON s.id = sm.reference_id
+     WHERE sm.reason LIKE 'sale_bundle%' AND sm.delta < 0
+       AND p.partner_link_id = $1 AND p.source_partner_id = $1 AND p.partner_sku IS NOT NULL
+       AND s.status NOT IN ('refunded','cancelled') AND COALESCE(s.is_estimate, false) = false
+       AND s.trade_account_id IS NULL
+       AND ($2::timestamptz IS NULL OR s.occurred_at >= $2)
+       AND NOT EXISTS (SELECT 1 FROM partner_auto_orders pa WHERE pa.sale_item_id = -sm.id)
+     ORDER BY occurred_at, sale_item_id LIMIT 200`, [link.id, link.auto_order_since])).rows;
   if (!cands.length) return { ordered: 0 };
   // How much of each product still has to come from the partner: what our own
   // stock can't cover, less what's already on order from them.
