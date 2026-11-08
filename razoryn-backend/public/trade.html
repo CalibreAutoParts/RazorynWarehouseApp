@@ -168,7 +168,7 @@ function paintItems() {
   const box = $('items'); if (!box) return;
   box.innerHTML = S.items.length ? S.items.map((it, i) => `
     <div class="item">
-      ${it.image ? `<img src="${esc(it.image)}" loading="lazy" onclick="showPhotos('${esc(it.sku)}')" alt="">` : '<div style="height:60px" class="muted">No photo</div>'}
+      ${it.image ? `<img src="${esc(it.image)}" loading="lazy" onclick="showPhotos('${esc(it.sku)}')" alt="">` : `<div style="height:60px" class="muted">${S.me.photos === 'clean' ? 'No clean photo yet' : 'No photo'}</div>`}
       <div class="t">${esc(it.title)}</div>
       <div class="mono">${esc(it.sku)}${it.part_number && it.part_number !== it.sku ? ' · ' + esc(it.part_number) : ''}</div>
       <div class="row" style="justify-content:space-between">
@@ -197,6 +197,11 @@ async function showPhotos(sku) {
   openModal(`<div class="row" style="justify-content:space-between"><b>${esc(sku)}</b><button class="btn o" onclick="closeModal()">Close</button></div><div class="muted" style="margin:6px 0">Loading photos…</div>`);
   try {
     const r = await api('/images/' + encodeURIComponent(sku));
+    if (r.clean_missing) {
+      $('modal-box').innerHTML = `<div class="row" style="justify-content:space-between"><b>${esc(sku)}</b><button class="btn o" onclick="closeModal()">Close</button></div>
+        <div class="muted" style="margin-top:10px">No clean (unwatermarked) photos for this part yet — it hasn't been through our photo studio. Ask us if you need it.</div>`;
+      return;
+    }
     const note = r.clean ? '' : (S.me.photos === 'clean'
       ? `<div class="muted" style="margin-top:6px">⚠ Clean versions of this part's photos aren't available yet, so these carry our watermark.</div>`
       : `<div class="muted" style="margin-top:6px">These are our listing photos (with our watermark). Ask us to switch your account to clean photos if you list them yourself.</div>`);
