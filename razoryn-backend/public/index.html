@@ -24631,7 +24631,7 @@ async function obRemove(id) {
 }
 
 function renderTrade() {
-  el('content').innerHTML = `<div style="max-width:1150px">
+  el('content').innerHTML = `<div style="max-width:1600px">
     <h1 style="margin-bottom:4px">Trade &amp; wholesale</h1>
     <div style="color:var(--ink-soft);font-size:14px;margin-bottom:14px">Businesses that buy from you to resell — their own prices, live stock through the trade portal / API, orders that come straight off stock (eBay &amp; Shopify update instantly), pay-per-order or account terms with one consolidated invoice per period.</div>
     <div class="seg" style="margin-bottom:14px" id="tr-tabs">
@@ -25163,7 +25163,7 @@ async function trPartnerDetail(id) {
   try { linked = (await Api.get(`/api/trade/partners/${id}/linked`)).products; } catch (e) { toast(e.message, 'error'); return; }
   const p = ((await Api.get('/api/trade/partners').catch(() => ({ partners: [] }))).partners || []).find(x => x.id === id) || { name: 'Partner' };
   const info = p.account_info || {};
-  TR.partnerLinked = linked;
+  TR.partnerLinked = linked; TR.partnerName = p.name;
   el('tr-body').innerHTML = `
     <div style="margin-bottom:10px"><a href="#" onclick="trGo('partners');return false" style="font-size:13px">← Partner apps</a></div>
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
@@ -25190,8 +25190,9 @@ async function trPartnerDetail(id) {
         <input id="trpc-q" placeholder="Search their parts…" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')trPartnerSearch(${id})">
         <label style="font-size:13px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="trpc-in" checked> In stock</label>
         <button class="btn btn-outline" onclick="trPartnerSearch(${id})">Search</button>
-        <button class="btn btn-primary" onclick="trPartnerImport(${id})">Import / link ticked</button></div>
-        <div id="trpc-res" style="max-height:420px;overflow:auto"></div></div></div>
+        <button class="btn btn-outline" onclick="trPartnerImport(${id})" title="Adds the ticked parts to your warehouse only (cost = their trade price) — no selling price, nothing listed">Import ticked (warehouse only)</button>
+        <button class="btn btn-primary" onclick="trBulkList(${id})" title="List the ticked parts on Shopify + your eBay accounts — choose price, policies and brand, see the profit first">📋 List ticked</button></div>
+        <div id="trpc-res" style="max-height:60vh;overflow:auto"></div></div></div>
     <div class="card"><div class="card-head"><h3>Linked parts (${linked.length})</h3><div class="card-desc">Enter quantities and order — it's placed in ${escapeHtml(p.name)}'s app (their stock comes off live) and lands in your Incoming.</div></div>
       <div class="card-body" style="padding:0;overflow:auto">${linked.length ? `<table class="table" style="margin:0"><thead><tr><th>Part</th><th style="text-align:right">Your stock</th><th style="text-align:right">Theirs</th><th style="text-align:right">Their price</th><th>Their location / barcode</th><th>Order qty</th></tr></thead><tbody>
         ${linked.map(x => `<tr><td><b>${escapeHtml(x.sku)}</b>${x.sourced ? ' <span style="font-size:10px;color:var(--blue)">sourced</span>' : ''}<div style="font-size:11px;color:var(--ink-soft)">${escapeHtml((x.title || '').slice(0, 60))}</div></td>
@@ -25216,6 +25217,9 @@ async function trPartnerList(linkId, sku) {
   const it = r.item, pc = it.parcel || {}, L = it.listing || {};
   const specs = {};
   for (const sp of (L.item_specifics || [])) if (sp && sp.name && !/placement/i.test(sp.name)) specs[sp.name] = Array.isArray(sp.value) ? sp.value.join(', ') : (sp.value ?? sp.values ?? '');
+  // Our brand, not theirs.
+  for (const k of Object.keys(specs)) if (/^brand$/i.test(k)) delete specs[k];
+  specs.Brand = blDefaultBrand();
   const placements = []; for (const sp of (L.item_specifics || [])) if (sp && /placement/i.test(sp.name || '')) (Array.isArray(sp.value) ? sp.value : String(sp.value || '').split(/,\s*/)).forEach(v => v && placements.push(v));
   const fields = {
     'cl-title': it.title || '', 'cl-partnumber': it.part_number || '', 'ce-title': it.title || '',
@@ -25321,6 +25325,160 @@ function trbdCalc() {
     set('trbd-net-' + k, `<span style="color:${net < 0 ? 'var(--red)' : 'var(--green)'}">${net < 0 ? '−' : ''}${trMoney(Math.abs(net))}</span><div style="font-size:11px;font-weight:400">${B ? (net / B * 100).toFixed(1) + '%' : ''}</div>`);
   }
 }
+// ── Bulk list partner parts: price rule + live profit, eBay accounts with
+// their policies, Shopify, own brand — then created one by one ──
+const BL = { linkId: null, items: [], rule: 'retail', pct: 0, prices: {}, results: {}, running: false };
+async function trBulkList(linkId) {
+  const skus = [...document.querySelectorAll('[data-trimp]:checked')].map(x => x.dataset.trimp);
+  if (!skus.length) return toast('Tick the parts to list first', 'warn');
+  BL.linkId = linkId;
+  BL.items = (TR._partnerItems || []).filter(i => skus.includes(i.sku) && !i.local);
+  const skipped = skus.length - BL.items.length;
+  if (!BL.items.length) return toast('Those parts are already here — open them from Inventory', 'info');
+  BL.prices = {}; BL.results = {}; BL.running = false;
+  const stores = (State.brand?.stores || []).filter(s => s.channelCode?.startsWith('ebay_') && !s.disabled);
+  const brandName = blDefaultBrand();
+  modal({ title: `List ${BL.items.length} part${BL.items.length > 1 ? 's' : ''} from ${escapeHtml(TR.partnerName || 'partner')}`, size: 'xl', body: `
+    ${skipped ? `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">${skipped} ticked part(s) are already in your warehouse — skipped.</div>` : ''}
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:12px">
+      <div class="field" style="margin:0"><label>eBay price</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <select id="bl-rule" onchange="BL.rule=this.value;blPaint()" style="flex:1">
+            <option value="retail">Their eBay price ± %</option><option value="cost">My cost + %</option></select>
+          <input id="bl-pct" type="number" step="1" value="0" style="width:80px" oninput="BL.pct=parseFloat(this.value)||0;blPaint()"> %</div>
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Change any row's price below. Shopify follows your usual Shopify % rule.</div></div>
+      <div class="field" style="margin:0"><label>Brand on the listings</label><input id="bl-brand" value="${escapeAttr(brandName)}">
+        <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Replaces their brand in the item specifics.</div></div>
+      <div class="field" style="margin:0"><label>Shopify</label>
+        <select id="bl-shop"><option value="active">List on Shopify (active)</option><option value="draft">Shopify draft (not live)</option></select></div>
+    </div>
+    <div style="font-size:13px;font-weight:600;margin-bottom:6px">eBay accounts</div>
+    <div id="bl-accts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:12px">
+      ${stores.length ? stores.map(s => `<div class="bl-acct" data-code="${escapeAttr(s.code)}" style="border:1px solid var(--line);border-radius:8px;padding:8px 10px">
+        <label style="display:flex;gap:6px;align-items:center;font-weight:600"><input type="checkbox" class="bl-on" ${s.primary ? 'checked' : ''}> ${escapeHtml(s.name)}${s.primary ? ' <span class="pill" style="font-size:10px">main</span>' : ''}</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px">
+          ${[['shippingId', 'Postage'], ['paymentId', 'Payment'], ['returnId', 'Returns']].map(([k, l]) => `<select data-pol="${k}" title="${l} policy" style="font-size:12px;padding:4px"><option value="">${l}: default</option></select>`).join('')}
+        </div></div>`).join('') : '<div style="font-size:12.5px;color:var(--ink-soft)">No eBay accounts connected.</div>'}
+    </div>
+    <div style="max-height:46vh;overflow:auto"><table class="table" style="margin:0;font-size:12.5px"><thead><tr>
+      <th>Part</th><th style="text-align:right">Their stock</th><th style="text-align:right">Your cost<div style="font-weight:400;font-size:10px">ex VAT</div></th>
+      <th style="text-align:right">eBay price</th><th style="text-align:right">Shopify</th><th style="text-align:right">eBay profit</th><th style="text-align:right">Shopify profit</th><th>Status</th></tr></thead>
+      <tbody id="bl-rows"></tbody></table></div>
+    <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">Each part is listed one by one: a warehouse product (selling their live stock), Shopify, and every ticked eBay account with its policies — using their category, item specifics, description, photos and carton size. Profit uses your own fees, postage and packaging (see £ breakdown).</div>`,
+    actions: [{ label: 'Close', onClick: closeModal }, { label: `List ${BL.items.length} part${BL.items.length > 1 ? 's' : ''}`, primary: true, onClick: () => blRun() }] });
+  // Each account's own business policies (pre-set to its saved defaults).
+  const cfg = await Api.get('/api/settings').catch(() => ({}));
+  const perStore = cfg.ebayPerStorePolicies || {};
+  const primary = stores.find(s => s.primary)?.code;
+  for (const b of document.querySelectorAll('#bl-accts .bl-acct')) {
+    const code = b.dataset.code;
+    const saved = perStore[code] || (code === primary ? { shipping: cfg.ebayPolicyShipping, payment: cfg.ebayPolicyPayment, return: cfg.ebayPolicyReturn } : {});
+    Api.get('/api/listings/business-policies?storeCode=' + encodeURIComponent(code)).then(r => {
+      const fill = (k, list, id) => { const sel = b.querySelector(`[data-pol="${k}"]`); for (const p of (list || [])) { const o = new Option(p.name, p.id); if (id && String(id) === String(p.id)) o.selected = true; sel.add(o); } };
+      fill('shippingId', r.shipping, saved.shipping); fill('paymentId', r.payment, saved.payment); fill('returnId', r.return, saved.return);
+    }).catch(() => {});
+  }
+  blPaint();
+}
+// The brand our listings carry (replaces the partner's): remembered once edited.
+function blDefaultBrand() {
+  try { const v = localStorage.getItem('partner_list_brand'); if (v) return v; } catch (_) {}
+  const code = String(State.brand?.code || State.brand?.id || '').toLowerCase();
+  if (code === 'calibre' || /calibre/i.test(State.brand?.name || '')) return 'CalibreAutoParts';
+  if (code === 'razoryn' || /razoryn/i.test(State.brand?.name || '')) return 'Razoryn eParts';
+  return State.brand?.name || '';
+}
+// Price for one part under the current rule (or the row's own override).
+function blPrice(i) {
+  if (BL.prices[i.sku] != null) return BL.prices[i.sku];
+  const base = BL.rule === 'cost' ? i.cost : (i.margins?.ebay?.price ?? i.rrp_ebay ?? i.rrp);
+  if (!(base > 0)) return null;
+  return Math.round(base * (1 + BL.pct / 100) * 100) / 100;
+}
+// Profit at a price on a channel, using the same rates as the £ breakdown.
+function blProfit(i, k, B) {
+  const p = i.margins?.[k]?.params; if (!p || !(B > 0)) return null;
+  const net = B - B * (p.vatPart || 0) - B * (p.feePct || 0) / 100 - (p.fixedFee || 0) - (p.postage || 0) - (p.packaging || 0) - (p.overhead || 0) - (p.cost ?? i.cost);
+  return { net, pct: net / B * 100 };
+}
+function blPaint() {
+  const tb = el('bl-rows'); if (!tb) return;
+  const shopPct = Number(State.pricingConfig?.shopifyPctEffective ?? State.pricingConfig?.priceLinkPct ?? 10);
+  const cell = r => r ? `<b style="color:${r.net < 0 ? 'var(--red)' : 'var(--green)'}">${r.net < 0 ? '−' : ''}${trMoney(Math.abs(r.net))}</b><div style="font-size:10.5px;color:var(--ink-soft)">${r.pct.toFixed(1)}%</div>` : '—';
+  tb.innerHTML = BL.items.map(i => {
+    const B = blPrice(i); const S = B ? Math.round(B * (1 - shopPct / 100) * 100) / 100 : null;
+    const res = BL.results[i.sku];
+    return `<tr>
+      <td><b>${escapeHtml(i.sku)}</b><div style="font-size:11px;color:var(--ink-soft);max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(i.title || '')}</div></td>
+      <td style="text-align:right">${escapeHtml(String(i.available_display ?? i.available ?? ''))}</td>
+      <td style="text-align:right">${trMoney(i.cost ?? i.price)}</td>
+      <td style="text-align:right"><input type="number" step="0.01" min="0" value="${B ?? ''}" style="width:90px;text-align:right;padding:4px 6px" ${BL.running ? 'disabled' : ''}
+        onchange="BL.prices['${escapeAttr(i.sku)}']=parseFloat(this.value)||null;blPaint()"></td>
+      <td style="text-align:right">${S != null ? trMoney(S) : '—'}</td>
+      <td style="text-align:right">${cell(blProfit(i, 'ebay', B))}</td>
+      <td style="text-align:right">${cell(blProfit(i, 'shopify', S))}</td>
+      <td style="font-size:11.5px;max-width:260px">${!res ? '<span style="color:var(--ink-soft)">ready</span>' : res.state === 'busy' ? '⏳ listing…' : res.state === 'ok' ? `<span style="color:var(--green)">✓ ${escapeHtml(res.msg)}</span>` : `<span style="color:var(--red)">✗ ${escapeHtml(res.msg)}</span>`}</td></tr>`;
+  }).join('');
+}
+// One by one: product (+ Shopify) → each ticked eBay account.
+async function blRun() {
+  if (BL.running) return;
+  const accts = [...document.querySelectorAll('#bl-accts .bl-acct')].filter(b => b.querySelector('.bl-on').checked).map(b => ({
+    code: b.dataset.code, pols: { shippingId: b.querySelector('[data-pol="shippingId"]').value || undefined, paymentId: b.querySelector('[data-pol="paymentId"]').value || undefined, returnId: b.querySelector('[data-pol="returnId"]').value || undefined } }));
+  const brandName = (el('bl-brand')?.value || '').trim();
+  try { if (brandName) localStorage.setItem('partner_list_brand', brandName); } catch (_) {}
+  const shopStatus = el('bl-shop')?.value || 'active';
+  const todo = BL.items.filter(i => BL.results[i.sku]?.state !== 'ok');
+  const noPrice = todo.filter(i => !(blPrice(i) > 0));
+  if (noPrice.length) return toast(`Set an eBay price for ${noPrice.map(i => i.sku).slice(0, 3).join(', ')}`, 'warn');
+  const losing = todo.filter(i => (blProfit(i, 'ebay', blPrice(i))?.net ?? 0) < 0);
+  if (!confirm(`List ${todo.length} part(s) — warehouse + Shopify (${shopStatus})${accts.length ? ' + eBay: ' + accts.map(a => (State.brand?.stores || []).find(s => s.code === a.code)?.name || a.code).join(', ') : ''}?` + (losing.length ? `\n\n⚠ ${losing.length} would lose money on eBay at the price set (${losing.slice(0, 3).map(i => i.sku).join(', ')}).` : ''))) return;
+  BL.running = true;
+  const t = Task.start(`Listing ${todo.length} part(s)`);
+  let ok = 0, bad = 0;
+  for (const i of todo) {
+    BL.results[i.sku] = { state: 'busy' }; blPaint();
+    try {
+      const d = (await Api.get(`/api/trade/partners/${BL.linkId}/item/${encodeURIComponent(i.sku)}`)).item;
+      const L = d.listing || {}, pc = d.parcel || {};
+      const price = blPrice(i);
+      const imgs = (d.images_public && d.images_public.length ? d.images_public : (d.images || []).map(x => x.url)).filter(u => /^https?:\/\//.test(u || ''));
+      const created = await Api.post('/api/listings/create-listing', {
+        sku: d.sku, title: d.title, partNumber: d.part_number || d.sku, ebayPrice: price, qty: 0, status: shopStatus,
+        costPrice: d.price, description: L.description || undefined, imageUrls: imgs,
+        pkgLengthCm: pc.length_cm ?? undefined, pkgWidthCm: pc.width_cm ?? undefined, pkgHeightCm: pc.height_cm ?? undefined, pkgWeightG: pc.weight_g ?? undefined,
+        packagingIncluded: pc.packaged ?? undefined, packagingCost: pc.packaging_cost ?? undefined,
+        shippingBand: pc.postage != null ? 'custom' : undefined, shippingCost: pc.postage ?? undefined,
+        partnerLinkId: BL.linkId, partnerSku: d.sku, partnerQty: d.available ?? 0,
+      });
+      const pid = created.productId;
+      // Their item specifics, with OUR brand.
+      const specs = (L.item_specifics || []).filter(s => s && s.name).map(s => ({ name: s.name, value: Array.isArray(s.value) ? s.value.join(', ') : (s.value ?? s.values ?? '') }))
+        .filter(s => String(s.value).trim() !== '' && !/^brand$/i.test(s.name));
+      if (brandName) specs.push({ name: 'Brand', value: brandName });
+      if (!specs.some(s => /^manufacturer part number$/i.test(s.name))) specs.push({ name: 'Manufacturer Part Number', value: d.part_number || d.sku });
+      const bits = ['warehouse' + (created.shopifySkipped ? '' : ' + Shopify')];
+      for (const a of accts) {
+        try {
+          const r2 = await Api.post('/api/listings/create-ebay', { productId: pid, storeCode: a.code, categoryId: L.ebay_category_id || undefined, conditionId: 1000,
+            price, quantity: d.available ?? 0, titleOverride: d.title, descriptionOverride: L.description || undefined, itemSpecifics: specs,
+            brand: brandName || undefined, businessPolicies: a.pols, imageUrls: imgs.length ? imgs : undefined });
+          bits.push(`${(State.brand?.stores || []).find(s => s.code === a.code)?.name || a.code} ${r2.itemId || '✓'}`);
+        } catch (e) { bits.push(`${(State.brand?.stores || []).find(s => s.code === a.code)?.name || a.code} ✗ ${String(e.data?.message || e.message).slice(0, 80)}`); throw Object.assign(new Error(bits.join(' · ')), { partial: true }); }
+      }
+      BL.results[i.sku] = { state: 'ok', msg: bits.join(' · ') }; ok++;
+    } catch (e) {
+      const m = e.partial ? e.message : (e.data?.error === 'sku_exists' ? 'already in your warehouse' : (e.data?.message || e.message));
+      BL.results[i.sku] = { state: 'bad', msg: m }; bad++;
+    }
+    blPaint();
+  }
+  BL.running = false; blPaint();
+  Task.done(t, `${ok} listed${bad ? ', ' + bad + ' failed' : ''}`);
+  toast(`${ok} part(s) listed${bad ? ` · ${bad} with problems — see the list` : ''}`, bad ? 'warn' : 'success', 8000);
+  Store.refresh('products').catch(() => {});
+}
+
 async function trPartnerImport(id) {
   const skus = [...document.querySelectorAll('[data-trimp]:checked')].map(x => x.dataset.trimp);
   if (!skus.length) return toast('Tick the parts to import', 'warn');

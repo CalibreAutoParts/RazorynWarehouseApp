@@ -468,6 +468,8 @@ router.get('/pricing-config', async (req, res) => {
     // Per-shop VAT switch (non-VAT-registered shops) — the listing form uses it.
     storeVat:               (r.data && r.data.storeVat) || {},
     priceLinkPct:           r.price_link_pct != null ? parseFloat(r.price_link_pct) : 0,
+    // What Create listing actually uses for Shopify = eBay − this % (falls back to the bank %).
+    shopifyPctEffective:    r.price_link_pct != null ? parseFloat(r.price_link_pct) : (r.bank_transfer_pct != null ? parseFloat(r.bank_transfer_pct) : 10),
     ebayPromoteDefault:     !!r.ebay_promote_default,
     ebayPromotePercent:     r.ebay_promote_percent != null ? parseFloat(r.ebay_promote_percent) : 10,
     ebayDescriptionTemplates: (() => {
