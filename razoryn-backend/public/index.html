@@ -24118,7 +24118,7 @@ async function ebSync(btn) {
     const r = await Api.post('/api/ebayhub/messages/sync', { days: 7 });
     const added = r.results.reduce((a, x) => a + (x.added || 0), 0), errs = r.results.filter(x => x.error);
     Task.done(t, `${added} new`);
-    toast(`${added} new message(s)` + (errs.length ? ` · ${errs.map(e => e.store + ': ' + e.error).join('; ')}` : ''), errs.length ? 'warn' : 'success', errs.length ? 9000 : 3000);
+    toast((added ? `${added} new message${added > 1 ? 's' : ''}` : 'No new messages') + (errs.length ? ` · ${errs.map(e => e.store + ': ' + e.error).join('; ')}` : ''), errs.length ? 'warn' : 'success', errs.length ? 9000 : 3000);
     renderEbay();
   } catch (e) { Task.fail(t); toast(e.data?.message || e.message, 'error'); }
   if (btn) btn.disabled = false;

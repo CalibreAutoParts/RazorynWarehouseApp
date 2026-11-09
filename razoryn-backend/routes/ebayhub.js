@@ -97,7 +97,8 @@ router.get('/messages/:id', requirePermission('dispatch'), aw(async (req, res) =
   const hasMedia = url => conv.some(c => (c.media || []).some(x => x.url === url));
   for (const r of convRows.length ? convRows : [m]) {
     const parts = hub.parseConversation(r.body, m.sender);
-    const own = String(r.body || '').split(/\nNew message from/i)[0].trim();
+    const ownParts = hub.parseConversation(r.body, m.sender);
+    const own = /\nNew message from/i.test(String(r.body || '')) ? (ownParts.filter(x => x.from === 'buyer').slice(-1)[0]?.text || '') : '';
     parts.forEach((x, i) => {
       if (!x.text || conv.some(c => c.text && nrm(c.text) === nrm(x.text))) return;
       if (i === parts.length - 1 && x.from === 'buyer' && !x.at) x.at = r.received_at;

@@ -219,11 +219,23 @@ function parseConversation(body, buyer) {
     if (rest) out.push({ from: 'buyer', text: rest });
     return out.length ? out.reverse() : [{ from: 'buyer', text: lines.join('\n') }];
   }
-  const newest = lines.slice(0, nm).join('\n');
+  let newest = lines.slice(0, nm).join('\n');
   const isOurs = l => /^your previous message$/i.test(l);
   const blocks = [];
   let i = nm + 1;
   if (isBuyer(lines[i])) i++;                                   // "New message from: <name>"
+  // The top of eBay's email is a SHORTENED preview ("…"); the full text is in
+  // the first "Dear <us>, … - <buyer>" block that follows — use that.
+  {
+    let j = i;
+    while (j < lines.length && !/^Dear\s.+,$/.test(lines[j]) && !isOurs(lines[j]) && !isBuyer(lines[j])) j++;
+    if (j < lines.length && /^Dear\s.+,$/.test(lines[j])) {
+      let k = j + 1;
+      while (k < lines.length && !/^-\s\S+/.test(lines[k])) k++;
+      const full = lines.slice(j + 1, k).join('\n').trim();
+      if (full && k < lines.length && isBuyer(lines[k].replace(/^-\s+/, '').trim())) { newest = full; i = k + 1; }
+    }
+  }
   while (i < lines.length) {
     const l = lines[i];
     if (isBuyer(l) || isOurs(l)) {
