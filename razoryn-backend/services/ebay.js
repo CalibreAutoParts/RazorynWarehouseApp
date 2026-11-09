@@ -531,6 +531,12 @@ async function pushStockForProduct(product) {
       [product.shopify_product_id]
     );
     links = r.rows;
+    // Listed on eBay without a Shopify product (e.g. Shopify skipped): the link
+    // was saved with no Shopify id — find it by SKU instead.
+    if (!links.length && product.sku) {
+      links = (await query(`SELECT ebay_item_id, store_code FROM mirror_links
+        WHERE shopify_product_id IS NULL AND upper(last_synced_sku) = upper($1)`, [product.sku])).rows;
+    }
   } catch (e) { /* db unavailable — treat as no link */ }
 
   if (links.length) {
@@ -570,7 +576,9 @@ async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
   if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
   if (!itemId) throw new Error('missing_item_id');
   // Limited accounts show at most their cap; the warehouse keeps the real count.
+  const asked = Math.max(0, parseInt(quantity) || 0);
   let qty = await require('../lib/ebay-qty-cap').applyCap(quantity, resolveStore(storeArg)?.code);
+  let limitedBy = qty < asked ? 'qty_cap' : null;
   // Accounts with monthly selling limits: raising a listing's quantity uses up
   // allowance too — only raise it as far as the allowance left covers.
   const lim = opts.lowering ? null : await getSellingLimits(storeArg).catch(() => null);
@@ -582,7 +590,9 @@ async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
       if (qty > curQty) {
         const byQty = lim.qtyRemaining != null ? lim.qtyRemaining : Infinity;
         const byAmt = (lim.amountRemaining != null && unit > 0) ? Math.floor((lim.amountRemaining + 0.001) / unit) : Infinity;
+        const before = qty;
         qty = curQty + Math.max(0, Math.min(qty - curQty, byQty, byAmt));
+        if (qty < before) limitedBy = 'selling_limit';
       }
     } catch (_) { /* can't read the listing — push as asked */ }
   }
@@ -592,7 +602,7 @@ async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
     const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
     throw new Error('eBay ReviseInventoryStatus error: ' + decodeEntities(err));
   }
-  return { ok: true, itemId, quantity: qty, storeCode: resolveStore(storeArg)?.code };
+  return { ok: true, itemId, quantity: qty, asked, limitedBy, storeCode: resolveStore(storeArg)?.code };
 }
 
 // getQuantityTradingAPI — read a listing's current available quantity via

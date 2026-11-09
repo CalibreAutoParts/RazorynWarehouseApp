@@ -1228,6 +1228,9 @@ router.post('/pull-ebay-stock', requireAdmin, async (req, res) => {
     FROM mirror_links ml
     JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text
     WHERE p.active = true
+      -- Partner-sourced parts list own + partner stock on eBay: copying that back
+      -- would count the partner's units as ours.
+      AND NOT (p.source_partner_id IS NOT NULL AND p.source_partner_id = p.partner_link_id)
     LIMIT 2000
   `);
 

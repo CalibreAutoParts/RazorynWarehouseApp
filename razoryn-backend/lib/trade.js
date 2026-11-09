@@ -160,6 +160,7 @@ async function _migrate() {
   for (const col of [
     'partner_link_id INTEGER', 'source_partner_id INTEGER', 'partner_sku TEXT', 'partner_qty INTEGER', 'partner_cost NUMERIC(12,4)',
     'partner_location TEXT', 'partner_barcode TEXT', 'partner_synced_at TIMESTAMPTZ',
+    'stock_pushed_at TIMESTAMPTZ', 'stock_push_result JSONB',
   ]) await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ${col}`);
 }
 

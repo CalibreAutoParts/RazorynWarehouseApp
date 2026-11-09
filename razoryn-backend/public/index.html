@@ -25171,7 +25171,7 @@ async function trPartnerDetail(id) {
       <span style="font-size:12px;color:var(--ink-soft)">${info.terms ? `Your terms with them: ${escapeHtml(info.terms.kind)}${info.terms.credit_limit ? ', limit ' + trMoney(info.terms.credit_limit) : ''} · you owe them ${trMoney(info.account_summary?.balance)}` : ''}</span>
       <button class="btn btn-outline btn-sm" onclick="trPartnerAction(${id},'connect')">Test connection</button>
       <button class="btn btn-outline btn-sm" onclick="trPartnerAction(${id},'sync')">↻ Sync stock &amp; costs</button>
-      <button class="btn btn-outline btn-sm" onclick="trPartnerAction(${id},'push-stock')" title="Send own + partner stock to the eBay and Shopify listings of every part sourced from this partner">⇅ Push stock to my listings</button>
+      <button class="btn btn-outline btn-sm" onclick="trPartnerPushStock(${id})" title="Send own + partner stock to the eBay and Shopify listings of every part sourced from this partner — shows each listing's result">⇅ Push stock to my listings</button>
       <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="trPartnerDelete(${id})">Unlink</button>
     </div>
     <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Selling their parts</h3><div class="card-desc">Parts you list from ${escapeHtml(p.name)} show <b>their live stock</b> (plus any of your own) on your eBay, Shopify and OnBuy, and update as their stock changes.</div></div>
@@ -25195,9 +25195,12 @@ async function trPartnerDetail(id) {
         <button class="btn btn-primary" onclick="trBulkList(${id})" title="List the ticked parts on Shopify + your eBay accounts — choose price, policies and brand, see the profit first">📋 List ticked</button></div>
         <div id="trpc-res" style="max-height:60vh;overflow:auto"></div></div></div>
     <div class="card"><div class="card-head"><h3>Linked parts (${linked.length})</h3><div class="card-desc">Enter quantities and order — it's placed in ${escapeHtml(p.name)}'s app (their stock comes off live) and lands in your Incoming.</div></div>
-      <div class="card-body" style="padding:0;overflow:auto">${linked.length ? `<table class="table" style="margin:0"><thead><tr><th>Part</th><th style="text-align:right">Your stock</th><th style="text-align:right">Theirs</th><th style="text-align:right">Their price</th><th>Their location / barcode</th><th>Order qty</th></tr></thead><tbody>
+      <div class="card-body" style="padding:0;overflow:auto">${linked.length ? `<table class="table" style="margin:0"><thead><tr><th>Part</th><th style="text-align:right">Your stock</th><th style="text-align:right">Theirs</th><th style="text-align:right" title="What your eBay / Shopify listings should show: your stock + theirs">On sale</th><th>Listings — last stock push</th><th style="text-align:right">Their price</th><th>Their location / barcode</th><th>Order qty</th></tr></thead><tbody>
         ${linked.map(x => `<tr><td><b>${escapeHtml(x.sku)}</b>${x.sourced ? ' <span style="font-size:10px;color:var(--blue)">sourced</span>' : ''}<div style="font-size:11px;color:var(--ink-soft)">${escapeHtml((x.title || '').slice(0, 60))}</div></td>
-          <td style="text-align:right">${x.qty_on_hand}</td><td style="text-align:right">${x.partner_qty ?? '—'}</td><td style="text-align:right">${trMoney(x.partner_cost)}${x.price_ebay && x.partner_cost ? `<div style="font-size:10px;color:var(--ink-soft)">your eBay ${trMoney(x.price_ebay)}</div>` : ''}</td>
+          <td style="text-align:right">${x.qty_on_hand}</td><td style="text-align:right">${x.partner_qty ?? '—'}</td>
+          <td style="text-align:right"><b>${x.sourced ? Math.max(0, x.qty_on_hand || 0) + Math.max(0, x.partner_qty || 0) : x.qty_on_hand}</b></td>
+          <td style="font-size:11px" id="trpush-${x.id}">${trPushSummary(x.stock_push_result, x)}</td>
+          <td style="text-align:right">${trMoney(x.partner_cost)}${x.price_ebay && x.partner_cost ? `<div style="font-size:10px;color:var(--ink-soft)">your eBay ${trMoney(x.price_ebay)}</div>` : ''}</td>
           <td style="font-size:11px">${escapeHtml(x.partner_location || '')}${x.partner_barcode ? `<div>▮ ${escapeHtml(x.partner_barcode)}</div>` : ''}</td>
           <td><input type="number" min="0" style="width:64px" data-trpo="${x.id}" max="${x.partner_qty || 0}"></td></tr>`).join('')}
         </tbody></table>
@@ -25256,6 +25259,49 @@ async function trPartnerAutoSave(id) {
     await Api.put(`/api/trade/partners/${id}`, { autoOrder: !!el('trp-auto')?.checked, autoOrderDelivery: el('trp-auto-del')?.value });
     toast(el('trp-auto')?.checked ? '🔁 Automatic ordering on' : 'Automatic ordering off', 'success', 4000);
   } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+// One line per channel: what the last stock push sent, or why it didn't.
+function trPushSummary(r, x = {}) {
+  const store = c => (State.brand?.stores || []).find(s => s.code === c)?.name || c || 'eBay';
+  if (!r) return `<span style="color:var(--ink-soft)">eBay ×${x.ebay_listings ?? 0} · ${x.on_shopify ? 'Shopify ✓' : 'not on Shopify'} · not pushed yet</span>`;
+  const bits = (r.ebay || []).map(e => e.error
+    ? `<div style="color:var(--red)">✗ ${escapeHtml(store(e.store))} ${escapeHtml(e.itemId)}: ${escapeHtml(e.error)}</div>`
+    : `<div style="color:${e.sent < r.qty ? 'var(--amber,#d97706)' : 'var(--green)'}">✓ ${escapeHtml(store(e.store))} ${escapeHtml(e.itemId)} → ${e.sent}${e.limitedBy === 'selling_limit' ? ' (held back by eBay selling limits)' : e.limitedBy === 'qty_cap' ? ' (account quantity cap)' : ''}</div>`);
+  if (!(r.ebay || []).length) bits.push('<div style="color:var(--amber,#d97706)">⚠ no eBay listing linked</div>');
+  const s = r.shopify || {};
+  bits.push(s.error ? `<div style="color:var(--red)">✗ Shopify: ${escapeHtml(s.error)}</div>` : s.skipped ? `<div style="color:var(--ink-soft)">Shopify: ${escapeHtml(s.skipped)}</div>` : `<div style="color:var(--green)">✓ Shopify → ${s.sent}</div>`);
+  if (r.at) bits.push(`<div style="color:var(--ink-soft);font-size:10px">${new Date(r.at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</div>`);
+  return bits.join('');
+}
+// Push every sourced part's stock one by one, with a progress bar and each
+// listing's result (refreshes their stock first).
+async function trPartnerPushStock(id) {
+  const parts = (TR.partnerLinked || []).filter(x => x.sourced);
+  if (!parts.length) return toast('No parts are sourced from this partner yet', 'warn');
+  let stop = false;
+  modal({ title: 'Push stock to my listings', size: 'lg', body: `
+    <div id="trps-msg" style="font-size:13px;margin-bottom:8px">Refreshing their stock…</div>
+    <div style="height:10px;background:var(--line-2);border-radius:6px;overflow:hidden"><div id="trps-bar" style="height:100%;width:0;background:var(--brand-primary);transition:width .25s"></div></div>
+    <div id="trps-list" style="margin-top:12px;max-height:55vh;overflow:auto;font-size:12px"></div>`,
+    actions: [{ label: 'Stop', onClick: () => { stop = true; } }, { label: 'Close', onClick: () => { stop = true; closeModal(); trPartnerDetail(id); } }] });
+  try { await Api.post(`/api/trade/partners/${id}/sync`, {}); } catch (e) { el('trps-msg').textContent = 'Could not refresh their stock (' + (e.data?.message || e.message) + ') — pushing the last known stock.'; }
+  let ok = 0, warn = 0, bad = 0;
+  for (let n = 0; n < parts.length && !stop; n++) {
+    const x = parts[n];
+    if (el('trps-msg')) el('trps-msg').textContent = `Pushing ${n + 1} of ${parts.length} — ${x.sku}`;
+    let row;
+    try {
+      const r = await Api.post(`/api/trade/partners/${id}/push-stock/${x.id}`, {});
+      const err = (r.ebay || []).some(e => e.error) || r.shopify?.error;
+      const short = !(r.ebay || []).length || (r.ebay || []).some(e => !e.error && e.sent < r.qty);
+      err ? bad++ : short ? warn++ : ok++;
+      row = `<b>${escapeHtml(x.sku)}</b> — on sale ${r.qty} (yours ${Math.max(0, r.own || 0)} + theirs ${r.partner ?? 0})${trPushSummary(r, x)}`;
+      const cell = el('trpush-' + x.id); if (cell) cell.innerHTML = trPushSummary(r, x);
+    } catch (e) { bad++; row = `<b>${escapeHtml(x.sku)}</b> <span style="color:var(--red)">✗ ${escapeHtml(e.data?.message || e.message)}</span>`; }
+    if (el('trps-list')) el('trps-list').insertAdjacentHTML('beforeend', `<div style="padding:6px 0;border-bottom:1px solid var(--line-2)">${row}</div>`);
+    if (el('trps-bar')) el('trps-bar').style.width = Math.round((n + 1) / parts.length * 100) + '%';
+  }
+  if (el('trps-msg')) el('trps-msg').innerHTML = `${stop ? 'Stopped' : 'Done'} — <b style="color:var(--green)">${ok} ok</b>${warn ? ` · <b style="color:var(--amber,#d97706)">${warn} need a look</b>` : ''}${bad ? ` · <b style="color:var(--red)">${bad} failed</b>` : ''}. eBay can take a minute to show the new quantity.`;
 }
 async function trPartnerAction(id, act) {
   try {

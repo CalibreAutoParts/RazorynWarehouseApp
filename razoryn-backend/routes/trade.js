@@ -529,9 +529,19 @@ router.post('/partners/:id/push-stock', aw(async (req, res) => {
   await audit(req, 'trade_partner_push_stock', 'trade_partner', link.id, { count: ids.length });
   res.json({ ok: true, count: ids.length });
 }));
+// POST /api/trade/partners/:id/push-stock/:productId — push ONE part now and
+// return what eBay / Shopify took (the page loops over parts for a progress bar).
+router.post('/partners/:id/push-stock/:productId', aw(async (req, res) => {
+  const p = (await query(`SELECT id FROM products WHERE id = $1 AND partner_link_id = $2`, [req.params.productId, req.params.id])).rows[0];
+  if (!p) return res.status(404).json({ error: 'not_found', message: 'That part is not linked to this partner.' });
+  try { res.json(await partner.pushOne(p.id)); } catch (e) { fail(res, e); }
+}));
 router.get('/partners/:id/linked', aw(async (req, res) => {
   const rows = (await query(`SELECT id, sku, title, qty_on_hand, partner_sku, partner_qty, partner_cost, partner_location, partner_barcode,
-      partner_synced_at, cost_price, price_shopify, price_ebay, (source_partner_id = $1) AS sourced
+      partner_synced_at, cost_price, price_shopify, price_ebay, (source_partner_id = $1) AS sourced,
+      shopify_inventory_id IS NOT NULL AS on_shopify, stock_pushed_at, stock_push_result,
+      (SELECT count(*)::int FROM mirror_links ml WHERE ml.shopify_product_id::text = products.shopify_product_id::text
+         OR (products.shopify_product_id IS NULL AND upper(ml.last_synced_sku) = upper(products.sku))) AS ebay_listings
     FROM products WHERE partner_link_id = $1 ORDER BY title LIMIT 2000`, [req.params.id])).rows;
   res.json({ products: rows });
 }));

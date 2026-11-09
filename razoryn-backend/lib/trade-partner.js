@@ -421,10 +421,52 @@ async function dropshipDispatched(link, o) {
 function pushPartnerStock(productIds) {
   const ids = [...new Set((productIds || []).filter(Boolean))];
   if (!ids.length) return;
-  setImmediate(() => {
-    require('../services/sync').pushStockForSaleItems(ids.map(id => ({ productId: id }))).catch(e => console.warn('[partner] stock push:', e.message));
+  setImmediate(async () => {
+    for (const id of ids) { try { await pushOne(id); } catch (e) { console.warn('[partner] stock push:', e.message); } }
     try { require('./onbuy-sync').pushStockAndPrices().catch(() => {}); } catch (_) {}
   });
+}
+
+// Push one part's sellable stock (own + partner) to each of its eBay listings
+// and its Shopify product, and keep the outcome on the product so the partner
+// page shows what each channel actually took.
+// → { productId, sku, qty, ebay: [{ itemId, store, sent, asked, limitedBy, error }], shopify: { sent | skipped | error } }
+async function pushOne(productId) {
+  const ebay = require('../services/ebay');
+  const shopify = require('../services/shopify');
+  const product = (await query(`SELECT * FROM products WHERE id = $1`, [productId])).rows[0];
+  if (!product) throw new Error('product_not_found');
+  const qty = await require('./stock-qty').sellableQty(product);
+  const out = { productId: product.id, sku: product.sku, own: product.qty_on_hand, partner: product.partner_qty, qty, ebay: [], shopify: null };
+
+  let links = [];
+  if (product.shopify_product_id) {
+    links = (await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [String(product.shopify_product_id)])).rows;
+  }
+  if (!links.length && product.sku) {
+    links = (await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE upper(last_synced_sku) = upper($1)`, [product.sku]).catch(() => ({ rows: [] }))).rows;
+  }
+  for (const l of links) {
+    const row = { itemId: l.ebay_item_id, store: l.store_code || null };
+    try {
+      const r = await ebay.setQuantityTradingAPI(l.ebay_item_id, qty, l.store_code || undefined);
+      row.sent = r.quantity; row.asked = r.asked; row.limitedBy = r.limitedBy || null;
+    } catch (e) {
+      const m = String(e.message || e);
+      row.error = (m === 'ebay_not_configured' ? 'this eBay account is not connected (Settings → eBay shops)' : m).slice(0, 300);
+    }
+    out.ebay.push(row);
+  }
+
+  if (!product.shopify_inventory_id) out.shopify = { skipped: 'not on Shopify' };
+  else if (!shopify.isConfigured()) out.shopify = { skipped: 'Shopify not connected' };
+  else {
+    try { await shopify.setInventoryLevel(product.shopify_inventory_id, qty); out.shopify = { sent: qty }; }
+    catch (e) { out.shopify = { error: String(e.response?.data?.errors ? JSON.stringify(e.response.data.errors) : (e.message || e)).slice(0, 300) }; }
+  }
+  out.at = new Date().toISOString();
+  await query(`UPDATE products SET stock_pushed_at = now(), stock_push_result = $2::jsonb WHERE id = $1`, [product.id, JSON.stringify(out)]).catch(() => {});
+  return out;
 }
 
 // Partner pushed an event to us (signature checked by the caller).
@@ -459,4 +501,4 @@ async function handleEvent(link, evt) {
   return { ignored: true };
 }
 
-module.exports = { ensureSchema, call, getLink, publicLink, connect, catalogue, importItems, sync, syncAll, placeOrder, handleEvent, origin, autoOrderSweep, pushPartnerStock };
+module.exports = { ensureSchema, call, getLink, publicLink, connect, catalogue, importItems, sync, syncAll, placeOrder, handleEvent, origin, autoOrderSweep, pushPartnerStock, pushOne };
