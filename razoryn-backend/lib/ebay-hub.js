@@ -106,7 +106,7 @@ async function syncStore(store, { days = 5 } = {}) {
     <StartTime>${start.toISOString()}</StartTime><EndTime>${end.toISOString()}</EndTime>`, store.code);
   const heads = parseHeaders(xml);
   let added = 0;
-  const needBody = [];
+  const needBody = [], fresh = [];
   for (const h of heads) {
     const r = (await query(`INSERT INTO ebay_messages (store_code, message_id, external_id, sender, recipient, subject, item_id, item_title,
         message_type, received_at, is_read, replied, response_enabled, high_priority)
@@ -116,7 +116,12 @@ async function syncStore(store, { days = 5 } = {}) {
       RETURNING (xmax = 0) AS inserted, body IS NULL AS no_body`,
       [store.code, h.messageId, h.externalId, h.sender, h.recipient, h.subject, h.itemId, h.itemTitle, h.type,
        h.received ? new Date(h.received) : null, h.read, h.replied, h.responseEnabled, h.highPriority])).rows[0];
-    if (r.inserted) added++;
+    if (r.inserted) {
+      added++;
+      // New buyer message (not eBay's own notices, not old backfill) → alert.
+      const isEbayMsg = /^ebay$/i.test(h.sender || '') || /@/.test(h.sender || '') || /^ebay /i.test(h.sender || '');
+      if (!isEbayMsg && h.received && Date.now() - new Date(h.received).getTime() < 3 * 3600 * 1000) fresh.push(h);
+    }
     if (r.no_body) needBody.push(h.messageId);
   }
   // Messages saved before photos / reply tracking existed: fetch again.
@@ -145,6 +150,23 @@ async function syncStore(store, { days = 5 } = {}) {
           [store.code, m.messageId, body || '', JSON.stringify(media), conv.length ? conv[conv.length - 1].from : 'buyer']);
       }
     } catch (e) { console.warn('[ebay-hub] bodies', store.code, e.message); }
+  }
+  if (fresh.length) {
+    try {
+      const notify = require('./notify');
+      if (fresh.length === 1) {
+        const h = fresh[0];
+        const row = (await query(`SELECT id, body FROM ebay_messages WHERE store_code = $1 AND message_id = $2`, [store.code, h.messageId])).rows[0];
+        const conv = row ? parseConversation(row.body, h.sender) : [];
+        const text = (conv.filter(x => x.from === 'buyer').slice(-1)[0]?.text || h.subject || '').replace(/\s+/g, ' ').slice(0, 140);
+        await notify.notifyEvent({ type: 'ebay_message', title: `💬 ${h.sender} · ${store.name}`, body: (h.itemTitle ? h.itemTitle.slice(0, 50) + ': ' : '') + text,
+          relatedType: 'ebay_message', relatedId: row?.id || null, url: '/#ebay', tag: 'ebaymsg-' + h.messageId, force: true });
+      } else {
+        const who = [...new Set(fresh.map(h => h.sender))];
+        await notify.notifyEvent({ type: 'ebay_message', title: `💬 ${fresh.length} new eBay messages · ${store.name}`,
+          body: 'From ' + who.slice(0, 4).join(', ') + (who.length > 4 ? ` +${who.length - 4} more` : ''), url: '/#ebay', tag: 'ebaymsg-batch-' + Date.now(), force: true });
+      }
+    } catch (e) { console.warn('[ebay-hub] notify:', e.message); }
   }
   return { store: store.code, fetched: heads.length, added };
 }
