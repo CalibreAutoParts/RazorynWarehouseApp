@@ -459,4 +459,4 @@ async function handleEvent(link, evt) {
   return { ignored: true };
 }
 
-module.exports = { ensureSchema, call, getLink, publicLink, connect, catalogue, importItems, sync, syncAll, placeOrder, handleEvent, origin, autoOrderSweep };
+module.exports = { ensureSchema, call, getLink, publicLink, connect, catalogue, importItems, sync, syncAll, placeOrder, handleEvent, origin, autoOrderSweep, pushPartnerStock };

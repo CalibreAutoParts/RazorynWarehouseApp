@@ -1039,7 +1039,8 @@ async function pushProductStockToChannels(productId, _opts = {}) {
   // of qty_on_hand (which is 0): the units still on the way, minus those already
   // pre-ordered — so the channels list exactly what can still be reserved and stop
   // selling once it's gone (the listing's inventory_policy is 'deny' for these).
-  let pushQty = product.qty_on_hand;
+  // Own stock — plus the partner's for a part sold from their stock.
+  let pushQty = await require('../lib/stock-qty').sellableQty(product);
   if (product.preorder_active || product.is_prelisted) {
     try {
       const inc = await query(

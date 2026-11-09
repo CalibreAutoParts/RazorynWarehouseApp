@@ -990,7 +990,7 @@ router.post('/ebay-limits/apply/:code', requireAdmin, async (req, res) => {
   const cap = await require('../lib/ebay-qty-cap').capFor(store.code);
   if (!cap) return res.status(400).json({ error: 'no_cap', message: 'Set a cap for this account first.' });
   const { rows } = await query(`
-    SELECT DISTINCT ON (ml.ebay_item_id) ml.ebay_item_id, p.sku, p.qty_on_hand
+    SELECT DISTINCT ON (ml.ebay_item_id) ml.ebay_item_id, p.sku, ${require('../lib/stock-qty').SELLABLE_SQL} AS qty_on_hand
     FROM mirror_links ml
     JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text AND p.active = true
     WHERE ml.store_code = $1

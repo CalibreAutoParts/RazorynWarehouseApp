@@ -25171,6 +25171,7 @@ async function trPartnerDetail(id) {
       <span style="font-size:12px;color:var(--ink-soft)">${info.terms ? `Your terms with them: ${escapeHtml(info.terms.kind)}${info.terms.credit_limit ? ', limit ' + trMoney(info.terms.credit_limit) : ''} · you owe them ${trMoney(info.account_summary?.balance)}` : ''}</span>
       <button class="btn btn-outline btn-sm" onclick="trPartnerAction(${id},'connect')">Test connection</button>
       <button class="btn btn-outline btn-sm" onclick="trPartnerAction(${id},'sync')">↻ Sync stock &amp; costs</button>
+      <button class="btn btn-outline btn-sm" onclick="trPartnerAction(${id},'push-stock')" title="Send own + partner stock to the eBay and Shopify listings of every part sourced from this partner">⇅ Push stock to my listings</button>
       <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="trPartnerDelete(${id})">Unlink</button>
     </div>
     <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Selling their parts</h3><div class="card-desc">Parts you list from ${escapeHtml(p.name)} show <b>their live stock</b> (plus any of your own) on your eBay, Shopify and OnBuy, and update as their stock changes.</div></div>
@@ -25259,7 +25260,7 @@ async function trPartnerAutoSave(id) {
 async function trPartnerAction(id, act) {
   try {
     const r = await Api.post(`/api/trade/partners/${id}/${act}`, {});
-    toast(act === 'sync' ? `Synced ${r.updated} part(s)${r.costChanged ? ` · ${r.costChanged} cost change(s)` : ''}` : `Connected ✓${r.hook?.ok === false ? ' (webhook not registered: ' + r.hook.error + ')' : ''}`, 'success', 6000);
+    toast(act === 'push-stock' ? `Pushing stock for ${r.count} part(s) to eBay/Shopify — runs in the background` : act === 'sync' ? `Synced ${r.updated} part(s)${r.costChanged ? ` · ${r.costChanged} cost change(s)` : ''}` : `Connected ✓${r.hook?.ok === false ? ' (webhook not registered: ' + r.hook.error + ')' : ''}`, 'success', 6000);
     trPartnerDetail(id);
   } catch (e) { toast(e.data?.message || e.message, 'error', 8000); }
 }
