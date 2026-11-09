@@ -25355,29 +25355,43 @@ async function trBulkList(linkId) {
     <div style="font-size:13px;font-weight:600;margin-bottom:6px">eBay accounts</div>
     <div id="bl-accts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:12px">
       ${stores.length ? stores.map(s => `<div class="bl-acct" data-code="${escapeAttr(s.code)}" style="border:1px solid var(--line);border-radius:8px;padding:8px 10px">
-        <label style="display:flex;gap:6px;align-items:center;font-weight:600"><input type="checkbox" class="bl-on" ${s.primary ? 'checked' : ''}> ${escapeHtml(s.name)}${s.primary ? ' <span class="pill" style="font-size:10px">main</span>' : ''}</label>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px">
-          ${[['shippingId', 'Postage'], ['paymentId', 'Payment'], ['returnId', 'Returns']].map(([k, l]) => `<select data-pol="${k}" title="${l} policy" style="font-size:12px;padding:4px"><option value="">${l}: default</option></select>`).join('')}
-        </div></div>`).join('') : '<div style="font-size:12.5px;color:var(--ink-soft)">No eBay accounts connected.</div>'}
+        <label style="display:flex;gap:6px;align-items:center;font-weight:600"><input type="checkbox" class="bl-on" ${s.primary ? 'checked' : ''} onchange="blPaint()"> ${escapeHtml(s.name)}${s.primary ? ' <span class="pill" style="font-size:10px">main</span>' : ''}</label>
+        <div style="display:flex;gap:6px;align-items:center;margin-top:6px;font-size:12px"><span style="color:var(--ink-soft);white-space:nowrap">Default postage</span>
+          <select class="bl-defship" style="font-size:12px;padding:4px;flex:1" onchange="blPaint()"><option value="">account's saved default</option></select></div>
+        </div>`).join('') : '<div style="font-size:12.5px;color:var(--ink-soft)">No eBay accounts connected.</div>'}
+    </div>
+    <div style="font-size:11.5px;color:var(--ink-soft);margin:-4px 0 10px">Payment and returns use each account's saved policies. Postage can be set per part below.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;font-size:12.5px">
+      <input type="search" id="bl-filter" placeholder="Filter parts — e.g. bonnet, bumper, headlight…" style="flex:1;min-width:220px" oninput="blPaint()">
+      <span>Set the shown rows on</span>
+      <select id="bl-set-acct" onchange="blFillSetPolicy()" style="padding:4px"></select>
+      <span>to</span>
+      <select id="bl-set-pol" style="padding:4px;min-width:150px"></select>
+      <button class="btn btn-outline btn-sm" onclick="blApplyShown()">Apply to shown rows</button>
     </div>
     <div style="max-height:46vh;overflow:auto"><table class="table" style="margin:0;font-size:12.5px"><thead><tr>
       <th>Part</th><th style="text-align:right">Their stock</th><th style="text-align:right">Your cost<div style="font-weight:400;font-size:10px">ex VAT</div></th>
-      <th style="text-align:right">eBay price</th><th style="text-align:right">Shopify</th><th style="text-align:right">eBay profit</th><th style="text-align:right">Shopify profit</th><th>Status</th></tr></thead>
+      <th style="text-align:right">eBay price</th><th style="text-align:right">Shopify</th><th style="text-align:right">eBay profit</th><th style="text-align:right">Shopify profit</th><th id="bl-ship-head">Postage</th><th>Status</th></tr></thead>
       <tbody id="bl-rows"></tbody></table></div>
     <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">Each part is listed one by one: a warehouse product (selling their live stock), Shopify, and every ticked eBay account with its policies — using their category, item specifics, description, photos and carton size. Profit uses your own fees, postage and packaging (see £ breakdown).</div>`,
     actions: [{ label: 'Close', onClick: closeModal }, { label: `List ${BL.items.length} part${BL.items.length > 1 ? 's' : ''}`, primary: true, onClick: () => blRun() }] });
-  // Each account's own business policies (pre-set to its saved defaults).
+  // Each account's postage policies; the account default is its saved one.
+  BL.ship = {}; BL.shipLists = {}; BL.names = Object.fromEntries(stores.map(s => [s.code, s.name]));
   const cfg = await Api.get('/api/settings').catch(() => ({}));
   const perStore = cfg.ebayPerStorePolicies || {};
   const primary = stores.find(s => s.primary)?.code;
-  for (const b of document.querySelectorAll('#bl-accts .bl-acct')) {
+  await Promise.all([...document.querySelectorAll('#bl-accts .bl-acct')].map(async b => {
     const code = b.dataset.code;
-    const saved = perStore[code] || (code === primary ? { shipping: cfg.ebayPolicyShipping, payment: cfg.ebayPolicyPayment, return: cfg.ebayPolicyReturn } : {});
-    Api.get('/api/listings/business-policies?storeCode=' + encodeURIComponent(code)).then(r => {
-      const fill = (k, list, id) => { const sel = b.querySelector(`[data-pol="${k}"]`); for (const p of (list || [])) { const o = new Option(p.name, p.id); if (id && String(id) === String(p.id)) o.selected = true; sel.add(o); } };
-      fill('shippingId', r.shipping, saved.shipping); fill('paymentId', r.payment, saved.payment); fill('returnId', r.return, saved.return);
-    }).catch(() => {});
-  }
+    const saved = (perStore[code] || (code === primary ? { shipping: cfg.ebayPolicyShipping } : {})).shipping;
+    BL.ship[code] = {};
+    try {
+      const r = await Api.get('/api/listings/business-policies?storeCode=' + encodeURIComponent(code));
+      BL.shipLists[code] = r.shipping || [];
+      const sel = b.querySelector('.bl-defship');
+      for (const p of BL.shipLists[code]) { const o = new Option(p.name, p.id); if (saved && String(saved) === String(p.id)) o.selected = true; sel.add(o); }
+    } catch (_) { BL.shipLists[code] = []; }
+  }));
+  blFillSetPolicy();
   blPaint();
 }
 // The brand our listings carry (replaces the partner's): remembered once edited.
@@ -25387,6 +25401,21 @@ function blDefaultBrand() {
   if (code === 'calibre' || /calibre/i.test(State.brand?.name || '')) return 'CalibreAutoParts';
   if (code === 'razoryn' || /razoryn/i.test(State.brand?.name || '')) return 'Razoryn eParts';
   return State.brand?.name || '';
+}
+function blAccts() { return [...document.querySelectorAll('#bl-accts .bl-acct')].filter(b => b.querySelector('.bl-on').checked).map(b => ({ code: b.dataset.code, def: b.querySelector('.bl-defship').value })); }
+function blShown() { const q = (el('bl-filter')?.value || '').trim().toLowerCase(); return BL.items.filter(i => !q || q.split(/\s+/).every(w => `${i.sku} ${i.title}`.toLowerCase().includes(w))); }
+function blFillSetPolicy() {
+  const a = el('bl-set-acct'), p = el('bl-set-pol'); if (!a || !p) return;
+  const accts = blAccts(); const cur = a.value;
+  a.innerHTML = accts.map(x => `<option value="${escapeAttr(x.code)}" ${x.code === cur ? 'selected' : ''}>${escapeHtml(BL.names[x.code] || x.code)}</option>`).join('') || '<option value="">no eBay account ticked</option>';
+  p.innerHTML = '<option value="">account default</option>' + ((BL.shipLists || {})[a.value] || []).map(x => `<option value="${escapeAttr(x.id)}">${escapeHtml(x.name)}</option>`).join('');
+}
+function blApplyShown() {
+  const code = el('bl-set-acct')?.value, pol = el('bl-set-pol')?.value || '';
+  if (!code) return toast('Tick an eBay account first', 'warn');
+  const shown = blShown(); for (const i of shown) { if (pol) BL.ship[code][i.sku] = pol; else delete BL.ship[code][i.sku]; }
+  toast(`${shown.length} part(s) set to ${pol ? el('bl-set-pol').selectedOptions[0].text : 'the account default'} on ${BL.names[code] || code}`, 'success', 3000);
+  blPaint();
 }
 // Price for one part under the current rule (or the row's own override).
 function blPrice(i) {
@@ -25405,7 +25434,17 @@ function blPaint() {
   const tb = el('bl-rows'); if (!tb) return;
   const shopPct = Number(State.pricingConfig?.shopifyPctEffective ?? State.pricingConfig?.priceLinkPct ?? 10);
   const cell = r => r ? `<b style="color:${r.net < 0 ? 'var(--red)' : 'var(--green)'}">${r.net < 0 ? '−' : ''}${trMoney(Math.abs(r.net))}</b><div style="font-size:10.5px;color:var(--ink-soft)">${r.pct.toFixed(1)}%</div>` : '—';
-  tb.innerHTML = BL.items.map(i => {
+  const accts = blAccts();
+  if (el('bl-set-acct') && el('bl-set-acct').options.length !== (accts.length || 1)) blFillSetPolicy();
+  const head = el('bl-ship-head'); if (head) head.textContent = accts.length > 1 ? 'Postage per account' : 'Postage';
+  const shipCell = i => accts.length ? accts.map(a => {
+    const cur = BL.ship[a.code]?.[i.sku] || '';
+    return `<div style="display:flex;gap:4px;align-items:center;margin:1px 0">${accts.length > 1 ? `<span style="font-size:10px;color:var(--ink-soft);width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(BL.names[a.code] || a.code)}</span>` : ''}
+      <select style="font-size:11.5px;padding:3px;max-width:170px" ${BL.running ? 'disabled' : ''} onchange="if(this.value)BL.ship['${escapeAttr(a.code)}']['${escapeAttr(i.sku)}']=this.value;else delete BL.ship['${escapeAttr(a.code)}']['${escapeAttr(i.sku)}']">
+        <option value="">default${a.def ? '' : ' (saved)'}</option>${((BL.shipLists || {})[a.code] || []).map(p => `<option value="${escapeAttr(p.id)}" ${String(p.id) === String(cur) ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}</select></div>`;
+  }).join('') : '<span style="color:var(--ink-soft);font-size:11px">no eBay</span>';
+  const shown = new Set(blShown().map(i => i.sku));
+  tb.innerHTML = BL.items.filter(i => shown.has(i.sku)).map(i => {
     const B = blPrice(i); const S = B ? Math.round(B * (1 - shopPct / 100) * 100) / 100 : null;
     const res = BL.results[i.sku];
     return `<tr>
@@ -25417,14 +25456,14 @@ function blPaint() {
       <td style="text-align:right">${S != null ? trMoney(S) : '—'}</td>
       <td style="text-align:right">${cell(blProfit(i, 'ebay', B))}</td>
       <td style="text-align:right">${cell(blProfit(i, 'shopify', S))}</td>
+      <td>${shipCell(i)}</td>
       <td style="font-size:11.5px;max-width:260px">${!res ? '<span style="color:var(--ink-soft)">ready</span>' : res.state === 'busy' ? '⏳ listing…' : res.state === 'ok' ? `<span style="color:var(--green)">✓ ${escapeHtml(res.msg)}</span>` : `<span style="color:var(--red)">✗ ${escapeHtml(res.msg)}</span>`}</td></tr>`;
   }).join('');
 }
 // One by one: product (+ Shopify) → each ticked eBay account.
 async function blRun() {
   if (BL.running) return;
-  const accts = [...document.querySelectorAll('#bl-accts .bl-acct')].filter(b => b.querySelector('.bl-on').checked).map(b => ({
-    code: b.dataset.code, pols: { shippingId: b.querySelector('[data-pol="shippingId"]').value || undefined, paymentId: b.querySelector('[data-pol="paymentId"]').value || undefined, returnId: b.querySelector('[data-pol="returnId"]').value || undefined } }));
+  const accts = blAccts();
   const brandName = (el('bl-brand')?.value || '').trim();
   try { if (brandName) localStorage.setItem('partner_list_brand', brandName); } catch (_) {}
   const shopStatus = el('bl-shop')?.value || 'active';
@@ -25462,7 +25501,10 @@ async function blRun() {
         try {
           const r2 = await Api.post('/api/listings/create-ebay', { productId: pid, storeCode: a.code, categoryId: L.ebay_category_id || undefined, conditionId: 1000,
             price, quantity: d.available ?? 0, titleOverride: d.title, descriptionOverride: L.description || undefined, itemSpecifics: specs,
-            brand: brandName || undefined, businessPolicies: a.pols, imageUrls: imgs.length ? imgs : undefined });
+            brand: brandName || undefined, imageUrls: imgs.length ? imgs : undefined,
+            // Postage: this part's own choice, else the account default; payment/returns: saved.
+            businessPolicies: (BL.ship[a.code]?.[i.sku] || a.def) ? { shippingId: BL.ship[a.code]?.[i.sku] || a.def } : undefined });
+          if (BL.ship[a.code]?.[i.sku] || a.def) ceRememberShipping(pid, a.code, BL.ship[a.code]?.[i.sku] || a.def);
           bits.push(`${(State.brand?.stores || []).find(s => s.code === a.code)?.name || a.code} ${r2.itemId || '✓'}`);
         } catch (e) { bits.push(`${(State.brand?.stores || []).find(s => s.code === a.code)?.name || a.code} ✗ ${String(e.data?.message || e.message).slice(0, 80)}`); throw Object.assign(new Error(bits.join(' · ')), { partial: true }); }
       }
