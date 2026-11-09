@@ -621,7 +621,7 @@
     padding: 12px 20px;
     z-index: 50;
   }
-  [data-theme="dark"] #qb-footer { background: var(--ink-2); }
+  [data-theme="dark"] #qb-footer { background: var(--white); box-shadow: 0 -4px 16px rgba(0,0,0,0.45); }
   #qb-footer .qb-footer-inner {
     max-width: 1400px;
     margin: 0 auto;
@@ -697,7 +697,7 @@
     background: var(--white);
     transition: border-color 0.15s, background 0.15s;
   }
-  [data-theme="dark"] .qb-pm-option { background: var(--ink-2); }
+  [data-theme="dark"] .qb-pm-option { background: var(--bg-soft); }
   .qb-pm-option:hover { border-color: var(--brand-primary); }
   .qb-pm-option.selected {
     border-color: var(--brand-primary);
@@ -1779,6 +1779,7 @@ function notifTarget(n) {
     case 'sale': return n.relatedId ? { action: () => openSaleDetail(n.relatedId) } : { page: 'sales' };
     case 'product': return { page: 'inventory' };
     case 'return': return { page: 'returns' };
+    case 'ebay_message': return { action: () => { EB.tab = 'messages'; EB.filter = 'all'; EB.sel = n.relatedId || null; routeTo('ebay'); } };
     case 'competitor_listing': return { page: 'competitors' };
     default:
       // Fall back on the notification type for the ones with no related_type.
@@ -2981,12 +2982,13 @@ function initKiosk() {
 // warehouse workflow: operational pages + Settings only (no marketing/admin
 // management), a bottom quick-bar for one-tap Scan/Inventory/Dispatch/Returns,
 // bigger touch targets, and global hardware-scanner capture.
-const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','qtycheck','iteminfo','locations','returns','dispatch','notifications','schedule','settings','createlisting','vinsearch']);
+const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','qtycheck','iteminfo','locations','returns','dispatch','ebay','notifications','schedule','settings','createlisting','vinsearch']);
 // Pages surfaced in the bottom quick-bar (order = left→right). Home is leftmost.
 // Only shown if the user has permission for them. Scan lives inside Stock Check
 // now (hardware scanner is automatic), so there's no separate Scan tab.
 const APP_TAB_BAR = [
   { page: 'dashboard', label: 'Home',     icon: 'M3 12l9-9 9 9M5 10v10h14V10' },
+  { page: 'ebay',      label: 'Messages', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z' },
   { page: 'dispatch',  label: 'Dispatch', icon: 'M1 3h15v13H1zM16 8h4l3 3v5h-7V8zM5.5 18.5a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM16.5 18.5a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0z' },
   { page: 'returns',   label: 'Returns',  icon: 'M3 7v6h6M3 13a9 9 0 1 0 3-7.7L3 8' },
   { page: 'qtycheck',  label: 'Quantity', icon: 'M20 7 12 3 4 7l8 4 8-4zM4 7v10l8 4 8-4V7M12 11v10' },
@@ -3411,6 +3413,7 @@ function hasPerm(page) {
     locations:    'locations',
     returns:     'returns',
     dispatch:    'dispatch',
+    ebay:        'dispatch',     // eBay messages: whoever handles orders answers buyers
     competitors: 'competitors',
     notifications: true,
     // Admin-only pages — no granular permission, hard "false" for warehouse role.
@@ -24159,7 +24162,7 @@ async function ebMessages() {
     </div></div>
     <div class="card"><div class="card-body" id="eb-msg"><div style="color:var(--ink-soft)">Pick a message.</div></div></div>
   </div>
-  <style>@media(max-width:860px){.eb-msg-grid{grid-template-columns:1fr!important}}</style>`;
+  <style>@media(max-width:860px){.eb-msg-grid{grid-template-columns:1fr!important}.eb-msg-grid.eb-open>.card:first-child{display:none}.eb-msg-grid:not(.eb-open)>.card:last-child{display:none}.eb-back{display:inline-flex!important}}</style>`;
   el('eb-filter').value = EB.filter;
   ebLoadList();
   if (EB.sel) ebOpen(EB.sel);
@@ -24190,10 +24193,14 @@ function ebBubble(x, m) {
   const text = x.text ? `<div style="white-space:pre-wrap">${escapeHtml(x.text)}</div>` : '';
   return x.from === 'us'
     ? `<div style="display:flex;justify-content:flex-end;margin:8px 0"><div style="max-width:78%;background:var(--brand-primary);color:#fff;border-radius:14px 14px 4px 14px;padding:10px 13px;font-size:14px;line-height:1.5;${x.ok === false ? 'opacity:.6;outline:2px solid var(--red)' : ''}">${text}${imgs(x.media)}
-        <div style="font-size:10.5px;opacity:.8;margin-top:4px;text-align:right">${x.ok === false ? '✗ not sent — ' + escapeHtml(x.error || '') : 'You' + (x.by ? ' · ' + escapeHtml(x.by) : '')}${x.at ? ' · ' + when(x.at) : ''}</div></div></div>`
+        <div style="font-size:10.5px;opacity:.8;margin-top:4px;text-align:right">${x.ok === false ? '✗ not sent — ' + escapeHtml(x.error || '') : 'You' + (x.by ? ' · ' + escapeHtml(x.by) : '')}${x.at ? ' · ' + when(x.at) : ''}${x.text ? ` · <a href="#" class="eb-copy" style="color:inherit" data-t="${escapeAttr(x.text)}">Copy</a>` : ''}</div></div></div>`
     : `<div style="display:flex;justify-content:flex-start;margin:8px 0"><div style="max-width:78%;background:var(--bg-soft);border:1px solid var(--line);border-radius:14px 14px 14px 4px;padding:10px 13px;font-size:14px;line-height:1.5">${text}${imgs(x.media)}
-        <div style="font-size:10.5px;color:var(--ink-soft);margin-top:4px">${escapeHtml(m.sender || 'Buyer')}${x.at ? ' · ' + when(x.at) : ''}</div></div></div>`;
+        <div style="font-size:10.5px;color:var(--ink-soft);margin-top:4px">${escapeHtml(m.sender || 'Buyer')}${x.at ? ' · ' + when(x.at) : ''}${x.text ? ` · <a href="#" class="eb-copy" data-t="${escapeAttr(x.text)}">Copy</a>` : ''}</div></div></div>`;
 }
+document.addEventListener('click', e => {
+  const a = e.target.closest && e.target.closest('.eb-copy'); if (!a) return;
+  e.preventDefault(); copyText(a.getAttribute('data-t') || '');
+});
 const ebConvKey = r => JSON.stringify((r.conversation || []).map(x => [x.from, x.text, (x.media || []).length, x.ok]));
 // Refresh the open conversation in place — the reply being typed is untouched.
 async function ebRefreshOpen() {
@@ -24206,8 +24213,10 @@ async function ebRefreshOpen() {
   chat.innerHTML = r.conversation.map(x => ebBubble(x, r.message)).join('');
   if (atBottom) chat.scrollTop = chat.scrollHeight;
 }
+function ebBack() { EB.sel = null; document.querySelector('.eb-msg-grid')?.classList.remove('eb-open'); ebLoadList(); }
 async function ebOpen(id) {
   EB.sel = id; EB.photos = [];
+  document.querySelector('.eb-msg-grid')?.classList.add('eb-open');
   const box = el('eb-msg'); if (!box) return;
   box.innerHTML = '<div style="color:var(--ink-soft)">Loading…</div>';
   let r; try { r = await Api.get('/api/ebayhub/messages/' + id); } catch (e) { box.innerHTML = `<div style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div>`; return; }
@@ -24219,7 +24228,7 @@ async function ebOpen(id) {
   const title = String(m.item_title || m.subject || '').replace(/^Re:\s*/i, '');
   box.innerHTML = `
     <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:6px">
-      <div style="min-width:0"><div style="font-size:15px;font-weight:700">${escapeHtml(m.sender || '')}</div>
+      <div style="min-width:0"><button class="btn btn-ghost btn-sm eb-back" style="display:none;margin:0 0 4px -6px" onclick="ebBack()">← All messages</button><div style="font-size:15px;font-weight:700">${escapeHtml(m.sender || '')}</div>
         ${m.item_id ? `<a href="https://www.ebay.co.uk/itm/${encodeURIComponent(m.item_id)}" target="_blank" rel="noopener" style="font-size:12.5px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(title)} ↗</a>` : `<div style="font-size:12.5px;color:var(--ink-soft)">${escapeHtml(m.subject || '')}</div>`}</div>
       <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
         <span style="font-size:11px;color:${m.needs_reply ? 'var(--amber)' : 'var(--ink-soft)'};white-space:nowrap;margin-right:4px">${m.is_ebay ? 'from eBay' : m.needs_reply ? 'needs reply' : m.done ? '✓ no reply needed' : '✓ answered'}</span>
