@@ -734,12 +734,23 @@ router.get('/reconcile', requireAdmin, async (req, res) => {
 //   • nothing is guessed from titles; prices are not touched.
 router.post('/rematch-store', requireAdmin, async (req, res) => {
   try {
-    await ensureMirrorLinksColumns();
     const b = req.body || {};
     const store = ebay.listStores().find(s => s.code === String(b.storeCode || '') && s.hasToken && !s.disabled);
     if (!store) return res.status(400).json({ error: 'unknown_store', message: 'Pick a connected eBay account.' });
-    const preview = !!b.preview;
-    const live = await ebay.getActiveListings(store.code);
+    const out = await rematchStore(store.code, { preview: !!b.preview });
+    if (!out.preview) await audit(req, 'ebay_rematch_store', 'ebay_store', null, { store: store.code, live: out.live, linked: out.linked, relinked: out.relinked, noMatch: out.noMatch.length });
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: 'rematch_failed', message: e.message });
+  }
+});
+// Also run automatically every few hours by lib/ebay-live (with the live list it
+// just read), so relisted parts are re-linked without anyone pressing a button.
+async function rematchStore(storeCode, { preview = false, live = null } = {}) {
+  {
+    await ensureMirrorLinksColumns();
+    const store = ebay.listStores().find(s => s.code === storeCode) || { code: storeCode, name: storeCode };
+    if (!live) live = await ebay.getActiveListings(store.code);
     const liveIds = new Set(live.map(l => String(l.itemId)));
     await query(`CREATE TABLE IF NOT EXISTS mirror_links_pruned (
       id SERIAL PRIMARY KEY, store_code TEXT, ebay_item_id TEXT, link JSONB, pruned_at TIMESTAMPTZ DEFAULT now())`);
@@ -784,12 +795,9 @@ router.post('/rematch-store', requireAdmin, async (req, res) => {
     out.staleLeft = stale.length;
     out.staleSample = stale.slice(0, 10).map(r => r.sku || r.last_synced_sku || r.ebay_item_id);
     out.preview = preview;
-    if (!preview) await audit(req, 'ebay_rematch_store', 'ebay_store', null, { store: store.code, live: out.live, linked: out.linked, relinked: out.relinked, noMatch: out.noMatch.length });
-    res.json(out);
-  } catch (e) {
-    res.status(500).json({ error: 'rematch_failed', message: e.message });
+    return out;
   }
-});
+}
 
 // POST /api/listings/link-status/force-match
 // Auto-link by SKU + part-number + title-token fuzzy matching. Pulls listings from
@@ -3390,6 +3398,17 @@ function wrapDesc(body, tpl, ctx) {
 // A styled spec table + intro used as the description BODY when the listing has
 // no rich Shopify description of its own — so a new listing never renders as a
 // bare wall of text. eBay-safe (inline CSS, table, no scripts).
+// The VEHICLE make/model of a part. products.brand is often the shop's own name
+// (e.g. the Shopify vendor "Razoryn eParts"), which must never show as the make
+// or drive "You might be interested in" — only a real car make counts, else the
+// make is read from the title.
+function vehicleOf(product) {
+  const parsed = parseVehicleFromTitle(product.title || '');
+  const b = String(product.brand || '').trim();
+  const known = b && VEHICLE_MAKES.find(m => m.toLowerCase() === b.toLowerCase());
+  return { make: known ? (known === 'VW' ? 'Volkswagen' : known) : parsed.make, model: product.model || parsed.model };
+}
+
 function buildStyledDescBody(product, specifics) {
   const color = (require('../lib/brand').primaryColor) || '#c8202d';
   const specMap = {};
@@ -3402,8 +3421,9 @@ function buildStyledDescBody(product, specifics) {
   add('Part number', specMap['manufacturer part number'] || mpnFromProduct(product));
   add('Interchange / alt part numbers', specMap['interchange part number']);
   add('Brand', specMap['brand']);
-  add('Fits make', specMap['make'] || product.brand);
-  add('Model', specMap['model'] || product.model);
+  const veh = vehicleOf(product);
+  add('Fits make', specMap['make'] || specMap['car make'] || veh.make);
+  add('Model', specMap['model'] || veh.model);
   add('Year', specMap['year']);
   add('Placement on vehicle', specMap['placement on vehicle'] || product.position);
   add('Colour / finish', specMap['colour'] || specMap['surface finish']);
@@ -3425,22 +3445,29 @@ function buildStyledDescBody(product, specifics) {
 async function buildRelatedItemsHtml(product, storeCode) {
   const brand = require('../lib/brand');
   const accent = brand.accentColor || brand.primaryColor || '#c8202d';
-  const make = product.brand, model = product.model;
-  if (!make && !model) return '';
+  const { make, model } = vehicleOf(product);
+  if (!make) return '';
   let rows = [];
   try {
+    // Only listings that are LIVE on eBay right now (ended / relisted item
+    // numbers are dropped — lib/ebay-live keeps the live list), one card per
+    // part (its newest listing), same make — same model first.
+    const live = require('../lib/ebay-live');
+    const haveLive = storeCode ? await live.hasList(storeCode) : false;
     const r = await query(
-      `SELECT p.title, p.price_ebay, p.image_url, ml.ebay_item_id
-         FROM products p
-         JOIN mirror_links ml ON ml.shopify_product_id::text = p.shopify_product_id::text
-        WHERE p.active = true AND p.id <> $1 AND p.image_url IS NOT NULL
-          AND ml.ebay_item_id IS NOT NULL
-          AND ($4 = '' OR ml.store_code = $4 OR ml.store_code IS NULL)
-          AND ( ($2 <> '' AND p.brand = $2) )
-          AND ( ($3 = '') OR p.model = $3 )
-        ORDER BY (p.model = $3) DESC, p.updated_at DESC
-        LIMIT 4`,
-      [product.id, make || '', model || '', storeCode || '']);
+      `SELECT * FROM (
+         SELECT DISTINCT ON (p.id) p.id, p.title, p.price_ebay, p.image_url, p.updated_at, ml.ebay_item_id,
+                (p.model = $3 OR ($3 <> '' AND p.title ILIKE '%' || $3 || '%')) AS same_model
+           FROM products p
+           JOIN mirror_links ml ON ml.shopify_product_id::text = p.shopify_product_id::text
+          WHERE p.active = true AND p.id <> $1 AND p.image_url IS NOT NULL
+            AND ml.ebay_item_id IS NOT NULL
+            AND ($4 = '' OR ml.store_code = $4 OR ml.store_code IS NULL)
+            AND (p.brand ILIKE $2 OR p.title ILIKE '%' || $2 || '%')
+            AND ($5 = false OR EXISTS (SELECT 1 FROM ebay_live_items li WHERE li.store_code = $4 AND li.ebay_item_id = ml.ebay_item_id::text))
+          ORDER BY p.id, ml.last_mirrored_at DESC NULLS LAST
+       ) x ORDER BY same_model DESC, updated_at DESC LIMIT 4`,
+      [product.id, make, model || '', storeCode || '', haveLive]);
     rows = r.rows;
   } catch (_) { return ''; }
   if (!rows.length) return '';
@@ -3488,8 +3515,8 @@ async function composeEbayDescription(product, { specifics, storeCode, rawBody, 
   const brand = require('../lib/brand');
   const color = brand.primaryColor || '#c8202d';
   const body = (rawBody && String(rawBody).trim()) ? unwrapDesc(rawBody) : buildStyledDescBody(product, specifics || []);
-  const vehicle = [product.brand || parseVehicleFromTitle(product.title || '').make,
-                   product.model || parseVehicleFromTitle(product.title || '').model].filter(Boolean).join(' ').trim();
+  const veh0 = vehicleOf(product);
+  const vehicle = [veh0.make, veh0.model].filter(Boolean).join(' ').trim();
   let related = '';
   try { related = await buildRelatedItemsHtml(product, storeCode); } catch (_) {}
 
@@ -3983,7 +4010,7 @@ function mpnFromProduct(product) {
 async function deriveEbaySpecifics(product, { countryOfOrigin, includeProductNumber = true } = {}) {
   const derived = [];
   const vehicle = parseVehicleFromTitle(product.title || '');
-  const vMake = product.brand || vehicle.make;
+  const vMake = vehicleOf(product).make;   // never the shop name kept in products.brand
   const vModel = product.model || vehicle.model;
   const vYear = vehicle.year;
   // MPN — eBay requires it for most car-part categories. Always resolves to
@@ -5144,21 +5171,32 @@ router.post('/restyle-descriptions', requireAdmin, async (req, res) => {
   if (restyleStatus.state === 'running') return res.json({ ok: true, started: false, alreadyRunning: true, status: restyleStatus });
   const includeShopify = !!(req.body && req.body.includeShopify);
   const onlyProductId = req.body && req.body.productId ? parseInt(req.body.productId) : null;
+  // A chosen set of parts (e.g. the parts listed from a partner) instead of all.
+  const onlyIds = Array.isArray(req.body?.productIds) ? req.body.productIds.map(x => parseInt(x)).filter(Number.isFinite).slice(0, 2000) : null;
   restyleStatus = { state: 'running', startedAt: Date.now(), finishedAt: null, total: 0, done: 0, ok: 0, failed: 0, sampleError: null, includeShopify };
   await audit(req, 'restyle_descriptions', null, null, { includeShopify, onlyProductId });
   res.json({ ok: true, started: true, includeShopify });
   setImmediate(async () => {
     try {
+      // Fresh live list + relisted parts re-linked first, so the "You might be
+      // interested in" cards (and the revisions) only use live item numbers.
+      if (!onlyIds) { try { await require('../lib/ebay-live').sweep(); } catch (e) { console.warn('[restyle] live sweep:', e.message); } }
       const stores = ebay.listStores().filter(st => st.hasToken && !st.disabled);
       const linkRows = (await query(
         `SELECT ml.ebay_item_id, ml.store_code, p.*
            FROM mirror_links ml JOIN products p ON p.shopify_product_id::text = ml.shopify_product_id::text
-          WHERE ml.ebay_item_id IS NOT NULL ${onlyProductId ? 'AND p.id = ' + onlyProductId : ''}`)).rows;
+          WHERE ml.ebay_item_id IS NOT NULL ${onlyProductId ? 'AND p.id = ' + onlyProductId : ''} ${onlyIds ? 'AND p.id = ANY($1::int[])' : ''}`, onlyIds ? [onlyIds] : [])).rows;
       restyleStatus.total = linkRows.length;
+      const liveOn = {};
       for (const row of linkRows) {
         const store = stores.find(st => st.code === row.store_code) || (stores.find(st => st.primary) || stores[0]);
         try {
           if (!store) throw new Error('no eBay store for link');
+          // Ended listing (not on the account's live list) — nothing to revise.
+          if (liveOn[store.code] === undefined) liveOn[store.code] = await require('../lib/ebay-live').hasList(store.code);
+          if (liveOn[store.code] && !(await query(`SELECT 1 FROM ebay_live_items WHERE store_code = $1 AND ebay_item_id = $2`, [store.code, String(row.ebay_item_id)])).rows.length) {
+            restyleStatus.done++; continue;
+          }
           // Read the live listing so the description shows its REAL specifics +
           // returns window; fall back to the persisted specifics if the read fails.
           let specifics = Array.isArray(row.ebay_item_specifics) ? row.ebay_item_specifics : [];
@@ -5199,3 +5237,4 @@ router.get('/restyle-descriptions/status', requireAdmin, (req, res) => res.json(
 router.runWarehouseImport = runImportSingleFlight;
 router.runCategoryAudit = runCategoryAudit;   // nightly AI cron entry point
 module.exports = router;
+module.exports.rematchStore = rematchStore;

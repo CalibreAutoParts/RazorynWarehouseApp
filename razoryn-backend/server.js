@@ -759,7 +759,7 @@ cron.schedule('15 3 * * *', async () => {
 // Trade: stamp stock changes (for changed_since polling) + push webhooks to
 // trade customers every 2 min; issue consolidated invoices daily; pull partner
 // warehouse stock/costs every 30 min (webhooks normally keep it live).
-require('./lib/trade').ensureSchema().catch(e => console.warn('[trade] schema:', e.message));
+require('./lib/trade-partner').ensureSchema().catch(e => console.warn('[trade] schema:', e.message));
 // eBay shop names set in the app (Settings → eBay shops) override the defaults.
 require('./lib/store-vat').applyNames().catch(e => console.warn('[shops] names:', e.message));
 // Supplier codes kept private (never sent to channels).
@@ -781,6 +781,15 @@ cron.schedule('*/30 * * * *', async () => {
 cron.schedule('*/2 * * * *', async () => {
   try { await require('./lib/trade-partner').autoOrderSweep(); } catch (e) { console.warn('[cron trade] auto-order:', e.message); }
 });
+
+// eBay: which item numbers are live on each account (descriptions only link to
+// live listings) + re-link parts relisted under a new item number — every 6 h
+// and shortly after start.
+cron.schedule('25 */6 * * *', async () => {
+  try { const r = await require('./lib/ebay-live').sweep(); console.log('[cron ebay-live]', JSON.stringify(r)); }
+  catch (e) { console.warn('[cron ebay-live]', e.message); }
+});
+setTimeout(() => { require('./lib/ebay-live').sweep().catch(e => console.warn('[ebay-live] boot:', e.message)); }, 4 * 60 * 1000);
 
 // OnBuy: import orders, pick up new-product results, push stock + prices — every
 // 10 min (does nothing until the keys are set and OnBuy is switched on).

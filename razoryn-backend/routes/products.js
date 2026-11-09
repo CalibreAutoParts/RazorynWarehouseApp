@@ -199,7 +199,9 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
     SELECT p.*, l.code AS location_code, l.name AS location_name,
            sg.code AS stock_group_code, sg.note AS stock_group_note,
            (SELECT array_agg(DISTINCT COALESCE(ml.store_code, '')) FROM mirror_links ml
-             WHERE p.shopify_product_id IS NOT NULL AND ml.shopify_product_id::text = p.shopify_product_id) AS ebay_stores
+             WHERE p.shopify_product_id IS NOT NULL AND ml.shopify_product_id::text = p.shopify_product_id) AS ebay_stores,
+           CASE WHEN p.source_partner_id IS NOT NULL AND p.source_partner_id = p.partner_link_id THEN ${require('../lib/stock-qty').SELLABLE_SQL} END AS sellable_qty,
+           (SELECT name FROM trade_partner_links tl WHERE tl.id = p.source_partner_id) AS partner_name
     FROM products p
     LEFT JOIN locations l ON l.id = p.location_id
     LEFT JOIN stock_groups sg ON sg.id = p.stock_group_id

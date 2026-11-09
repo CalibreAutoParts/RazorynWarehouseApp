@@ -540,6 +540,7 @@ router.get('/partners/:id/linked', aw(async (req, res) => {
   const rows = (await query(`SELECT id, sku, title, qty_on_hand, partner_sku, partner_qty, partner_cost, partner_location, partner_barcode,
       partner_synced_at, cost_price, price_shopify, price_ebay, (source_partner_id = $1) AS sourced,
       shopify_inventory_id IS NOT NULL AS on_shopify, stock_pushed_at, stock_push_result,
+      ${require('../lib/stock-qty').SELLABLE_SQL.replace(/\bp\./g, 'products.')} AS sellable_qty,
       (SELECT count(*)::int FROM mirror_links ml WHERE ml.shopify_product_id::text = products.shopify_product_id::text
          OR (products.shopify_product_id IS NULL AND upper(ml.last_synced_sku) = upper(products.sku))) AS ebay_listings
     FROM products WHERE partner_link_id = $1 ORDER BY title LIMIT 2000`, [req.params.id])).rows;
