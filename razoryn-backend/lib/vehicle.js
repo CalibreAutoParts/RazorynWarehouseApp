@@ -124,7 +124,36 @@ function parseForMatch(title) {
   };
 }
 
+// A real car make (case-insensitive), as written in VEHICLE_MAKES, else null.
+function knownMake(v) {
+  const s = String(v || '').trim().toLowerCase();
+  if (!s) return null;
+  const m = VEHICLE_MAKES.find(x => x.toLowerCase() === s);
+  return m ? (m === 'VW' ? 'Volkswagen' : m) : null;
+}
+// The "Make" item specific must be the VEHICLE make. Shop names ("Razoryn
+// eParts", "CalibreAutoParts" — the Shopify vendor kept in products.brand) got
+// in there; any value that isn't a known make is replaced by the make in the
+// title, or dropped when the title has none. Works on [{name, value|values}].
+const MAKE_NAMES = /^(make|car make|vehicle make)$/i;
+function cleanMakeSpecifics(specifics, title) {
+  if (!Array.isArray(specifics)) return specifics;
+  const fromTitle = parseVehicleFromTitle(title || '').make;
+  const out = [];
+  for (const s of specifics) {
+    if (!s || !s.name || !MAKE_NAMES.test(String(s.name).trim())) { out.push(s); continue; }
+    const vals = (Array.isArray(s.values) ? s.values : (Array.isArray(s.value) ? s.value : [s.value])).filter(v => v != null && String(v).trim());
+    const good = vals.map(knownMake).filter(Boolean);
+    if (good.length) out.push(Array.isArray(s.values) ? { ...s, values: good } : { ...s, value: good.length > 1 ? good : good[0] });
+    else if (fromTitle) out.push(Array.isArray(s.values) ? { ...s, values: [fromTitle] } : { ...s, value: fromTitle });
+    // else: drop it — a shop name is worse than no Make
+  }
+  return out;
+}
+
 module.exports = {
+  knownMake,
+  cleanMakeSpecifics,
   VEHICLE_MAKES,
   parseVehicleFromTitle,
   parseForMatch,

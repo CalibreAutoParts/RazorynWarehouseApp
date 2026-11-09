@@ -902,7 +902,9 @@ async function getActiveListings(storeArg, opts = {}) {
 // Build an <ItemSpecifics> block from [{name, value}] or [{name, values:[...]}].
 // Sending the block REPLACES the listing's specifics, so callers should pass the
 // full set they want (merge before calling).
-function buildItemSpecificsXml(specifics) {
+function buildItemSpecificsXml(specifics, title) {
+  // Make = the vehicle make, never a shop name (see lib/vehicle cleanMakeSpecifics).
+  specifics = require('../lib/vehicle').cleanMakeSpecifics(specifics || [], title);
   const lists = (specifics || []).filter(s => s && s.name).map(s => {
     const vals = (Array.isArray(s.values) ? s.values : [s.value]).filter(v => v != null && String(v).trim());
     if (!vals.length) return '';
@@ -911,7 +913,7 @@ function buildItemSpecificsXml(specifics) {
   return lists ? `<ItemSpecifics>${lists}</ItemSpecifics>` : '';
 }
 
-async function reviseItem(itemId, { sku, title, price, description, itemSpecifics, pictureUrls, packageDetails, categoryId, call } = {}, storeArg) {
+async function reviseItem(itemId, { sku, title, price, description, itemSpecifics, pictureUrls, packageDetails, categoryId, call, titleHint } = {}, storeArg) {
   if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
   if (!itemId) throw new Error('missing_item_id');
   if (sku == null && title == null && price == null && description == null
@@ -934,7 +936,7 @@ async function reviseItem(itemId, { sku, title, price, description, itemSpecific
   }
   // Description accepts HTML; CDATA-wrap so our markup isn't re-escaped by eBay.
   if (description != null) fields.push(`<Description><![CDATA[${String(description)}]]></Description>`);
-  if (itemSpecifics && itemSpecifics.length) fields.push(buildItemSpecificsXml(itemSpecifics));
+  if (itemSpecifics && itemSpecifics.length) fields.push(buildItemSpecificsXml(itemSpecifics, title || titleHint));
   if (pictureUrls && pictureUrls.length) {
     fields.push(`<PictureDetails>${pictureUrls.filter(Boolean).slice(0, 24).map(u => `<PictureURL>${escapeXml(u)}</PictureURL>`).join('')}</PictureDetails>`);
   }
@@ -1395,7 +1397,7 @@ async function addItem(storeArg, opts = {}) {
   // string OR an array of strings (multi-value aspects like "Placement on
   // Vehicle" — e.g. ["Front","Left"]). Stored as arrays internally.
   const specsByName = new Map();
-  for (const s of itemSpecifics) {
+  for (const s of require('../lib/vehicle').cleanMakeSpecifics(itemSpecifics || [], title)) {
     if (!s || !s.name) continue;
     // A specific may carry its value(s) as `values: [...]` (multi-value aspects,
     // e.g. Placement on Vehicle ["Front","Left"], Interchange with several codes)
