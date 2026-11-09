@@ -22,4 +22,7 @@ async function sellableQty(product) {
   return Math.max(0, own) + Math.max(0, parseInt(pq) || 0);
 }
 
-module.exports = { sellableQty };
+// The same, as SQL on a products row aliased p (for bulk queries).
+const SELLABLE_SQL = `(CASE WHEN p.source_partner_id IS NOT NULL AND p.source_partner_id = p.partner_link_id
+  THEN GREATEST(p.qty_on_hand, 0) + GREATEST(COALESCE(p.partner_qty, 0), 0) ELSE p.qty_on_hand END)`;
+module.exports = { sellableQty, SELLABLE_SQL };

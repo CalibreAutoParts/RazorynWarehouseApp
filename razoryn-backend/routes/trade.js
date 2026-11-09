@@ -519,6 +519,16 @@ router.post('/partners/:id/import', aw(async (req, res) => {
 router.post('/partners/:id/sync', aw(async (req, res) => {
   try { res.json(await partner.sync(await partner.getLink(req.params.id))); } catch (e) { fail(res, e); }
 }));
+// POST /api/trade/partners/:id/push-stock — send own + their stock to our
+// eBay / Shopify / OnBuy listings for every part we sell from their stock.
+router.post('/partners/:id/push-stock', aw(async (req, res) => {
+  const link = await partner.getLink(req.params.id);
+  try { await partner.sync(link); } catch (_) {}
+  const ids = (await query(`SELECT id FROM products WHERE partner_link_id = $1 AND source_partner_id = $1 AND active = true`, [link.id])).rows.map(r => r.id);
+  partner.pushPartnerStock(ids);
+  await audit(req, 'trade_partner_push_stock', 'trade_partner', link.id, { count: ids.length });
+  res.json({ ok: true, count: ids.length });
+}));
 router.get('/partners/:id/linked', aw(async (req, res) => {
   const rows = (await query(`SELECT id, sku, title, qty_on_hand, partner_sku, partner_qty, partner_cost, partner_location, partner_barcode,
       partner_synced_at, cost_price, price_shopify, price_ebay, (source_partner_id = $1) AS sourced

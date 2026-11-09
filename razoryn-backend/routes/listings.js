@@ -2094,6 +2094,12 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
           partner_qty = $4, partner_cost = $5, partner_synced_at = now(), landed_cost = COALESCE(landed_cost, $5) WHERE id = $1`,
         [productId, parseInt(b.partnerLinkId), String(b.partnerSku), Math.max(0, parseInt(b.partnerQty) || 0), costPrice]);
       result.partnerSourced = true;
+      // Shopify was created with 0 (own stock) — give it the partner's stock now.
+      const p2 = (await query(`SELECT * FROM products WHERE id = $1`, [productId])).rows[0];
+      if (p2?.shopify_inventory_id && shopify.isConfigured()) {
+        try { await shopify.pushStockForProduct(p2); result.shopifyQty = await require('../lib/stock-qty').sellableQty(p2); }
+        catch (e) { console.warn('[create-listing] partner shopify qty:', e.message); }
+      }
     } catch (e) { console.warn('[create-listing] partner link:', e.message); }
   }
 
@@ -2506,7 +2512,7 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
           // ReviseFixedPriceItem is the call that applies category moves reliably.
           call: sendCategory ? 'ReviseFixedPriceItem' : undefined,
         }, store.code, { productId, source: 'edit', changes: pushChanges.length ? pushChanges : undefined });
-        try { await ebay.setQuantityTradingAPI(link.ebay_item_id, qty, store.code); } catch (e) { /* qty push best-effort */ }
+        try { await ebay.setQuantityTradingAPI(link.ebay_item_id, await require('../lib/stock-qty').sellableQty({ ...product, qty_on_hand: qty }), store.code); } catch (e) { /* qty push best-effort */ }
         if (pr2.queued) {
           // eBay refused (open offer / transient) — the change is queued and
           // retried every 12h; the Push Queue page shows it.
@@ -4161,7 +4167,7 @@ async function doCreateEbay(b, { req } = {}) {
     price: parseFloat(b.price),
     // An explicit quantity (including 0, for out-of-stock listings) is honoured;
     // only a missing/invalid quantity falls back to stock-on-hand, then 1.
-    quantity: (() => { const q = parseInt(b.quantity); return Number.isFinite(q) ? q : (product.qty_on_hand || 1); })(),
+    quantity: await (async () => { const q = parseInt(b.quantity); if (Number.isFinite(q)) return q; const s = await require('../lib/stock-qty').sellableQty(product); return s || 1; })(),
     currency: 'GBP',
     imageUrls,
     businessPolicies: pol,
@@ -4673,7 +4679,7 @@ router.post('/clone-to-store/free-allowance', requireAdmin, async (req, res) => 
   const BATCH = 20;
   if (!after) await require('../lib/ebay-qty-cap').saveCaps({ [store.code]: keep });
   const { rows } = await query(
-    `SELECT ml.ebay_item_id, p.sku, p.qty_on_hand
+    `SELECT ml.ebay_item_id, p.sku, ${require('../lib/stock-qty').SELLABLE_SQL} AS qty_on_hand
        FROM mirror_links ml JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text
       WHERE ml.store_code = $1 ORDER BY ml.ebay_item_id OFFSET $2 LIMIT $3`, [store.code, after, BATCH]);
   const results = [];
@@ -4721,7 +4727,7 @@ router.post('/clone-to-store/sync-quantities', requireAdmin, async (req, res) =>
 
   // Listings on the target store joined to their warehouse product's stock.
   const { rows } = await query(
-    `SELECT ml.ebay_item_id, p.id AS product_id, p.sku, p.qty_on_hand
+    `SELECT ml.ebay_item_id, p.id AS product_id, p.sku, ${require('../lib/stock-qty').SELLABLE_SQL} AS qty_on_hand
      FROM mirror_links ml
      JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text
      WHERE ml.store_code = $1
