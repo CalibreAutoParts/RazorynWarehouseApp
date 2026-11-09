@@ -13,7 +13,7 @@ router.use(requireAuth);
 // Vehicle Make/Model/Year parsing now lives in lib/vehicle.js so the
 // competitor-monitor matcher reuses the exact same logic. Behaviour here is
 // unchanged — it's the same function, just imported.
-const { VEHICLE_MAKES, parseVehicleFromTitle } = require('../lib/vehicle');
+const { VEHICLE_MAKES, parseVehicleFromTitle, knownMake, cleanMakeSpecifics } = require('../lib/vehicle');
 const preorder = require('../lib/preorder');
 
 // GET /api/listings/category-specifics?categoryId=&storeCode=
@@ -2515,6 +2515,7 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
           price: ebayPrice != null ? ebayPrice : undefined,
           description: b.ebayDescription != null && String(b.ebayDescription).trim() !== '' ? b.ebayDescription : undefined,
           itemSpecifics: specificsToSend,
+          titleHint: ebayTitle || product.title || undefined,   // for the Make check (vehicle make from the title)
           pictureUrls: ebayPictureUrls && ebayPictureUrls.length ? ebayPictureUrls : undefined,
           categoryId: sendCategory,
           // ReviseFixedPriceItem is the call that applies category moves reliably.
@@ -2992,7 +2993,7 @@ async function runCategoryAudit(trigger = 'manual') {
                       if (sp.name && val) byName.set(sp.name.toLowerCase(), { name: sp.name, value: val });
                     }
                     for (const sp of fill.specifics) byName.set(sp.name.toLowerCase(), sp);
-                    await ebay.reviseItem(issue.itemId, { itemSpecifics: [...byName.values()] }, issue.storeCode);
+                    await ebay.reviseItem(issue.itemId, { itemSpecifics: [...byName.values()], titleHint: d.title }, issue.storeCode);
                     issue.aiFillApplied = true;
                     _catAudit.ai.autoApplied++;
                   } catch (e) { issue.applyError = (issue.applyError ? issue.applyError + ' · ' : '') + e.message; }
@@ -3422,7 +3423,7 @@ function buildStyledDescBody(product, specifics) {
   add('Interchange / alt part numbers', specMap['interchange part number']);
   add('Brand', specMap['brand']);
   const veh = vehicleOf(product);
-  add('Fits make', specMap['make'] || specMap['car make'] || veh.make);
+  add('Fits make', knownMake(specMap['make']) || knownMake(specMap['car make']) || veh.make);
   add('Model', specMap['model'] || veh.model);
   add('Year', specMap['year']);
   add('Placement on vehicle', specMap['placement on vehicle'] || product.position);
@@ -3643,7 +3644,7 @@ async function _refreshEbayListingContent(product, link, store) {
   try { const det = await ebay.getItemDetails(link.ebay_item_id, store.code); if (det && Array.isArray(det.specifics)) { liveSpecifics = det.specifics; liveOk = true; } } catch (_) {}
   const storedSpecifics = Array.isArray(product.ebay_item_specifics) ? product.ebay_item_specifics : [];
   const derivedNow = await deriveEbaySpecifics(product);
-  const fullSpecifics = mergeSpecificsByName(liveSpecifics, storedSpecifics, derivedNow);
+  const fullSpecifics = cleanMakeSpecifics(mergeSpecificsByName(liveSpecifics, storedSpecifics, derivedNow), product.title);
   const haveBaseline = liveOk || storedSpecifics.length > 0;
   const specificsToSend = (haveBaseline && fullSpecifics.length) ? fullSpecifics : undefined;
   // Description: Shopify body (if any) + the styled spec table, wrapped.
@@ -3654,7 +3655,7 @@ async function _refreshEbayListingContent(product, link, store) {
   const specTable = buildStyledDescBody(product, fullSpecifics);
   const finalBody = (rawBody && String(rawBody).trim()) ? (unwrapDesc(rawBody) + specTable) : specTable;
   const description = await composeEbayDescription({ ...product }, { specifics: fullSpecifics, storeCode: store.code, rawBody: finalBody });
-  await ebay.reviseItem(link.ebay_item_id, { description, itemSpecifics: specificsToSend }, store.code);
+  await ebay.reviseItem(link.ebay_item_id, { description, itemSpecifics: specificsToSend, titleHint: product.title }, store.code);
   // Persist the recomputed specifics so future edits keep the full set.
   try { await query(`UPDATE products SET ebay_item_specifics = $1::jsonb, updated_at = now() WHERE id = $2`, [JSON.stringify(fullSpecifics), product.id]); } catch (_) {}
   return { specifics: fullSpecifics.length };
@@ -4136,7 +4137,8 @@ async function doCreateEbay(b, { req } = {}) {
   const countryOfOrigin = (b.countryOfOrigin != null ? b.countryOfOrigin : (settings.ebay_country_of_origin || 'China'));
   const derivedSpecifics = await deriveEbaySpecifics(product, { countryOfOrigin });
   // User-provided specifics WIN on name collisions (form overlays the derived set).
-  const mergedSpecifics = mergeSpecificsByName(derivedSpecifics, Array.isArray(b.itemSpecifics) ? b.itemSpecifics : []);
+  // Make = vehicle make (a shop name copied from another listing is replaced).
+  const mergedSpecifics = cleanMakeSpecifics(mergeSpecificsByName(derivedSpecifics, Array.isArray(b.itemSpecifics) ? b.itemSpecifics : []), title);
 
   // Build the FINAL description: use the raw body (form/Shopify) if present, else
   // a styled spec-table body, then wrap it in the branded storefront template so
@@ -5206,8 +5208,13 @@ router.post('/restyle-descriptions', requireAdmin, async (req, res) => {
             if (det && Array.isArray(det.specifics) && det.specifics.length) specifics = det.specifics;
             if (det && det.returns) terms = { returnsWithinDays: det.returns.withinDays, returnsAccepted: det.returns.accepted };
           } catch (_) {}
-          const html = await composeEbayDescription(row, { specifics, storeCode: store.code, terms });
-          await ebay.reviseItem(row.ebay_item_id, { description: html }, store.code);
+          // A shop name in "Make" (e.g. "Razoryn eParts") is corrected on eBay too —
+          // the full live set is re-sent with only Make changed.
+          const cleaned = cleanMakeSpecifics(specifics, row.title);
+          const makeFixed = JSON.stringify(cleaned) !== JSON.stringify(specifics);
+          const html = await composeEbayDescription(row, { specifics: cleaned, storeCode: store.code, terms });
+          await ebay.reviseItem(row.ebay_item_id, { description: html, ...(makeFixed && cleaned.length ? { itemSpecifics: cleaned, titleHint: row.title } : {}) }, store.code);
+          if (makeFixed) await query(`UPDATE products SET ebay_item_specifics = $1::jsonb WHERE id = $2`, [JSON.stringify(cleaned), row.id]).catch(() => {});
           await query(`UPDATE products SET ebay_description = $1, updated_at = now() WHERE id = $2`, [html, row.id]).catch(() => {});
           if (includeShopify && row.shopify_product_id && shopify.isConfigured()) {
             try { await shopify.updateProduct(row.shopify_product_id, { description: html, imageUrls: [] }); } catch (_) {}
