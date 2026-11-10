@@ -142,6 +142,12 @@ if (settingsModule.publicLogoRouter) {
   app.use('/', settingsModule.publicLogoRouter);
 }
 
+// ---------- Version: open pages reload themselves after a deploy ----------
+// A screen left open all day (the warehouse PC) would otherwise run the old
+// version until someone refreshes it.
+const BUILD_ID = process.env.RAILWAY_DEPLOYMENT_ID || process.env.RAILWAY_GIT_COMMIT_SHA || String(Date.now());
+app.get('/api/version', (req, res) => { res.set('Cache-Control', 'no-store'); res.json({ build: BUILD_ID }); });
+
 // ---------- PWA: brand-aware manifest + app icon ----------
 // Defined BEFORE the static/SPA fallback so they aren't swallowed by index.html.
 app.get('/manifest.webmanifest', (req, res) => {

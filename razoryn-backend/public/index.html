@@ -2079,6 +2079,44 @@ function registerPwa() {
     }
   } catch (e) {}
 
+  // ── New version deployed → reload. Checked every minute and when the tab comes
+  // back into view. Reloads straight away when nothing is in progress (no window
+  // open, nothing being typed, no reply draft); otherwise shows a bar to reload.
+  (function versionWatch() {
+    let mine = null, pending = false;
+    const busy = () => {
+      if (document.getElementById('modal-overlay')?.classList.contains('open')) return true;
+      if (document.getElementById('photo-view')) return true;
+      const a = document.activeElement;
+      if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.value) return true;
+      if ((document.getElementById('eb-reply')?.value || '').trim()) return true;
+      return false;
+    };
+    const bar = () => {
+      if (document.getElementById('ver-bar')) return;
+      const d = document.createElement('div');
+      d.id = 'ver-bar';
+      d.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:max(16px,env(safe-area-inset-bottom));z-index:99999;background:var(--ink,#111);color:var(--bg,#fff);padding:10px 14px;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.3);display:flex;gap:12px;align-items:center;font-size:14px';
+      d.innerHTML = '<span>A new version of the app is ready</span><button class="btn btn-primary btn-sm" onclick="location.reload()">Reload</button>';
+      document.body.appendChild(d);
+    };
+    const tryReload = () => { if (!pending) return; if (busy()) bar(); else location.reload(); };
+    const check = async () => {
+      try {
+        const r = await fetch('/api/version', { cache: 'no-store' });
+        if (!r.ok) return;
+        const { build } = await r.json();
+        if (!mine) { mine = build; return; }
+        if (build && build !== mine) { pending = true; tryReload(); }
+      } catch (_) {}
+    };
+    check();
+    setInterval(check, 60 * 1000);
+    // Waiting for a quiet moment: try again every 20 s once an update is known.
+    setInterval(tryReload, 20 * 1000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+  })();
+
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
     // When the app is OPEN and a push arrives, the service worker forwards it
