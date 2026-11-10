@@ -24,7 +24,9 @@ const RULES = [
 
 // Couriers' tracking pages — allowed ONLY when replying about an order the
 // buyer has placed (opts.allowTracking), so they can follow their parcel.
-const COURIER_HOSTS = /(?:^|\.)(?:dropfleet\.co\.uk|proovia\.co\.uk|proovia\.com|royalmail\.com|parcelforce\.com|evri\.com|hermes-europe\.co\.uk|dpd\.co\.uk|dpdlocal\.co\.uk|dhl\.com|dhl\.co\.uk|fedex\.com|ups\.com|yodel\.co\.uk|tuffnells\.co\.uk|apc-overnight\.com|palletways\.com|parcel2go\.com|track\.aftership\.com)$/i;
+// Matched by the courier's own name on any of its domains (e.g. Proovia's
+// tracking lives on track.proovia.delivery, not proovia.co.uk).
+const COURIER_HOSTS = /(?:^|\.)(?:dropfleet|proovia|royalmail|parcelforce|evri|myhermes|hermes-europe|dpd|dpdlocal|dhl|fedex|ups|yodel|tuffnells|apc-overnight|palletways|parcel2go|aftership|parcelsapp|17track|inpost|dx)\.(?:delivery|com|co\.uk|uk|app|io|net|org|eu)$/i;
 function stripCourierLinks(t) {
   return t.replace(/\b(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})(\/[^\s]*)?/gi, (m, host) => COURIER_HOSTS.test(host) ? ' ' : m);
 }
