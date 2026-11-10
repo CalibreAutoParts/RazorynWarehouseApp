@@ -1282,12 +1282,13 @@ async function completeSale(storeArg, opts = {}) {
 // AddMemberMessageAAQToPartner — send a seller→buyer "Ask a question" style
 // member message about a specific listing/transaction. Used for the automated
 // fitment-confirmation messages and the manual message button.
-async function sendMemberMessage(storeArg, { itemId, recipientId, subject, body, questionType = 'General' } = {}) {
+async function sendMemberMessage(storeArg, { itemId, recipientId, subject, body, questionType = 'General', allowTracking = false } = {}) {
   if (!itemId) throw new Error('itemId required');
   if (!recipientId) throw new Error('recipientId (buyer username) required');
   if (!body) throw new Error('body required');
-  // eBay member-to-member policy: refuse contact details / off-eBay links.
-  require('../lib/ebay-message-guard').assertClean(subject, body);
+  // eBay member-to-member policy: refuse contact details / off-eBay links
+  // (a courier tracking link only for a message about the buyer's own order).
+  require('../lib/ebay-message-guard').assertClean(subject, body, { allowTracking });
   const bodyInner = `
     <ItemID>${escapeXml(String(itemId))}</ItemID>
     <MemberMessage>
