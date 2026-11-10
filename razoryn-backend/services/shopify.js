@@ -1101,6 +1101,20 @@ async function findProductsBySkus(skus) {
 //
 // Already-fulfilled orders are treated as success.
 // ──────────────────────────────────────────────────────────────────────────
+// Is this order already fulfilled on Shopify (by any app — FedEx, Click & Drop —
+// or by hand)? → { shipped, tracking, carrier, url } — one quick call, used
+// before an order is packed so it can't be sent twice.
+async function getOrderShipped(orderId) {
+  const r = await shopifyRequest('GET', `/orders/${encodeURIComponent(orderId)}.json`, { params: { fields: 'id,fulfillment_status,fulfillments,cancelled_at' } });
+  const o = r.data?.order || {};
+  const fs = String(o.fulfillment_status || '').toLowerCase();
+  const f = (o.fulfillments || []).find(x => x && x.tracking_number) || (o.fulfillments || [])[0] || {};
+  return {
+    shipped: fs === 'fulfilled' || fs === 'partial', partial: fs === 'partial', cancelled: !!o.cancelled_at,
+    tracking: f.tracking_number || null, carrier: f.tracking_company || null, url: f.tracking_url || null,
+  };
+}
+
 async function fulfillOrder(opts = {}) {
   const { orderId, trackingNumber, carrier, trackingUrl = null, notifyCustomer = true } = opts;
   if (!orderId) throw new Error('orderId required');
@@ -1143,9 +1157,17 @@ async function fulfillOrder(opts = {}) {
     fo.status === 'open' || fo.status === 'in_progress'
   );
   if (fulfillable.length === 0) {
-    // Nothing left to fulfil — order is already shipped or all line items are
-    // in non-shippable states. Match the eBay behaviour: success.
-    return { ok: true, alreadyFulfilled: true, totalFulfillmentOrders: fulfillmentOrders.length };
+    // No fulfillment orders at all usually means the app can't SEE them (Shopify
+    // only returns those the app has permission for) — not that it shipped.
+    // Check the order itself before calling it a success.
+    let st = null; try { st = await getOrderShipped(orderId); } catch (_) {}
+    if (st && st.shipped) return { ok: true, alreadyFulfilled: true, tracking: st.tracking, carrier: st.carrier };
+    if (!fulfillmentOrders.length) {
+      throw new Error("Shopify didn't let the app see this order's fulfilment — the warehouse app's Shopify connection needs the "
+        + "'merchant-managed fulfillment orders' permission (read_merchant_managed_fulfillment_orders + write_merchant_managed_fulfillment_orders). "
+        + 'Add them to the app in Shopify (Settings → Apps → Develop apps → the warehouse app → Configuration) and reinstall / update the token.');
+    }
+    throw new Error(`Nothing Shopify can fulfil on this order (fulfilment status: ${fulfillmentOrders.map(f => f.status).join(', ')})`);
   }
 
   // 2. POST a Fulfillment that covers every open fulfillment order in one go.
@@ -1479,6 +1501,7 @@ async function setProductRating(productId, rating, count) {
 
 module.exports = {
   isConfigured,
+  getOrderShipped,
   addProductImages,
   setOrderInvoiceMetafields,
   getCustomerForOffer,
