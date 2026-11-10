@@ -151,6 +151,8 @@ router.get('/outstanding', requirePermission('dispatch'), async (req, res) => {
       SELECT s.*,
         (SELECT title FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_title,
         (SELECT sku   FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_sku,
+        (SELECT p.part_number FROM sale_items si JOIN products p ON p.id = si.product_id WHERE si.sale_id = s.id ORDER BY si.id LIMIT 1) AS first_item_pn,
+        (SELECT COALESCE(l.name, l.code) FROM sale_items si JOIN products p ON p.id = si.product_id JOIN locations l ON l.id = p.location_id WHERE si.sale_id = s.id ORDER BY si.id LIMIT 1) AS first_item_loc,
         (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS item_count,
         EXTRACT(EPOCH FROM (now() - s.occurred_at)) / 3600 AS age_hours
       FROM sales s
@@ -173,6 +175,8 @@ router.get('/outstanding', requirePermission('dispatch'), async (req, res) => {
       SELECT s.*,
         (SELECT title FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_title,
         (SELECT sku   FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_sku,
+        (SELECT p.part_number FROM sale_items si JOIN products p ON p.id = si.product_id WHERE si.sale_id = s.id ORDER BY si.id LIMIT 1) AS first_item_pn,
+        (SELECT COALESCE(l.name, l.code) FROM sale_items si JOIN products p ON p.id = si.product_id JOIN locations l ON l.id = p.location_id WHERE si.sale_id = s.id ORDER BY si.id LIMIT 1) AS first_item_loc,
         (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS item_count,
         EXTRACT(EPOCH FROM (now() - s.occurred_at)) / 3600 AS age_hours
       FROM sales s
@@ -285,6 +289,9 @@ router.post('/bulk-mark-dispatched', requireAdmin, async (req, res) => {
         if (pushToChannel && (row.channel || '').match(/^(shopify|ebay_|onbuy)/)) {
           const updated = await query(`SELECT * FROM sales WHERE id = $1`, [id]);
           setImmediate(() => pushDispatchToChannel(updated.rows[0]).catch(e => console.warn('[dispatch.bulkPush]', e.message)));
+          // "On its way" eBay message (Proovia / DropFleet; off unless switched on).
+          const sid = updated.rows[0].id;
+          setTimeout(() => require('../services/dispatch-messages').sendForSale(sid).catch(() => {}), 1500);
         }
       }
     } catch (e) {
@@ -374,6 +381,20 @@ router.post('/:saleId/mark-dispatched', requirePermission('dispatch'), async (re
     await query(`UPDATE sales SET channel_push_state = 'na' WHERE id = $1 AND channel_push_state = 'pending'`, [result.sale.id]);
   }
 
+  // eBay buyers of a Proovia / DropFleet order: one "on its way" message with the
+  // tracking link (eBay can't link those couriers). Off unless switched on in
+  // Settings; a second later so the channel push goes first.
+  let buyerMessage = null;
+  if (/^ebay_/.test(result.sale.channel || '')) {
+    const dm = require('../services/dispatch-messages');
+    const cfg = await dm.getConfig().catch(() => null);
+    const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (cfg?.enabled && cfg.channels.includes(result.sale.channel) && cfg.carriers.some(c => norm(c) === norm(carrier))) {
+      buyerMessage = 'queued';
+      setTimeout(() => dm.sendForSale(result.sale.id).catch(() => {}), 1500);
+    }
+  }
+
   // Email OUR direct (bank/card) delivery customers their "on its way" notice with
   // the tracking link. eBay/Shopify buyers are notified by the marketplace.
   let emailed = false;
@@ -387,6 +408,7 @@ router.post('/:saleId/mark-dispatched', requirePermission('dispatch'), async (re
     sale: result.sale,
     trackingUrl: trackingUrlClean,
     customerEmailQueued: emailed,
+    buyerMessage,
   });
 });
 
@@ -474,6 +496,59 @@ function channelGroup(channel) {
   if (c === 'direct_card') return 'card';
   return 'other';
 }
+
+// GET /api/dispatch/:saleId/pick — what to pick for this order: each line with
+// SKU, part number, barcode, location (+ whether a location / item photo exists),
+// stock, photo and links to the listing it was bought from. Dispatch permission
+// only — no money.
+router.get('/:saleId/pick', requirePermission('dispatch'), async (req, res) => {
+  try {
+    if (!/^\d+$/.test(req.params.saleId)) return res.status(400).json({ error: 'bad_id' });
+    const s = (await query(`SELECT id, channel, invoice_number, external_order_id, customer_name FROM sales WHERE id = $1`, [req.params.saleId])).rows[0];
+    if (!s) return res.status(404).json({ error: 'not_found' });
+    const brand = require('../lib/brand');
+    const store = (brand.allStores || brand.stores || []).find(x => x.channelCode === s.channel) || null;
+    const rows = (await query(`
+      SELECT si.id AS line_id, si.title, si.sku, si.qty, si.product_id,
+             p.part_number, p.barcode, p.partner_barcode, p.qty_on_hand, p.image_url, p.shopify_handle, p.shopify_product_id,
+             p.location_note, p.partner_location, p.source_partner_id, l.code AS location_code, l.name AS location_name,
+             (p.location_photo_data_url IS NOT NULL) AS has_location_photo,
+             (p.location_photo_data_url_2 IS NOT NULL) AS has_location_photo_2,
+             (p.item_photo_data_url IS NOT NULL) AS has_item_photo
+        FROM sale_items si
+        LEFT JOIN products p ON p.id = si.product_id
+        LEFT JOIN locations l ON l.id = p.location_id
+       WHERE si.sale_id = $1 ORDER BY si.id`, [s.id])).rows;
+    const domain = (brand.domain || '').replace(/^https?:\/\//, '');
+    for (const r of rows) {
+      r.links = [];
+      if (r.shopify_product_id) {
+        const ml = (await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1
+            ORDER BY (store_code = $2) DESC NULLS LAST, last_mirrored_at DESC NULLS LAST`, [String(r.shopify_product_id), store?.code || ''])).rows;
+        const seen = new Set();
+        for (const m of ml) {
+          if (seen.has(m.store_code)) continue; seen.add(m.store_code);
+          const st = (brand.allStores || brand.stores || []).find(x => x.code === m.store_code);
+          r.links.push({ kind: 'ebay', label: 'eBay' + (st ? ' · ' + st.name : ''), url: `https://www.ebay.co.uk/itm/${m.ebay_item_id}`, sold: !!store && m.store_code === store.code });
+        }
+      }
+      if (r.shopify_handle && domain) r.links.push({ kind: 'shopify', label: 'Website', url: `https://${domain}/products/${encodeURIComponent(r.shopify_handle)}`, sold: s.channel === 'shopify' });
+      r.links.sort((a, b) => (b.sold ? 1 : 0) - (a.sold ? 1 : 0));
+    }
+    res.json({ sale: s, items: rows });
+  } catch (e) { res.status(500).json({ error: 'pick_failed', message: e.message }); }
+});
+// Photos for the pick view, with dispatch permission (the product photo routes
+// need the locations permission, which packers may not have).
+router.get('/pick-photo/:productId/:which', requirePermission('dispatch'), async (req, res) => {
+  const col = { location: 'location_photo_data_url', location2: 'location_photo_data_url_2', item: 'item_photo_data_url' }[req.params.which];
+  if (!col || !/^\d+$/.test(req.params.productId)) return res.status(400).end();
+  const r = (await query(`SELECT ${col} AS d FROM products WHERE id = $1`, [req.params.productId]).catch(() => ({ rows: [] }))).rows[0];
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(r?.d || '');
+  if (!m) return res.status(404).end();
+  res.set('Content-Type', m[1]); res.set('Cache-Control', 'private, max-age=3600');
+  res.send(Buffer.from(m[2], 'base64'));
+});
 
 // POST /api/dispatch/:saleId/set-fulfillment  { method: 'ship'|'collect' }
 // Re-classify an order between Deliveries and Collections. Fixes a mis-bucketed

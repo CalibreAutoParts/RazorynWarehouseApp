@@ -3562,8 +3562,12 @@ if (!window._histNavBound) {
   window._histNavBound = true;
   window.addEventListener('popstate', (e) => {
     try {
+      if (window._pvSkipPop) { window._pvSkipPop = false; return; }   // our own history.back() from closing the photo
+      if (window._ebSkipPop) { window._ebSkipPop = false; return; }   // our own history.back() from leaving a chat
+      if (document.getElementById('photo-view')) { photoViewClose(true); return; }
       const ov = document.getElementById('modal-overlay');
       if (ov && ov.classList.contains('open')) { closeModal(); return; }
+      if (document.querySelector('.eb-msg-grid.eb-open') && typeof ebIsMobile === 'function' && ebIsMobile()) { ebBack(true); return; }
       const pg = (e.state && e.state.page) || (location.hash || '').replace(/^#/, '');
       if (!pg || pg === State.page) return;
       if (typeof hasPerm === 'function' && !hasPerm(pg)) return;
@@ -8789,6 +8793,7 @@ function paintDispatchApp() {
       <div class="disp-main">
         <div class="disp-ref copyable">${escapeHtml(ref)}</div>
         <div class="disp-title">${itemLabel}</div>
+        ${s.first_item_sku ? `<div style="font-size:11.5px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(s.first_item_sku)}${s.first_item_pn && s.first_item_pn !== s.first_item_sku ? ' · PN ' + escapeHtml(s.first_item_pn) : ''}${s.first_item_loc ? ' · 📍 ' + escapeHtml(s.first_item_loc) : ''}</div>` : ''}
         <div class="disp-sub">${escapeHtml(s.customer_name || '—')}${isCollect && s.customer_phone ? ' · ' + escapeHtml(s.customer_phone) : ''} · ${age}</div>
         <div style="margin-top:4px">${moveLink}</div>
       </div>
@@ -8818,10 +8823,11 @@ function renderDispatchRow(s, kind) {
         </td>
         <td>${channelPill(s.channel, s)}</td>
         <td>${escapeHtml(s.customer_name || '—')}</td>
-        <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div></td>
+        <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div>${s.first_item_sku ? `<div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(s.first_item_sku)}${s.first_item_pn && s.first_item_pn !== s.first_item_sku ? ' · PN ' + escapeHtml(s.first_item_pn) : ''}${s.first_item_loc ? ' · 📍 ' + escapeHtml(s.first_item_loc) : ''}</div>` : ''}</td>
         <td class="num"><strong>${gbp(s.total)}</strong></td>
         <td>${ageBadge}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap;text-align:right">
+          <button class="btn btn-outline btn-sm" onclick="openPickCheck('${s.id}')" title="Where to find each part — scan to check it's the right one">🎯 Pick</button>
           <button class="btn btn-primary btn-sm" onclick="openDispatchModal('${s.id}')">📦 Mark dispatched</button>
           ${actionMenu([
             { label: '🧾 View order', onclick: `openSaleDetail('${s.id}')` },
@@ -8845,7 +8851,7 @@ function renderDispatchRow(s, kind) {
           <div style="margin-top:2px">${channelPill(s.channel, s)}</div>
         </td>
         <td>${escapeHtml(s.customer_name || '—')}<div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(s.customer_phone || '')}</div></td>
-        <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div></td>
+        <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div>${s.first_item_sku ? `<div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(s.first_item_sku)}${s.first_item_pn && s.first_item_pn !== s.first_item_sku ? ' · PN ' + escapeHtml(s.first_item_pn) : ''}${s.first_item_loc ? ' · 📍 ' + escapeHtml(s.first_item_loc) : ''}</div>` : ''}</td>
         <td class="num"><strong>${gbp(s.total)}</strong></td>
         <td>${ageBadge}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap;text-align:right">
@@ -9091,6 +9097,8 @@ function openDispatchModal(saleId) {
         <div style="font-size:13px">${escapeHtml(sale.customer_name || '—')} · ${gbp(sale.total)} · ${channelPill(sale.channel, sale)}</div>
         ${sale.shipping_address ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:6px;white-space:pre-line;line-height:1.5">${escapeHtml(sale.shipping_address)}</div>` : ''}
       </div>
+      <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Items to pick</div>
+      <div id="d-pick" style="margin-bottom:14px;font-size:13px;color:var(--ink-soft)">Loading items…</div>
       <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">How did it leave?</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px">
         <label class="d-mode-opt" style="border:1px solid var(--line);border-radius:8px;padding:10px;cursor:pointer;display:flex;gap:8px;align-items:center">
@@ -9135,6 +9143,42 @@ function openDispatchModal(saleId) {
     ],
   });
   dDispatchMode();
+  dLoadPick(saleId);
+}
+
+// ── Items to pick: SKU, part number, location (+photo), stock, the listing it
+// was bought from; the scan check is the existing Pick-check (openPickCheck) ──
+let DPICK = { items: [], ok: new Set(), saleId: null };
+async function dLoadPick(saleId) {
+  const box = el('d-pick'); if (!box) return;
+  try {
+    const r = await Api.get(`/api/dispatch/${saleId}/pick`);
+    DPICK = { items: r.items || [], ok: new Set(), saleId };
+    dPaintPick();
+  } catch (e) { box.textContent = 'Could not load the items: ' + (e.data?.message || e.message); }
+}
+function dPaintPick() {
+  const box = el('d-pick'); if (!box) return;
+  const its = DPICK.items;
+  if (!its.length) { box.textContent = 'No item lines on this order.'; return; }
+  const chip = (k, v) => v ? `<span style="display:inline-block;background:var(--bg-soft);border:1px solid var(--line);border-radius:6px;padding:2px 7px;margin:2px 4px 2px 0;font-size:12px;color:var(--ink)"><span style="color:var(--ink-soft)">${k}</span> <b style="font-family:ui-monospace,monospace">${escapeHtml(String(v))}</b></span>` : '';
+  box.innerHTML = its.map((it, n) => {
+    const ok = DPICK.ok.has(n);
+    const loc = it.location_name || it.location_code ? `${escapeHtml(it.location_name || '')}${it.location_code ? ` <span style="color:var(--ink-soft)">(${escapeHtml(it.location_code)})</span>` : ''}` : (it.source_partner_id ? `<span style="color:var(--blue,#2563eb)">At partner${it.partner_location ? ': ' + escapeHtml(it.partner_location) : ''}</span>` : '<span style="color:var(--amber,#d97706)">No location set</span>');
+    const photos = [it.has_location_photo ? `/api/dispatch/pick-photo/${it.product_id}/location` : null, it.has_location_photo_2 ? `/api/dispatch/pick-photo/${it.product_id}/location2` : null].filter(Boolean);
+    return `<div style="display:flex;gap:10px;padding:10px;border:1px solid ${ok ? 'var(--green)' : 'var(--line)'};border-radius:10px;margin-bottom:8px;background:${ok ? 'color-mix(in srgb, var(--green) 8%, transparent)' : 'transparent'}">
+      ${it.image_url ? `<img src="${escapeAttr(it.image_url)}" data-zoom alt="" style="width:64px;height:64px;object-fit:contain;border-radius:8px;background:#fff;flex:none;cursor:zoom-in">` : `<div style="width:64px;height:64px;border-radius:8px;background:var(--line-2);flex:none"></div>`}
+      <div style="flex:1;min-width:0;color:var(--ink)">
+        <div style="font-weight:600;font-size:13.5px;line-height:1.35">${it.qty > 1 ? `<span style="color:var(--red)">${it.qty}×</span> ` : ''}${escapeHtml(it.title || '')}${ok ? ' <span style="color:var(--green)">✓ checked</span>' : ''}</div>
+        <div style="margin-top:4px">${chip('SKU', it.sku)}${chip('Part no', it.part_number)}${it.qty_on_hand != null ? chip('Stock', it.qty_on_hand) : ''}</div>
+        <div style="font-size:12.5px;margin-top:4px">📍 ${loc}${it.location_note ? `<div style="font-size:11.5px;color:var(--ink-soft)">${escapeHtml(it.location_note)}</div>` : ''}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+          ${photos.length ? `<button class="btn btn-outline btn-sm" onclick='photoView(${JSON.stringify(photos)})'>📷 Location photo</button>` : ''}
+          ${it.has_item_photo ? `<button class="btn btn-outline btn-sm" onclick="photoView('/api/dispatch/pick-photo/${it.product_id}/item')">🖼 Item photo</button>` : ''}
+          ${(it.links || []).map(l => `<a class="btn btn-outline btn-sm" href="${escapeAttr(l.url)}" target="_blank" rel="noopener" title="${l.sold ? 'The listing this order came from' : 'Also listed here'}">${l.kind === 'ebay' ? '🛒' : '🌐'} ${escapeHtml(l.label)}${l.sold ? ' ✓' : ''} ↗</a>`).join('')}
+        </div>
+      </div></div>`;
+  }).join('') + `<button class="btn btn-outline btn-sm" onclick="closeModal();openPickCheck('${DPICK.saleId}')" title="Scan each item's barcode to confirm it's the right part">🎯 Scan-check the items</button>`;
 }
 
 // Couriers without an automatic tracking link (DropFleet, Proovia, other):
@@ -9243,9 +9287,11 @@ async function submitDispatch(saleId, isExternalChannel) {
     let toastMsg = 'Order marked dispatched';
     if (pushToChannel) toastMsg += ' · pushing tracking to channel in background';
     if (r.customerEmailQueued) toastMsg += ' · emailing customer';
+    if (r.buyerMessage === 'queued') toastMsg += ' · sending the buyer the tracking message on eBay';
     toast(toastMsg, 'success', 6000);
     closeModal();
-    dShowCustomerMessage(sale, r.sale?.carrier || carrierName || carrier, trackingNumber, r.sale?.tracking_url || trackingUrl);
+    // The buyer is messaged automatically — no copy-paste message needed.
+    if (r.buyerMessage !== 'queued') dShowCustomerMessage(sale, r.sale?.carrier || carrierName || carrier, trackingNumber, r.sale?.tracking_url || trackingUrl);
     await loadDispatch(); await loadShipments();
     await Store.refresh('sales');
   } catch (e) {
@@ -18724,7 +18770,7 @@ function pickRowHtml(it) {
         <div style="font-family:ui-monospace,monospace;color:var(--ink-soft)">${p?.partNumber ? 'PN <span class="copyable">' + escapeHtml(p.partNumber) + '</span> · ' : ''}${escapeHtml(it.sku || '')}</div>
         ${p && (p.location || p.locationNote) ? `<div style="margin-top:3px">📍 <strong>${escapeHtml([p.location, p.locationNote].filter(Boolean).join(' — '))}</strong></div>` : '<div style="margin-top:3px;color:var(--ink-soft)">📍 No location recorded</div>'}
       </div>
-      ${p?.locationPhoto ? `<img src="${escapeAttr(p.locationPhoto)}" loading="lazy" onclick="window.open(this.src,'_blank')" style="width:46px;height:46px;object-fit:cover;border-radius:8px;flex:none;cursor:pointer" title="Where it lives — tap to enlarge">` : (p?.itemPhoto || p?.imageUrl) ? `<img src="${escapeAttr(p.itemPhoto || p.imageUrl)}" loading="lazy" style="width:46px;height:46px;object-fit:cover;border-radius:8px;flex:none">` : ''}
+      ${p?.locationPhoto ? `<img src="${escapeAttr(p.locationPhoto)}" loading="lazy" data-zoom" style="width:46px;height:46px;object-fit:cover;border-radius:8px;flex:none;cursor:pointer" title="Where it lives — tap to enlarge">` : (p?.itemPhoto || p?.imageUrl) ? `<img src="${escapeAttr(p.itemPhoto || p.imageUrl)}" loading="lazy" style="width:46px;height:46px;object-fit:cover;border-radius:8px;flex:none">` : ''}
     </div>`;
 }
 function pickVerifyCode(code) {
@@ -22892,6 +22938,28 @@ function renderSettings() {
       </div>
 
       <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>🚚 eBay "on its way" message (Proovia / DropFleet)</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">
+            When you mark an eBay order <strong>dispatched</strong> with one of the couriers below, the buyer gets <strong>one</strong> message with the courier, tracking number and tracking link — eBay can't link to Proovia or DropFleet tracking itself. Once per order, only about that order; the app blocks anything eBay's policy forbids.
+          </p>
+          <div class="perm-row">
+            <div><div class="perm-name">Enabled</div><div class="perm-desc">Off by default. Only the accounts and couriers ticked below.</div></div>
+            <label class="switch"><input type="checkbox" id="dm-enabled" onchange="if(this.checked && !confirm('Switch on automatic dispatch messages to eBay buyers?\n\nIn October eBay restricted one of your accounts after automated buyer messages. These go once per order with the tracking only — but leave out any account eBay has restricted.\n\nSwitch on?')) this.checked=false"><span></span></label>
+          </div>
+          <div class="field" style="margin-top:10px"><label>Send from these eBay accounts</label><div id="dm-stores" style="display:flex;gap:14px;flex-wrap:wrap;font-size:13px"></div></div>
+          <div class="field"><label>For these couriers</label><div id="dm-carriers" style="display:flex;gap:14px;flex-wrap:wrap;font-size:13px"></div></div>
+          <div class="field"><label>Subject</label><input id="dm-subject" placeholder="Your order is on its way"></div>
+          <div class="field"><label>Message</label><textarea id="dm-body" rows="7"></textarea>
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:2px"><code>{name}</code> first name · <code>{carrier}</code> · <code>{tracking}</code> · <code>{link}</code> tracking link · <code>{shop}</code> your eBay shop · <code>{ref}</code> order no. A line whose value is missing (e.g. no link) is left out.</div></div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" onclick="saveDispatchMsgConfig(this)">Save</button>
+            <span id="dm-status" style="font-size:12px;color:var(--ink-soft)"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>eBay description template</h3></div>
         <div class="card-body">
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">
@@ -23686,6 +23754,7 @@ function renderSettings() {
   loadDropfleetConfig();
   loadThumbnailConfig();
   loadFitmentConfig();
+  loadDispatchMsgConfig();
   settingsMakeCollapsible();
   if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); loadAiSettings(); loadEbayLimits(); loadStoreVat(); loadChannelColors(); }
   // Re-attach to a category audit that's running (or finished) in the background.
@@ -24167,7 +24236,28 @@ async function ebMessages() {
     </div></div>
     <div class="card"><div class="card-body" id="eb-msg"><div style="color:var(--ink-soft)">Pick a message.</div></div></div>
   </div>
-  <style>@media(max-width:860px){.eb-msg-grid{grid-template-columns:1fr!important}.eb-msg-grid.eb-open>.card:first-child{display:none}.eb-msg-grid:not(.eb-open)>.card:last-child{display:none}.eb-back{display:inline-flex!important}}</style>`;
+  <style>
+    .eb-m-only{display:none}
+    @media(max-width:860px){
+      .eb-msg-grid{grid-template-columns:1fr!important}
+      .eb-msg-grid.eb-open>.card:first-child{display:none}
+      .eb-msg-grid:not(.eb-open)>.card:last-child{display:none}
+      .eb-back{display:inline-flex!important}
+      .eb-m-only{display:inline-flex}.eb-d-only{display:none!important}
+      /* An open conversation is a full-screen chat: header, messages, reply box. */
+      .eb-msg-grid.eb-open>.card:last-child{position:fixed;inset:0;z-index:900;margin:0;border:0;border-radius:0;background:var(--bg)}
+      .eb-msg-grid.eb-open #eb-msg{height:100%;display:flex;flex-direction:column;padding:0}
+      #eb-msg .eb-head{padding:max(10px,env(safe-area-inset-top)) 10px 8px;margin:0!important;background:var(--surface,var(--bg-soft));align-items:center!important}
+      #eb-msg .eb-order{margin:6px 10px!important}
+      #eb-msg #eb-chat{flex:1;max-height:none!important;padding:6px 10px!important;overscroll-behavior:contain}
+      #eb-msg .eb-compose{padding:8px 10px max(8px,env(safe-area-inset-bottom))!important;margin:0!important;background:var(--surface,var(--bg-soft))}
+      #eb-msg .eb-quick{flex-wrap:nowrap!important;overflow-x:auto;scrollbar-width:none}
+      #eb-msg .eb-quick .btn{flex:none}
+      #eb-msg .eb-hint{display:none}
+      #eb-msg #eb-reply{font-size:16px;border-radius:20px;padding:9px 14px;resize:none;height:44px;min-height:44px}
+      #eb-msg .eb-thread{margin:0 10px 8px}
+    }
+  </style>`;
   el('eb-filter').value = EB.filter;
   ebLoadList();
   if (EB.sel) ebOpen(EB.sel);
@@ -24194,7 +24284,7 @@ const EB_QUICK = [
 // One chat bubble: buyer left, ours right.
 function ebBubble(x, m) {
   const when = t => t ? new Date(t).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
-  const imgs = list => (list || []).length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:${x.text ? 8 : 0}px">${list.map(i => `<a href="${escapeAttr(i.url)}" target="_blank" rel="noopener"><img src="${escapeAttr(i.url)}" alt="" style="width:140px;height:140px;object-fit:cover;border-radius:8px;border:1px solid var(--line)"></a>`).join('')}</div>` : '';
+  const imgs = list => (list || []).length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:${x.text ? 8 : 0}px">${list.map(i => `<img src="${escapeAttr(i.url)}" data-zoom alt="" loading="lazy" style="width:140px;height:140px;object-fit:cover;border-radius:8px;border:1px solid var(--line);cursor:zoom-in;background:#fff">`).join('')}</div>` : '';
   const text = x.text ? `<div style="white-space:pre-wrap">${escapeHtml(x.text)}</div>` : '';
   return x.from === 'us'
     ? `<div style="display:flex;justify-content:flex-end;margin:8px 0"><div style="max-width:78%;background:var(--brand-primary);color:#fff;border-radius:14px 14px 4px 14px;padding:10px 13px;font-size:14px;line-height:1.5;${x.ok === false ? 'opacity:.6;outline:2px solid var(--red)' : ''}">${text}${imgs(x.media)}
@@ -24218,10 +24308,20 @@ async function ebRefreshOpen() {
   chat.innerHTML = r.conversation.map(x => ebBubble(x, r.message)).join('');
   if (atBottom) chat.scrollTop = chat.scrollHeight;
 }
-function ebBack() { EB.sel = null; document.querySelector('.eb-msg-grid')?.classList.remove('eb-open'); ebLoadList(); }
+const ebIsMobile = () => window.matchMedia('(max-width:860px)').matches;
+// fromPop: the phone's back button already took our history entry.
+function ebBack(fromPop) {
+  EB.sel = null; document.querySelector('.eb-msg-grid')?.classList.remove('eb-open'); ebLoadList();
+  if (!fromPop) { try { if (history.state && history.state.ebChat) { window._ebSkipPop = true; history.back(); } } catch (_) {} }
+}
+// Reply box grows with the text (up to ~6 lines) like a chat app.
+function ebGrow(t) { if (!ebIsMobile()) return; t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 150) + 'px'; }
 async function ebOpen(id) {
   EB.sel = id; EB.photos = [];
-  document.querySelector('.eb-msg-grid')?.classList.add('eb-open');
+  const grid = document.querySelector('.eb-msg-grid');
+  // On a phone the chat is a full screen of its own: back goes to the list.
+  if (ebIsMobile() && grid && !grid.classList.contains('eb-open')) { try { history.pushState({ ...(history.state || {}), ebChat: true }, '', location.href); } catch (_) {} }
+  grid?.classList.add('eb-open');
   const box = el('eb-msg'); if (!box) return;
   box.innerHTML = '<div style="color:var(--ink-soft)">Loading…</div>';
   let r; try { r = await Api.get('/api/ebayhub/messages/' + id); } catch (e) { box.innerHTML = `<div style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div>`; return; }
@@ -24232,21 +24332,27 @@ async function ebOpen(id) {
   EB.trackMsg = os ? `Hi, your order has been dispatched with ${os.carrier || 'our courier'}.` + (os.tracking_number ? ` Tracking number: ${os.tracking_number}.` : '') + (os.tracking_url ? ` You can track it here: ${os.tracking_url}` : '') : '';
   const title = String(m.item_title || m.subject || '').replace(/^Re:\s*/i, '');
   box.innerHTML = `
-    <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:6px">
-      <div style="min-width:0"><button class="btn btn-ghost btn-sm eb-back" style="display:none;margin:0 0 4px -6px" onclick="ebBack()">← All messages</button><div style="font-size:15px;font-weight:700">${escapeHtml(m.sender || '')}</div>
+    <div class="eb-head" style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:6px">
+      <button class="btn btn-ghost eb-back" style="display:none;flex:none;font-size:20px;padding:4px 10px" onclick="ebBack()" aria-label="Back to messages">←</button>
+      <div style="min-width:0;flex:1"><div style="font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(m.sender || '')}</div>
         ${m.item_id ? `<a href="https://www.ebay.co.uk/itm/${encodeURIComponent(m.item_id)}" target="_blank" rel="noopener" style="font-size:12.5px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(title)} ↗</a>` : `<div style="font-size:12.5px;color:var(--ink-soft)">${escapeHtml(m.subject || '')}</div>`}</div>
-      <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
+      <span class="eb-m-only">${actionMenu([
+        m.needs_reply ? { label: '✓ No reply needed', onclick: `ebMark(${m.id}, 'done')` } : (!m.is_ebay ? { label: '↩ Needs reply', onclick: `ebMark(${m.id}, 'reply')` } : null),
+        { label: '● Mark unread', onclick: `ebMark(${m.id}, 'unread')` },
+        r.order ? { label: '⟳ Check eBay order', onclick: `ebOrderCheck(${m.id}, true)` } : null,
+      ], { label: '⋮', btnClass: 'btn btn-ghost' })}</span>
+      <div class="eb-d-only" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
         <span style="font-size:11px;color:${m.needs_reply ? 'var(--amber)' : 'var(--ink-soft)'};white-space:nowrap;margin-right:4px">${m.is_ebay ? 'from eBay' : m.needs_reply ? 'needs reply' : m.done ? '✓ no reply needed' : '✓ answered'}</span>
         ${m.needs_reply ? `<button class="btn btn-outline btn-sm" onclick="ebMark(${m.id}, 'done')" title="Take it off 'To answer' without replying">✓ No reply needed</button>`
           : !m.is_ebay ? `<button class="btn btn-ghost btn-sm" onclick="ebMark(${m.id}, 'reply')" title="Put it back on 'To answer'">Needs reply</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="ebMark(${m.id}, 'unread')">Mark unread</button></div>
     </div>
-    ${r.order ? `<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:12.5px;background:var(--bg-soft);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:6px">
+    ${r.order ? `<div class="eb-order" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:12.5px;background:var(--bg-soft);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:6px">
       <span>🧾 Order <b>${escapeHtml(r.order.number)}</b></span>
       ${r.order.status ? `<span class="pill" style="font-size:10.5px">${escapeHtml(r.order.status)}</span>` : ''}
       ${r.order.sale ? (r.order.sale.dispatched_at
         ? `<span>📦 Dispatched ${escapeHtml(r.order.sale.carrier || '')}${r.order.sale.tracking_number ? ' · ' + escapeHtml(r.order.sale.tracking_number) : ''}</span>
-           ${r.order.sale.tracking_number || r.order.sale.tracking_url ? `<button class="btn btn-ghost btn-sm" onclick="el('eb-reply').value=EB.trackMsg;el('eb-reply').focus()">Insert tracking</button>` : ''}`
+           ${r.order.sale.tracking_number || r.order.sale.tracking_url ? `<button class="btn btn-ghost btn-sm" onclick="el('eb-reply').value=EB.trackMsg;ebGrow(el('eb-reply'));el('eb-reply').focus()">Insert tracking</button>` : ''}`
         : '<span style="color:var(--amber)">not dispatched yet</span>')
         + ' <span style="color:var(--green);font-size:11.5px">· tracking links allowed in replies</span>'
         : '<span style="color:var(--ink-soft)">not found in your sales</span>'}
@@ -24254,21 +24360,21 @@ async function ebOpen(id) {
       <span id="eb-ebay-ship" style="color:var(--ink-soft)">eBay: checking…</span>
       <button class="btn btn-ghost btn-sm" onclick="ebOrderCheck(${m.id}, true)" title="Ask eBay now — updates the warehouse if it's shipped there">⟳ Check eBay</button>
     </div>` : ''}
-    <div id="eb-chat" style="max-height:52vh;overflow-y:auto;padding:4px 2px">
+    <div id="eb-chat" data-zoom-group style="max-height:52vh;overflow-y:auto;padding:4px 2px">
       ${r.conversation.length ? r.conversation.map(bubble).join('') : bubble({ from: 'buyer', text: m.body || '(message not downloaded yet)', at: m.received_at, media: m.media })}
     </div>
     ${canReply ? `
-      <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:6px">
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px"><button class="btn btn-outline btn-sm" onclick="ebVinHelp()" title="Asks for the VIN and attaches a picture showing where to find it">🔎 VIN help + picture</button>${EB_QUICK.map(([l], i) => `<button class="btn btn-ghost btn-sm" onclick="el('eb-reply').value=EB_QUICK[${i}][1];el('eb-reply').focus()">${l}</button>`).join('')}</div>
-        <textarea id="eb-reply" rows="3" style="width:100%" placeholder="Reply to ${escapeAttr(m.sender || 'the buyer')}…" onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey))ebReply(${m.id}, el('eb-send'))"></textarea>
+      <div class="eb-compose" style="border-top:1px solid var(--line);padding-top:10px;margin-top:6px">
+        <div class="eb-quick" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px"><button class="btn btn-outline btn-sm" onclick="ebVinHelp()" title="Asks for the VIN and attaches a picture showing where to find it">🔎 VIN help + picture</button>${EB_QUICK.map(([l], i) => `<button class="btn btn-ghost btn-sm" onclick="el('eb-reply').value=EB_QUICK[${i}][1];ebGrow(el('eb-reply'));el('eb-reply').focus()">${l}</button>`).join('')}</div>
+        <textarea id="eb-reply" rows="3" style="width:100%" placeholder="Reply to ${escapeAttr(m.sender || 'the buyer')}…" oninput="ebGrow(this)" onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey))ebReply(${m.id}, el('eb-send'))"></textarea>
         <div id="eb-photos" style="display:flex;gap:6px;flex-wrap:wrap"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
           <label class="btn btn-outline btn-sm" style="cursor:pointer">📷 Add photos<input type="file" accept="image/*" multiple style="display:none" onchange="ebAddPhotos(this.files);this.value=''"></label>
-          <span style="font-size:11px;color:var(--ink-soft);flex:1">No phone numbers, emails, website links or "buy direct" — the app blocks them${r.order?.sale ? ' (courier tracking links are fine — they have an order)' : ''}. Ctrl+Enter sends.</span>
+          <span class="eb-hint" style="font-size:11px;color:var(--ink-soft);flex:1">No phone numbers, emails, website links or "buy direct" — the app blocks them${r.order?.sale ? ' (courier tracking links are fine — they have an order)' : ''}. Ctrl+Enter sends.</span>
           <button class="btn btn-primary" id="eb-send" onclick="ebReply(${m.id}, this)">Send</button></div>
       </div>`
       : `<div style="font-size:12.5px;color:var(--ink-soft);border-top:1px solid var(--line);padding-top:10px">eBay doesn't allow replies to this message from here${m.item_id ? '' : " (it isn't about one of your listings)"} — open it on eBay to respond.</div>`}
-    ${r.thread.length ? `<details style="margin-top:12px"><summary style="cursor:pointer;font-size:12px;color:var(--ink-soft)">Other conversations with ${escapeHtml(m.sender)} (${r.thread.length})</summary>
+    ${r.thread.length ? `<details class="eb-thread eb-d-only" style="margin-top:12px"><summary style="cursor:pointer;font-size:12px;color:var(--ink-soft)">Other conversations with ${escapeHtml(m.sender)} (${r.thread.length})</summary>
       ${r.thread.map(t => `<div onclick="ebOpen(${t.id})" style="cursor:pointer;font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--line)"><b>${escapeHtml(t.subject || '')}</b> <span style="color:var(--ink-soft)">· ${t.received_at ? new Date(t.received_at).toLocaleDateString('en-GB') : ''}</span></div>`).join('')}</details>` : ''}`;
   EB.convKey = ebConvKey(r);
   const chat = el('eb-chat'); if (chat) chat.scrollTop = chat.scrollHeight;   // newest at the bottom, next to the reply box
@@ -24279,7 +24385,7 @@ async function ebOpen(id) {
 // design, no shop branding — fine for every eBay account).
 const EB_VIN_TEXT = "Hi, thanks for your message. To make sure this part fits your exact vehicle, could you send us your VIN (Vehicle Identification Number)?\n\nIt's 17 letters and numbers. You'll find it:\n• at the bottom of the windscreen on the driver's side\n• on the sticker inside the driver's door frame\n• in section E of your V5C logbook\n\nWe've attached a picture showing where to look. Once we have it we'll confirm the fit straight away. Thanks!";
 async function ebVinHelp() {
-  const box = el('eb-reply'); if (box) { box.value = EB_VIN_TEXT; box.rows = 10; box.focus(); box.setSelectionRange(0, 0); box.scrollTop = 0; }
+  const box = el('eb-reply'); if (box) { box.value = EB_VIN_TEXT; box.rows = 10; ebGrow(box); box.focus(); box.setSelectionRange(0, 0); box.scrollTop = 0; }
   EB.photos = (EB.photos || []).filter(p => p.name !== 'where-to-find-your-vin.jpg');
   try {
     const blob = await (await fetch('/img/vin-locations.jpg', { cache: 'force-cache' })).blob();
@@ -24299,7 +24405,7 @@ async function ebAddPhotos(files) {
 }
 function ebPaintPhotos() {
   const box = el('eb-photos'); if (!box) return;
-  box.innerHTML = (EB.photos || []).map((p, i) => `<div style="position:relative;margin-top:6px"><img src="${p.data}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--line)"><button class="btn btn-ghost btn-sm" style="position:absolute;top:-6px;right:-6px;padding:0 5px" onclick="EB.photos.splice(${i},1);ebPaintPhotos()">✕</button></div>`).join('');
+  box.innerHTML = (EB.photos || []).map((p, i) => `<div style="position:relative;margin-top:6px"><img src="${p.data}" data-zoom style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--line);cursor:zoom-in"><button class="btn btn-ghost btn-sm" style="position:absolute;top:-6px;right:-6px;padding:0 5px" onclick="EB.photos.splice(${i},1);ebPaintPhotos()">✕</button></div>`).join('');
 }
 // eBay's shipping status for the order in this conversation; the server also
 // brings the warehouse in line (dispatched / tracking).
@@ -25777,6 +25883,33 @@ async function applyEbayCap(code, btn) {
   btn.disabled = false; btn.textContent = 'Apply to live listings';
 }
 
+async function loadDispatchMsgConfig() {
+  try {
+    const c = await Api.get('/api/messages/dispatch-msg/config');
+    if (!el('dm-enabled')) return;
+    el('dm-enabled').checked = !!c.enabled;
+    el('dm-subject').value = c.subject || ''; el('dm-body').value = c.body || '';
+    const stores = (State.brand?.allStores || State.brand?.stores || []).filter(st => st.channelCode && st.channelCode.startsWith('ebay_'));
+    el('dm-stores').innerHTML = stores.map(st => `<label style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-dmch="${escapeAttr(st.channelCode)}" ${(c.channels || []).includes(st.channelCode) ? 'checked' : ''}> ${escapeHtml(st.name)}</label>`).join('') || '<span style="color:var(--ink-soft)">No eBay accounts set up</span>';
+    const carriers = [...new Set(['Proovia', 'Dropfleet', ...(State.dispatch?.carriers || []).filter(x => !/^(Royal Mail|Evri|FedEx|DHL|Other)/.test(x)), ...(c.carriers || [])])];
+    el('dm-carriers').innerHTML = carriers.map(x => `<label style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-dmcar="${escapeAttr(x)}" ${(c.carriers || []).includes(x) ? 'checked' : ''}> ${escapeHtml(x)}</label>`).join('');
+    const r = Object.fromEntries((c.recent || []).map(x => [x.s, x.n]));
+    el('dm-status').innerHTML = `${c.enabled ? 'On' : 'Off'} · last 30 days: ${r.sent || 0} sent${r.skipped ? `, ${r.skipped} skipped` : ''}${r.error ? `, <span style="color:var(--red)">${r.error} failed</span>` : ''}${c.enabled && !(c.channels || []).length ? ' · <span style="color:var(--amber)">no eBay account ticked, so nothing will send</span>' : ''}`;
+  } catch (_) {}
+}
+async function saveDispatchMsgConfig(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await Api.put('/api/messages/dispatch-msg/config', {
+      enabled: el('dm-enabled').checked,
+      channels: [...document.querySelectorAll('[data-dmch]:checked')].map(x => x.dataset.dmch),
+      carriers: [...document.querySelectorAll('[data-dmcar]:checked')].map(x => x.dataset.dmcar),
+      subject: el('dm-subject').value.trim(), body: el('dm-body').value.trim(),
+    });
+    toast('Dispatch message settings saved', 'success'); loadDispatchMsgConfig();
+  } catch (e) { toast(e.data?.message || e.message, 'error', 8000); }
+  finally { if (btn) btn.disabled = false; }
+}
 async function loadFitmentConfig() {
   try {
     const c = await Api.get('/api/messages/fitment/config');
@@ -31363,6 +31496,65 @@ function modal({ title, body, actions=[], size = null }) {
   // Label any tables in the modal so they stack cleanly on mobile.
   try { if (typeof labelizeTables === 'function') labelizeTables(el('modal-body')); } catch (_) {}
 }
+// Full-screen photo viewer — tap a photo anywhere in the app to see it big.
+// Closes with the ✕, a tap off the photo, Esc or the phone's back button. Tap
+// the photo to zoom in (drag / scroll to look around), tap again to fit.
+// urls: one URL or a list (← → / swipe between them).
+function photoView(urls, start = 0) {
+  const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
+  if (!list.length) return;
+  photoViewClose(true);
+  let i = Math.max(0, Math.min(start, list.length - 1)), zoom = false, sx = null;
+  const ov = document.createElement('div');
+  ov.id = 'photo-view';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.92);display:flex;align-items:center;justify-content:center;overflow:auto;touch-action:pan-x pan-y pinch-zoom';
+  ov.innerHTML = `<img id="pv-img" alt="" style="width:96vw;height:88vh;object-fit:contain;cursor:zoom-in;user-select:none;flex:none">
+    <button aria-label="Close" onclick="photoViewClose()" style="position:fixed;top:max(12px,env(safe-area-inset-top));right:12px;width:44px;height:44px;border-radius:50%;border:none;background:rgba(255,255,255,.18);color:#fff;font-size:24px;line-height:44px;cursor:pointer">✕</button>
+    ${list.length > 1 ? `<button id="pv-prev" aria-label="Previous" style="position:fixed;left:8px;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;border:none;background:rgba(255,255,255,.18);color:#fff;font-size:22px;cursor:pointer">‹</button>
+    <button id="pv-next" aria-label="Next" style="position:fixed;right:8px;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;border:none;background:rgba(255,255,255,.18);color:#fff;font-size:22px;cursor:pointer">›</button>
+    <div id="pv-count" style="position:fixed;bottom:max(14px,env(safe-area-inset-bottom));left:0;right:0;text-align:center;color:#ddd;font-size:13px"></div>` : ''}`;
+  document.body.appendChild(ov);
+  const img = ov.querySelector('#pv-img');
+  const show = () => {
+    zoom = false; img.src = list[i];
+    img.style.width = '96vw'; img.style.height = '88vh'; img.style.cursor = 'zoom-in';
+    ov.style.alignItems = 'center'; ov.style.justifyContent = 'center';
+    const c = ov.querySelector('#pv-count'); if (c) c.textContent = `${i + 1} / ${list.length}`;
+  };
+  const go = d => { i = (i + d + list.length) % list.length; show(); };
+  img.onclick = (e) => {
+    e.stopPropagation(); zoom = !zoom;
+    // Zoomed: twice the screen width (scroll / drag to look around).
+    img.style.width = zoom ? '200vw' : '96vw'; img.style.height = zoom ? 'auto' : '88vh'; img.style.cursor = zoom ? 'zoom-out' : 'zoom-in';
+    ov.style.alignItems = zoom ? 'flex-start' : 'center'; ov.style.justifyContent = zoom ? 'flex-start' : 'center';
+  };
+  ov.onclick = (e) => { if (e.target === ov) photoViewClose(); };
+  ov.querySelector('#pv-prev')?.addEventListener('click', e => { e.stopPropagation(); go(-1); });
+  ov.querySelector('#pv-next')?.addEventListener('click', e => { e.stopPropagation(); go(1); });
+  ov.addEventListener('touchstart', e => { sx = e.touches.length === 1 ? e.touches[0].clientX : null; }, { passive: true });
+  ov.addEventListener('touchend', e => { if (sx == null || zoom || list.length < 2) return; const dx = e.changedTouches[0].clientX - sx; if (Math.abs(dx) > 60) go(dx < 0 ? 1 : -1); sx = null; });
+  window._pvKey = (e) => { if (e.key === 'Escape') photoViewClose(); else if (e.key === 'ArrowLeft' && list.length > 1) go(-1); else if (e.key === 'ArrowRight' && list.length > 1) go(1); };
+  document.addEventListener('keydown', window._pvKey);
+  try { history.pushState({ ...(history.state || {}), photo: true }, '', location.href); } catch (_) {}
+  show();
+}
+// fromBack: the back button already popped our history entry.
+function photoViewClose(fromBack) {
+  const ov = document.getElementById('photo-view'); if (!ov) return;
+  ov.remove();
+  if (window._pvKey) { document.removeEventListener('keydown', window._pvKey); window._pvKey = null; }
+  if (!fromBack) { try { if (history.state && history.state.photo) { window._pvSkipPop = true; history.back(); } } catch (_) {} }
+}
+// Any <img data-zoom> (or inside [data-zoom-group]) opens in the viewer when tapped.
+document.addEventListener('click', (e) => {
+  const img = e.target.closest && e.target.closest('img[data-zoom]');
+  if (!img) return;
+  e.preventDefault(); e.stopPropagation();
+  const group = img.closest('[data-zoom-group]');
+  const imgs = group ? [...group.querySelectorAll('img[data-zoom]')] : [img];
+  photoView(imgs.map(x => x.dataset.zoom || x.src), Math.max(0, imgs.indexOf(img)));
+}, true);
+
 function closeModal() {
   // Free the stock-take camera if the scan modal is being dismissed any way.
   try { if (typeof stStopScanCamera === 'function') stStopScanCamera(); } catch (_) {}

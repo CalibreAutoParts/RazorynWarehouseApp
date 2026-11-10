@@ -791,6 +791,30 @@ router.get('/fitment/last-run', requireAdmin, async (req, res) => {
   res.json({ ..._fitmentLastRun, pending: await fitment.countEligible().catch(() => null) });
 });
 
+// "On its way" eBay message after a Proovia / DropFleet dispatch
+// (services/dispatch-messages.js).
+const dispatchMsg = require('../services/dispatch-messages');
+router.get('/dispatch-msg/config', requireAdmin, async (req, res) => {
+  try {
+    const c = await dispatchMsg.getConfig();
+    const recent = (await query(`SELECT dispatch_msg_status AS s, count(*)::int AS n FROM sales
+        WHERE dispatch_msg_sent_at > now() - interval '30 days' GROUP BY 1`)).rows;
+    res.json({ ...c, recent });
+  } catch (e) { res.status(500).json({ error: 'load_failed', message: e.message }); }
+});
+router.put('/dispatch-msg/config', requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {}, patch = {};
+    for (const k of ['enabled', 'channels', 'carriers', 'subject', 'body']) if (b[k] !== undefined) patch[k] = b[k];
+    const c = await dispatchMsg.saveConfig(patch);
+    await audit(req, 'update_dispatch_msg_config', null, null, { enabled: c.enabled, channels: c.channels, carriers: c.carriers });
+    res.json({ ok: true, ...c });
+  } catch (e) {
+    if (e.code === 'ebay_message_policy') return res.status(422).json({ error: e.code, message: e.message });
+    res.status(500).json({ error: 'save_failed', message: e.message });
+  }
+});
+
 // Read-only diagnostic — pinpoints why messages aren't sending (per order).
 router.get('/fitment/diagnose', requireAdmin, async (req, res) => {
   try { res.json(await fitment.diagnose()); }

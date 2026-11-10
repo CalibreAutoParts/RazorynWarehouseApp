@@ -284,6 +284,6 @@ async function resetUnsent() {
 
 module.exports = {
   ensureColumns, getConfig, saveConfig, countEligible,
-  sendFitmentMessagesCore, sendForSale, resetUnsent, diagnose,
+  sendFitmentMessagesCore, sendForSale, resetUnsent, diagnose, resolveSendTargets,
   DEFAULT_SUBJECT, DEFAULT_BODY,
 };
