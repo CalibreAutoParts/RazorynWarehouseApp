@@ -1296,6 +1296,10 @@
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           Costs &amp; margins
         </button>
+        <button class="nav-item admin-only" data-page="pricecheck">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><path d="M11 8v6M9 9.5h3a1 1 0 0 1 0 2h-2a1 1 0 0 0 0 2h3"/></svg>
+          Price check
+        </button>
         <button class="nav-item admin-only" data-page="pricingrules">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           Pricing rules
@@ -3475,6 +3479,7 @@ function hasPerm(page) {
     mirror:       false,
     bundles:      false,
     costs:        false,
+    pricecheck:   false,
     createlisting: false,
     staff:        false,
     settings:     false,
@@ -3533,7 +3538,7 @@ function routeTo(page) {
     activity: renderActivity, pricingrules: renderPricingRules,
     labels: renderLabels, notes: renderNotes, dispatch: renderDispatch,
     competitors: renderCompetitors, bundles: renderBundles, createlisting: renderCreateListing,
-    sharedstock: renderSharedStock, editlisting: renderEditListing, costs: renderCosts,
+    sharedstock: renderSharedStock, editlisting: renderEditListing, costs: renderCosts, pricecheck: renderPriceCheck,
     drafts: renderDrafts, clonestore: renderCloneStore,
     vinsearch: renderVinSearch,
     qtycheck: renderQtyCheck, iteminfo: renderItemInfo,
@@ -17089,6 +17094,360 @@ const CT = { items: [], settings: null, summary: null };
 function ctMoney(n) { return n == null ? '—' : '£' + Number(n).toFixed(2); }
 function ctPct(n) { return n == null ? '—' : Number(n).toFixed(1) + '%'; }
 function ctToday() { return new Date().toISOString().slice(0, 10); }
+
+// ── Price check: should we order this part? ───────────────────────────────
+// Part number → who sells it new on eBay and for how much (price + postage),
+// how crowded it is, how well it sells; then the eBay profit maths with the
+// supplier's price and the postage, using Costs & margins settings, and the
+// most we should pay (to negotiate with the supplier).
+const PC = { tab: 'check', r: null, S: null, rate: 1, rateCur: 'GBP', bulk: [], bulkRunning: false };
+const PC_CUR = ['GBP', 'CNY', 'USD', 'EUR'];
+function renderPriceCheck() {
+  el('content').innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Price check</h1><div class="desc">Thinking of ordering a part? Enter its part number: see who sells it on eBay and for how much, whether it sells, and what you'd make at the supplier's price — and the most you should pay.</div></div>
+      </div>
+      <div class="tabs" style="display:flex;gap:4px;margin-bottom:14px;flex-wrap:wrap">
+        ${[['check', '🔎 Check a part'], ['bulk', '📋 Check a list'], ['history', '🗂 Saved checks']].map(([k, l]) => `<button class="btn ${PC.tab === k ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="PC.tab='${k}';renderPriceCheck()">${l}</button>`).join('')}
+      </div>
+      <div id="pc-body"></div>
+    </div>`;
+  pcLoadSettings().then(() => (PC.tab === 'bulk' ? pcBulkView() : PC.tab === 'history' ? pcHistory() : pcCheckView()));
+}
+async function pcLoadSettings() {
+  if (PC.S) return;
+  try { PC.S = (await Api.get('/api/costs/settings')).settings; } catch (e) { toast('Could not load cost settings: ' + (e.data?.message || e.message), 'error'); }
+}
+async function pcRate(cur) {
+  if (cur === 'GBP') return 1;
+  PC._rates = PC._rates || {};
+  if (PC._rates[cur]) return PC._rates[cur];
+  try { const r = await Api.get(`/api/costs/fx?from=${cur}&to=GBP`); PC._rates[cur] = r.rate; return r.rate; }
+  catch (_) { toast(`No ${cur}→GBP rate right now — enter the cost in GBP`, 'warn'); return null; }
+}
+
+// The eBay maths (same formula as Costs & margins / lib/pricing-floor).
+// inp: { costGbp, landed (cost already includes freight/duty), postage, postageInPrice, price }
+function pcCalc(inp) {
+  const S = PC.S || {};
+  const feeVat = S.feesVatOnEbay !== false ? 1 + (S.feesVatPct ?? 20) / 100 : 1;
+  const p = ((+S.ebayFvfPct || 0) + (+S.ebayRegulatoryPct || 0) + (+S.ebayHighReturnPct || 0) + (+S.adRatePct || 0)) / 100 * feeVat + (+S.externalAdPct || 0) / 100;
+  const v = S.vatRegistered ? ((+S.vatRate || 20) / 100) / (1 + (+S.vatRate || 20) / 100) : 0;
+  const uplift = inp.landed ? 0 : (+S.landedUpliftPct || 0) / 100;
+  const cost = (+inp.costGbp || 0) * (1 + uplift);
+  const post = inp.postageInPrice ? (+inp.postage || 0) : 0;
+  const fixedFee = (+S.ebayPerOrderFee || 0) * feeVat;
+  const other = post + (+S.packagingCost || 0) + fixedFee + (+S.overheadPerUnit || 0);
+  const B = +inp.price || 0;
+  const div = 1 - p - v;
+  const t = (+S.targetMarginPct || 15) / 100;
+  const out = { p, v, cost, other, post, fixedFee, uplift, div, target: t * 100 };
+  out.breakeven = div > 0 ? (cost + other) / div : null;
+  out.floor = out.breakeven != null ? out.breakeven * (1 + t) : null;
+  if (B > 0) {
+    out.fees = B * p; out.vat = B * v;
+    out.net = B * div - cost - other;
+    out.marginPct = out.net / B * 100;
+    // Most we can pay (landed, then before the freight/duty estimate) and still
+    // sell at B with the target margin — the negotiating number.
+    out.maxLanded = B / (1 + t) * div - other;
+    out.maxSupplierGbp = out.maxLanded / (1 + uplift);
+    out.maxBreakevenGbp = (B * div - other) / (1 + uplift);
+  }
+  return out;
+}
+const pcMoney = n => (n == null || !isFinite(n) ? '—' : (n < 0 ? '−£' : '£') + Math.abs(n).toFixed(2));
+const PC_LVL = {
+  none: ['var(--green)', 'No one else sells it'], low: ['var(--green)', 'Low'], medium: ['var(--amber,#d97706)', 'Medium'], high: ['var(--red)', 'High — crowded'],
+  'very low': ['var(--red)', 'Very low'], unknown: ['var(--ink-soft)', 'Unknown'],
+};
+const PC_DEM = { high: ['var(--green)', 'Sells well'], medium: ['var(--green)', 'Steady'], low: ['var(--amber,#d97706)', 'Slow'], 'very low': ['var(--red)', 'Very slow'], unknown: ['var(--ink-soft)', 'No sales data'] };
+
+function pcCheckView() {
+  const r = PC.r;
+  el('pc-body').innerHTML = `
+    <div class="card" style="margin-bottom:14px"><div class="card-body" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+      <div class="field" style="margin:0;flex:1;min-width:200px"><label>Part number</label>
+        <input id="pc-pn" placeholder="e.g. 575807221T" value="${escapeAttr(r?.partNumber || '')}" style="font-family:ui-monospace,monospace;font-size:15px" onkeydown="if(event.key==='Enter')pcRun()"></div>
+      <div class="field" style="margin:0;flex:1;min-width:200px"><label>Or search words <span style="font-weight:400;color:var(--ink-soft)">(optional — if the part number finds nothing)</span></label>
+        <input id="pc-q" placeholder="e.g. Seat Ateca front bumper" value="${escapeAttr(r?.market?.query && r.market.query !== r.partNumber ? r.market.query : '')}" onkeydown="if(event.key==='Enter')pcRun()"></div>
+      <label style="font-size:12.5px;display:flex;gap:6px;align-items:center;margin-bottom:9px"><input type="checkbox" id="pc-used"> Include used</label>
+      <button class="btn btn-primary" id="pc-go" onclick="pcRun()">🔎 Check eBay</button>
+    </div></div>
+    <div id="pc-res">${r ? '' : '<div style="color:var(--ink-soft);font-size:13px">Enter a part number to see the market.</div>'}</div>`;
+  if (r) pcPaint();
+}
+async function pcRun(pnArg, opts = {}) {
+  const pn = (pnArg || el('pc-pn')?.value || '').trim();
+  if (!pn) return toast('Enter a part number', 'warn');
+  const btn = el('pc-go'); if (btn) { btn.disabled = true; btn.textContent = 'Checking eBay…'; }
+  if (el('pc-res')) el('pc-res').innerHTML = '<div style="color:var(--ink-soft);font-size:13px">Searching eBay and reading how well each listing sells… (10–20 seconds)</div>';
+  try {
+    const r = await Api.post('/api/pricecheck/check', { partNumber: pn, q: (el('pc-q')?.value || '').trim() || undefined, used: !!el('pc-used')?.checked, fresh: !!opts.fresh });
+    PC.r = r;
+    const m = r.market;
+    // Defaults: sell at the cheapest like-for-like price (or our own price), postage = small band.
+    const ourPrice = r.ours.products.find(p => p.price_ebay)?.price_ebay;
+    PC.in = Object.assign({ cost: '', cur: 'GBP', landed: false, postageCode: (PC.S?.shippingBands || [])[0]?.code || 'custom', postage: (PC.S?.shippingBands || [])[0]?.cost ?? (PC.S?.postageSmall || 0),
+      postageInPrice: true, price: m.lowest ? +(m.lowest.total - 0.01).toFixed(2) : (ourPrice ? +ourPrice : ''), qty: '', supplier: '', notes: '' }, opts.keep || {});
+    const prevCost = r.previous?.[0];
+    if (prevCost && !opts.keep) { PC.in.cost = prevCost.supplier_cost ?? ''; PC.in.cur = prevCost.currency || 'GBP'; PC.in.supplier = prevCost.supplier || ''; }
+    if (PC.in.cur !== 'GBP') PC.rate = await pcRate(PC.in.cur) || 1; else PC.rate = 1;
+    pcPaint();
+  } catch (e) {
+    if (el('pc-res')) el('pc-res').innerHTML = `<div class="card"><div class="card-body" style="color:var(--red)">${escapeHtml(e.data?.message || e.message)}</div></div>`;
+  } finally { if (btn) { btn.disabled = false; btn.textContent = '🔎 Check eBay'; } }
+}
+// Read the calculator inputs back into PC.in.
+function pcReadInputs() {
+  const g = id => el(id);
+  if (!g('pc-cost')) return;
+  PC.in.cost = g('pc-cost').value; PC.in.cur = g('pc-cur').value; PC.in.landed = g('pc-landed').checked;
+  PC.in.postageCode = g('pc-post').value;
+  const band = (PC.S?.shippingBands || []).find(b => b.code === PC.in.postageCode);
+  if (band && document.activeElement !== g('pc-post-amt')) { PC.in.postage = band.cost; g('pc-post-amt').value = band.cost; }
+  else PC.in.postage = parseFloat(g('pc-post-amt').value) || 0;
+  PC.in.postageInPrice = g('pc-post-in').checked;
+  PC.in.price = g('pc-price').value; PC.in.qty = g('pc-qty').value;
+  PC.in.supplier = g('pc-supplier').value; PC.in.notes = g('pc-notes').value;
+}
+async function pcCurChanged() {
+  pcReadInputs();
+  PC.rate = await pcRate(PC.in.cur) || 1;
+  pcRecalc();
+}
+function pcCostGbp() { const c = parseFloat(PC.in.cost); return isFinite(c) ? c * (PC.in.cur === 'GBP' ? 1 : PC.rate) : null; }
+function pcVerdict(m, c, costGbp) {
+  const dem = m.demand, comp = m.competition;
+  if (costGbp == null) return ['var(--ink-soft)', 'Enter the supplier\'s price', 'Add what the supplier charges to see the profit and the verdict.'];
+  if (c.net == null) return ['var(--ink-soft)', 'Set a selling price', ''];
+  const slow = dem === 'low' || dem === 'very low';
+  if (c.net <= 0) return ['var(--red)', '✗ Don\'t order at this price', `You'd lose ${pcMoney(-c.net)} a sale at ${pcMoney(+PC.in.price)}. ${c.maxSupplierGbp > 0 ? `Ask the supplier for ${pcMoney(c.maxSupplierGbp)} or less.` : 'Even free stock wouldn\'t pay at this price.'}`];
+  if (+PC.in.price < c.floor) return ['var(--amber,#d97706)', '⚖ Negotiate first', `Thin margin (${c.marginPct.toFixed(1)}%, target ${c.target}%). Get it to ${pcMoney(c.maxSupplierGbp)} or less to hit your target.`];
+  if (comp === 'none' && dem === 'unknown') return ['var(--green)', '✓ Opportunity — no one else sells it', 'No competition on eBay, so demand is untested — start with a small order.'];
+  if (slow) return ['var(--amber,#d97706)', '✓ Profitable, but slow seller', `Good margin (${c.marginPct.toFixed(1)}%) but only ~${m.perMonth}/month sell on eBay — order small.`];
+  if (comp === 'high') return ['var(--green)', '✓ Order — but it\'s crowded', `Good margin (${c.marginPct.toFixed(1)}%). ${m.sellers} sellers — expect price pressure.`];
+  return ['var(--green)', '✓ Worth ordering', `${c.marginPct.toFixed(1)}% margin at ${pcMoney(+PC.in.price)} and it sells (~${m.perMonth}/month across eBay).`];
+}
+function pcPaint() {
+  const r = PC.r, m = r.market, o = r.ours, I = PC.in, S = PC.S || {};
+  const tile = (title, big, sub, color) => `<div class="card"><div class="card-body" style="padding:12px 14px">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft)">${title}</div>
+      <div style="font-size:20px;font-weight:800;margin-top:2px;${color ? 'color:' + color : ''}">${big}</div>
+      <div style="font-size:12px;color:var(--ink-soft);margin-top:2px">${sub}</div></div></div>`;
+  const [cc, cl] = PC_LVL[m.competition] || PC_LVL.unknown;
+  const [dc, dl] = PC_DEM[m.demand] || PC_DEM.unknown;
+  const ourP = o.products[0];
+  el('pc-res').innerHTML = `
+    <div id="pc-verdict"></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:12px 0">
+      ${tile('Competition', `${m.sellers} seller${m.sellers === 1 ? '' : 's'}`, `<b style="color:${cc}">${cl}</b> · ${m.totalListings} listing(s) found${m.exactCount ? ` · ${m.exactCount} with this part no. in the title` : ''}`, cc)}
+      ${tile('eBay price (incl. postage)', m.lowest ? pcMoney(m.lowest.total) : '—', m.lowest ? `cheapest${m.lowest.seller ? ' · ' + escapeHtml(m.lowest.seller) : ''} · median ${pcMoney(m.median)} · top ${pcMoney(m.highest)}` : 'no one sells it new')}
+      ${tile('Demand', m.demandListings ? `~${m.perMonth}/month` : '—', `<b style="color:${dc}">${dl}</b>${m.demandListings ? ` · ${m.soldTotal} sold across ${m.demandListings} listing(s)` : ''}`, dc)}
+      ${tile('You', ourP ? `${o.products.reduce((a, p) => a + (+p.qty_on_hand || 0), 0)} in stock` : 'Not stocked', ourP ? `${ourP.price_ebay ? 'eBay ' + pcMoney(+ourP.price_ebay) + ' · ' : ''}sold ${o.sold90} in 90 days, ${o.sold365} in a year` : 'never sold here')}
+    </div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h3>eBay calculator</h3><div class="card-desc">Uses your Costs &amp; margins settings: eBay fees ${(((+S.ebayFvfPct || 0) + (+S.ebayRegulatoryPct || 0) + (+S.ebayHighReturnPct || 0))).toFixed(2)}%${S.feesVatOnEbay !== false ? ' + VAT on fees' : ''}${+S.adRatePct ? `, ads ${S.adRatePct}%` : ''}, packaging ${pcMoney(+S.packagingCost)}, overhead ${pcMoney(+S.overheadPerUnit)}/unit${S.vatRegistered ? ', VAT ' + S.vatRate + '%' : ''}.</div></div>
+      <div class="card-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;align-items:end">
+        <div class="field" style="margin:0"><label>Supplier price (per unit)</label><div style="display:flex;gap:4px">
+          <input id="pc-cost" type="number" step="0.01" min="0" value="${escapeAttr(I.cost)}" placeholder="0.00" oninput="pcReadInputs();pcRecalc()" style="flex:1;min-width:0">
+          <select id="pc-cur" onchange="pcCurChanged()" style="width:88px">${PC_CUR.map(c => `<option ${I.cur === c ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
+          <div id="pc-cost-gbp" style="font-size:11px;color:var(--ink-soft);margin-top:3px"></div></div>
+        <label style="font-size:12px;display:flex;gap:6px;align-items:center;margin-bottom:22px" title="Tick when the price already includes shipping it to you, import VAT and duty"><input type="checkbox" id="pc-landed" ${I.landed ? 'checked' : ''} onchange="pcReadInputs();pcRecalc()"> Price includes freight &amp; duty${+S.landedUpliftPct ? ` <span style="color:var(--ink-soft)">(else +${S.landedUpliftPct}%)</span>` : ''}</label>
+        <div class="field" style="margin:0"><label>Postage to customer</label><div style="display:flex;gap:4px">
+          <select id="pc-post" onchange="pcReadInputs();pcRecalc()" style="flex:1;min-width:0">${(S.shippingBands || []).map(b => `<option value="${escapeAttr(b.code)}" ${I.postageCode === b.code ? 'selected' : ''}>${escapeHtml(b.label)} · ${pcMoney(b.cost)}</option>`).join('')}<option value="custom" ${I.postageCode === 'custom' ? 'selected' : ''}>Other amount</option></select>
+          <input id="pc-post-amt" type="number" step="0.01" min="0" value="${escapeAttr(I.postage)}" oninput="el('pc-post').value='custom';pcReadInputs();pcRecalc()" style="width:76px"></div>
+          <label style="font-size:11.5px;display:flex;gap:5px;align-items:center;margin-top:4px"><input type="checkbox" id="pc-post-in" ${I.postageInPrice ? 'checked' : ''} onchange="pcReadInputs();pcRecalc()"> Free postage (we pay it)</label></div>
+        <div class="field" style="margin:0"><label>Our eBay price</label><input id="pc-price" type="number" step="0.01" min="0" value="${escapeAttr(I.price)}" oninput="pcReadInputs();pcRecalc()">
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">${m.lowest ? `<button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:11px" onclick="el('pc-price').value=${(m.lowest.total - 0.01).toFixed(2)};pcReadInputs();pcRecalc()">beat cheapest</button>` : ''}${m.median ? `<button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:11px" onclick="el('pc-price').value=${m.median};pcReadInputs();pcRecalc()">median</button>` : ''}<button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:11px" onclick="const c=pcCalc({costGbp:pcCostGbp(),landed:PC.in.landed,postage:PC.in.postage,postageInPrice:PC.in.postageInPrice,price:1});if(c.floor){el('pc-price').value=c.floor.toFixed(2);pcReadInputs();pcRecalc()}">my target</button></div></div>
+        <div class="field" style="margin:0"><label>Qty to order <span style="font-weight:400;color:var(--ink-soft)">(optional)</span></label><input id="pc-qty" type="number" min="0" value="${escapeAttr(I.qty)}" oninput="pcReadInputs();pcRecalc()"></div>
+      </div>
+      <div class="card-body" id="pc-out" style="border-top:1px solid var(--line)"></div>
+      <div class="card-body" style="border-top:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div class="field" style="margin:0;min-width:160px"><label>Supplier</label><input id="pc-supplier" value="${escapeAttr(I.supplier)}" oninput="pcReadInputs()"></div>
+        <div class="field" style="margin:0;flex:1;min-width:200px"><label>Notes</label><input id="pc-notes" value="${escapeAttr(I.notes)}" placeholder="e.g. MOQ 10, 3 weeks lead time" oninput="pcReadInputs()"></div>
+        <button class="btn btn-primary" onclick="pcSave(this)">💾 Save check</button>
+        <button class="btn btn-ghost btn-sm" onclick="pcRun(PC.r.partNumber,{fresh:true,keep:PC.in})" title="Ask eBay again (results are kept for 30 minutes)">⟳ Refresh eBay</button>
+      </div></div>
+    ${r.previous?.length ? `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Checked before: ${r.previous.map(p => `${new Date(p.created_at).toLocaleDateString('en-GB')} — ${p.supplier_cost != null ? (p.currency || '') + ' ' + (+p.supplier_cost).toFixed(2) : 'no price'}${p.supplier ? ' from ' + escapeHtml(p.supplier) : ''}${p.verdict ? ' · ' + escapeHtml(p.verdict) : ''}`).join(' · ')}</div>` : ''}
+    <div class="card"><div class="card-head"><h3>Who sells it (${m.items.length})</h3><div class="card-desc">New, cheapest first${m.exactCount ? '; listings with the part number in the title on top' : ''}. "Sold" is eBay's count for that listing; per month = since it was listed.</div></div>
+      <div class="card-body" style="padding:0;overflow:auto" id="pc-items"></div></div>`;
+  pcRecalc();
+}
+function pcRecalc() {
+  if (!PC.r || !el('pc-out')) return;
+  const m = PC.r.market, I = PC.in;
+  const costGbp = pcCostGbp();
+  const c = pcCalc({ costGbp: costGbp || 0, landed: I.landed, postage: I.postage, postageInPrice: I.postageInPrice, price: I.price });
+  if (el('pc-cost-gbp')) el('pc-cost-gbp').textContent = costGbp == null ? '' : `${I.cur !== 'GBP' ? `= ${pcMoney(costGbp)} (1 ${I.cur} = £${(+PC.rate).toFixed(4)})` : ''}${c.uplift ? ` · landed ≈ ${pcMoney(c.cost)}` : ''}`;
+  const [vc, vt, vd] = pcVerdict(m, c, costGbp);
+  el('pc-verdict').innerHTML = `<div style="border:2px solid ${vc};border-radius:12px;padding:12px 16px;background:color-mix(in srgb, ${vc} 8%, transparent)">
+    <div style="font-size:18px;font-weight:800;color:${vc}">${vt}</div>${vd ? `<div style="font-size:13.5px;margin-top:3px">${vd}</div>` : ''}</div>`;
+  PC.verdict = vt.replace(/^[^A-Za-z]+/, '');
+  const qty = parseInt(I.qty) || 0;
+  const row = (k, v, strong) => `<div style="display:flex;justify-content:space-between;gap:10px;padding:3px 0;${strong ? 'font-weight:700;border-top:1px solid var(--line);margin-top:4px;padding-top:6px' : ''}"><span style="color:${strong ? 'var(--ink)' : 'var(--ink-soft)'}">${k}</span><span>${v}</span></div>`;
+  const toCur = g => (I.cur === 'GBP' || !PC.rate ? '' : ` <span style="color:var(--ink-soft)">(${I.cur} ${(g / PC.rate).toFixed(2)})</span>`);
+  el('pc-out').innerHTML = c.net == null ? '<div style="color:var(--ink-soft);font-size:13px">Enter our eBay price to see the profit.</div>' : `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;font-size:13px">
+      <div>
+        ${row('Sale price', pcMoney(+I.price))}
+        ${row('eBay fees' + (c.p ? ` (${(c.p * 100).toFixed(1)}%)` : ''), '−' + pcMoney(c.fees + c.fixedFee).replace('£', '£'))}
+        ${c.vat ? row('VAT to HMRC', '−' + pcMoney(c.vat)) : ''}
+        ${row('Part (landed)', '−' + pcMoney(c.cost))}
+        ${c.post ? row('Postage', '−' + pcMoney(c.post)) : ''}
+        ${row('Packaging + overhead', '−' + pcMoney((+PC.S.packagingCost || 0) + (+PC.S.overheadPerUnit || 0)))}
+        ${row('Profit per sale', `<span style="color:${c.net < 0 ? 'var(--red)' : 'var(--green)'}">${pcMoney(c.net)} · ${c.marginPct.toFixed(1)}%</span>`, true)}
+        ${qty ? row(`On ${qty} unit(s)`, `<span style="color:${c.net < 0 ? 'var(--red)' : 'var(--green)'}">${pcMoney(c.net * qty)}</span> · spend ${pcMoney(c.cost * qty)}`) : ''}
+      </div>
+      <div>
+        <div style="font-weight:700;margin-bottom:4px">Negotiating with the supplier</div>
+        ${row(`Most to pay for your ${c.target}% target`, `<b style="color:var(--green)">${pcMoney(c.maxSupplierGbp)}</b>${toCur(c.maxSupplierGbp)}`)}
+        ${row('Most to pay to break even', `${pcMoney(c.maxBreakevenGbp)}${toCur(c.maxBreakevenGbp)}`)}
+        <div style="font-weight:700;margin:10px 0 4px">At this supplier price</div>
+        ${row('Break-even eBay price', pcMoney(c.breakeven))}
+        ${row(`Price for your ${c.target}% target`, pcMoney(c.floor))}
+        ${m.lowest ? row('Cheapest competitor', pcMoney(m.lowest.total) + (c.floor ? ` <span style="color:${m.lowest.total >= c.floor ? 'var(--green)' : 'var(--red)'}">(${m.lowest.total >= c.floor ? 'room to compete' : 'below your target'})</span>` : '')) : ''}
+      </div>
+    </div>`;
+  pcPaintItems(costGbp);
+}
+function pcPaintItems(costGbp) {
+  const box = el('pc-items'); if (!box) return;
+  const m = PC.r.market, I = PC.in;
+  if (!m.items.length) { box.innerHTML = `<div style="padding:14px;color:var(--ink-soft);font-size:13px">Nobody sells this on eBay${PC.r.market.query ? ` for “${escapeHtml(m.query)}”` : ''}. Try search words (make, model, part) above to double-check.</div>`; return; }
+  box.innerHTML = `<table class="table" style="margin:0"><thead><tr><th></th><th>Listing</th><th>Seller</th><th style="text-align:right">Price + post</th><th style="text-align:right">Sold</th><th style="text-align:right">/ month</th><th style="text-align:right" title="Your profit if you sold at this price">You'd make</th></tr></thead><tbody>
+    ${m.items.slice(0, 60).map(it => {
+      const c = costGbp != null ? pcCalc({ costGbp, landed: I.landed, postage: I.postage, postageInPrice: I.postageInPrice, price: it.total }) : null;
+      return `<tr style="${it.ours ? 'background:color-mix(in srgb, var(--blue,#2563eb) 7%, transparent)' : ''}">
+        <td style="width:54px">${it.image ? `<img src="${escapeAttr(it.image)}" data-zoom alt="" style="width:48px;height:48px;object-fit:contain;border-radius:6px;background:#fff;cursor:zoom-in">` : ''}</td>
+        <td style="max-width:380px"><a href="${escapeAttr(it.url || '#')}" target="_blank" rel="noopener" style="font-size:12.5px">${escapeHtml(it.title)}</a>
+          <div style="font-size:10.5px;margin-top:2px">${it.ours ? '<span class="pill" style="font-size:9px">yours</span> ' : ''}${it.exact ? '<span class="pill green" style="font-size:9px">part no. match</span> ' : '<span style="color:var(--ink-soft)">matched by eBay — check it\'s the same part</span>'}${it.condition && it.condition !== 'New' ? ' · ' + escapeHtml(it.condition) : ''}${it.listedMonths ? ` · listed ${it.listedMonths < 1 ? '<1' : Math.round(it.listedMonths)} mo` : ''}</div></td>
+        <td style="font-size:12px">${escapeHtml(it.seller || '')}${it.feedback != null ? `<div style="font-size:10.5px;color:var(--ink-soft)">${it.feedback} · ${it.positive ?? '?'}%</div>` : ''}</td>
+        <td style="text-align:right;white-space:nowrap"><b>${pcMoney(it.total)}</b><div style="font-size:10.5px;color:var(--ink-soft)">${pcMoney(it.price)} + ${it.postage ? pcMoney(it.postage) : 'free'}</div></td>
+        <td style="text-align:right">${it.sold ?? '—'}</td>
+        <td style="text-align:right">${it.perMonth ?? '—'}</td>
+        <td style="text-align:right;white-space:nowrap">${c && c.net != null ? `<b style="color:${c.net < 0 ? 'var(--red)' : 'var(--green)'}">${pcMoney(c.net)}</b><div style="font-size:10.5px;color:var(--ink-soft)">${c.marginPct.toFixed(0)}%</div>` : '—'}</td></tr>`;
+    }).join('')}</tbody></table>`;
+}
+async function pcSave(btn) {
+  pcReadInputs();
+  const I = PC.in;
+  if (btn) btn.disabled = true;
+  try {
+    await Api.post('/api/pricecheck/save', { partNumber: PC.r.partNumber, query: PC.r.market.query, result: PC.r, supplier: I.supplier, supplierCost: I.cost, currency: I.cur, costGbp: pcCostGbp(), postage: I.postage, sellPrice: I.price, qty: I.qty, verdict: PC.verdict, notes: I.notes });
+    toast('Check saved', 'success');
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+// ── Check a list: "part number, supplier price" per line ──
+function pcBulkView() {
+  const S = PC.S || {};
+  el('pc-body').innerHTML = `
+    <div class="card" style="margin-bottom:14px"><div class="card-body">
+      <div class="field"><label>One part per line: <b>part number, supplier price</b> (price optional) — or upload a CSV / paste from Excel</label>
+        <textarea id="pcb-list" rows="7" placeholder="575807221T, 38.50&#10;98 310 477 80, 41&#10;H010A6RAMA" style="font-family:ui-monospace,monospace">${escapeHtml(PC.bulkText || '')}</textarea></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <label class="btn btn-outline btn-sm" style="cursor:pointer">⬆ CSV file<input type="file" accept=".csv,.txt" style="display:none" onchange="pcBulkFile(this.files[0]);this.value=''"></label>
+        <div class="field" style="margin:0"><label>Prices are in</label><select id="pcb-cur">${PC_CUR.map(c => `<option>${c}</option>`).join('')}</select></div>
+        <div class="field" style="margin:0"><label>Postage</label><select id="pcb-post">${(S.shippingBands || []).map(b => `<option value="${b.cost}">${escapeHtml(b.label)} · ${pcMoney(b.cost)}</option>`).join('')}</select></div>
+        <label style="font-size:12px;display:flex;gap:6px;align-items:center;margin-bottom:8px"><input type="checkbox" id="pcb-landed"> Prices include freight &amp; duty</label>
+        <button class="btn btn-primary" id="pcb-go" onclick="pcBulkRun()">🔎 Check all</button>
+      </div>
+      <div id="pcb-prog" style="margin-top:10px"></div>
+    </div></div>
+    <div class="card"><div class="card-body" style="padding:0;overflow:auto" id="pcb-res"></div></div>`;
+  pcBulkPaint();
+}
+function pcBulkFile(f) {
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => { el('pcb-list').value = String(rd.result || '').split(/\r?\n/).map(l => l.split(/[,\t;]/).slice(0, 2).map(x => x.trim().replace(/^"|"$/g, '')).join(', ')).filter(l => l.replace(/[, ]/g, '')).join('\n'); };
+  rd.readAsText(f);
+}
+async function pcBulkRun() {
+  if (PC.bulkRunning) return;
+  PC.bulkText = el('pcb-list').value;
+  const lines = PC.bulkText.split(/\r?\n/).map(l => l.split(/[,\t;]/)).map(([pn, price]) => ({ pn: String(pn || '').trim(), price: parseFloat(String(price || '').replace(/[^0-9.]/g, '')) })).filter(x => x.pn && !/^part/i.test(x.pn));
+  if (!lines.length) return toast('Add at least one part number', 'warn');
+  const cur = el('pcb-cur').value, rate = cur === 'GBP' ? 1 : await pcRate(cur);
+  if (!rate) return;
+  const postage = parseFloat(el('pcb-post').value) || 0, landed = el('pcb-landed').checked;
+  PC.bulk = lines.map(x => ({ ...x, cur, rate, postage, landed, state: 'wait' }));
+  PC.bulkRunning = true; el('pcb-go').disabled = true;
+  for (let i = 0; i < PC.bulk.length; i++) {
+    const row = PC.bulk[i]; row.state = 'busy';
+    el('pcb-prog').innerHTML = `<div style="font-size:12.5px;margin-bottom:5px">Checking ${i + 1} of ${PC.bulk.length} — ${escapeHtml(row.pn)}</div><div style="height:8px;background:var(--line-2);border-radius:5px;overflow:hidden"><div style="height:100%;width:${Math.round(i / PC.bulk.length * 100)}%;background:var(--brand-primary)"></div></div>`;
+    pcBulkPaint();
+    try { row.r = await Api.post('/api/pricecheck/check', { partNumber: row.pn }); row.state = 'ok'; }
+    catch (e) { row.state = 'err'; row.err = e.data?.message || e.message; }
+    pcBulkPaint();
+  }
+  PC.bulkRunning = false; el('pcb-go').disabled = false;
+  el('pcb-prog').innerHTML = `<div style="font-size:12.5px;color:var(--green)">Done — ${PC.bulk.filter(x => x.state === 'ok').length} checked. Click a row to open it in the calculator.</div>`;
+}
+function pcBulkPaint() {
+  const box = el('pcb-res'); if (!box) return;
+  if (!PC.bulk.length) { box.innerHTML = '<div style="padding:14px;color:var(--ink-soft);font-size:13px">Results appear here — sell price = just under the cheapest competitor.</div>'; return; }
+  box.innerHTML = `<table class="table" style="margin:0"><thead><tr><th>Part no.</th><th>Part</th><th style="text-align:right">Sellers</th><th style="text-align:right">Cheapest</th><th style="text-align:right">Sells / month</th><th style="text-align:right">Supplier £</th><th style="text-align:right">Profit at cheapest −1p</th><th style="text-align:right">Pay at most</th><th>Verdict</th></tr></thead><tbody>
+    ${PC.bulk.map((x, i) => {
+      if (x.state !== 'ok') return `<tr><td><b>${escapeHtml(x.pn)}</b></td><td colspan="8" style="color:${x.state === 'err' ? 'var(--red)' : 'var(--ink-soft)'};font-size:12px">${x.state === 'busy' ? 'Checking…' : x.state === 'err' ? escapeHtml(x.err) : 'Waiting'}</td></tr>`;
+      const m = x.r.market, costGbp = isFinite(x.price) ? x.price * x.rate : null;
+      const price = m.lowest ? +(m.lowest.total - 0.01).toFixed(2) : null;
+      const c = price ? pcCalc({ costGbp: costGbp || 0, landed: x.landed, postage: x.postage, postageInPrice: true, price }) : null;
+      const saved = PC.in; PC.in = { price }; const v = c ? pcVerdict(m, c, costGbp) : ['var(--green)', m.competition === 'none' ? 'No competition' : '—']; PC.in = saved;
+      const [dc] = PC_DEM[m.demand] || PC_DEM.unknown, [cc] = PC_LVL[m.competition] || PC_LVL.unknown;
+      return `<tr style="cursor:pointer" onclick="pcOpenBulk(${i})">
+        <td><b style="font-family:ui-monospace,monospace">${escapeHtml(x.pn)}</b></td>
+        <td style="font-size:12px;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml((m.items[0] || {}).title || (x.r.ours.products[0] || {}).title || '')}</td>
+        <td style="text-align:right;color:${cc}">${m.sellers}</td>
+        <td style="text-align:right">${m.lowest ? pcMoney(m.lowest.total) : '—'}</td>
+        <td style="text-align:right;color:${dc}">${m.demandListings ? '~' + m.perMonth : '—'}</td>
+        <td style="text-align:right">${costGbp != null ? pcMoney(costGbp) : '—'}</td>
+        <td style="text-align:right">${c && costGbp != null ? `<b style="color:${c.net < 0 ? 'var(--red)' : 'var(--green)'}">${pcMoney(c.net)}</b> <span style="font-size:11px;color:var(--ink-soft)">${c.marginPct.toFixed(0)}%</span>` : '—'}</td>
+        <td style="text-align:right">${c ? pcMoney(c.maxSupplierGbp) : '—'}</td>
+        <td style="font-size:12px;font-weight:700;color:${v[0]}">${escapeHtml(v[1])}</td></tr>`;
+    }).join('')}</tbody></table>`;
+}
+function pcOpenBulk(i) {
+  const x = PC.bulk[i]; if (!x?.r) return;
+  PC.r = x.r; const m = x.r.market;
+  PC.in = { cost: isFinite(x.price) ? x.price : '', cur: x.cur, landed: x.landed, postageCode: 'custom', postage: x.postage, postageInPrice: true,
+    price: m.lowest ? +(m.lowest.total - 0.01).toFixed(2) : '', qty: '', supplier: '', notes: '' };
+  PC.rate = x.rate; PC.tab = 'check';
+  renderPriceCheck();
+}
+
+// ── Saved checks ──
+async function pcHistory() {
+  el('pc-body').innerHTML = `<div class="card"><div class="card-body" style="padding:10px"><input type="search" id="pch-q" placeholder="Search part number or supplier…" style="width:100%;max-width:360px" oninput="clearTimeout(PC.ht);PC.ht=setTimeout(pcHistoryLoad,300)"></div><div class="card-body" style="padding:0;overflow:auto" id="pch-res">Loading…</div></div>`;
+  pcHistoryLoad();
+}
+async function pcHistoryLoad() {
+  let r; try { r = await Api.get('/api/pricecheck/history?q=' + encodeURIComponent(el('pch-q')?.value || '')); } catch (e) { el('pch-res').textContent = e.message; return; }
+  el('pch-res').innerHTML = r.checks.length ? `<table class="table" style="margin:0"><thead><tr><th>When</th><th>Part no.</th><th>Supplier price</th><th style="text-align:right">Sellers</th><th style="text-align:right">Cheapest</th><th style="text-align:right">/ month</th><th>Verdict</th><th></th></tr></thead><tbody>
+    ${r.checks.map(c => `<tr style="cursor:pointer" onclick="pcOpenSaved(${c.id})">
+      <td style="font-size:12px;white-space:nowrap">${new Date(c.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' })}<div style="color:var(--ink-soft);font-size:10.5px">${escapeHtml(c.by_name || '')}</div></td>
+      <td><b style="font-family:ui-monospace,monospace">${escapeHtml(c.part_number)}</b><div style="font-size:11px;color:var(--ink-soft);max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(c.title || '')}</div></td>
+      <td style="font-size:12.5px">${c.supplier_cost != null ? `${escapeHtml(c.currency || '')} ${(+c.supplier_cost).toFixed(2)}` : '—'}${c.supplier ? `<div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(c.supplier)}</div>` : ''}</td>
+      <td style="text-align:right">${c.sellers ?? '—'}</td><td style="text-align:right">${c.lowest != null ? pcMoney(+c.lowest) : '—'}</td><td style="text-align:right">${c.per_month ?? '—'}</td>
+      <td style="font-size:12px;font-weight:600">${escapeHtml(c.verdict || '')}${c.notes ? `<div style="font-weight:400;color:var(--ink-soft);font-size:11px">${escapeHtml(c.notes)}</div>` : ''}</td>
+      <td onclick="event.stopPropagation()"><button class="btn btn-ghost btn-sm" onclick="pcDelete(${c.id})" title="Delete">✕</button></td></tr>`).join('')}</tbody></table>`
+    : '<div style="padding:14px;color:var(--ink-soft);font-size:13px">No saved checks yet.</div>';
+}
+async function pcOpenSaved(id) {
+  try {
+    const c = (await Api.get('/api/pricecheck/' + id)).check;
+    if (!c.result) return toast('Nothing saved for that check', 'warn');
+    PC.r = c.result;
+    PC.in = { cost: c.supplier_cost ?? '', cur: c.currency || 'GBP', landed: false, postageCode: 'custom', postage: c.postage != null ? +c.postage : 0, postageInPrice: true,
+      price: c.sell_price ?? '', qty: c.qty ?? '', supplier: c.supplier || '', notes: c.notes || '' };
+    PC.rate = (await pcRate(PC.in.cur)) || 1; PC.tab = 'check';
+    renderPriceCheck();
+    toast(`Saved check from ${new Date(c.created_at).toLocaleDateString('en-GB')} — press ⟳ Refresh eBay for today's market`, 'info', 6000);
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+async function pcDelete(id) { if (!confirm('Delete this saved check?')) return; await Api.delete('/api/pricecheck/' + id).catch(() => {}); pcHistoryLoad(); }
 
 function renderCosts() {
   el('content').innerHTML = `

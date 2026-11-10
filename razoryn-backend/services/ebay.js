@@ -109,6 +109,10 @@ function normalizeBrowseItem(it) {
     condition: it.condition || null,
     condition_id: it.conditionId || null,
     seller_username: (it.seller && it.seller.username) || null,
+    seller_feedback: it.seller && it.seller.feedbackScore != null ? Number(it.seller.feedbackScore) : null,
+    seller_positive: it.seller && it.seller.feedbackPercentage != null ? Number(it.seller.feedbackPercentage) : null,
+    legacy_id: it.legacyItemId || (String(it.itemId || '').split('|')[1] || null),
+    created_at: it.itemCreationDate || null,
     shipping_cost: shippingCost,
     shipping_type: shippingType,
     shipping_free: shippingFree,
@@ -234,6 +238,23 @@ async function searchActiveListings({ q, conditionIds, marketplaceId, limit = 10
     if (offset < Math.min(limit, total)) await sleep(300);
   }
   return { items: out, total: total === Infinity ? out.length : total };
+}
+
+// One listing's demand from the public Browse API: how many it has sold (eBay's
+// estimate) and how many are left, plus when it was listed.
+async function getBrowseItemDemand(itemId, marketplaceId) {
+  const mkt = marketplaceId || process.env.EBAY_MARKETPLACE_ID || 'EBAY_GB';
+  const resp = await browseSearch(`${BASE}/buy/browse/v1/item/${encodeURIComponent(itemId)}?fieldgroups=PRODUCT`, mkt);
+  const d = resp.data || {};
+  const av = (d.estimatedAvailabilities || [])[0] || {};
+  const mpn = (d.localizedAspects || []).find(a => /^(manufacturer part number|mpn|reference oe\/oem number|oe\/oem part number)$/i.test(a.name || ''));
+  return {
+    sold: av.estimatedSoldQuantity != null ? Number(av.estimatedSoldQuantity) : null,
+    available: av.estimatedAvailableQuantity != null ? Number(av.estimatedAvailableQuantity) : null,
+    createdAt: d.itemCreationDate || null,
+    mpn: mpn ? String(mpn.value || '') : null,
+    aspects: (d.localizedAspects || []).map(a => `${a.name}: ${a.value}`).join(' | ').slice(0, 2000),
+  };
 }
 
 // Cheap saturation count for a query+condition (reads total without fetching all).
@@ -2219,6 +2240,7 @@ async function getSellerFeedback(storeArg) {
 }
 
 module.exports = {
+  getBrowseItemDemand,
   isConfigured,
   getSellerFeedback,
   getAccessToken,
