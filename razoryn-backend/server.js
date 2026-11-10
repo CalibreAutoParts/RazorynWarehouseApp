@@ -94,6 +94,7 @@ app.use('/api/settings',     require('./routes/settings'));
 app.use('/api/onbuy',        require('./routes/onbuy'));
 app.use('/api/ebayhub',      require('./routes/ebayhub'));
 app.use('/api/costs',        require('./routes/costs'));
+app.use('/api/pricecheck',   require('./routes/pricecheck'));
 app.use('/api/listings',     require('./routes/listings'));
 app.use('/api/bundles',      require('./routes/bundles'));
 app.use('/api/notes',        require('./routes/notes'));
