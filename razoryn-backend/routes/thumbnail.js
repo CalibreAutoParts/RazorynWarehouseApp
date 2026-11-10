@@ -458,12 +458,13 @@ router.post('/products/:sku/images', async (req, res) => {
   // 2) eBay: revise pictures on every linked listing (same guts as
   //    /api/listings/repush-ebay-images).
   const ebayResult = { pushed: 0, errors: [], truncated: false, skipped: !pushEbay };
+  // The eBay set carries the studio's "eBay logo" (the sole-trader shop's own
+  // mark): kept on the product, and only sole-trader-branded accounts get it —
+  // company accounts get the website photos (lib/ebay-photos).
+  const ebayPhotos = require('../lib/ebay-photos');
+  if (ebayImages.length) { try { await ebayPhotos.saveStudioSet(product.id, ebayImages); } catch (e) { console.warn('[thumbnail] eBay set:', e.message); } }
   if (pushEbay) {
-    let ebayUrls = ebayImages.length ? ebayImages : cdnUrls;
-    if (ebayUrls.length > EBAY_REVISE_IMAGE_CAP) {
-      ebayUrls = ebayUrls.slice(0, EBAY_REVISE_IMAGE_CAP);
-      ebayResult.truncated = true;
-    }
+    const cap = list => { if (list.length > EBAY_REVISE_IMAGE_CAP) { ebayResult.truncated = true; return list.slice(0, EBAY_REVISE_IMAGE_CAP); } return list; };
     try {
       const links = await query(
         `SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`,
@@ -479,6 +480,7 @@ router.post('/products/:sku/images', async (req, res) => {
             || (link.store_code ? null : (stores.find(s => s.primary) || stores[0]));
           if (!store) { ebayResult.errors.push(`${link.ebay_item_id}: store unavailable`); continue; }
           try {
+            const ebayUrls = cap((await ebayPhotos.forStore(store.code, { studio: ebayImages, website: cdnUrls })) || cdnUrls);
             await ebay.reviseItem(link.ebay_item_id, { pictureUrls: ebayUrls }, store.code);
             ebayResult.pushed++;
           } catch (e) {

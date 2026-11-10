@@ -2406,10 +2406,14 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
   const ebayImages = Array.isArray(b.ebayImages)
     ? b.ebayImages.map(u => String(u || '').trim()).filter(u => /^https:\/\//i.test(u))
     : [];
+  // Website set vs the studio's eBay set (sole-trader watermark): chosen per
+  // eBay account below (lib/ebay-photos).
+  let ebayWebsiteUrls = null;
   if (imagesChanged) {
-    if (ebayImages.length) ebayPictureUrls = ebayImages;
-    else if (hostedImageUrls && hostedImageUrls.length) ebayPictureUrls = hostedImageUrls;
-    else { const urlsOnly = (b.images || []).filter(u => /^https?:\/\//.test(String(u))); if (urlsOnly.length) ebayPictureUrls = urlsOnly; }
+    if (hostedImageUrls && hostedImageUrls.length) ebayWebsiteUrls = hostedImageUrls;
+    else { const urlsOnly = (b.images || []).filter(u => /^https?:\/\//.test(String(u))); if (urlsOnly.length) ebayWebsiteUrls = urlsOnly; }
+    ebayPictureUrls = ebayWebsiteUrls || (ebayImages.length ? ebayImages : undefined);
+    if (ebayImages.length) await require('../lib/ebay-photos').saveStudioSet(productId, ebayImages).catch(() => {});
   }
 
   // 3) eBay — revise every linked listing. CRITICAL: eBay's ReviseItem treats a
@@ -2516,7 +2520,7 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
           description: b.ebayDescription != null && String(b.ebayDescription).trim() !== '' ? b.ebayDescription : undefined,
           itemSpecifics: specificsToSend,
           titleHint: ebayTitle || product.title || undefined,   // for the Make check (vehicle make from the title)
-          pictureUrls: ebayPictureUrls && ebayPictureUrls.length ? ebayPictureUrls : undefined,
+          pictureUrls: imagesChanged ? ((await require('../lib/ebay-photos').forStore(store.code, { studio: ebayImages, website: ebayWebsiteUrls })) || undefined) : undefined,
           categoryId: sendCategory,
           // ReviseFixedPriceItem is the call that applies category moves reliably.
           call: sendCategory ? 'ReviseFixedPriceItem' : undefined,
@@ -2580,7 +2584,11 @@ router.post('/repush-ebay-images', requireAdmin, async (req, res) => {
       if (allStores.find(s => s.code === link.store_code)) { skippedDisabled++; continue; }
       errors.push(`${link.ebay_item_id}: no store for this link`); continue;
     }
-    try { await ebay.reviseItem(link.ebay_item_id, { pictureUrls: imageUrls }, store.code); pushed++; }
+    try {
+      const ep = require('../lib/ebay-photos');
+      const pics = (await ep.forStore(store.code, { studio: await ep.studioSet(product.id), website: imageUrls })) || imageUrls;
+      await ebay.reviseItem(link.ebay_item_id, { pictureUrls: pics }, store.code); pushed++;
+    }
     catch (e) { errors.push(`${link.ebay_item_id}: ${e.message}`); }
   }
   await audit(req, 'repush_ebay_images', 'product', product.id, { pushed, images: imageUrls.length, skippedDisabled });
@@ -4108,6 +4116,15 @@ async function doCreateEbay(b, { req } = {}) {
       console.warn('[create-ebay] Shopify fetch failed (continuing with warehouse data):', e.message);
     }
   }
+  // Company accounts get the website photos; a sole-trader-branded account gets
+  // the Thumbnail Maker's eBay gallery (its own watermark) when there is one.
+  try {
+    const ep = require('../lib/ebay-photos');
+    if (Array.isArray(b.studioEbayImages) && b.studioEbayImages.length) await ep.saveStudioSet(product.id, b.studioEbayImages);
+    const studio = (Array.isArray(b.studioEbayImages) && b.studioEbayImages.length) ? b.studioEbayImages : await ep.studioSet(product.id);
+    const pick = await ep.forStore(store.code, { studio, website: imageUrls });
+    if (pick) imageUrls = pick;
+  } catch (e) { console.warn('[create-ebay] photo set:', e.message); }
   // Shop set to clean photos → use the part's clean (unbranded) photos when it
   // has any (Trade → Settings → Clean photos); otherwise keep the listing photos.
   let photosUsed = 'listing';

@@ -15370,9 +15370,10 @@ async function submitUnifiedCreate(btn, overrides = {}) {
   State._ceCtx = State._ceCtx || {};
   State._ceCtx.product = { id: created.productId, title: shopTitle, sku, shopify_product_id: created.shopifyProductId };
   await submitCreateEbayListing(created.productId, {
-    // Studio-imported photos: eBay gets its own gallery (composite main);
-    // Shopify already has the website one (clean main + parts diagram).
-    imageUrls: clStudioEbayImages() || created.imageUrls || [],
+    // Website photos; the studio's eBay gallery (sole-trader watermark) goes
+    // along and the server uses it only on sole-trader-branded accounts.
+    imageUrls: created.imageUrls || [],
+    studioEbayImages: clStudioEbayImages() || undefined,
     onSuccess: (r) => { toast(`✓ Listed everywhere — eBay ItemID ${r.itemId}`, 'success', 8000); clOfferRepeat(r); },
   });
   if (btn) btn.disabled = false;
@@ -20834,7 +20835,7 @@ async function ceListOnOtherShops(productId, codes, inp, title, opts = {}) {
         promote: inp.promote,
         // This account's own business policies (shop categories stay per account → its default).
         businessPolicies: ceAcctPolicies(code),
-        imageUrls: (opts.imageUrls && opts.imageUrls.length) ? opts.imageUrls : undefined,
+        imageUrls: (opts.imageUrls && opts.imageUrls.length) ? opts.imageUrls : undefined, studioEbayImages: (opts.studioEbayImages && opts.studioEbayImages.length) ? opts.studioEbayImages : undefined,
       });
       Task.done(t, 'Listed');
       ceRememberShipping(productId, code, ceAcctPolicies(code)?.shippingId);
@@ -20869,7 +20870,7 @@ async function submitCreateEbayListing(productId, opts = {}) {
       itemSpecifics: inp.itemSpecifics, businessPolicies: inp.businessPolicies, preview,
       countryOfOrigin: inp.countryOfOrigin,
       vatPercent: inp.vatPercent, storeCategoryId: inp.storeCategoryId, promote,
-      imageUrls: (opts.imageUrls && opts.imageUrls.length) ? opts.imageUrls : undefined,
+      imageUrls: (opts.imageUrls && opts.imageUrls.length) ? opts.imageUrls : undefined, studioEbayImages: (opts.studioEbayImages && opts.studioEbayImages.length) ? opts.studioEbayImages : undefined,
     });
     // Preview mode: nothing was listed — show fees, keep the modal open so the
     // user can untick Preview and publish.
@@ -24048,7 +24049,7 @@ async function loadStoreVat() {
         <div class="field" style="margin:0"><label style="font-size:11px">VAT registered?</label>${sel('shp-vat-' + c, s.vatOff ? 'no' : 'yes', [['yes', 'Yes — charge VAT'], ['no', 'No — no VAT']])}</div>
         <div class="field" style="margin:0" id="shp-sincewrap-${c}"><label style="font-size:11px">No VAT from (date it changed)</label><input type="date" id="shp-since-${c}" value="${escapeAttr(s.since || today)}"></div>
         <div class="field" style="margin:0"><label style="font-size:11px">Name on invoices</label><input id="shp-inv-${c}" value="${escapeAttr(s.tradingName || '')}" placeholder="e.g. J Smith t/a Razoryn" oninput="shopProfileHints('${c}')"></div>
-        <div class="field" style="margin:0"><label style="font-size:11px">eBay listing branding</label>${sel('shp-brand-' + c, s.listingBranding, [['company', 'Company logo + name'], ['shop', "Shop's own name (no company logo)"]])}</div>
+        <div class="field" style="margin:0"><label style="font-size:11px">eBay listing branding</label>${sel('shp-brand-' + c, s.listingBranding, [['company', 'Company logo + name · website photos'], ['shop', "Shop's own name · Thumbnail Maker eBay-logo photos"]])}</div>
         <div class="field" style="margin:0"><label style="font-size:11px">Photos on new listings</label>${sel('shp-photos-' + c, s.photos, [['branded', 'Listing photos (as on Shopify)'], ['clean', 'Clean photos (no branding) where available']])}</div>
       </div>
       <div id="shp-hint-${c}" style="font-size:12px;color:var(--ink-soft);margin:8px 0;line-height:1.5"></div>
