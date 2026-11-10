@@ -273,6 +273,12 @@ router.post('/bulk-mark-dispatched', requireAdmin, async (req, res) => {
         `, [req.user.id, notes, id]);
         collected++;
       } else {
+        // Pushing to the channel: skip any already shipped there (FedEx / Click &
+        // Drop label, or by hand) — it takes that tracking instead.
+        if (pushToChannel) {
+          const cr = await channelShipped(row);
+          if (cr.shipped) { await markShippedFromChannel(row, cr); skipped++; errors.push({ id, reason: 'already_shipped_on_channel' }); continue; }
+        }
         // Non-cash → mark dispatched. channel_push_state='na' for bulk operations
         // unless the caller explicitly opted in to pushToChannel.
         await query(`
@@ -321,8 +327,80 @@ router.post('/bulk-mark-dispatched', requireAdmin, async (req, res) => {
 //    record is still saved and channel_push_state captures the error for
 //    later retry.
 // ──────────────────────────────────────────────────────────────────────────
+// ── Already shipped on the channel? ──────────────────────────────────────────
+// Labels made in a courier app linked to Shopify/eBay (FedEx, Click & Drop…) or
+// marked shipped by hand there fulfil the order without the warehouse app. Ask
+// the channel LIVE when an order is opened for packing and again on "Mark
+// dispatched", so it can't be packed and sent twice. Found shipped → the sale
+// is marked dispatched here with that tracking (nothing is pushed back).
+const _chanCache = new Map();   // saleId -> { at, result } (30 s)
+async function channelShipped(sale) {
+  const ch = String(sale.channel || '');
+  if (!sale.external_order_id || !(ch === 'shopify' || ch.startsWith('ebay_'))) return { checked: false };
+  const hit = _chanCache.get(sale.id);
+  if (hit && Date.now() - hit.at < 30000) return hit.result;
+  let r = { checked: true, shipped: false, platform: ch === 'shopify' ? 'Shopify' : 'eBay' };
+  try {
+    if (ch === 'shopify') {
+      const shopify = require('../services/shopify');
+      if (!shopify.isConfigured()) return { checked: false };
+      Object.assign(r, await shopify.getOrderShipped(sale.external_order_id));
+    } else {
+      const ebay = require('../services/ebay');
+      const store = (require('../lib/brand').stores || []).find(s => s.channelCode === ch);
+      if (!store || !store.token) return { checked: false };
+      const xml = await ebay.getOrderDetail(sale.external_order_id, store.code);
+      const o = ebay.extractOne(xml, 'Order') || '';
+      const tb = ebay.extractOne(o, 'ShipmentTrackingDetails') || '';
+      const tracking = ebay.decodeEntities(ebay.extractOne(tb, 'ShipmentTrackingNumber') || '') || null;
+      r.shipped = !!(ebay.extractOne(o, 'ShippedTime') || tracking);
+      r.tracking = tracking; r.carrier = ebay.decodeEntities(ebay.extractOne(tb, 'ShippingCarrierUsed') || '') || null;
+    }
+  } catch (e) { return { checked: false, error: e.message }; }
+  _chanCache.set(sale.id, { at: Date.now(), result: r });
+  return r;
+}
+async function markShippedFromChannel(sale, r) {
+  await query(`UPDATE sales SET dispatched_at = now(), status = 'dispatched', channel_push_state = 'na',
+      carrier = COALESCE($2, carrier), tracking_number = COALESCE($3, tracking_number),
+      tracking_url = COALESCE($4, tracking_url),
+      dispatch_notes = COALESCE(dispatch_notes, $5)
+    WHERE id = $1 AND dispatched_at IS NULL`,
+    [sale.id, r.carrier || null, r.tracking || null, r.url || null, `Already shipped on ${r.platform} — found when it was opened for packing`]);
+  setImmediate(async () => {
+    const df = require('../services/dropfleet');
+    await df.notifyShipped(sale.id).catch(() => {});
+    await df.withdrawSales(sale.id).catch(() => {});
+  });
+}
+// GET /api/dispatch/:saleId/channel-check — asks Shopify / eBay now.
+router.get('/:saleId/channel-check', requirePermission('dispatch'), async (req, res) => {
+  try {
+    await ensureDispatchColumns();
+    const sale = (await query(`SELECT * FROM sales WHERE id = $1`, [req.params.saleId])).rows[0];
+    if (!sale) return res.status(404).json({ error: 'not_found' });
+    if (sale.dispatched_at) return res.json({ checked: true, shipped: true, alreadyHere: true, tracking: sale.tracking_number, carrier: sale.carrier });
+    const r = await channelShipped(sale);
+    if (r.shipped) await markShippedFromChannel(sale, r);
+    res.json(r);
+  } catch (e) { res.json({ checked: false, error: e.message }); }
+});
+
 router.post('/:saleId/mark-dispatched', requirePermission('dispatch'), async (req, res) => {
   await ensureDispatchColumns();
+  // Last check before it's sent: already shipped on Shopify / eBay?
+  if (!req.body?.force) {
+    const s0 = (await query(`SELECT * FROM sales WHERE id = $1`, [req.params.saleId])).rows[0];
+    if (s0 && !s0.dispatched_at) {
+      _chanCache.delete(s0.id);
+      const r = await channelShipped(s0);
+      if (r.shipped) {
+        await markShippedFromChannel(s0, r);
+        return res.status(409).json({ error: 'already_shipped_on_channel', ...r,
+          message: `Already shipped on ${r.platform}${r.carrier ? ' with ' + r.carrier : ''}${r.tracking ? ' (' + r.tracking + ')' : ''} — don't send it again. It's been taken off the list.` });
+      }
+    }
+  }
   const { notes, pushToChannel } = req.body || {};
   // "Other / custom courier" + a typed name → that name is the carrier
   // (eBay and Shopify show it to the buyer instead of "Other").

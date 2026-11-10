@@ -458,10 +458,7 @@ if (cron.validate(dispatchCronExpr)) {
   cron.schedule(dispatchCronExpr, async () => {
     try {
       const dispatch = require('./routes/dispatch');
-      if (typeof dispatch.syncEbayDispatchCore === 'function') {
-        const result = await dispatch.syncEbayDispatchCore({ days: 14 });
-        if (result.dispatched) console.log(`[cron dispatch] auto-dispatched ${result.dispatched} eBay order(s)`);
-      }
+      // (Orders shipped on eBay / Shopify are picked up every 5 min — below.)
       // Drop cancelled/refunded eBay orders off the worklist (they aren't shipped,
       // so the shipped-sync above won't clear them).
       if (typeof dispatch.syncEbayCancellationsCore === 'function') {
@@ -477,14 +474,6 @@ if (cron.validate(dispatchCronExpr)) {
           const sc = await dispatch.syncShopifyCancellationsCore({ days: 14 });
           if (sc.cancelled) console.log(`[cron dispatch] cleared ${sc.cancelled} cancelled Shopify order(s)`);
         } catch (e) { console.warn('[cron dispatch] shopify cancel-sync failed:', e.message); }
-      }
-      // Shopify counterpart — mark orders fulfilled on Shopify as dispatched so
-      // they drop off the worklist and aren't wrongly pushed to DropFleet.
-      if (typeof dispatch.syncShopifyDispatchCore === 'function') {
-        try {
-          const sr = await dispatch.syncShopifyDispatchCore({ days: 14 });
-          if (sr.dispatched) console.log(`[cron dispatch] auto-dispatched ${sr.dispatched} Shopify order(s)`);
-        } catch (e) { if (!/shopify_not_configured/.test(e.message)) console.warn('[cron dispatch] shopify readback failed:', e.message); }
       }
       // Pull real delivery status from the carrier APIs (Royal Mail/FedEx/DHL).
       if (typeof dispatch.refreshTrackingStatuses === 'function') {
@@ -502,6 +491,20 @@ if (cron.validate(dispatchCronExpr)) {
   });
   console.log(`[boot] eBay dispatch auto-sync scheduled: ${dispatchCronExpr}`);
 }
+// Orders shipped OUTSIDE the app (FedEx / Click & Drop labels linked to Shopify
+// or eBay, or marked shipped there by hand) leave the dispatch list within 5
+// minutes — and the moment someone opens one to pack (live check in Dispatch).
+cron.schedule(process.env.SHIPPED_SYNC_CRON || '*/5 * * * *', async () => {
+  const dispatch = require('./routes/dispatch');
+  try {
+    const sr = await dispatch.syncShopifyDispatchCore({ days: 14 });
+    if (sr.dispatched) console.log(`[cron shipped] ${sr.dispatched} Shopify order(s) shipped outside the app`);
+  } catch (e) { if (!/shopify_not_configured/.test(e.message)) console.warn('[cron shipped] shopify:', e.message); }
+  try {
+    const er = await dispatch.syncEbayDispatchCore({ days: 14 });
+    if (er.dispatched) console.log(`[cron shipped] ${er.dispatched} eBay order(s) shipped outside the app`);
+  } catch (e) { if (!/ebay_not_configured/.test(e.message)) console.warn('[cron shipped] ebay:', e.message); }
+});
 
 // Competitor monitoring — scan configured competitors (eBay sellers, and later
 // their websites), record price history, match against our catalogue and raise

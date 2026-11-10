@@ -8916,7 +8916,7 @@ function renderRecentRow(s) {
   let pushBadge = '';
   if (s.channel_push_state === 'ok')      pushBadge = '<span class="pill green" style="font-size:9px;margin-left:4px" title="Tracking pushed to channel">✓ Pushed</span>';
   else if (s.channel_push_state === 'pending') pushBadge = '<span class="pill amber" style="font-size:9px;margin-left:4px" title="Push in progress">⋯ Pushing</span>';
-  else if (s.channel_push_state === 'error')   pushBadge = '<span class="pill" style="font-size:9px;margin-left:4px;background:var(--red-light);color:var(--red)" title="' + escapeAttr(s.channel_push_error || 'Push failed') + '">⚠ Push failed</span>';
+  else if (s.channel_push_state === 'error')   pushBadge = '<span class="pill" style="font-size:9px;margin-left:4px;background:var(--red-light);color:var(--red)" title="' + escapeAttr(s.channel_push_error || 'Push failed') + '">⚠ Push failed</span>' + (s.channel_push_error ? '<div style="font-size:10.5px;color:var(--red);max-width:340px;white-space:normal;margin-top:2px">' + escapeHtml(s.channel_push_error.slice(0, 220)) + '</div>' : '');
   return `
     <tr>
       <td><div style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(ref)}</div></td>
@@ -9129,6 +9129,7 @@ function openDispatchModal(saleId) {
   modal({
     title: 'Complete order',
     body: `
+      <div id="d-chan" style="font-size:12.5px;color:var(--ink-soft);margin-bottom:8px">${isExternalChannel ? `⟳ Checking ${sale.channel === 'shopify' ? 'Shopify' : 'eBay'} it hasn't already been shipped…` : ''}</div>
       <div style="background:var(--bg-soft);padding:12px;border-radius:8px;margin-bottom:14px">
         <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Order</div>
         <div style="font-family:ui-monospace,monospace;font-size:13px;margin-bottom:4px">${escapeHtml(ref)}</div>
@@ -9182,6 +9183,25 @@ function openDispatchModal(saleId) {
   });
   dDispatchMode();
   dLoadPick(saleId);
+  if (isExternalChannel) dChannelCheck(saleId, 'd-chan', true);
+}
+
+// Ask Shopify / eBay NOW whether the order was already shipped there (a FedEx /
+// Click & Drop label, or marked shipped by hand). If so it's taken off the list
+// and packing it is blocked, so it can't go out twice.
+async function dChannelCheck(saleId, boxId, blockDispatch) {
+  const box = el(boxId); if (!box) return;
+  let r; try { r = await Api.get(`/api/dispatch/${saleId}/channel-check`); } catch (_) { box.innerHTML = ''; return; }
+  if (!el(boxId)) return;
+  if (r.shipped) {
+    box.innerHTML = `<div style="background:var(--red-light,#fde8e8);border:2px solid var(--red);color:var(--red);border-radius:10px;padding:12px 14px;font-size:14px">
+      <div style="font-weight:800;font-size:15px">⛔ Already shipped on ${escapeHtml(r.platform || 'the channel')} — do not send it again</div>
+      <div style="margin-top:4px;color:var(--ink)">${r.carrier ? escapeHtml(r.carrier) : 'Shipped'}${r.tracking ? ' · tracking <b style="font-family:ui-monospace,monospace">' + escapeHtml(r.tracking) + '</b>' : ''}${r.partial ? ' · <b>part</b> of the order' : ''}. It's been taken off the dispatch list.</div></div>`;
+    if (blockDispatch) { const b = document.querySelector('#modal-foot .btn-primary'); if (b) { b.disabled = true; b.textContent = 'Already shipped'; } }
+    setTimeout(() => { loadDispatch().catch(() => {}); }, 300);
+  } else if (r.checked) {
+    box.innerHTML = `<span style="color:var(--green)">✓ Not shipped on ${escapeHtml(r.platform)} yet</span>`;
+  } else box.innerHTML = r.error ? `<span style="color:var(--amber)">Couldn't check ${escapeHtml(r.platform || 'the channel')} right now — check it hasn't shipped already.</span>` : '';
 }
 
 // ── Items to pick: SKU, part number, location (+photo), stock, the listing it
@@ -9334,6 +9354,11 @@ async function submitDispatch(saleId, isExternalChannel) {
     await Store.refresh('sales');
   } catch (e) {
     Task.fail(taskId, 'Failed');
+    if (e.data?.error === 'already_shipped_on_channel') {
+      toast('⛔ ' + e.data.message, 'error', 12000);
+      closeModal(); await loadDispatch().catch(() => {});
+      return;
+    }
     toast('Failed: ' + (e.data?.message || e.message), 'error');
   }
 }
@@ -18783,6 +18808,7 @@ async function openPickCheck(saleId) {
   modal({
     title: '🎯 Pick — ' + ref,
     body: `
+      <div id="pick-chan" style="margin-bottom:8px;font-size:12.5px"></div>
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Find each part using its location below, then <strong>scan its barcode</strong> to verify it's the right one — a wrong part flashes red before it can go in the box. Scan once per unit.</div>
       <input id="pick-scan" placeholder="Scan item barcode…" autocomplete="off" ${State.appShell ? 'inputmode="none"' : ''} style="width:100%;font-family:ui-monospace,monospace;font-size:15px;margin-bottom:10px"
         onkeydown="if(event.key==='Enter'){event.preventDefault();pickVerifyCode(this.value);this.value='';}">
@@ -18796,6 +18822,7 @@ async function openPickCheck(saleId) {
     ],
   });
   setTimeout(() => el('pick-scan')?.focus(), 150);
+  if (/^(shopify|ebay_)/.test(data.sale?.channel || '')) dChannelCheck(saleId, 'pick-chan', true);
 }
 function pickRowHtml(it) {
   const p = it.prod;
