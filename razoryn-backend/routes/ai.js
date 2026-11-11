@@ -256,6 +256,12 @@ async function applySuggestion(s, payloadOverride) {
     if (r.queued) return { ok: true, queued: true, added: proposed.map(p => p.name), note: 'eBay blocked the revision (offer open) — queued, retrying every 12h' };
     return { ok: true, sent: r.sent, added: proposed.map(p => p.name), warnings: r.warnings };
   }
+  if (s.kind === 'title') {
+    const t = String(payload.title || '').trim().slice(0, 80);
+    if (!t) throw new Error('no title in suggestion');
+    if (!s.product_id) throw new Error('suggestion has no linked product');
+    return applySuggestion({ ...s, kind: 'part_number' }, { fix: { title: t, specifics: [] } });
+  }
   if (s.kind === 'part_number') {
     const pn = String(payload.partNumber || '').trim();
     const fix = payload.fix || {};
@@ -879,13 +885,23 @@ async function runListingOptScan(trigger = 'manual', opts = {}) {
             const proposedPn = (pc.correctPartNumber && normPn(pc.correctPartNumber) !== normPn(p.part_number)) ? pc.correctPartNumber : null;
             // Ready-to-apply correction (corrected title / corrected specifics)
             // rides along so approving the card fixes the listing in one click.
+            // Drop "corrections" that equal what the listing already has —
+            // applying those changes nothing (the real fault is elsewhere).
+            const curSpec = new Map((Array.isArray(p.ebay_item_specifics) ? p.ebay_item_specifics : []).map(x => [String(x.name || '').toLowerCase(), normPn((Array.isArray(x.values) ? x.values : [x.value]).join(','))]));
             const fix = {
               title: (pc.fix?.title && pc.fix.title.trim() !== String(p.title || '').trim()) ? pc.fix.title : null,
-              specifics: pc.fix?.specifics || [],
+              specifics: (pc.fix?.specifics || []).filter(x => {
+                const cur = curSpec.get(String(x.name || '').toLowerCase());
+                if (cur != null && cur === normPn(x.value)) return false;
+                if (/part number/i.test(x.name || '') && p.part_number && normPn(x.value) === normPn(p.part_number) && cur == null) return false;
+                return true;
+              }),
             };
+            // A typo'd SKU (part number + specifics right): review flag only.
+            const skuFix = pc.faultIn === 'sku' && pc.correctSku && normPn(pc.correctSku) !== normPn(p.sku) ? pc.correctSku : null;
             await ai.queueSuggestion({
               kind: 'part_number', productId: p.id, title: p.title,
-              payload: { partNumber: proposedPn, sku: p.sku, currentPartNumber: p.part_number || null, issue: 'mismatch', faultIn: pc.faultIn, fix: (fix.title || fix.specifics.length) ? fix : null },
+              payload: { partNumber: proposedPn, sku: p.sku, currentPartNumber: p.part_number || null, issue: 'mismatch', faultIn: pc.faultIn, correctSku: skuFix, fix: (fix.title || fix.specifics.length) ? fix : null },
               context: { sku: p.sku, title: p.title, partNumber: p.part_number || null, faultIn: pc.faultIn, source: 'listing_audit' },
               confidence: pc.confidence,
               reason: (pc.faultIn ? 'Mistake looks to be in the ' + pc.faultIn.replace('_', ' ') + ': ' : '') + pc.reason,
@@ -897,7 +913,11 @@ async function runListingOptScan(trigger = 'manual', opts = {}) {
           if (alt && (alt.superseded.length || alt.regional.length || alt.reference.length)) {
             flaggedThis = true;
             const payload = { superseded: alt.superseded, regional: alt.regional, reference: alt.reference };
-            if (auto && alt.confidence >= thr) {
+            // Lamps: LHD/RHD and LED/halogen versions carry different numbers —
+            // alternates for lights are never added without a person checking.
+            const isLamp = /head ?light|head ?lamp|tail ?light|tail ?lamp|rear light|fog ?(light|lamp)|\blamp\b|\bDRL\b/i.test(p.title || '');
+            if (isLamp) payload.lamp = true;
+            if (auto && alt.confidence >= thr && !isLamp) {
               try {
                 await applySuggestion({ kind: 'alt_numbers', product_id: p.id, payload }, null);
                 _listScan.autoApplied++;
@@ -909,6 +929,14 @@ async function runListingOptScan(trigger = 'manual', opts = {}) {
               await ai.queueSuggestion({ kind: 'alt_numbers', productId: p.id, title: p.title, payload, context: { sku: p.sku, partNumber: p.part_number }, confidence: alt.confidence, reason: alt.reason });
               _listScan.queued++;
             }
+          }
+          // 2b. Better eBay title for search — always a review card.
+          if (audit_.titleSuggestion && audit_.titleSuggestion.title && audit_.titleSuggestion.title.trim() !== String(p.title || '').trim()) {
+            flaggedThis = true;
+            await ai.queueSuggestion({ kind: 'title', productId: p.id, title: p.title,
+              payload: { title: audit_.titleSuggestion.title, current: p.title },
+              context: { sku: p.sku, partNumber: p.part_number }, confidence: audit_.confidence, reason: audit_.titleSuggestion.why || 'Title optimised for eBay search' });
+            _listScan.queued++;
           }
           // 3+4. eBay specifics + Shopify SEO — one combined suggestion.
           if ((audit_.ebaySpecifics && audit_.ebaySpecifics.length) || audit_.shopify.seoTitle || audit_.shopify.seoDescription || audit_.shopify.tags.length) {
@@ -966,4 +994,57 @@ router.post('/scan/listing-opt/cancel', (req, res) => {
 router.runPartNumberScan = runPartNumberScan;
 router.runPricingScan = runPricingScan;
 router.runListingOptScan = runListingOptScan;
+// ──────────────────────────────────────────────────────────────────────────
+// eBay ad spend review: is promoted-listings spend paying off?
+// Month by month (from the uploaded eBay statements: gross sales, selling
+// fees, advertising) plus our eBay sales and the cost settings, then Claude
+// says whether to spend more, less or the same — and where.
+// ──────────────────────────────────────────────────────────────────────────
+async function adSpendData(months) {
+  const since = new Date(); since.setUTCMonth(since.getUTCMonth() - months); since.setUTCDate(1);
+  const st = (await query(`SELECT platform, account_name, label, period_start, period_end, summary FROM platform_statements
+      WHERE LOWER(COALESCE(platform, '')) LIKE 'ebay%' AND period_start >= $1 ORDER BY period_start`, [since.toISOString().slice(0, 10)]).catch(() => ({ rows: [] }))).rows;
+  const n = (v) => (v == null || v === '' || isNaN(+v) ? 0 : +v);
+  const stmts = st.map(r => {
+    const S = r.summary || {};
+    const gross = n(S.grossSales), ads = Math.abs(n(S.advertising)), fees = Math.abs(n(S.fees));
+    return { month: String(r.period_start).slice(0, 7), account: r.account_name || r.label || 'eBay', grossSales: +gross.toFixed(2), advertising: +ads.toFixed(2),
+      fees: +fees.toFixed(2), refunds: +Math.abs(n(S.refunds)).toFixed(2), adPctOfSales: gross ? +(ads / gross * 100).toFixed(2) : null };
+  });
+  const sales = (await query(`SELECT to_char(date_trunc('month', occurred_at), 'YYYY-MM') AS month, channel,
+      COUNT(*)::int AS orders, SUM(GREATEST(total - COALESCE(refunded_amount, 0), 0))::numeric(14,2) AS total
+      FROM sales WHERE channel LIKE 'ebay\_%' AND is_estimate = false AND status NOT IN ('cancelled') AND occurred_at >= $1
+      GROUP BY 1, 2 ORDER BY 1, 2`, [since.toISOString().slice(0, 10)])).rows.map(r => ({ ...r, total: +r.total }));
+  const S = require('../lib/pricing-floor').resolveCostSettings((await query(`SELECT * FROM app_settings WHERE id = 1`)).rows[0]);
+  const listed = (await query(`SELECT COUNT(DISTINCT ml.ebay_item_id)::int AS n FROM mirror_links ml`).catch(() => ({ rows: [{ n: null }] }))).rows[0].n;
+  return { months, stmts, sales, settings: { adRatePct: S.adRatePct, ebayFeePct: +(S.ebayFvfPct + S.ebayRegulatoryPct + S.ebayHighReturnPct).toFixed(2), targetMarginPct: S.targetMarginPct, vatRegistered: S.vatRegistered }, listedItems: listed };
+}
+router.get('/ads/review', async (req, res) => {
+  try { res.json(await adSpendData(Math.min(24, Math.max(1, parseInt(req.query.months) || 6)))); }
+  catch (e) { res.status(500).json({ error: 'load_failed', message: e.message }); }
+});
+router.post('/ads/review/ask', async (req, res) => {
+  if (!ai.isConfigured()) return res.status(400).json({ error: 'ai_not_configured', message: 'Add the Anthropic API key first.' });
+  try {
+    const data = await adSpendData(Math.min(24, Math.max(1, parseInt(req.body?.months) || 6)));
+    if (!data.stmts.length && !data.sales.length) return res.status(400).json({ error: 'no_data', message: 'Upload your eBay monthly statements in Books & VAT first — the advertising figures come from them.' });
+    const system = `You are a commercial analyst for a UK car-body-parts seller on eBay (vehicle parts, mostly new primed panels and lamps, prices £30–£500). You judge whether promoted-listings (eBay ads) spend is worth it. Be concrete and conservative, use the numbers given, never invent figures. Reply with ONLY JSON.`;
+    const user = `Data (monthly, per eBay account; advertising and fees from eBay's own statements; our sales from our order records):
+${JSON.stringify(data)}
+
+Judge: is the ad spend paying for itself? Consider ad % of sales vs the margin left after eBay fees and VAT (targetMarginPct is our minimum margin goal), the trend month to month (does sales grow when ads grow?), refunds, and the general rule for parts: high-intent searches by part number convert without ads; ads help most on competitive generic searches (e.g. "Golf bumper").
+Reply JSON:
+{"verdict":"increase"|"keep"|"reduce"|"pause"|"not_enough_data",
+ "headline":"<one sentence>",
+ "findings":["<short point with a number>", "..."],          // 3-6
+ "actions":["<specific next step>", "..."],                   // 2-5 (e.g. set ad rate to 3% on account X; promote only items with >30% margin)
+ "suggestedAdRatePct": <number|null>,
+ "confidence": <0..1>}`;
+    const out = await ai.callClaude({ kind: 'ads_review', system, user, maxTokens: 900 });
+    res.json({ data, review: out.json || null });
+  } catch (e) {
+    res.status(e.code === 'budget' ? 429 : 500).json({ error: e.code || 'ai_failed', message: e.code === 'budget' ? 'Daily AI token budget reached — try tomorrow or raise it in AI settings.' : e.message });
+  }
+});
+
 module.exports = router;
