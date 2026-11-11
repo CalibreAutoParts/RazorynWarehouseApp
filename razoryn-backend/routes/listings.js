@@ -2067,7 +2067,15 @@ router.post('/create-listing', requireAdmin, async (req, res) => {
 
   // If another active listing already uses this part number, link them into a
   // shared stock pool so a sale on any one decrements them all.
-  try {
+  // sharePool === false: same part number but a DIFFERENT item (e.g. a complete
+  // bumper vs the bare skin) — its own stock, and never auto-pooled later.
+  if (b.sharePool === false) {
+    try {
+      await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS no_auto_pool BOOLEAN NOT NULL DEFAULT false`);
+      await query(`UPDATE products SET no_auto_pool = true WHERE id = $1`, [productId]);
+      result.stockPool = { separate: true };
+    } catch (e) { /* non-fatal */ }
+  } else try {
     const { autoPoolByPartNumber } = require('./products');
     const pool = await autoPoolByPartNumber(productId, partNumber);
     if (pool) result.stockPool = pool;

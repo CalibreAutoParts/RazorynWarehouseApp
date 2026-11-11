@@ -14723,7 +14723,7 @@ async function renderCreateListing() {
     </div>`;
   try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (_) {}
   CL.categoryId = ''; CL.categoryName = ''; CL.categoryAuto = false; CL._catResults = []; CL.images = []; CL.studio = null;
-  CL.editProductId = null; CL.imagesReadonly = false;   // create mode (not edit)
+  CL.editProductId = null; CL.imagesReadonly = false; CL.sharePool = undefined;   // create mode (not edit)
   CL.draftId = null;   // set when resuming a saved draft
   if (!CL_REPEAT) { CL._incomingId = null; CL._partner = null; }
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
@@ -15223,11 +15223,14 @@ function clCoreHtml() {
   const pct = clPct();
   const editing = !!CL.editProductId;
   return `
-    <div class="field"><label>SKU *</label><input id="cl-sku" style="font-family:ui-monospace,monospace" placeholder="e.g. 7450B289" autocomplete="off">
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Must be unique per listing (Shopify & eBay require it). For a part that fits several models, give each listing its own SKU.</div></div>
+    <div class="field"><label>SKU *</label><div style="display:flex;gap:6px"><input id="cl-sku" style="font-family:ui-monospace,monospace;flex:1" placeholder="e.g. 7450B289" autocomplete="off" oninput="clSameCheckSoon()">
+      <button type="button" class="btn btn-outline btn-sm" onclick="clSkuGenOpen()" title="Make a SKU from the part number + a code for the item type (e.g. 575807221T-SKN for a bumper skin)">⚙ Generate</button></div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Must be unique per listing (Shopify & eBay require it). For a part that fits several models, give each listing its own SKU.</div>
+      <div id="cl-skugen" style="display:none;margin-top:6px"></div></div>
     <div class="field"><label>Part number <span style="color:var(--ink-soft);font-weight:400">— blank = same as SKU</span></label>
-      <input id="cl-partnumber" style="font-family:ui-monospace,monospace" placeholder="e.g. 602001929AA" autocomplete="off" oninput="clCompSchedule()">
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">🔗 Listings that fit multiple models should share <strong>the same part number</strong> — they'll be auto-linked into one shared stock pool (a sale on any one reduces them all).</div></div>
+      <input id="cl-partnumber" style="font-family:ui-monospace,monospace" placeholder="e.g. 602001929AA" autocomplete="off" oninput="clCompSchedule();clSameCheckSoon()">
+      <div id="cl-samepart"></div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">🔗 Same part number = one shared stock pool by default (a sale on any one reduces them all) — unless you mark it as a different item below.</div></div>
     <div class="field"><label>Photos</label>
       <input type="file" id="cl-photo-file" accept="image/*" multiple capture="environment" onchange="clAddPhotos(this)" style="font-size:12px">
       <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">${editing
@@ -15400,6 +15403,8 @@ async function submitUnifiedCreate(btn, overrides = {}) {
     created = await Api.post('/api/listings/create-listing', {
       sku, title: shopTitle,
       partNumber,
+      // Same part number, different item → own stock (never pooled).
+      sharePool: CL.sharePool === false ? false : undefined,
       barcode: overrides.barcode,                      // shared barcode for multi-fitment siblings
       description: (el('cl-desc')?.value || '').trim() || null,
       ebayPrice, qty: parseInt(el('ce-qty')?.value) || 0,
@@ -15484,6 +15489,68 @@ async function submitUnifiedCreate(btn, overrides = {}) {
 }
 
 // Suggest a unique SKU by suffixing -2, -3, … (skipping ones already in use).
+// ── Same part number already listed? Share stock or keep it separate ────────
+// e.g. a complete bumper (sent complete) and a bare bumper skin share a part
+// number but are different items: "different item" gives it its own stock and
+// a generated SKU, and it's never pooled automatically.
+const clNormPn = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+let _clSameT = null;
+function clSameCheckSoon() { clearTimeout(_clSameT); _clSameT = setTimeout(clSameCheck, 300); }
+function clSameCheck() {
+  const box = el('cl-samepart'); if (!box || CL.editProductId) return;
+  const pn = clNormPn(el('cl-partnumber')?.value || el('cl-sku')?.value);
+  const sku = (el('cl-sku')?.value || '').trim().toLowerCase();
+  const same = pn.length >= 4 ? (State.products || []).filter(p => clNormPn(p.partNumber || p.part_number) === pn || (p.sku || '').toLowerCase() === sku) : [];
+  if (!same.length) { box.innerHTML = ''; CL.sharePool = undefined; return; }
+  if (CL.sharePool === undefined) CL.sharePool = true;
+  const skuTaken = same.some(p => (p.sku || '').toLowerCase() === sku);
+  box.innerHTML = `<div style="margin-top:8px;border:1px solid var(--amber,#d97706);border-radius:8px;padding:10px 12px;background:color-mix(in srgb, var(--amber,#d97706) 7%, transparent);font-size:12.5px">
+    <div style="font-weight:700;margin-bottom:4px">This part number is already listed (${same.length}):</div>
+    ${same.slice(0, 5).map(p => `<div>• ${escapeHtml(p.title || '')} — <span style="font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')}</span> · stock ${p.qty ?? p.qtyOnHand ?? p.qty_on_hand ?? '?'}${p.stockGroupCode ? ' · in a shared pool' : ''}</div>`).join('')}
+    <label style="display:flex;gap:7px;align-items:flex-start;margin-top:8px;cursor:pointer"><input type="radio" name="cl-share" style="width:auto;flex:none;margin-top:3px" ${CL.sharePool !== false ? 'checked' : ''} onchange="CL.sharePool=true;clSameCheck()"> <span><b>Same physical part</b> (e.g. fits another model) — <b>share stock</b>: a sale on any listing reduces them all.</span></label>
+    <label style="display:flex;gap:7px;align-items:flex-start;margin-top:4px;cursor:pointer"><input type="radio" name="cl-share" style="width:auto;flex:none;margin-top:3px" ${CL.sharePool === false ? 'checked' : ''} onchange="CL.sharePool=false;clSameCheck();if(!clSkuIsFree())clSkuGenOpen()"> <span><b>Different item</b> (e.g. complete bumper vs bumper skin) — <b>own stock</b>, own SKU, never pooled.</span></label>
+    ${skuTaken ? `<div style="margin-top:6px;color:var(--red)">That SKU is taken — ${CL.sharePool === false ? 'generate a new one (⚙ Generate)' : 'give this listing its own SKU (⚙ Generate)'}.</div>` : ''}
+  </div>`;
+}
+function clSkuIsFree(s) {
+  const v = String(s ?? el('cl-sku')?.value ?? '').trim().toLowerCase();
+  return !!v && !(State.products || []).some(p => (p.sku || '').toLowerCase() === v);
+}
+// ── SKU generator: part number skeleton + a code for the item type ──
+const CL_SKU_TYPES = [['SKN', 'Skin only'], ['CPL', 'Complete (with fittings)'], ['PRM', 'Primed'], ['PNT', 'Painted'], ['L', 'Left'], ['R', 'Right'], ['KIT', 'Kit / set'], ['UPR', 'Upper'], ['LWR', 'Lower'], ['ALT', 'Alternative version']];
+function clSkuGenOpen() {
+  const box = el('cl-skugen'); if (!box) return;
+  const base = clNormPn(el('cl-partnumber')?.value || el('cl-sku')?.value);
+  if (!base) { toast('Enter the part number first', 'warn'); el('cl-partnumber')?.focus(); return; }
+  box.style.display = '';
+  box.innerHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:8px 10px">
+    <span style="font-family:ui-monospace,monospace;font-weight:700">${escapeHtml(base)}</span><span>-</span>
+    <select id="cl-skugen-type" onchange="clSkuGenPreview()">${CL_SKU_TYPES.map(([c, l]) => `<option value="${c}">${c} · ${l}</option>`).join('')}<option value="">Custom…</option></select>
+    <input id="cl-skugen-custom" placeholder="code e.g. GT" maxlength="8" style="width:90px;display:none;font-family:ui-monospace,monospace" oninput="clSkuGenPreview()">
+    <span>→ <b id="cl-skugen-out" style="font-family:ui-monospace,monospace"></b></span>
+    <button type="button" class="btn btn-primary btn-sm" onclick="clSkuGenUse()">Use</button>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="el('cl-skugen').style.display='none'">✕</button></div>`;
+  CL._skuBase = base;
+  clSkuGenPreview();
+}
+function clSkuGenValue() {
+  const t = el('cl-skugen-type')?.value;
+  const cust = el('cl-skugen-custom'); if (cust) cust.style.display = t ? 'none' : '';
+  const code = (t || (cust?.value || '').toUpperCase().replace(/[^A-Z0-9]/g, '')) || 'V';
+  let v = `${CL._skuBase}-${code}`;
+  for (let i = 2; !clSkuIsFree(v) && i < 100; i++) v = `${CL._skuBase}-${code}${i}`;
+  return v;
+}
+function clSkuGenPreview() { const o = el('cl-skugen-out'); if (o) o.textContent = clSkuGenValue(); }
+function clSkuGenUse() {
+  const v = clSkuGenValue();
+  if (el('cl-sku')) el('cl-sku').value = v;
+  if (el('cl-partnumber') && !el('cl-partnumber').value.trim()) el('cl-partnumber').value = CL._skuBase;
+  el('cl-skugen').style.display = 'none';
+  clSameCheck();
+  toast(`SKU ${v} — part number stays ${el('cl-partnumber')?.value || CL._skuBase}`, 'success');
+}
+
 function clSuggestUniqueSku(base) {
   const skus = new Set((State.products || []).map(p => (p.sku || '').toLowerCase()));
   for (let i = 2; i < 1000; i++) { const cand = `${base}-${i}`; if (!skus.has(cand.toLowerCase())) return cand; }
