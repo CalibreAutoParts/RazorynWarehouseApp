@@ -739,7 +739,28 @@ async function tradingCall(callName, bodyInner, storeArg) {
 // Upload one picture to eBay Picture Services (UploadSiteHostedPictures,
 // multipart with the image bytes) — for photos in buyer messages. Returns the
 // eBay-hosted URL. Needs the store's Auth'n'Auth token.
-async function uploadPicture(storeArg, buffer, name = 'photo.jpg') {
+// Upload a photo to eBay Picture Services → its i.ebayimg.com URL. Tries the
+// file upload at Supersize, then Standard, then (when the app has a public
+// address) lets eBay fetch the photo from the app instead.
+async function uploadPicture(storeArg, buffer, name = 'photo.jpg', opts = {}) {
+  const errors = [];
+  for (const set of ['Supersize', 'Standard']) {
+    try { return await uploadPictureFile(storeArg, buffer, name, set); }
+    catch (e) { errors.push(`${set}: ${e.message}`); }
+  }
+  if (opts.publicUrl) {
+    try {
+      const xml = await tradingCall('UploadSiteHostedPictures', `<ExternalPictureURL>${escapeXml(opts.publicUrl)}</ExternalPictureURL>
+        <PictureName>${escapeXml(String(name).slice(0, 80))}</PictureName><PictureSet>Supersize</PictureSet>`, storeArg);
+      const url = extractOne(xml, 'FullURL');
+      if (url) return decodeEntities(url);
+      errors.push('from link: ' + (decodeEntities(extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || '') || 'no URL returned'));
+    } catch (e) { errors.push('from link: ' + e.message); }
+  }
+  console.warn('[ebay] photo upload failed:', errors.join(' | '));
+  throw new Error('eBay wouldn\'t take the photo — ' + errors[errors.length - 1]);
+}
+async function uploadPictureFile(storeArg, buffer, name, pictureSet) {
   const token = tokenFor(storeArg);
   if (!token) throw new Error('This eBay account has no Trading token — photos can\'t be uploaded');
   const boundary = 'RZNBOUNDARY' + Date.now().toString(16);
@@ -747,7 +768,7 @@ async function uploadPicture(storeArg, buffer, name = 'photo.jpg') {
 <UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
   <RequesterCredentials><eBayAuthToken>${escapeXml(token)}</eBayAuthToken></RequesterCredentials>
   <PictureName>${escapeXml(String(name).slice(0, 80))}</PictureName>
-  <PictureSet>Supersize</PictureSet>
+  <PictureSet>${pictureSet || 'Supersize'}</PictureSet>
 </UploadSiteHostedPicturesRequest>`;
   const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="XML Payload"\r\nContent-Type: text/xml;charset=utf-8\r\n\r\n${xml}\r\n`
     + `--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="${String(name).replace(/[^\w.-]+/g, '_')}"\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: binary\r\n\r\n`);
@@ -762,6 +783,7 @@ async function uploadPicture(storeArg, buffer, name = 'photo.jpg') {
     timeout: 60000, maxBodyLength: 20 * 1024 * 1024,
   });
   const out = String(r.data || '');
+  if (/<Ack>Failure<\/Ack>/.test(out)) throw new Error(decodeEntities(extractOne(out, 'LongMessage') || extractOne(out, 'ShortMessage') || 'Failure'));
   const url = extractOne(out, 'FullURL');
   if (!url) throw new Error('eBay photo upload failed: ' + (decodeEntities(extractOne(out, 'LongMessage') || extractOne(out, 'ShortMessage') || '') || 'no URL returned'));
   return decodeEntities(url);

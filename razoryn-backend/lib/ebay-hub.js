@@ -86,6 +86,26 @@ function parseHeaders(xml) {
   })).filter(m => m.messageId);
 }
 
+// Pictures a buyer attached (in the app or by replying to eBay's email) that
+// only show up inside the message HTML. eBay Picture Services URLs: the older
+// /00/s/… form and the newer /images/g/<id>/s-l<size> form. Small sizes are
+// the listing thumbnail eBay puts in every email — left out. One per picture,
+// at the large size.
+function photosInEmail(html) {
+  const urls = (String(html || '').match(/https:\/\/i\.ebayimg\.com\/(?:00\/s\/|images\/g\/)[^"'\s<>)]+/g) || []).map(u => u.replace(/&amp;/g, '&'));
+  const seen = new Set(), out = [];
+  for (const u of urls) {
+    const g = u.match(/\/images\/g\/([^/]+)\/s-l(\d+)/);
+    if (g && parseInt(g[2]) < 400) continue;                 // thumbnail (s-l64…s-l300)
+    const key = g ? g[1] : u.split('?')[0].replace(/\$_\d+\.\w+$/, '');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ url: g ? u.replace(/s-l\d+(\.\w+)/, 's-l1600$1') : u, name: 'Photo' });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
 async function tradingOk(call, body, store) {
   const E = ebay();
   const xml = await E.tradingCall(call, body, store);
@@ -125,7 +145,11 @@ async function syncStore(store, { days = 5 } = {}) {
     if (r.no_body) needBody.push(h.messageId);
   }
   // Messages saved before photos / reply tracking existed: fetch again.
-  const redo = (await query(`SELECT message_id FROM ebay_messages WHERE store_code = $1 AND (media IS NULL OR last_from IS NULL)
+  await query(`ALTER TABLE ebay_messages ADD COLUMN IF NOT EXISTS media_v INTEGER NOT NULL DEFAULT 0`).catch(() => {});
+  // Re-read messages saved before photos / reply tracking existed, and (once)
+  // those read before email-attached photos were recognised (media_v < 2).
+  const redo = (await query(`SELECT message_id FROM ebay_messages WHERE store_code = $1
+      AND (media IS NULL OR last_from IS NULL OR (media_v < 2 AND COALESCE(jsonb_array_length(media), 0) = 0))
       AND received_at > now() - interval '45 days' ORDER BY received_at DESC LIMIT 60`, [store.code])).rows.map(r => r.message_id);
   for (const id of redo) if (!needBody.includes(id)) needBody.push(id);
   // Bodies, 10 per call (eBay's limit for ReturnMessages).
@@ -140,13 +164,10 @@ async function syncStore(store, { days = 5 } = {}) {
         // only appear in the email (eBay Picture Services "/00/s/" URLs —
         // listing thumbnails use other paths).
         let media = m.media || [];
-        if (!media.length && m.text) {
-          const html = ebay().decodeEntities(m.text);
-          media = [...new Set((html.match(/https:\/\/i\.ebayimg\.com\/00\/s\/[^"'\s<>)]+/g) || []))].slice(0, 10).map(u => ({ url: u.replace(/&amp;/g, '&'), name: 'Photo' }));
-        }
+        if (!media.length && m.text) media = photosInEmail(ebay().decodeEntities(m.text));
         const snd = m.sender || (await query(`SELECT sender FROM ebay_messages WHERE store_code = $1 AND message_id = $2`, [store.code, m.messageId])).rows[0]?.sender || null;
         const conv = parseConversation(body || '', snd);
-        await query(`UPDATE ebay_messages SET body = $3, media = $4::jsonb, last_from = $5 WHERE store_code = $1 AND message_id = $2`,
+        await query(`UPDATE ebay_messages SET body = $3, media = $4::jsonb, last_from = $5, media_v = 2 WHERE store_code = $1 AND message_id = $2`,
           [store.code, m.messageId, body || '', JSON.stringify(media), conv.length ? conv[conv.length - 1].from : 'buyer']);
       }
     } catch (e) { console.warn('[ebay-hub] bodies', store.code, e.message); }
@@ -296,12 +317,26 @@ async function uploadPhotos(rowId, files = []) {
   const out = [];
   for (const f of files.slice(0, 5)) {
     const m = String(f.data || '').match(/^data:image\/(png|jpe?g|gif|webp);base64,(.+)$/);
-    if (!m) continue;
+    if (!m) throw Object.assign(new Error(`${f.name || 'A photo'} isn't a JPG/PNG picture — take or pick it again`), { status: 400 });
     const buf = Buffer.from(m[2], 'base64');
     if (buf.length > 7 * 1024 * 1024) throw Object.assign(new Error(`${f.name || 'Photo'} is over 7MB`), { status: 400 });
-    out.push({ url: await ebay().uploadPicture(row.store_code, buf, f.name || 'photo.jpg'), name: String(f.name || 'Photo').slice(0, 60) });
+    // A public copy for 1 day, so eBay can fetch it if the direct upload fails.
+    const publicUrl = await tempPublicPhoto(buf, m[1]).catch(() => null);
+    try {
+      out.push({ url: await ebay().uploadPicture(row.store_code, buf, f.name || 'photo.jpg', { publicUrl }), name: String(f.name || 'Photo').slice(0, 60) });
+    } catch (e) { throw Object.assign(new Error(`${f.name || 'Photo'}: ${e.message}`), { status: 502 }); }
   }
   return out;
+}
+// Short-lived public copy of a reply photo (served by /public/msg-photo/:token).
+async function tempPublicPhoto(buf, ext) {
+  const base = (process.env.PUBLIC_BASE_URL || (process.env.CORS_ORIGIN || '').split(',').map(s => s.trim()).find(s => /^https:\/\//i.test(s)) || '').replace(/\/+$/, '');
+  if (!base) return null;
+  await query(`CREATE TABLE IF NOT EXISTS ebay_msg_photos (token TEXT PRIMARY KEY, mime TEXT, data BYTEA, created_at TIMESTAMPTZ DEFAULT now())`);
+  await query(`DELETE FROM ebay_msg_photos WHERE created_at < now() - interval '1 day'`);
+  const token = require('crypto').randomBytes(18).toString('hex');
+  await query(`INSERT INTO ebay_msg_photos (token, mime, data) VALUES ($1,$2,$3)`, [token, 'image/' + (ext === 'jpg' ? 'jpeg' : ext), buf]);
+  try { return new URL(base).origin + '/public/msg-photo/' + token + '.' + (ext === 'jpeg' ? 'jpg' : ext); } catch (_) { return null; }
 }
 
 async function reply(rowId, body, userId, media = []) {
@@ -316,16 +351,25 @@ async function reply(rowId, body, userId, media = []) {
   if (!row.item_id) throw Object.assign(new Error("eBay only lets you reply from here to messages about one of your listings — reply to this one on eBay."), { status: 400 });
   if (!row.external_id) throw Object.assign(new Error('This message has no reply reference — reply on eBay.'), { status: 400 });
   const E = ebay();
-  try {
-    await tradingOk('AddMemberMessageRTQ', `<ItemID>${E.escapeXml(row.item_id)}</ItemID>
+  const pics = (media || []).slice(0, 5).filter(x => /^https:\/\//.test(x.url || ''));
+  const send = (bodyText, withMedia) => tradingOk('AddMemberMessageRTQ', `<ItemID>${E.escapeXml(row.item_id)}</ItemID>
       <MemberMessage>
-        <Body>${E.escapeXml(text.slice(0, 2000))}</Body>
+        <Body>${E.escapeXml(bodyText.slice(0, 2000))}</Body>
         <DisplayToPublic>false</DisplayToPublic>
         <EmailCopyToSender>true</EmailCopyToSender>
         <ParentMessageID>${E.escapeXml(row.external_id)}</ParentMessageID>
         <RecipientID>${E.escapeXml(row.sender)}</RecipientID>
-        ${(media || []).slice(0, 5).filter(x => /^https:\/\//.test(x.url || '')).map(x => `<MessageMedia><MediaURL>${E.escapeXml(x.url)}</MediaURL><MediaName>${E.escapeXml(String(x.name || 'Photo').slice(0, 60))}</MediaName></MessageMedia>`).join('')}
+        ${withMedia ? pics.map(x => `<MessageMedia><MediaURL>${E.escapeXml(x.url)}</MediaURL><MediaName>${E.escapeXml(String(x.name || 'Photo').replace(/[^\w .-]/g, '').slice(0, 60) || 'Photo')}</MediaName></MessageMedia>`).join('') : ''}
       </MemberMessage>`, row.store_code);
+  try {
+    try { await send(text, pics.length > 0); }
+    catch (e1) {
+      if (!pics.length) throw e1;
+      // eBay refused the attachments: send the photos as eBay picture links
+      // in the message instead, so the buyer still gets them.
+      console.warn('[ebay-hub] reply with photos refused, sending links:', e1.message);
+      await send(`${text}\n\n${pics.length > 1 ? 'Photos' : 'Photo'}:\n${pics.map(x => x.url).join('\n')}`, false);
+    }
   } catch (e) {
     await query(`INSERT INTO ebay_message_replies (message_row_id, store_code, body, sent_by, ok, error) VALUES ($1,$2,$3,$4,false,$5)`,
       [row.id, row.store_code, text, userId || null, e.message.slice(0, 500)]);
