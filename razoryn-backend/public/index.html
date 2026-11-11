@@ -27112,6 +27112,16 @@ function renderBooks() {
       <div class="card" style="margin-bottom:14px">
         <div class="card-head"><h3>📤 Export &amp; share with the accountant</h3></div>
         <div class="card-body">
+          <div style="font-weight:600;font-size:13px;margin-bottom:6px">For the accountant — separate folders</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+            <button class="btn btn-primary" onclick="bkAccountant('all')" title="One ZIP: 1 Revenue (sales) · 2 Expenditure (purchases) · 3 Bank statements">🗂 All three folders</button>
+            <button class="btn btn-outline" onclick="bkAccountant('revenue')" title="Every sales invoice as a PDF + Revenue list.csv + marketplace statements">💷 Revenue (sales invoices)</button>
+            <button class="btn btn-outline" onclick="bkAccountant('expenditure')" title="Every purchase invoice / receipt + Expenditure list.csv (transfers left out)">🧾 Expenditure (purchase invoices)</button>
+            <button class="btn btn-outline" onclick="bkAccountant('bank')" title="The bank's own statements per account + a CSV of each account's transactions">🏦 Bank statements</button>
+            <label style="font-size:12px;display:flex;gap:5px;align-items:center" title="Sales invoices dated in the period (usual), or paid in the period (VAT cash accounting)"><select id="bk-basis" style="font-size:12px"><option value="issued">Sales dated in period</option><option value="paid">Sales paid in period</option></select></label>
+          </div>
+          <div style="font-size:11.5px;color:var(--ink-soft);margin-bottom:12px">Revenue and expenditure each get their own folder with a list (CSV) of every document; bank statements are kept apart.</div>
+          <div style="font-weight:600;font-size:13px;margin-bottom:6px">Other exports</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
             <button class="btn btn-outline" onclick="bkOpenPack('paid')" title="One print-ready document: the FULL invoice for every order PAID in the period, one per page — Save as PDF for the pack.">📄 Invoice pack — paid in period</button>
             <button class="btn btn-outline" onclick="bkOpenPack('issued')">📄 Invoice pack — issued in period</button>
@@ -27121,6 +27131,11 @@ function renderBooks() {
           </div>
           <div id="bk-shares" style="margin-top:10px;font-size:12px;color:var(--ink-soft)"></div>
         </div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>📊 Where the money goes</h3><div class="card-desc">Money in and out by category, and sales by channel — per month, quarter or year (transfers between your own accounts left out). For business meetings.</div>
+          <select id="bk-rep-group" onchange="bkReport()" style="font-size:12px"><option value="month">By month</option><option value="quarter">By quarter</option><option value="year">By year</option></select></div>
+        <div class="card-body" style="padding:0;overflow:auto"><div id="bk-report" style="font-size:13px;color:var(--ink-soft);padding:12px">Loading…</div></div>
       </div>
       <div class="card" style="margin-bottom:14px">
         <div class="card-head"><h3>🏦 Accounts &amp; statements</h3><div class="card-desc">Several accounts supported, same or different banks — add each account once, then upload its statements.</div>
@@ -27278,6 +27293,7 @@ async function bkSetPrimary(id) {
 async function bkLoad() {
   if (!BK.from || !BK.to) return;   // custom period not applied yet
   bkRefreshPeriodLabels();
+  bkReport();
   try {
     const qstr = `from=${BK.from}&to=${BK.to}` + (BK.accountId ? '&accountId=' + BK.accountId : '');
     const [sum, tx, st] = await Promise.all([
@@ -27783,6 +27799,39 @@ async function bkDeleteStatement(id) {
 }
 function bkOpenPack(basis) {
   window.open(`/api/books/export/invoice-pack?from=${BK.from}&to=${BK.to}&basis=${basis}`, '_blank');
+}
+function bkAccountant(part) {
+  const basis = el('bk-basis')?.value || 'issued';
+  toast(`📦 Building the ${part === 'all' ? 'accountant folders' : part} download for ${BK.from} → ${BK.to} — bigger periods take a minute.`, 'info', 8000);
+  window.open(`/api/books/export/accountant?from=${BK.from}&to=${BK.to}&part=${part}&basis=${basis}`, '_blank');
+}
+// Where the money goes: categories down the side, periods across.
+async function bkReport() {
+  const box = el('bk-report'); if (!box || !BK.from) return;
+  const group = el('bk-rep-group')?.value || 'month';
+  let r; try { r = await Api.get(`/api/books/report?from=${BK.from}&to=${BK.to}&group=${group}`); } catch (e) { box.textContent = e.data?.message || e.message; return; }
+  const periods = [...new Set([...r.rows.map(x => x.period), ...r.sales.map(x => x.period)])].sort();
+  if (!periods.length) { box.innerHTML = '<div style="padding:12px">No bank lines or sales in this period yet.</div>'; return; }
+  const lab = p => { const d = new Date(p + 'T00:00:00Z'); return group === 'year' ? d.getUTCFullYear() : group === 'quarter' ? `Q${Math.floor(d.getUTCMonth() / 3) + 1} ${d.getUTCFullYear()}` : d.toLocaleDateString('en-GB', { month: 'short', year: '2-digit', timeZone: 'UTC' }); };
+  const pivot = (rows, key, val) => { const m = {}; for (const x of rows) { (m[x[key]] = m[x[key]] || {})[x.period] = (m[x[key]][x.period] || 0) + (+x[val] || 0); } return m; };
+  const out = pivot(r.rows.filter(x => +x.money_out > 0), 'category', 'money_out');
+  const inn = pivot(r.rows.filter(x => +x.money_in > 0), 'category', 'money_in');
+  const sales = pivot(r.sales, 'channel', 'total');
+  const total = m => Object.values(m).reduce((a, x) => a + Object.values(x).reduce((b, y) => b + y, 0), 0);
+  const fmt = n => n ? '£' + Math.round(n).toLocaleString('en-GB') : '—';
+  const section = (title, m, color) => {
+    const cats = Object.keys(m).sort((a, b) => Object.values(m[b]).reduce((s, x) => s + x, 0) - Object.values(m[a]).reduce((s, x) => s + x, 0));
+    const grand = total(m);
+    return `<tr><td colspan="${periods.length + 3}" style="font-weight:700;background:var(--bg-soft)">${title}</td></tr>` + cats.map(c => {
+      const sum = Object.values(m[c]).reduce((a, x) => a + x, 0);
+      return `<tr><td>${escapeHtml(CUST_CH_LABEL?.[c] || c)}</td>${periods.map(p => `<td class="num">${fmt(m[c][p])}</td>`).join('')}<td class="num"><b>${fmt(sum)}</b></td><td class="num" style="color:var(--ink-soft)">${grand ? Math.round(sum / grand * 100) + '%' : ''}</td></tr>`;
+    }).join('') + `<tr><td><b>Total</b></td>${periods.map(p => `<td class="num"><b style="color:${color}">${fmt(Object.values(m).reduce((a, x) => a + (x[p] || 0), 0))}</b></td>`).join('')}<td class="num"><b style="color:${color}">${fmt(grand)}</b></td><td></td></tr>`;
+  };
+  box.innerHTML = `<table class="table" style="margin:0"><thead><tr><th></th>${periods.map(p => `<th class="num">${lab(p)}</th>`).join('')}<th class="num">Total</th><th class="num">Share</th></tr></thead><tbody>
+    ${section('💸 Money out — where it goes', out, 'var(--red)')}
+    ${section('💰 Money in (bank)', inn, 'var(--green)')}
+    ${Object.keys(sales).length ? section('🛒 Sales by channel (invoices)', sales, 'var(--green)') : ''}
+  </tbody></table>`;
 }
 function bkZip() {
   toast('📦 Building the pack — CSV, invoice PDFs, receipts, statements. Bigger quarters take a minute; the download starts when it’s ready.', 'info', 9000);
