@@ -27112,6 +27112,16 @@ function renderBooks() {
       <div class="card" style="margin-bottom:14px">
         <div class="card-head"><h3>📤 Export &amp; share with the accountant</h3></div>
         <div class="card-body">
+          <div style="font-weight:600;font-size:13px;margin-bottom:6px">For the accountant — separate folders</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+            <button class="btn btn-primary" onclick="bkAccountant('all')" title="One ZIP: 1 Revenue (sales) · 2 Expenditure (purchases) · 3 Bank statements">🗂 All three folders</button>
+            <button class="btn btn-outline" onclick="bkAccountant('revenue')" title="Every sales invoice as a PDF + Revenue list.csv + marketplace statements">💷 Revenue (sales invoices)</button>
+            <button class="btn btn-outline" onclick="bkAccountant('expenditure')" title="Every purchase invoice / receipt + Expenditure list.csv (transfers left out)">🧾 Expenditure (purchase invoices)</button>
+            <button class="btn btn-outline" onclick="bkAccountant('bank')" title="The bank's own statements per account + a CSV of each account's transactions">🏦 Bank statements</button>
+            <label style="font-size:12px;display:flex;gap:5px;align-items:center" title="Sales invoices dated in the period (usual), or paid in the period (VAT cash accounting)"><select id="bk-basis" style="font-size:12px"><option value="issued">Sales dated in period</option><option value="paid">Sales paid in period</option></select></label>
+          </div>
+          <div style="font-size:11.5px;color:var(--ink-soft);margin-bottom:12px">Revenue and expenditure each get their own folder with a list (CSV) of every document; bank statements are kept apart.</div>
+          <div style="font-weight:600;font-size:13px;margin-bottom:6px">Other exports</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
             <button class="btn btn-outline" onclick="bkOpenPack('paid')" title="One print-ready document: the FULL invoice for every order PAID in the period, one per page — Save as PDF for the pack.">📄 Invoice pack — paid in period</button>
             <button class="btn btn-outline" onclick="bkOpenPack('issued')">📄 Invoice pack — issued in period</button>
@@ -27121,6 +27131,11 @@ function renderBooks() {
           </div>
           <div id="bk-shares" style="margin-top:10px;font-size:12px;color:var(--ink-soft)"></div>
         </div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>📊 Where the money goes</h3><div class="card-desc">Money in and out by category, and sales by channel — per month, quarter or year (transfers between your own accounts left out). For business meetings.</div>
+          <select id="bk-rep-group" onchange="bkReport()" style="font-size:12px"><option value="month">By month</option><option value="quarter">By quarter</option><option value="year">By year</option></select></div>
+        <div class="card-body" style="padding:0;overflow:auto"><div id="bk-report" style="font-size:13px;color:var(--ink-soft);padding:12px">Loading…</div></div>
       </div>
       <div class="card" style="margin-bottom:14px">
         <div class="card-head"><h3>🏦 Accounts &amp; statements</h3><div class="card-desc">Several accounts supported, same or different banks — add each account once, then upload its statements.</div>
@@ -27278,6 +27293,7 @@ async function bkSetPrimary(id) {
 async function bkLoad() {
   if (!BK.from || !BK.to) return;   // custom period not applied yet
   bkRefreshPeriodLabels();
+  bkReport();
   try {
     const qstr = `from=${BK.from}&to=${BK.to}` + (BK.accountId ? '&accountId=' + BK.accountId : '');
     const [sum, tx, st] = await Promise.all([
@@ -27783,6 +27799,41 @@ async function bkDeleteStatement(id) {
 }
 function bkOpenPack(basis) {
   window.open(`/api/books/export/invoice-pack?from=${BK.from}&to=${BK.to}&basis=${basis}`, '_blank');
+}
+function bkAccountant(part) {
+  const basis = el('bk-basis')?.value || 'issued';
+  toast(`📦 Building the ${part === 'all' ? 'accountant folders' : part} download for ${BK.from} → ${BK.to} — bigger periods take a minute.`, 'info', 8000);
+  window.open(`/api/books/export/accountant?from=${BK.from}&to=${BK.to}&part=${part}&basis=${basis}`, '_blank');
+}
+// Where the money goes: categories down the side, periods across.
+async function bkReport() {
+  const box = el('bk-report'); if (!box || !BK.from) return;
+  const group = el('bk-rep-group')?.value || 'month';
+  let r; try { r = await Api.get(`/api/books/report?from=${BK.from}&to=${BK.to}&group=${group}`); } catch (e) { box.textContent = e.data?.message || e.message; return; }
+  const periods = [...new Set([...r.rows.map(x => x.period), ...r.sales.map(x => x.period)])].sort();
+  if (!periods.length) { box.innerHTML = '<div style="padding:12px">No bank lines or sales in this period yet.</div>'; return; }
+  const lab = p => { const d = new Date(p + 'T00:00:00Z'); return group === 'year' ? d.getUTCFullYear() : group === 'quarter' ? `Q${Math.floor(d.getUTCMonth() / 3) + 1} ${d.getUTCFullYear()}` : d.toLocaleDateString('en-GB', { month: 'short', year: '2-digit', timeZone: 'UTC' }); };
+  const pivot = (rows, key, val) => { const m = {}; for (const x of rows) { (m[x[key]] = m[x[key]] || {})[x.period] = (m[x[key]][x.period] || 0) + (+x[val] || 0); } return m; };
+  const out = pivot(r.rows.filter(x => +x.money_out > 0), 'category', 'money_out');
+  const inn = pivot(r.rows.filter(x => +x.money_in > 0), 'category', 'money_in');
+  const sales = pivot(r.sales, 'channel', 'total');
+  const total = m => Object.values(m).reduce((a, x) => a + Object.values(x).reduce((b, y) => b + y, 0), 0);
+  const fmt = n => n ? '£' + Math.round(n).toLocaleString('en-GB') : '—';
+  const section = (title, m, color) => {
+    const cats = Object.keys(m).sort((a, b) => Object.values(m[b]).reduce((s, x) => s + x, 0) - Object.values(m[a]).reduce((s, x) => s + x, 0));
+    if (!cats.length) return '';
+    const grand = total(m);
+    return `<tr><td colspan="${periods.length + 3}" style="font-weight:700;background:var(--bg-soft)">${title}</td></tr>` + cats.map(c => {
+      const sum = Object.values(m[c]).reduce((a, x) => a + x, 0);
+      const store = (State.brand?.allStores || State.brand?.stores || []).find(x => x.channelCode === c);
+      return `<tr><td>${escapeHtml(store ? 'eBay · ' + store.name : (CUST_CH_LABEL?.[c] || c))}</td>${periods.map(p => `<td class="num">${fmt(m[c][p])}</td>`).join('')}<td class="num"><b>${fmt(sum)}</b></td><td class="num" style="color:var(--ink-soft)">${grand ? Math.round(sum / grand * 100) + '%' : ''}</td></tr>`;
+    }).join('') + `<tr><td><b>Total</b></td>${periods.map(p => `<td class="num"><b style="color:${color}">${fmt(Object.values(m).reduce((a, x) => a + (x[p] || 0), 0))}</b></td>`).join('')}<td class="num"><b style="color:${color}">${fmt(grand)}</b></td><td></td></tr>`;
+  };
+  box.innerHTML = `<table class="table" style="margin:0"><thead><tr><th></th>${periods.map(p => `<th class="num">${lab(p)}</th>`).join('')}<th class="num">Total</th><th class="num">Share</th></tr></thead><tbody>
+    ${section('💸 Money out — where it goes', out, 'var(--red)')}
+    ${section('💰 Money in (bank)', inn, 'var(--green)')}
+    ${Object.keys(sales).length ? section('🛒 Sales by channel (invoices)', sales, 'var(--green)') : ''}
+  </tbody></table>`;
 }
 function bkZip() {
   toast('📦 Building the pack — CSV, invoice PDFs, receipts, statements. Bigger quarters take a minute; the download starts when it’s ready.', 'info', 9000);
@@ -29002,7 +29053,38 @@ const AI_KIND_LABELS = {
   pricing: { name: 'Pricing & margins', icon: '💷' },
   alt_numbers: { name: 'Superseded & alternative numbers', icon: '🔁' },
   listing_opt: { name: 'Listing optimisation (eBay + Shopify)', icon: '🚀' },
+  title: { name: 'eBay titles (search)', icon: '🔎' },
 };
+// ── eBay ad spend review ──
+async function adsLoad() {
+  const box = el('ads-table'); if (!box) return;
+  let r; try { r = await Api.get('/api/ai/ads/review?months=' + (el('ads-months')?.value || 6)); } catch (e) { box.textContent = e.data?.message || e.message; return; }
+  if (!r.stmts.length) { box.innerHTML = 'No eBay statements for this period yet — upload them in <a href="#" onclick="routeTo(\'books\');return false">Books &amp; VAT → Marketplace statements</a> (the advertising figures come from them).' + (r.sales.length ? ` Your eBay sales are known (${r.sales.reduce((a, x) => a + x.orders, 0)} orders), so the review can still look at those.` : ''); return; }
+  const f = n => n == null ? '—' : '£' + Math.round(n).toLocaleString('en-GB');
+  box.innerHTML = `<table class="table" style="margin:0"><thead><tr><th>Month</th><th>Account</th><th class="num">eBay sales</th><th class="num">Advertising</th><th class="num">Ads % of sales</th><th class="num">Selling fees</th><th class="num">Refunds</th></tr></thead><tbody>
+    ${r.stmts.map(x => `<tr><td>${escapeHtml(x.month)}</td><td>${escapeHtml(x.account)}</td><td class="num">${f(x.grossSales)}</td><td class="num">${f(x.advertising)}</td>
+      <td class="num" style="font-weight:700;color:${x.adPctOfSales == null ? 'inherit' : x.adPctOfSales > 8 ? 'var(--red)' : x.adPctOfSales > 4 ? 'var(--amber,#d97706)' : 'var(--green)'}">${x.adPctOfSales == null ? '—' : x.adPctOfSales.toFixed(1) + '%'}</td>
+      <td class="num">${f(x.fees)}</td><td class="num">${f(x.refunds)}</td></tr>`).join('')}</tbody></table>
+    <div style="font-size:11.5px;margin-top:6px">Your ad rate setting: ${r.settings.adRatePct}% · eBay fees ${r.settings.ebayFeePct}% · target margin ${r.settings.targetMarginPct}%</div>`;
+}
+async function adsAsk(btn) {
+  if (btn) btn.disabled = true;
+  const box = el('ads-review'); if (box) box.innerHTML = '<div style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">Claude is reviewing your ad spend…</div>';
+  try {
+    const r = await Api.post('/api/ai/ads/review/ask', { months: parseInt(el('ads-months')?.value) || 6 });
+    const v = r.review;
+    if (!v) { box.innerHTML = '<div style="color:var(--red)">No answer — try again.</div>'; return; }
+    const col = { increase: 'var(--green)', keep: 'var(--blue,#2563eb)', reduce: 'var(--amber,#d97706)', pause: 'var(--red)', not_enough_data: 'var(--ink-soft)' }[v.verdict] || 'var(--ink)';
+    const word = { increase: 'Spend more', keep: 'Keep as is', reduce: 'Spend less', pause: 'Pause ads', not_enough_data: 'Not enough data yet' }[v.verdict] || v.verdict;
+    box.innerHTML = `<div style="border:2px solid ${col};border-radius:10px;padding:12px 14px;margin-bottom:12px">
+      <div style="font-weight:800;font-size:16px;color:${col}">${escapeHtml(word)}${v.suggestedAdRatePct != null ? ` · suggested ad rate ${v.suggestedAdRatePct}%` : ''}</div>
+      <div style="margin-top:3px">${escapeHtml(v.headline || '')}</div>
+      ${(v.findings || []).length ? `<div style="font-weight:700;margin-top:8px;font-size:13px">What the numbers say</div><ul style="margin:4px 0 0 18px;font-size:13px">${v.findings.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : ''}
+      ${(v.actions || []).length ? `<div style="font-weight:700;margin-top:8px;font-size:13px">What to do</div><ol style="margin:4px 0 0 18px;font-size:13px">${v.actions.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ol>` : ''}
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Confidence ${Math.round((v.confidence || 0) * 100)}% · based on ${r.data.stmts.length} statement month(s)</div></div>`;
+  } catch (e) { if (box) box.innerHTML = `<div style="color:var(--red);margin-bottom:10px">${escapeHtml(e.data?.message || e.message)}</div>`; }
+  finally { if (btn) btn.disabled = false; }
+}
 function aiSuggestionCard(s) {
   const conf = s.confidence != null ? Math.round(parseFloat(s.confidence) * 100) + '%' : '—';
   let what = '', editBtn = '', approveLabel = '✓ Approve &amp; apply';
@@ -29025,6 +29107,9 @@ function aiSuggestionCard(s) {
         + '<strong>' + escapeHtml(proposed) + '</strong>'
         + (cur ? ' <span style="color:var(--ink-soft)">(currently ' + escapeHtml(cur) + ')</span>' : ' <span style="color:var(--ink-soft)">(currently blank — found in SKU ' + escapeHtml(s.payload?.sku || '') + ')</span>')
         + (faultIn ? ' <span style="color:var(--red);font-weight:600">— mistake in the ' + escapeHtml(faultIn.replace('_', ' ')) + '</span>' : '');
+    } else if (faultIn === 'sku' || s.payload?.correctSku) {
+      what = '⚠ Part number <strong>' + escapeHtml(cur || '—') + '</strong> and the eBay specifics are right — the <span style="color:var(--red);font-weight:700">SKU</span> looks mistyped: <strong>' + escapeHtml(s.payload?.sku || '') + '</strong>' + (s.payload?.correctSku ? ' → <strong>' + escapeHtml(s.payload.correctSku) + '</strong>' : '') + '. Open the listing edit to change the SKU.';
+      approveLabel = '✓ Mark reviewed';
     } else if (faultIn === 'title') {
       what = '⚠ Part number <strong>' + escapeHtml(cur || '—') + '</strong> and the photo agree — the <span style="color:var(--red);font-weight:700">TITLE</span> looks wrong. Open the listing edit to fix the title.';
       approveLabel = '✓ Mark reviewed';
@@ -29037,7 +29122,10 @@ function aiSuggestionCard(s) {
     }
     // Ready-to-apply AI correction (corrected title and/or specifics): show
     // exactly what will change and make Approve apply it in one click.
-    const fix = s.payload?.fix || {};
+    const fix = { ...(s.payload?.fix || {}) };
+    // Older cards could "correct" the part number to the value it already has
+    // (the real fault was the SKU) — hide those no-op corrections.
+    if (Array.isArray(fix.specifics)) fix.specifics = fix.specifics.filter(x => !(/part number/i.test(x.name || '') && cur && normPn(x.value) === normPn(cur)));
     const fixBits = [];
     if (fix.title) fixBits.push('<div><strong>New title:</strong> ' + escapeHtml(fix.title) + '</div>');
     if ((fix.specifics || []).length) fixBits.push('<div><strong>Corrected specifics:</strong> ' + escapeHtml(fix.specifics.map(x => x.name + ': ' + x.value).join(' · ')) + '</div>');
@@ -29052,7 +29140,11 @@ function aiSuggestionCard(s) {
     if ((s.payload?.superseded || []).length) bits.push('<strong>Superseded:</strong> ' + escapeHtml(s.payload.superseded.join(', ')));
     if ((s.payload?.regional || []).length) bits.push('<strong>Regional:</strong> ' + escapeHtml(s.payload.regional.join(', ')));
     if ((s.payload?.reference || []).length) bits.push('<strong>Reference:</strong> ' + escapeHtml(s.payload.reference.join(', ')));
-    what = '🔁 Add alternative numbers — ' + bits.join(' · ') + '<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Applies to the warehouse alternates, the Shopify alternate-numbers field, and the eBay Superseded / Reference specifics.</div>';
+    what = '🔁 Add alternative numbers — ' + bits.join(' · ') + '<div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Applies to the warehouse alternates, the Shopify alternate-numbers field, and the eBay Superseded / Reference specifics.</div>'
+      + (s.payload?.lamp ? '<div style="font-size:11.5px;color:var(--amber,#d97706);margin-top:3px;font-weight:600">💡 Lamp — check these are the SAME drive side (LHD/RHD) and type (LED/halogen) before approving; never applied automatically.</div>' : '');
+  } else if (s.kind === 'title') {
+    what = '🔎 Better eBay title for search:<div style="font-size:12.5px;margin-top:4px"><div style="color:var(--ink-soft)">Now: ' + escapeHtml(s.payload?.current || s.title || '') + '</div><div><strong>New: ' + escapeHtml(s.payload?.title || '') + '</strong> <span style="color:var(--ink-soft)">(' + String(s.payload?.title || '').length + '/80)</span></div></div>';
+    approveLabel = '✓ Use this title';
   } else if (s.kind === 'listing_opt') {
     const specs = s.payload?.ebaySpecifics || [];
     const shop = s.payload?.shopify || {};
@@ -29198,6 +29290,12 @@ function renderAiPage() {
         </div>
       </div>
       <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>📣 eBay ad spend — is it worth it?</h3><div class="card-desc">From your uploaded eBay monthly statements (Books &amp; VAT): sales vs advertising per account per month. Claude weighs it against your margins and says whether to spend more or less, and where.</div>
+          <div style="display:flex;gap:6px;align-items:center"><select id="ads-months" onchange="adsLoad()" style="font-size:12px"><option value="3">3 months</option><option value="6" selected>6 months</option><option value="12">12 months</option></select>
+          <button class="btn btn-primary btn-sm" onclick="adsAsk(this)">🤖 Review ad spend</button></div></div>
+        <div class="card-body"><div id="ads-review"></div><div id="ads-table" style="font-size:13px;color:var(--ink-soft);overflow:auto">Loading…</div></div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>🔎 Check a part number</h3><div class="card-desc">Found another number for a part (supplier sheet, Google, a box label)? Paste it here instead — Claude verifies it's genuinely the same part &amp; fitment (superseded revision, regional code) or tells you why not (wrong side, trim, generation, vehicle). Confirmed numbers push to the warehouse, eBay and Shopify in one click.</div></div>
         <div class="card-body">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
@@ -29241,6 +29339,7 @@ function renderAiPage() {
   aiPagePollTick();
   // A bulk alternate push may be running/finished — show where it got to.
   Api.get('/api/ai/alts/push-all').then(r => { altPushPaint(r.status); if (r.status.state === 'running') altPushWatch(); }).catch(() => {});
+  setTimeout(() => { if (typeof adsLoad === 'function') adsLoad(); }, 0);
 }
 async function loadAiPageBanner() {
   const b = el('ai-page-banner');

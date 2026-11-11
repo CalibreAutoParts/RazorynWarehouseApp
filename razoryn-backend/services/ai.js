@@ -362,14 +362,16 @@ TASKS — reply with ONLY this JSON (omit nothing, use nulls/empty arrays where 
 {
  "partNumberCheck": {
    "verdict": "ok"|"mismatch"|"unsure",
-   "faultIn": "title"|"photo"|"part_number"|null,   // where the mistake is when things disagree
+   "faultIn": "title"|"photo"|"part_number"|"sku"|null,   // where the mistake is when things disagree
    "correctPartNumber": "..."|null,                  // only when clearly derivable
+   "correctSku": "..."|null,                         // ONLY when faultIn is "sku": the SKU is a typo of the (correct) part number
    "proposedFix": {                                  // the ready-to-apply correction, when one exists
      "title": "..."|null,                            // corrected listing title (max 80 chars) — ONLY when the title is the fault
      "specifics": [{"name":"...","value":"..."}]     // ONLY the specifics whose CURRENT value is wrong (wrong side, typo'd number…)
    },
    "confidence": <0..1>, "reason": "<short>"
  },
+ "titleSuggestion": {"title": "...", "why": "<short>"} | null,   // a better eBay title (max 80) ONLY when it would clearly improve search — else null
  "altNumbers": {                                     // ONLY numbers you genuinely know — never invent
    "superseded": ["..."],                            // newer numbers replacing this one
    "regional": ["..."],                              // region-specific codes for the SAME part+fitment
@@ -386,6 +388,14 @@ TASKS — reply with ONLY this JSON (omit nothing, use nulls/empty arrays where 
 }
 
 RULES for partNumberCheck: the part in the PHOTO must be the part TYPE the title says, and the part number must belong to that part and vehicle. If the photo shows a different part than the title → faultIn "photo" or "title" (whichever is more likely wrong given the part number). If title and photo agree but the number belongs to something else → faultIn "part_number". correctPartNumber MUST be null when the stored part number is already right (fault in title/photo) or when you can't derive the right one — NEVER echo back the same number as a "correction". A wrong number inside the eBay specifics (while the stored one is right) is faultIn "part_number" with the specifics named in the reason, AND the corrected entry in proposedFix.specifics.
+SKU RULE: when the stored part number and the eBay specifics agree and are right but the SKU is a typo of that number (an extra/missing digit, transposed characters — e.g. SKU "663110-G6000" vs part number "66312-G6000"), that is faultIn "sku" with correctSku — NOT a part-number fault, and proposedFix stays empty. NEVER put a specific in proposedFix whose value is already what the listing has.
+RULES for altNumbers — be careful, a wrong number sells the wrong part:
+- Most stock is made in Asia; the stored number is often the Asian-market / supplier number. A European number for the SAME item may differ slightly — add it only when you KNOW it is the same part for the same vehicle and side.
+- VAG (VW/Audi/Seat/Skoda/Cupra): a different final letter can be a supersession (same part — list under superseded) OR a different item (other trim, colour, with/without sensors). Only list it when you know which; never guess.
+- Japanese and Korean makes: numbers can differ by factory/plant for the same part — list those as regional only when certain.
+- LAMPS (headlights, tail lights, fog lights): left-hand-drive and right-hand-drive versions have DIFFERENT numbers and we sell both — NEVER add the other drive side's number, and never mix LED/halogen/xenon or with/without-motor versions. Keep to the numbers that match this exact listing.
+- Never add the opposite side (left vs right) or a different position (front vs rear). When in doubt, leave it out and lower the confidence.
+RULES for titleSuggestion: eBay search is title-led. Suggest a title only when the current one misses key search words — make, model, generation/years, part name buyers use, side/position, "Primed"/finish, and the part number when it fits in 80 characters. Keep it truthful and readable (no keyword stuffing, no ALL CAPS rewriting). Null when the current title is already good.
 RULES for proposedFix: give the correction ready to apply. Title fault → proposedFix.title: keep the existing title's shape (make, model, years, part name, part number) and change ONLY what's wrong (e.g. the side, or the part name). Wrong values in the current eBay specifics (side, position, a typo'd number) → the corrected entries in proposedFix.specifics. A photo fault has no auto-fix — leave proposedFix empty.
 
 NAMING RULE (titles + SEO everywhere): use what a CUSTOMER calls the part — the popular search term — not the technically pedantic name. A mirror mounted on the door is still a "Wing Mirror"; a bonnet is not an "engine hood panel". A title using a popular synonym for the same part is CORRECT, not a mismatch — only flag a title that names a genuinely different part, side or position.
@@ -400,7 +410,7 @@ RULES for ebaySpecifics:
 - "Vehicle Model Code": the chassis/generation code when known (e.g. Hyundai i20 new shape = "BC3", MG HS new shape = "AS33") — key for telling similar parts apart.
 - "Trim": ONLY when the part number pins it to a specific trim level.
 - Keep every existing specific that is still correct; correct wrong ones; values max 65 chars.`;
-  const out = await callClaude({ kind: 'listing_opt', system, user, maxTokens: 1100, images: ctx.imageUrls });
+  const out = await callClaude({ kind: 'listing_opt', system, user, maxTokens: 1300, images: ctx.imageUrls });
   const v = out.json;
   if (!v) return null;
   const clamp = (x) => Math.max(0, Math.min(1, +x || 0));
@@ -425,8 +435,9 @@ RULES for ebaySpecifics:
   return {
     partNumberCheck: {
       verdict: ['ok', 'mismatch', 'unsure'].includes(pn.verdict) ? pn.verdict : 'unsure',
-      faultIn: ['title', 'photo', 'part_number'].includes(pn.faultIn) ? pn.faultIn : null,
+      faultIn: ['title', 'photo', 'part_number', 'sku'].includes(pn.faultIn) ? pn.faultIn : null,
       correctPartNumber: pn.correctPartNumber ? String(pn.correctPartNumber).trim().slice(0, 60) : null,
+      correctSku: pn.correctSku ? String(pn.correctSku).trim().slice(0, 60) : null,
       fix: {
         title: pn.proposedFix?.title ? String(pn.proposedFix.title).trim().slice(0, 80) : null,
         specifics: (Array.isArray(pn.proposedFix?.specifics) ? pn.proposedFix.specifics : [])
@@ -441,6 +452,7 @@ RULES for ebaySpecifics:
       confidence: clamp(alt.confidence), reason: String(alt.reason || '').slice(0, 300),
     },
     ebaySpecifics: specifics,
+    titleSuggestion: v.titleSuggestion && v.titleSuggestion.title ? { title: String(v.titleSuggestion.title).trim().slice(0, 80), why: String(v.titleSuggestion.why || '').slice(0, 200) } : null,
     shopify: {
       seoTitle: shop.seoTitle ? String(shop.seoTitle).slice(0, 70) : null,
       seoDescription: shop.seoDescription ? String(shop.seoDescription).slice(0, 170) : null,

@@ -1646,6 +1646,164 @@ router.get('/export/zip', async (req, res) => {
   }
 });
 
+// ── Accountant folders: revenue · expenditure · bank statements ───────────
+// What the accountant asked for: bank statements kept apart, one folder with
+// ALL revenue (every sales invoice + a list) and one with ALL expenditure
+// (every purchase invoice / receipt + a list). part = revenue | expenditure |
+// bank | all (all = one ZIP with the three folders).
+const csvCell = (v) => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+const csvOf = (cols, rows) => [cols.join(','), ...rows.map(r => r.map(csvCell).join(','))].join('\n');
+const money2 = (n) => (n == null || n === '' ? '' : (+n).toFixed(2));
+async function streamAccountantFolders(res, { from, to, part, basis }) {
+  const archiver = require('archiver');
+  const brand = require('../lib/brand');
+  const salesMod = require('./sales');
+  const { buildInvoicePdf } = require('../lib/invoice-pdf');
+  const name = { revenue: 'Revenue', expenditure: 'Expenditure', bank: 'Bank statements', all: 'Accounts' }[part];
+  res.set('Content-Type', 'application/zip');
+  res.set('Content-Disposition', `attachment; filename="${zipSafe(brand.name || 'accounts')} - ${name} ${from} to ${to}.zip"`);
+  const zip = archiver('zip', { zlib: { level: 6 } });
+  zip.on('error', (e) => { console.error('[books] zip error:', e.message); try { res.destroy(e); } catch (_) {} });
+  zip.pipe(res);
+  const top = (folder) => (part === 'all' ? folder + '/' : '');
+  const notes = [];
+
+  if (part === 'revenue' || part === 'all') {
+    const F = top('1 Revenue (sales)');
+    const company = await salesMod.getCompanySettings();
+    const sales = await loadInvoiceSales({ from, to, basis });
+    const list = [];
+    let n = 0, fails = 0;
+    for (const sale of sales) {
+      const gross = +(sale.total || 0), vat = +(sale.vat || 0), refunded = +(sale.refunded_amount || 0);
+      list.push([ukDate(sale.occurred_at), sale.invoice_number || ('#' + sale.id), sale.customer_name || '', sale.channel || '', sale.payment_method || '',
+        money2(gross - vat), money2(vat), money2(gross), refunded ? money2(refunded) : '', sale.paid_at ? ukDate(sale.paid_at) : '']);
+      try {
+        const items = (await query(`SELECT * FROM sale_items WHERE sale_id = $1`, [sale.id])).rows;
+        await salesMod.enrichSaleCustomer(sale);
+        const pdf = await buildInvoicePdf({ sale, items, company: await require('../lib/store-vat').companyForSale(sale, company), brand, mode: sale.payment_method === 'cash' ? 'receipt' : 'invoice' });
+        zip.append(pdf, { name: `${F}Sales invoices/${zipSafe(isoDay(sale.occurred_at) + ' ' + (sale.invoice_number || ('invoice-' + sale.id)) + ' - ' + (sale.customer_name || ''))}.pdf` });
+        n++;
+      } catch (e) { fails++; }
+    }
+    for (const ti of await loadTradeInvoices({ from, to })) {
+      try {
+        const d = await require('../lib/trade').invoiceDetail(ti.id);
+        const pdf = await require('../lib/trade-invoice').buildPdf(d, { company, brand });
+        zip.append(pdf, { name: `${F}Sales invoices/${zipSafe(isoDay(d.invoice.issued_at) + ' ' + d.invoice.number + ' - ' + d.account.name)}.pdf` });
+        list.push([ukDate(d.invoice.issued_at), d.invoice.number, d.account.name, 'trade', d.invoice.account_type || '', money2(d.invoice.net), money2(d.invoice.vat), money2(d.invoice.total), '', '']);
+        n++;
+      } catch (_) { fails++; }
+    }
+    zip.append(csvOf(['date', 'invoice', 'customer', 'channel', 'payment', 'net', 'vat', 'gross', 'refunded', 'paid'], list), { name: `${F}Revenue list.csv` });
+    // Marketplace statements (eBay / Shopify): the sales they paid out, with
+    // their fees taken off — the accountant reconciles payouts with these.
+    let m = 0;
+    for (const st of (await query(`SELECT * FROM platform_statements WHERE period_start <= $2::date AND period_end >= $1::date`, [from, to]).catch(() => ({ rows: [] }))).rows) {
+      const abs = st.file_path ? path.join(UPLOAD_DIR, st.file_path) : null;
+      if (!abs || !fs.existsSync(abs)) continue;
+      zip.file(abs, { name: `${F}Marketplace statements/${zipSafe((st.platform || 'platform').toUpperCase() + ' ' + (st.label || st.account_name || '') + ' ' + (isoDay(st.period_start) || ''))}${path.extname(st.file_path) || '.pdf'}` });
+      m++;
+    }
+    notes.push(`REVENUE: ${n} sales invoice(s)${fails ? ` (${fails} could not be generated)` : ''}, ${m} marketplace statement(s). Revenue list.csv lists every invoice (${basis === 'issued' ? 'dated' : 'paid'} in the period) with net, VAT and gross.`);
+  }
+
+  if (part === 'expenditure' || part === 'all') {
+    const F = top('2 Expenditure (purchases)');
+    const txs = (await loadTransactions({ from, to })).filter(t => +t.money_out > 0 && t.category !== 'transfer');
+    const list = []; let n = 0; const seen = new Set();
+    for (const t of txs) {
+      const recs = Array.isArray(t.receipts) ? t.receipts : [];
+      const files = [];
+      for (const r2 of recs) {
+        const row = (await query(`SELECT file_path, original_name FROM bank_tx_receipts WHERE id = $1`, [r2.id])).rows[0];
+        if (!row || !row.file_path) continue;
+        const abs = path.join(UPLOAD_DIR, row.file_path);
+        if (!fs.existsSync(abs) || seen.has(row.file_path)) continue;
+        seen.add(row.file_path);
+        const ext = path.extname(row.file_path) || path.extname(row.original_name || '') || '.pdf';
+        const fname = `${isoDay(t.tx_date)} ${zipSafe((t.counterparty || t.description || 'payment').slice(0, 40))} ${(+t.money_out).toFixed(2)} (${r2.id})${ext}`;
+        zip.file(abs, { name: `${F}Purchase invoices and receipts/${fname}` });
+        files.push(fname); n++;
+      }
+      const vat = t.vat_amount != null ? +t.vat_amount : null, gross = +t.money_out;
+      list.push([ukDate(t.tx_date), t.counterparty || '', t.description || '', t.category || '', t.account_name || '',
+        money2(vat != null ? gross - vat : null), vat != null ? money2(vat) : '', money2(gross),
+        files.join(' | ') || (t.needs_vat_receipt ? 'MISSING' : 'none'), t.notes || '']);
+    }
+    zip.append(csvOf(['date', 'paid to', 'description', 'category', 'account', 'net', 'vat', 'gross', 'invoice / receipt file', 'notes'], list), { name: `${F}Expenditure list.csv` });
+    notes.push(`EXPENDITURE: ${txs.length} payment(s) out (transfers between our own accounts left out), ${n} purchase invoice / receipt file(s). Expenditure list.csv names the file for each payment, or MISSING.`);
+  }
+
+  if (part === 'bank' || part === 'all') {
+    const F = top('3 Bank statements');
+    const stmts = (await query(`SELECT s.*, a.name AS account_name, a.bank FROM bank_statements s LEFT JOIN bank_accounts a ON a.id = s.account_id
+        WHERE s.period_start <= $2::date AND COALESCE(s.period_end, s.period_start) >= $1::date ORDER BY a.name, s.period_start`, [from, to]).catch(() => ({ rows: [] }))).rows;
+    let n = 0;
+    for (const st of stmts) {
+      const abs = st.file_path ? path.join(UPLOAD_DIR, st.file_path) : null;
+      if (!abs || !fs.existsSync(abs)) continue;
+      zip.file(abs, { name: `${F}${zipSafe(st.account_name || st.bank || st.bank_detected || 'Account')}/${zipSafe((st.account_name || st.bank_detected || 'statement') + ' ' + (isoDay(st.period_start) || ''))}${path.extname(st.file_path) || '.pdf'}` });
+      n++;
+    }
+    const txs = await loadTransactions({ from, to });
+    const byAcc = {};
+    for (const t of txs) (byAcc[t.account_name || t.bank_detected || 'Account'] = byAcc[t.account_name || t.bank_detected || 'Account'] || []).push(t);
+    for (const [acc, rows] of Object.entries(byAcc)) zip.append(buildCsv(rows), { name: `${F}${zipSafe(acc)}/${zipSafe(acc)} transactions.csv` });
+    notes.push(`BANK STATEMENTS: ${n} original statement file(s), plus each account's transactions as a CSV.`);
+  }
+
+  zip.append(`${brand.fullName || brand.name || ''} — ${name} ${ukDate(from)} to ${ukDate(to)}
+Prepared ${new Date().toLocaleDateString('en-GB')}
+
+${notes.join('\n\n')}
+${part === 'all' ? `
+Folders:
+  1 Revenue (sales)          — every sales invoice + Revenue list.csv + marketplace statements
+  2 Expenditure (purchases)  — every purchase invoice / receipt + Expenditure list.csv
+  3 Bank statements          — the bank's own statements, per account
+` : ''}`, { name: (part === 'all' ? '' : '') + 'READ-ME.txt' });
+  await zip.finalize();
+}
+router.get('/export/accountant', async (req, res) => {
+  try {
+    await ensureTables();
+    const { from, to } = req.query;
+    if (!from || !to) return res.status(400).json({ error: 'from_to_required' });
+    const part = ['revenue', 'expenditure', 'bank', 'all'].includes(req.query.part) ? req.query.part : 'all';
+    const basis = req.query.basis === 'paid' ? 'paid' : 'issued';
+    await audit(req, 'books_accountant_export', null, null, { from, to, part, basis });
+    await streamAccountantFolders(res, { from, to, part, basis });
+  } catch (e) {
+    console.error('[books] accountant export failed:', (e && e.stack) || e);
+    if (!res.headersSent) res.status(500).json({ error: 'export_failed', message: e.message });
+    else try { res.end(); } catch (_) {}
+  }
+});
+
+// ── Where the money goes: money in / out by category per month / quarter / year
+router.get('/report', async (req, res) => {
+  await ensureTables();
+  const { from, to } = req.query;
+  if (!from || !to) return res.status(400).json({ error: 'from_to_required' });
+  const group = ['month', 'quarter', 'year'].includes(req.query.group) ? req.query.group : 'month';
+  const rows = (await query(`
+    SELECT to_char(date_trunc($3, t.tx_date), 'YYYY-MM-DD') AS period, COALESCE(NULLIF(t.category, ''), 'uncategorised') AS category,
+           SUM(COALESCE(t.money_in, 0))::numeric(14,2) AS money_in, SUM(COALESCE(t.money_out, 0))::numeric(14,2) AS money_out,
+           SUM(COALESCE(t.vat_amount, 0))::numeric(14,2) AS vat, COUNT(*)::int AS n
+      FROM bank_transactions t
+     WHERE t.tx_date BETWEEN $1 AND $2 AND COALESCE(t.category, '') <> 'transfer'
+     GROUP BY 1, 2 ORDER BY 1, 2`, [from, to, group])).rows;
+  // Sales by channel per period (invoices issued) — the income side by source.
+  const sales = (await query(`
+    SELECT to_char(date_trunc($3, s.occurred_at), 'YYYY-MM-DD') AS period, s.channel,
+           SUM(GREATEST(s.total - COALESCE(s.refunded_amount, 0), 0))::numeric(14,2) AS total, COUNT(*)::int AS n
+      FROM sales s WHERE s.is_estimate = false AND s.status NOT IN ('cancelled')
+       AND s.occurred_at >= $1::date AND s.occurred_at < ($2::date + interval '1 day')
+     GROUP BY 1, 2 ORDER BY 1, 2`, [from, to, group])).rows;
+  res.json({ group, rows, sales });
+});
+
 // ── Accountant share links ─────────────────────────────────────────────────
 router.post('/share', async (req, res) => {
   await ensureTables();
