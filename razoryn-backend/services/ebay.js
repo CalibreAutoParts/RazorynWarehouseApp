@@ -598,23 +598,36 @@ async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
   if (!itemId) throw new Error('missing_item_id');
   // Limited accounts show at most their cap; the warehouse keeps the real count.
   const asked = Math.max(0, parseInt(quantity) || 0);
-  let qty = await require('../lib/ebay-qty-cap').applyCap(quantity, resolveStore(storeArg)?.code);
+  const capLib = require('../lib/ebay-qty-cap');
+  const code = resolveStore(storeArg)?.code;
+  let qty = await capLib.applyCap(quantity, code);
   let limitedBy = qty < asked ? 'qty_cap' : null;
+  const rules = await capLib.rulesFor(code);
   // Accounts with monthly selling limits: raising a listing's quantity uses up
-  // allowance too — only raise it as far as the allowance left covers.
+  // allowance too — only raise it as far as the allowance left covers, minus
+  // the amount kept free. With a top-up level, a listing is only raised once
+  // it has sold down to that level.
   const lim = opts.lowering ? null : await getSellingLimits(storeArg).catch(() => null);
-  if (lim && lim.limited && qty > 0) {
+  if (qty > 0 && !opts.lowering && ((lim && lim.limited) || rules.refillAt != null)) {
     try {
       const gx = await tradingCall('GetItem', `<ItemID>${escapeXml(String(itemId))}</ItemID>`, storeArg);
       const curQty = (parseInt(extractOne(gx, 'Quantity') || '0') || 0) - (parseInt(extractOne(extractOne(gx, 'SellingStatus') || '', 'QuantitySold') || '0') || 0);
       const unit = parseFloat(extractOne(extractOne(gx, 'SellingStatus') || '', 'CurrentPrice') || extractOne(gx, 'StartPrice') || '0') || 0;
       if (qty > curQty) {
-        const byQty = lim.qtyRemaining != null ? lim.qtyRemaining : Infinity;
-        const byAmt = (lim.amountRemaining != null && unit > 0) ? Math.floor((lim.amountRemaining + 0.001) / unit) : Infinity;
-        const before = qty;
-        qty = curQty + Math.max(0, Math.min(qty - curQty, byQty, byAmt));
-        if (qty < before) limitedBy = 'selling_limit';
+        if (rules.refillAt != null && curQty > rules.refillAt && !opts.force) {
+          // Not low enough yet — leave it until it sells down to the top-up level.
+          return { ok: true, itemId, quantity: curQty, asked, limitedBy: 'waiting_to_top_up', unchanged: true, storeCode: code };
+        }
+        if (lim && lim.limited) {
+          const byQty = lim.qtyRemaining != null ? lim.qtyRemaining : Infinity;
+          const spare = lim.amountRemaining != null ? lim.amountRemaining - (rules.reserveGbp || 0) : null;
+          const byAmt = (spare != null && unit > 0) ? Math.floor((Math.max(0, spare) + 0.001) / unit) : Infinity;
+          const before = qty;
+          qty = curQty + Math.max(0, Math.min(qty - curQty, byQty, byAmt));
+          if (qty < before) limitedBy = rules.reserveGbp && spare != null && spare < (lim.amountRemaining || 0) && byAmt < byQty ? 'kept_free' : 'selling_limit';
+        }
       }
+      if (qty === curQty) return { ok: true, itemId, quantity: qty, asked, limitedBy, unchanged: true, storeCode: code };
     } catch (_) { /* can't read the listing — push as asked */ }
   }
   const body = `<InventoryStatus><ItemID>${escapeXml(String(itemId))}</ItemID><Quantity>${qty}</Quantity></InventoryStatus>`;
@@ -739,7 +752,28 @@ async function tradingCall(callName, bodyInner, storeArg) {
 // Upload one picture to eBay Picture Services (UploadSiteHostedPictures,
 // multipart with the image bytes) — for photos in buyer messages. Returns the
 // eBay-hosted URL. Needs the store's Auth'n'Auth token.
-async function uploadPicture(storeArg, buffer, name = 'photo.jpg') {
+// Upload a photo to eBay Picture Services → its i.ebayimg.com URL. Tries the
+// file upload at Supersize, then Standard, then (when the app has a public
+// address) lets eBay fetch the photo from the app instead.
+async function uploadPicture(storeArg, buffer, name = 'photo.jpg', opts = {}) {
+  const errors = [];
+  for (const set of ['Supersize', 'Standard']) {
+    try { return await uploadPictureFile(storeArg, buffer, name, set); }
+    catch (e) { errors.push(`${set}: ${e.message}`); }
+  }
+  if (opts.publicUrl) {
+    try {
+      const xml = await tradingCall('UploadSiteHostedPictures', `<ExternalPictureURL>${escapeXml(opts.publicUrl)}</ExternalPictureURL>
+        <PictureName>${escapeXml(String(name).slice(0, 80))}</PictureName><PictureSet>Supersize</PictureSet>`, storeArg);
+      const url = extractOne(xml, 'FullURL');
+      if (url) return decodeEntities(url);
+      errors.push('from link: ' + (decodeEntities(extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || '') || 'no URL returned'));
+    } catch (e) { errors.push('from link: ' + e.message); }
+  }
+  console.warn('[ebay] photo upload failed:', errors.join(' | '));
+  throw new Error('eBay wouldn\'t take the photo — ' + errors[errors.length - 1]);
+}
+async function uploadPictureFile(storeArg, buffer, name, pictureSet) {
   const token = tokenFor(storeArg);
   if (!token) throw new Error('This eBay account has no Trading token — photos can\'t be uploaded');
   const boundary = 'RZNBOUNDARY' + Date.now().toString(16);
@@ -747,7 +781,7 @@ async function uploadPicture(storeArg, buffer, name = 'photo.jpg') {
 <UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
   <RequesterCredentials><eBayAuthToken>${escapeXml(token)}</eBayAuthToken></RequesterCredentials>
   <PictureName>${escapeXml(String(name).slice(0, 80))}</PictureName>
-  <PictureSet>Supersize</PictureSet>
+  <PictureSet>${pictureSet || 'Supersize'}</PictureSet>
 </UploadSiteHostedPicturesRequest>`;
   const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="XML Payload"\r\nContent-Type: text/xml;charset=utf-8\r\n\r\n${xml}\r\n`
     + `--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="${String(name).replace(/[^\w.-]+/g, '_')}"\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: binary\r\n\r\n`);
@@ -762,6 +796,7 @@ async function uploadPicture(storeArg, buffer, name = 'photo.jpg') {
     timeout: 60000, maxBodyLength: 20 * 1024 * 1024,
   });
   const out = String(r.data || '');
+  if (/<Ack>Failure<\/Ack>/.test(out)) throw new Error(decodeEntities(extractOne(out, 'LongMessage') || extractOne(out, 'ShortMessage') || 'Failure'));
   const url = extractOne(out, 'FullURL');
   if (!url) throw new Error('eBay photo upload failed: ' + (decodeEntities(extractOne(out, 'LongMessage') || extractOne(out, 'ShortMessage') || '') || 'no URL returned'));
   return decodeEntities(url);

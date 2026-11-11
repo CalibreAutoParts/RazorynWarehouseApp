@@ -437,9 +437,11 @@ router.post('/stock-groups', requireAdmin, async (req, res) => {
 // listings are skipped, so it's safe to re-run.
 router.post('/stock-groups/pool-all', requireAdmin, async (req, res) => {
   await ensureStockGroupsSchema();
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS no_auto_pool BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
   const { rows } = await query(
     `SELECT id, part_number, qty_on_hand FROM products
-     WHERE active = true AND hidden = false AND stock_group_id IS NULL AND part_number IS NOT NULL AND part_number <> ''`);
+     WHERE active = true AND hidden = false AND stock_group_id IS NULL AND part_number IS NOT NULL AND part_number <> ''
+       AND COALESCE(no_auto_pool, false) = false`);
   const byCode = new Map();
   for (const p of rows) {
     const k = sgNorm(p.part_number);
@@ -1642,9 +1644,13 @@ async function autoPoolByPartNumber(productId, partNumber) {
   await ensureStockGroupsSchema();
   const code = sgNorm(partNumber);
   if (!code) return null;
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS no_auto_pool BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+  // Items marked "different item, own stock" never join a pool automatically.
+  const self = (await query(`SELECT no_auto_pool FROM products WHERE id = $1`, [productId])).rows[0];
+  if (self && self.no_auto_pool) return null;
   const others = await query(
     `SELECT id, stock_group_id, qty_on_hand FROM products
-     WHERE active = true AND id <> $1
+     WHERE active = true AND id <> $1 AND COALESCE(no_auto_pool, false) = false
        AND REGEXP_REPLACE(UPPER(COALESCE(part_number,'')), '[^A-Z0-9]', '', 'g') = $2`,
     [productId, code]);
   if (!others.rows.length) return null;

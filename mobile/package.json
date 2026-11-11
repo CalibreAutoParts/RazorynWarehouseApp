@@ -1,7 +1,7 @@
 {
   "name": "warehouse-hub-mobile",
   "version": "1.0.0",
-  "description": "Warehouse Hub Android app — native shell around the live web app (Calibre + Razoryn brands)",
+  "description": "Warehouse Hub Android app \u2014 native shell around the live web app (Calibre + Razoryn brands)",
   "author": "Calibre Auto Parts Ltd",
   "license": "UNLICENSED",
   "private": true,
@@ -20,7 +20,8 @@
     "@capacitor/app": "^6.0.2",
     "@capacitor/core": "^6.2.0",
     "@capacitor/device": "^6.0.2",
-    "@capacitor/push-notifications": "^6.0.4"
+    "@capacitor/push-notifications": "^6.0.4",
+    "@capacitor/local-notifications": "^6.1.0"
   },
   "devDependencies": {
     "@capacitor/assets": "^3.0.5",

@@ -112,6 +112,14 @@ jobs:
             echo "No google-services.json secret for ${{ matrix.brand }} — push plugin removed, building WITHOUT native push."
           fi
 
+      - name: Allow notifications (Android 13+)
+        # The in-app alert watcher raises local notifications (new orders, eBay
+        # messages, returns) — Android 13+ needs this permission declared.
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          grep -q POST_NOTIFICATIONS "$M" || sed -i 's#<application#<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <application#' "$M"
+          grep -n POST_NOTIFICATIONS "$M"
+
       - name: Generate launcher icons from the brand logo
         run: npx capacitor-assets generate --android
 

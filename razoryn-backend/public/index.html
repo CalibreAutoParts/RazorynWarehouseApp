@@ -30,6 +30,7 @@
     --line: #e6e8ec;
     --line-2: #f0f2f5;
     --bg: #fafbfc;
+    --bg-soft: #f5f6f8;   /* soft panel / hover fill (used across the app) */
     --white: #ffffff;
     --green: #1a7f3e;
     --green-light: #e3f4e9;
@@ -58,6 +59,7 @@
     --line: #2a2e36;
     --line-2: #1f232a;
     --bg: #0d0f13;
+    --bg-soft: #1a1e25;
     --white: #161a21;
     --green: #4ade80;
     --green-light: #0e2a18;
@@ -1996,9 +1998,10 @@ function fmtDate(iso) {
 // Money is admin-only. Warehouse staff never see sale prices / totals / refunds —
 // gbp() masks for them, and a mutation observer (initMoneyMask) scrubs any inline
 // "£x.xx" that a local formatter produced, so nothing leaks on any screen.
-function canSeeMoney() { return !State.user || State.user.role === 'admin'; }
+// Prices show for admins and for staff allowed to quote (Quote Builder needs them).
+function canSeeMoney() { return !State.user || State.user.role === 'admin' || !!(State.user.permissions || State.user.perms || {}).pricing; }
 function gbp(n) {
-  if (State.user && State.user.role !== 'admin') return '£•••';
+  if (!canSeeMoney()) return '£•••';
   return '£' + Number(n).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 const MONEY_RE = /£\s?\d[\d,]*\.\d{2}/g;
@@ -2399,6 +2402,19 @@ function enterApp() {
   // Are we running inside the native handheld app shell? (Set before nav so the
   // page-permission guard + app-mode nav filtering apply from the first render.)
   State.appShell = detectAppShell();
+  // Staff: the sidebar shows exactly the pages their permissions allow — an
+  // "admin-only" page they've been given (Quote Builder, Key Information,
+  // Notes) appears, and anything they can't open is hidden.
+  if (State.user.role !== 'admin') {
+    document.querySelectorAll('.nav-item[data-page]').forEach(n => {
+      const ok = hasPerm(n.dataset.page);
+      n.style.display = ok ? 'flex' : 'none';
+    });
+    requestAnimationFrame(() => document.querySelectorAll('.sidebar .nav-section').forEach(sec => {
+      const any = [...sec.querySelectorAll('.nav-item[data-page]')].some(n => n.style.display !== 'none');
+      sec.style.display = any ? '' : 'none';
+    }));
+  }
 
   document.getElementById('user-avatar').textContent = State.user.name.charAt(0).toUpperCase();
   document.getElementById('user-name').textContent = State.user.name;
@@ -2417,6 +2433,7 @@ function enterApp() {
   initCopyTap();            // tap a part number / SKU to copy it
   initMoneyMask();          // hide all £ amounts from non-admin (warehouse) staff
   initNativeApp();          // register device + native push (FCM) when in the APK
+  initAlertWatcher();       // new notifications → sound + phone notification while the app is running
   psInitBackground();       // this computer = print station → prints on ANY page
   initEditingTracker();
   initTableLabeller();
@@ -2679,7 +2696,7 @@ const Sounds = {
   },
 
   // Per-event defaults used until the server prefs load (or if an event is unset).
-  _defaults: { sale: 'chaching', return: 'chime', return_closed: 'pop', low_stock: 'bell' },
+  _defaults: { sale: 'chaching', return: 'chime', return_closed: 'pop', low_stock: 'bell', message: 'ding' },
 
   // Load synced preferences from the server. Called at app start + after saving.
   async loadPrefs() {
@@ -3027,7 +3044,7 @@ function initKiosk() {
 // warehouse workflow: operational pages + Settings only (no marketing/admin
 // management), a bottom quick-bar for one-tap Scan/Inventory/Dispatch/Returns,
 // bigger touch targets, and global hardware-scanner capture.
-const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','qtycheck','iteminfo','locations','returns','dispatch','ebay','notifications','schedule','settings','createlisting','vinsearch']);
+const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','qtycheck','iteminfo','locations','returns','dispatch','ebay','notifications','schedule','settings','createlisting','vinsearch','pricecheck']);
 // Pages surfaced in the bottom quick-bar (order = left→right). Home is leftmost.
 // Only shown if the user has permission for them. Scan lives inside Stock Check
 // now (hardware scanner is automatic), so there's no separate Scan tab.
@@ -3133,7 +3150,7 @@ async function initNativeApp() {
         try { await Push.createChannel({ id: 'warehouse_alerts', name: 'Warehouse alerts', description: 'Sales, returns, competitor prices and AI updates', importance: 5, visibility: 1, vibration: true }); } catch (_) {}
         const perm = await Push.requestPermissions();
         if (perm && perm.receive === 'granted') {
-          Push.addListener('registration', (t) => { if (t && t.value) registerDevice(t.value); });
+          Push.addListener('registration', (t) => { if (t && t.value) { State.nativePushOk = true; registerDevice(t.value); } });
           Push.addListener('registrationError', (e) => console.warn('[push] reg error', e));
           Push.addListener('pushNotificationReceived', (n) => {
             // App is open — surface it in-app + play the matching sound.
@@ -3150,6 +3167,60 @@ async function initNativeApp() {
     } catch (e) { console.warn('[push] native register failed:', e.message); }
   } catch (e) { console.warn('[native] init failed:', e.message); }
 }
+// ── Alerts while the app is running ─────────────────────────────────────────
+// Without native push (Firebase not set up — the APK is then built without the
+// push plugin) the phone got no alerts at all. Every 30 s the app asks for new
+// notifications; each one plays its sound, shows in-app and — in the APK, via
+// the local-notifications plugin — raises a real Android notification with
+// sound (works while the app is open or in the background; when it's fully
+// closed only Firebase push can reach it). Skipped when native push works.
+const ALERT_SOUND = { sale: 'sale', return: 'return', return_closed: 'return_closed', low_stock: 'low_stock' };
+function initAlertWatcher() {
+  if (!State.appShell || window._alertWatch) return;
+  window._alertWatch = true;
+  const LN = window.Capacitor?.Plugins?.LocalNotifications;
+  if (LN) {
+    try { LN.requestPermissions?.(); } catch (_) {}
+    try { LN.createChannel?.({ id: 'warehouse_alerts', name: 'Warehouse alerts', description: 'New orders, eBay messages, returns', importance: 5, visibility: 1, vibration: true }); } catch (_) {}
+    try {
+      LN.addListener?.('localNotificationActionPerformed', (a) => {
+        const page = a?.notification?.extra?.page;
+        if (page && typeof routeTo === 'function' && hasPerm(page)) routeTo(page);
+      });
+    } catch (_) {}
+  }
+  let last = null;
+  const pageFor = n => {
+    const t = String(n.type || '');
+    if (t === 'ebay_message') return 'ebay';
+    if (t === 'sale') return State.user?.role === 'admin' ? 'sales' : 'dispatch';
+    if (t.startsWith('return')) return 'returns';
+    if (t.startsWith('shipment_') || t === 'partner_order') return 'dispatch';
+    return 'notifications';
+  };
+  const tick = async () => {
+    if (State.nativePushOk || !State.user) return;
+    let r; try { r = await Api.get('/api/notifications/feed' + (last == null ? '' : '?after=' + last)); } catch (_) { return; }
+    if (last == null) { last = r.latestId || 0; return; }
+    const items = r.items || [];
+    for (const n of items) {
+      last = Math.max(last, n.id);
+      try { if (window.Sounds) Sounds._playDebounced(ALERT_SOUND[n.type] || (String(n.type).startsWith('return') ? 'return' : 'message')); } catch (_) {}
+      if (LN) {
+        try { await LN.schedule({ notifications: [{ id: n.id % 2000000000, title: n.title || 'Warehouse', body: n.body || '', channelId: 'warehouse_alerts', extra: { page: pageFor(n) } }] }); } catch (_) {}
+      }
+    }
+    if (items.length) {
+      const n = items[items.length - 1];
+      toast(items.length > 1 ? `${items.length} new alerts — ${n.title}` : (n.body ? `${n.title} — ${n.body}` : n.title), 'info', 6000);
+      Store.refresh('notifications').catch(() => {});
+    }
+  };
+  tick();
+  setInterval(tick, 30000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+}
+
 function registerDevice(pushToken) {
   try {
     const d = State.device || {};
@@ -3467,15 +3538,15 @@ function hasPerm(page) {
     sales:        false,
     activity:     false,
     pricingrules: false,
-    pricing:      false,
+    pricing:      'pricing',   // Quote Builder (+ sees prices)
     // Tasks are operational: every staff member must SEE what they're meant to
     // do (the backend already allows viewing + status changes for everyone;
     // creating/editing/deleting tasks stays admin-only in the UI + API).
     schedule:     true,
-    videos:       false,
-    kb:           false,
-    notes:        false,
-    labels:       false,
+    videos:       'videos',
+    kb:           'kb',
+    notes:        'notes',     // Notes & follow-ups
+    labels:       'labels',
     mirror:       false,
     bundles:      false,
     costs:        false,
@@ -9730,6 +9801,9 @@ function renderCustomers() {
         <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none">
           <input type="checkbox" id="cust-repeat" ${State.custRepeat?'checked':''}> Repeat only
         </label>
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none" title="eBay-only buyers are hidden — they can only be contacted through eBay messages">
+          <input type="checkbox" id="cust-ebay" ${State.custEbay?'checked':''}> Show eBay buyers
+        </label>
         <select id="cust-sort" aria-label="Sort by" title="Sort by" style="padding:6px 8px;font-size:13px">
           ${[['spend','Top spenders'],['orders','Most orders'],['recent','Most recent']].map(([v,l])=>`<option value="${v}" ${State.custSort===v?'selected':''}>${l}</option>`).join('')}
         </select>
@@ -9748,6 +9822,7 @@ function renderCustomers() {
     search.addEventListener('input', () => { State.custSearch = search.value; clearTimeout(t); t = setTimeout(loadCustomers, 300); });
   }
   el('cust-repeat')?.addEventListener('change', (e) => { State.custRepeat = e.target.checked; loadCustomers(); });
+  el('cust-ebay')?.addEventListener('change', (e) => { State.custEbay = e.target.checked; loadCustomers(); });
   el('cust-sort')?.addEventListener('change', (e) => { State.custSort = e.target.value; loadCustomers(); });
   loadCustomers();
 }
@@ -9761,6 +9836,7 @@ async function loadCustomers() {
   const params = new URLSearchParams();
   if (State.custSearch) params.set('q', State.custSearch);
   if (State.custRepeat) params.set('repeat', '1');
+  if (State.custEbay) params.set('ebay', '1');
   params.set('sort', State.custSort || 'spend');
   let data;
   try { data = await Api.get('/api/customers/from-sales?' + params.toString()); }
@@ -9776,7 +9852,7 @@ async function loadCustomers() {
     const channels = [...new Set((c.channels || []).map(ch => CUST_CH_LABEL[ch] || ch))].join(', ');
     return `<tr class="cust-row" style="cursor:pointer" onclick="toggleCustomerOrders(this, '${escapeAttr(key)}')">
       <td><strong>${escapeHtml(c.name || '—')}</strong>${c.is_repeat ? ` <span style="background:var(--green,#16a34a);color:#fff;font-size:10px;font-weight:600;padding:1px 7px;border-radius:10px;margin-left:4px">Repeat</span>` : ''}</td>
-      <td style="font-size:12px;color:var(--ink-soft)">${escapeHtml(c.email || '')}${c.phone ? `<br>${escapeHtml(c.phone)}` : ''}</td>
+      <td style="font-size:12px;color:var(--ink-soft)">${escapeHtml(c.email || '')}${c.ebay_relay ? ` <span class="pill" style="font-size:9px" title="eBay's relay address — eBay reads these emails, so the app never emails it. Message them on eBay.">eBay relay · no emails</span>` : ''}${c.phone ? `<br>${escapeHtml(c.phone)}` : ''}</td>
       <td class="num">${c.order_count}</td>
       <td class="num">${gbp(c.total_spend)}</td>
       <td style="font-size:12px">${custDateShort(c.first_order)}</td>
@@ -9793,7 +9869,7 @@ async function toggleCustomerOrders(row, key) {
   if (next && next.classList.contains('cust-detail')) { next.remove(); return; }
   const detail = document.createElement('tr');
   detail.className = 'cust-detail';
-  detail.innerHTML = `<td colspan="7" style="padding:0;background:var(--bg-soft,#f7f7f8)"><div style="padding:12px 16px;color:var(--ink-soft);font-size:12px">Loading orders…</div></td>`;
+  detail.innerHTML = `<td colspan="7" style="padding:0;background:var(--bg-soft)"><div style="padding:12px 16px;color:var(--ink-soft);font-size:12px">Loading orders…</div></td>`;
   row.after(detail);
   let data;
   try { data = await Api.get('/api/customers/from-sales/orders?' + key); }
@@ -13779,9 +13855,16 @@ function paintStaff() {
           ${permRow(u, 'videos', 'How-to videos', 'View training videos')}
           ${permRow(u, 'kb', 'Key Information', 'View KB entries')}
           ${permRow(u, 'kbSensitive', 'Sensitive entries', 'Login info, supplier contacts')}
-          <div style="margin:14px 0 10px;padding:10px 12px;background:var(--bg-soft);border-radius:6px;font-size:12px;color:var(--ink-soft);line-height:1.5">
+          ${permRow(u, 'pricing', 'Quote Builder', 'Quote customers and record counter sales — also shows prices')}
+          ${permRow(u, 'labels', 'Labels', 'Print product and location labels')}
+          ${permRow(u, 'notes', 'Notes & follow-ups', 'Shared notes and customer follow-ups')}
+          <div style="margin:12px 0 4px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-outline btn-sm" onclick="applyStaffPreset('${u.id}','pc')" title="Dispatch, eBay messages, stock check, labels, incoming, returns, print station, Quote Builder, VIN search, schedule, notes & follow-ups, key information">🖥 Warehouse PC preset</button>
+            <button class="btn btn-ghost btn-sm" onclick="applyStaffPreset('${u.id}','handheld')" title="Stock check, locations, dispatch, returns, schedule — no prices">📱 Handheld preset</button>
+          </div>
+          <div style="margin:10px 0;padding:10px 12px;background:var(--bg-soft);border-radius:6px;font-size:12px;color:var(--ink-soft);line-height:1.5">
             <strong style="color:var(--ink)">🔒 Admin-only sections</strong><br>
-            Sales, Quote Builder, Listing Mirror, Staff &amp; Access and Settings are reserved for admin accounts. Warehouse staff don't see these pages in their sidebar at all.
+            Sales reports, costs, listings, Listing Mirror, Staff &amp; Access, Books and Settings are reserved for admin accounts. Warehouse staff don't see these pages in their sidebar at all.
           </div>
         `}
 
@@ -13859,6 +13942,22 @@ async function togglePerm(uid, key, val) {
     toast(u.name + ' · ' + key + ' = ' + (val ? 'on' : 'off'), 'success');
     paintStaff();
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+// One-click permission sets. "Warehouse PC" = the shared downstairs computer:
+// dispatch, eBay messages, stock check, labels, incoming, returns, print
+// station, Quote Builder, VIN search, schedule, notes & follow-ups, key info.
+const STAFF_PRESETS = {
+  pc: { inventory: true, scan: true, locations: true, returns: true, dispatch: true, competitors: false, schedule: true, videos: true, kb: true, kbSensitive: false, pricing: true, labels: true, notes: true },
+  handheld: { inventory: true, scan: true, locations: true, returns: true, dispatch: true, competitors: false, schedule: true, videos: false, kb: false, kbSensitive: false, pricing: false, labels: false, notes: false },
+};
+async function applyStaffPreset(uid, which) {
+  const u = State.staff.find(x => x.id == uid); if (!u) return;
+  if (!confirm(`Set ${u.name}'s access to the ${which === 'pc' ? 'Warehouse PC' : 'Handheld'} preset?`)) return;
+  try {
+    await Api.patch('/api/staff/' + uid, { permissions: { ...u.perms, ...STAFF_PRESETS[which] } });
+    await Store.refresh('staff'); paintStaff();
+    toast(`${u.name} → ${which === 'pc' ? 'Warehouse PC' : 'Handheld'} access`, 'success');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 function editStaff(id) { openStaffModal(id); }
 async function deactivateStaff(id) {
@@ -14624,7 +14723,7 @@ async function renderCreateListing() {
     </div>`;
   try { State.pricingConfig = await Api.get('/api/settings/pricing-config'); } catch (_) {}
   CL.categoryId = ''; CL.categoryName = ''; CL.categoryAuto = false; CL._catResults = []; CL.images = []; CL.studio = null;
-  CL.editProductId = null; CL.imagesReadonly = false;   // create mode (not edit)
+  CL.editProductId = null; CL.imagesReadonly = false; CL.sharePool = undefined;   // create mode (not edit)
   CL.draftId = null;   // set when resuming a saved draft
   if (!CL_REPEAT) { CL._incomingId = null; CL._partner = null; }
   try { const r = await Api.get('/api/listings/metafield-definitions'); CL.defs = r.definitions || []; } catch (_) { CL.defs = []; }
@@ -15124,11 +15223,14 @@ function clCoreHtml() {
   const pct = clPct();
   const editing = !!CL.editProductId;
   return `
-    <div class="field"><label>SKU *</label><input id="cl-sku" style="font-family:ui-monospace,monospace" placeholder="e.g. 7450B289" autocomplete="off">
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Must be unique per listing (Shopify & eBay require it). For a part that fits several models, give each listing its own SKU.</div></div>
+    <div class="field"><label>SKU *</label><div style="display:flex;gap:6px"><input id="cl-sku" style="font-family:ui-monospace,monospace;flex:1" placeholder="e.g. 7450B289" autocomplete="off" oninput="clSameCheckSoon()">
+      <button type="button" class="btn btn-outline btn-sm" onclick="clSkuGenOpen()" title="Make a SKU from the part number + a code for the item type (e.g. 575807221T-SKN for a bumper skin)">⚙ Generate</button></div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Must be unique per listing (Shopify & eBay require it). For a part that fits several models, give each listing its own SKU.</div>
+      <div id="cl-skugen" style="display:none;margin-top:6px"></div></div>
     <div class="field"><label>Part number <span style="color:var(--ink-soft);font-weight:400">— blank = same as SKU</span></label>
-      <input id="cl-partnumber" style="font-family:ui-monospace,monospace" placeholder="e.g. 602001929AA" autocomplete="off" oninput="clCompSchedule()">
-      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">🔗 Listings that fit multiple models should share <strong>the same part number</strong> — they'll be auto-linked into one shared stock pool (a sale on any one reduces them all).</div></div>
+      <input id="cl-partnumber" style="font-family:ui-monospace,monospace" placeholder="e.g. 602001929AA" autocomplete="off" oninput="clCompSchedule();clSameCheckSoon()">
+      <div id="cl-samepart"></div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">🔗 Same part number = one shared stock pool by default (a sale on any one reduces them all) — unless you mark it as a different item below.</div></div>
     <div class="field"><label>Photos</label>
       <input type="file" id="cl-photo-file" accept="image/*" multiple capture="environment" onchange="clAddPhotos(this)" style="font-size:12px">
       <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">${editing
@@ -15301,6 +15403,8 @@ async function submitUnifiedCreate(btn, overrides = {}) {
     created = await Api.post('/api/listings/create-listing', {
       sku, title: shopTitle,
       partNumber,
+      // Same part number, different item → own stock (never pooled).
+      sharePool: CL.sharePool === false ? false : undefined,
       barcode: overrides.barcode,                      // shared barcode for multi-fitment siblings
       description: (el('cl-desc')?.value || '').trim() || null,
       ebayPrice, qty: parseInt(el('ce-qty')?.value) || 0,
@@ -15385,6 +15489,68 @@ async function submitUnifiedCreate(btn, overrides = {}) {
 }
 
 // Suggest a unique SKU by suffixing -2, -3, … (skipping ones already in use).
+// ── Same part number already listed? Share stock or keep it separate ────────
+// e.g. a complete bumper (sent complete) and a bare bumper skin share a part
+// number but are different items: "different item" gives it its own stock and
+// a generated SKU, and it's never pooled automatically.
+const clNormPn = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+let _clSameT = null;
+function clSameCheckSoon() { clearTimeout(_clSameT); _clSameT = setTimeout(clSameCheck, 300); }
+function clSameCheck() {
+  const box = el('cl-samepart'); if (!box || CL.editProductId) return;
+  const pn = clNormPn(el('cl-partnumber')?.value || el('cl-sku')?.value);
+  const sku = (el('cl-sku')?.value || '').trim().toLowerCase();
+  const same = pn.length >= 4 ? (State.products || []).filter(p => clNormPn(p.partNumber || p.part_number) === pn || (p.sku || '').toLowerCase() === sku) : [];
+  if (!same.length) { box.innerHTML = ''; CL.sharePool = undefined; return; }
+  if (CL.sharePool === undefined) CL.sharePool = true;
+  const skuTaken = same.some(p => (p.sku || '').toLowerCase() === sku);
+  box.innerHTML = `<div style="margin-top:8px;border:1px solid var(--amber,#d97706);border-radius:8px;padding:10px 12px;background:color-mix(in srgb, var(--amber,#d97706) 7%, transparent);font-size:12.5px">
+    <div style="font-weight:700;margin-bottom:4px">This part number is already listed (${same.length}):</div>
+    ${same.slice(0, 5).map(p => `<div>• ${escapeHtml(p.title || '')} — <span style="font-family:ui-monospace,monospace">${escapeHtml(p.sku || '')}</span> · stock ${p.qty ?? p.qtyOnHand ?? p.qty_on_hand ?? '?'}${p.stockGroupCode ? ' · in a shared pool' : ''}</div>`).join('')}
+    <label style="display:flex;gap:7px;align-items:flex-start;margin-top:8px;cursor:pointer"><input type="radio" name="cl-share" style="width:auto;flex:none;margin-top:3px" ${CL.sharePool !== false ? 'checked' : ''} onchange="CL.sharePool=true;clSameCheck()"> <span><b>Same physical part</b> (e.g. fits another model) — <b>share stock</b>: a sale on any listing reduces them all.</span></label>
+    <label style="display:flex;gap:7px;align-items:flex-start;margin-top:4px;cursor:pointer"><input type="radio" name="cl-share" style="width:auto;flex:none;margin-top:3px" ${CL.sharePool === false ? 'checked' : ''} onchange="CL.sharePool=false;clSameCheck();if(!clSkuIsFree())clSkuGenOpen()"> <span><b>Different item</b> (e.g. complete bumper vs bumper skin) — <b>own stock</b>, own SKU, never pooled.</span></label>
+    ${skuTaken ? `<div style="margin-top:6px;color:var(--red)">That SKU is taken — ${CL.sharePool === false ? 'generate a new one (⚙ Generate)' : 'give this listing its own SKU (⚙ Generate)'}.</div>` : ''}
+  </div>`;
+}
+function clSkuIsFree(s) {
+  const v = String(s ?? el('cl-sku')?.value ?? '').trim().toLowerCase();
+  return !!v && !(State.products || []).some(p => (p.sku || '').toLowerCase() === v);
+}
+// ── SKU generator: part number skeleton + a code for the item type ──
+const CL_SKU_TYPES = [['SKN', 'Skin only'], ['CPL', 'Complete (with fittings)'], ['PRM', 'Primed'], ['PNT', 'Painted'], ['L', 'Left'], ['R', 'Right'], ['KIT', 'Kit / set'], ['UPR', 'Upper'], ['LWR', 'Lower'], ['ALT', 'Alternative version']];
+function clSkuGenOpen() {
+  const box = el('cl-skugen'); if (!box) return;
+  const base = clNormPn(el('cl-partnumber')?.value || el('cl-sku')?.value);
+  if (!base) { toast('Enter the part number first', 'warn'); el('cl-partnumber')?.focus(); return; }
+  box.style.display = '';
+  box.innerHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:8px 10px">
+    <span style="font-family:ui-monospace,monospace;font-weight:700">${escapeHtml(base)}</span><span>-</span>
+    <select id="cl-skugen-type" onchange="clSkuGenPreview()">${CL_SKU_TYPES.map(([c, l]) => `<option value="${c}">${c} · ${l}</option>`).join('')}<option value="">Custom…</option></select>
+    <input id="cl-skugen-custom" placeholder="code e.g. GT" maxlength="8" style="width:90px;display:none;font-family:ui-monospace,monospace" oninput="clSkuGenPreview()">
+    <span>→ <b id="cl-skugen-out" style="font-family:ui-monospace,monospace"></b></span>
+    <button type="button" class="btn btn-primary btn-sm" onclick="clSkuGenUse()">Use</button>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="el('cl-skugen').style.display='none'">✕</button></div>`;
+  CL._skuBase = base;
+  clSkuGenPreview();
+}
+function clSkuGenValue() {
+  const t = el('cl-skugen-type')?.value;
+  const cust = el('cl-skugen-custom'); if (cust) cust.style.display = t ? 'none' : '';
+  const code = (t || (cust?.value || '').toUpperCase().replace(/[^A-Z0-9]/g, '')) || 'V';
+  let v = `${CL._skuBase}-${code}`;
+  for (let i = 2; !clSkuIsFree(v) && i < 100; i++) v = `${CL._skuBase}-${code}${i}`;
+  return v;
+}
+function clSkuGenPreview() { const o = el('cl-skugen-out'); if (o) o.textContent = clSkuGenValue(); }
+function clSkuGenUse() {
+  const v = clSkuGenValue();
+  if (el('cl-sku')) el('cl-sku').value = v;
+  if (el('cl-partnumber') && !el('cl-partnumber').value.trim()) el('cl-partnumber').value = CL._skuBase;
+  el('cl-skugen').style.display = 'none';
+  clSameCheck();
+  toast(`SKU ${v} — part number stays ${el('cl-partnumber')?.value || CL._skuBase}`, 'success');
+}
+
 function clSuggestUniqueSku(base) {
   const skus = new Set((State.products || []).map(p => (p.sku || '').toLowerCase()));
   for (let i = 2; i < 1000; i++) { const cand = `${base}-${i}`; if (!skus.has(cand.toLowerCase())) return cand; }
@@ -26277,25 +26443,46 @@ async function loadEbayLimits(fresh) {
       : !L.limited ? '<span style="color:var(--green)">No monthly selling limits on this account</span>'
       : `<b>${L.qtyRemaining != null ? L.qtyRemaining : '?'}</b> more items · <b>£${L.amountRemaining != null ? Number(L.amountRemaining).toFixed(2) : '?'}</b> more value this month`
         + (L.amountRemaining != null && L.qtyRemaining ? ` <span style="opacity:.75">(≈ £${(L.amountRemaining / Math.max(1, L.qtyRemaining)).toFixed(2)} avg per item to use it all)</span>` : '');
+    const c = escapeAttr(s.code);
     return `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin-bottom:8px;color:var(--ink)">
-      <div style="min-width:150px"><b>${escapeHtml(s.name)}</b><div style="font-size:11px;color:var(--ink-soft)">${s.linked} linked listing${s.linked === 1 ? '' : 's'}</div></div>
+      <div style="min-width:150px"><b>${escapeHtml(s.name)}</b><div style="font-size:11px;color:var(--ink-soft)">${s.linked} linked listing${s.linked === 1 ? '' : 's'}${s.listedValue != null ? ` · ≈ £${Number(s.listedValue).toLocaleString('en-GB')} on show${s.cap && s.fullValue > s.listedValue ? ` (£${Number(s.fullValue).toLocaleString('en-GB')} uncapped)` : ''}` : ''}</div></div>
       <div style="flex:1;min-width:220px;font-size:12px">${lim}</div>
-      <label style="display:flex;align-items:center;gap:6px;font-size:12px">Show at most
-        <input type="number" min="1" step="1" style="width:70px" id="ebay-cap-${escapeAttr(s.code)}" value="${s.cap || ''}" placeholder="all"> on eBay</label>
-      <button class="btn btn-sm btn-primary" onclick="saveEbayCap('${escapeAttr(s.code)}', this)">Save</button>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px" title="Never list more than this many of one part on this account">Show at most
+        <input type="number" min="1" step="1" style="width:64px" id="ebay-cap-${c}" value="${s.cap || ''}" placeholder="all"></label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px" title="Only raise a listing's quantity again once it has sold down to this many (blank = top up after every sale)">Top up at
+        <input type="number" min="0" step="1" style="width:56px" id="ebay-refill-${c}" value="${s.refillAt ?? ''}" placeholder="—"></label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px" title="Monthly-limit accounts: raising quantities never uses the last £X of eBay's allowance — kept free for new and incoming stock">Keep £
+        <input type="number" min="0" step="500" style="width:84px" id="ebay-reserve-${c}" value="${s.reserveGbp ?? ''}" placeholder="0"> free</label>
+      <button class="btn btn-sm btn-primary" onclick="saveEbayCap('${c}', this)">Save</button>
       ${s.cap ? `<button class="btn btn-sm btn-outline" title="Push min(warehouse stock, cap) to every listing on this account now" onclick="applyEbayCap('${escapeAttr(s.code)}', this)">Apply to live listings</button>` : ''}
     </div>`;
-  }).join('') + `<button class="btn btn-sm btn-outline" onclick="loadEbayLimits(true)">↻ Re-check with eBay</button>`;
+  }).join('') + `<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-sm btn-outline" onclick="loadEbayLimits(true)">↻ Re-check with eBay</button>
+    ${r.stores.length > 1 ? `<button class="btn btn-sm btn-outline" onclick="copyEbayCapToAll()" title="Copy the first account's three settings to every account">Same settings for all accounts</button>` : ''}</div>
+    <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">Example: show at most <b>15</b>, top up at <b>3</b>, keep <b>£30,000</b> free → each part lists up to 15; when it sells down to 3 it goes back up to 15 (if you have the stock); quantities are never raised into the last £30,000 of the monthly allowance, so new stock can always be listed. The warehouse stock itself never changes.</div>`;
+  PC_EBL = r.stores;
 }
 
+let PC_EBL = [];
 async function saveEbayCap(code, btn) {
   const v = el('ebay-cap-' + code)?.value;
-  btn.disabled = true;
+  const refillAt = el('ebay-refill-' + code)?.value, reserveGbp = el('ebay-reserve-' + code)?.value;
+  if (v && refillAt !== '' && parseInt(refillAt) >= parseInt(v)) return toast('"Top up at" must be lower than "Show at most"', 'warn');
+  if (btn) btn.disabled = true;
   try {
-    await Api.put('/api/settings/ebay-limits', { caps: { [code]: v ? parseInt(v) : null } });
-    toast(v ? `Saved — eBay will show at most ${parseInt(v)} on this account` : 'Cap removed — full warehouse stock will show', 'success');
+    await Api.put('/api/settings/ebay-limits', { caps: { [code]: v ? parseInt(v) : null }, rules: { [code]: { refillAt, reserveGbp } } });
+    toast(v ? `Saved — at most ${parseInt(v)}${refillAt !== '' ? `, topped up at ${refillAt}` : ''}${reserveGbp ? `, £${Number(reserveGbp).toLocaleString('en-GB')} kept free` : ''}` : 'Cap removed — full warehouse stock will show', 'success');
     loadEbayLimits();
-  } catch (e) { toast(e.data?.message || e.message, 'error'); btn.disabled = false; }
+  } catch (e) { toast(e.data?.message || e.message, 'error'); if (btn) btn.disabled = false; }
+}
+async function copyEbayCapToAll() {
+  const first = PC_EBL[0]; if (!first) return;
+  const g = id => el(id + first.code)?.value ?? '';
+  const cap = g('ebay-cap-'), refillAt = g('ebay-refill-'), reserveGbp = g('ebay-reserve-');
+  if (!confirm(`Set every eBay account to: show at most ${cap || 'all'}, top up at ${refillAt || '—'}, keep £${reserveGbp || 0} free?`)) return;
+  const caps = {}, rules = {};
+  for (const s of PC_EBL) { caps[s.code] = cap ? parseInt(cap) : null; rules[s.code] = { refillAt, reserveGbp }; }
+  try { await Api.put('/api/settings/ebay-limits', { caps, rules }); toast('Saved for all accounts', 'success'); loadEbayLimits(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
 }
 
 async function applyEbayCap(code, btn) {

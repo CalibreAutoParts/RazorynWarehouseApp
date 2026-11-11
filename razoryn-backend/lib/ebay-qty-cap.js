@@ -60,4 +60,41 @@ async function saveCaps(caps = {}) {
   return getCaps();
 }
 
-module.exports = { getCaps, capFor, applyCap, saveCaps };
+// ── Top-up level + money kept free (per account) ──────────────────────────
+// refillAt:  a listing's quantity is only RAISED again once it has sold down
+//            to this many (e.g. cap 15, refill at 3 → shows 15, sells down to
+//            3, then goes back up to 15). Lowering always happens straight away.
+// reserveGbp: on accounts with monthly selling limits, raising quantities never
+//            uses the last £X of the allowance — kept free for new / incoming
+//            stock. Stored in app_settings.data.ebayQtyRules = { code: {...} }.
+let _rules = null, _rulesAt = 0;
+async function getRules() {
+  if (_rules && Date.now() - _rulesAt < TTL_MS) return _rules;
+  try {
+    const raw = ((await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {}).ebayQtyRules || {};
+    const out = {};
+    for (const [code, r] of Object.entries(raw)) {
+      const refillAt = parseInt(r?.refillAt), reserveGbp = parseFloat(r?.reserveGbp);
+      out[code] = { refillAt: Number.isFinite(refillAt) && refillAt >= 0 ? refillAt : null, reserveGbp: Number.isFinite(reserveGbp) && reserveGbp > 0 ? reserveGbp : null };
+    }
+    _rules = out;
+  } catch (_) { _rules = _rules || {}; }
+  _rulesAt = Date.now();
+  return _rules;
+}
+async function rulesFor(storeCode) { return (storeCode && (await getRules())[storeCode]) || { refillAt: null, reserveGbp: null }; }
+async function saveRules(rules = {}) {
+  const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
+  const next = { ...(cur.ebayQtyRules || {}) };
+  for (const [code, r] of Object.entries(rules)) {
+    if (!r) { delete next[code]; continue; }
+    const refillAt = r.refillAt === '' || r.refillAt == null ? null : parseInt(r.refillAt);
+    const reserveGbp = r.reserveGbp === '' || r.reserveGbp == null ? null : parseFloat(r.reserveGbp);
+    next[code] = { refillAt: Number.isFinite(refillAt) && refillAt >= 0 ? refillAt : null, reserveGbp: Number.isFinite(reserveGbp) && reserveGbp > 0 ? reserveGbp : null };
+  }
+  await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify({ ...cur, ebayQtyRules: next })]);
+  _rules = null;
+  return getRules();
+}
+
+module.exports = { getCaps, capFor, applyCap, saveCaps, getRules, rulesFor, saveRules };

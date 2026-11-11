@@ -143,6 +143,18 @@ if (settingsModule.publicLogoRouter) {
   app.use('/', settingsModule.publicLogoRouter);
 }
 
+// Reply photos for eBay messages: a 1-day public copy eBay can fetch when the
+// direct upload is refused (lib/ebay-hub tempPublicPhoto). Unguessable token.
+app.get('/public/msg-photo/:file', async (req, res) => {
+  const token = String(req.params.file || '').replace(/\.\w+$/, '');
+  if (!/^[a-f0-9]{36}$/.test(token)) return res.status(404).end();
+  try {
+    const r = (await require('./db').query(`SELECT mime, data FROM ebay_msg_photos WHERE token = $1 AND created_at > now() - interval '1 day'`, [token])).rows[0];
+    if (!r) return res.status(404).end();
+    res.set('Content-Type', r.mime || 'image/jpeg'); res.set('Cache-Control', 'public, max-age=3600'); res.send(r.data);
+  } catch (_) { res.status(404).end(); }
+});
+
 // ---------- Version: open pages reload themselves after a deploy ----------
 // A screen left open all day (the warehouse PC) would otherwise run the old
 // version until someone refreshes it.

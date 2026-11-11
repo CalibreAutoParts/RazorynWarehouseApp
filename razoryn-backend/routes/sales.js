@@ -625,7 +625,10 @@ router.get('/:id', requireAdmin, async (req, res, next) => {
 // POST /api/sales — record a manual sale or estimate.
 // Body: { channel, paymentMethod, isEstimate, customerName, customerPhone, customerEmail,
 //         shippingAddress, vehicleReg, orderNumber, items, shipping, notes }
-router.post('/', requireAdmin, async (req, res) => {
+// Recording a sale / estimate: admins, and staff allowed to quote (Quote
+// Builder on the warehouse PC records counter sales).
+const canQuote = (req, res, next) => (req.user?.role === 'admin' || req.user?.permissions?.pricing) ? next() : res.status(403).json({ error: 'forbidden', missing: 'pricing' });
+router.post('/', canQuote, async (req, res) => {
   const b = req.body || {};
   if (!CHANNELS.includes(b.channel)) return res.status(400).json({ error: 'invalid_channel' });
   if (!Array.isArray(b.items) || !b.items.length) return res.status(400).json({ error: 'items_required' });
