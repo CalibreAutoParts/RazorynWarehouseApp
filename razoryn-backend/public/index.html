@@ -1998,9 +1998,10 @@ function fmtDate(iso) {
 // Money is admin-only. Warehouse staff never see sale prices / totals / refunds —
 // gbp() masks for them, and a mutation observer (initMoneyMask) scrubs any inline
 // "£x.xx" that a local formatter produced, so nothing leaks on any screen.
-function canSeeMoney() { return !State.user || State.user.role === 'admin'; }
+// Prices show for admins and for staff allowed to quote (Quote Builder needs them).
+function canSeeMoney() { return !State.user || State.user.role === 'admin' || !!(State.user.permissions || State.user.perms || {}).pricing; }
 function gbp(n) {
-  if (State.user && State.user.role !== 'admin') return '£•••';
+  if (!canSeeMoney()) return '£•••';
   return '£' + Number(n).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 const MONEY_RE = /£\s?\d[\d,]*\.\d{2}/g;
@@ -2401,6 +2402,19 @@ function enterApp() {
   // Are we running inside the native handheld app shell? (Set before nav so the
   // page-permission guard + app-mode nav filtering apply from the first render.)
   State.appShell = detectAppShell();
+  // Staff: the sidebar shows exactly the pages their permissions allow — an
+  // "admin-only" page they've been given (Quote Builder, Key Information,
+  // Notes) appears, and anything they can't open is hidden.
+  if (State.user.role !== 'admin') {
+    document.querySelectorAll('.nav-item[data-page]').forEach(n => {
+      const ok = hasPerm(n.dataset.page);
+      n.style.display = ok ? 'flex' : 'none';
+    });
+    requestAnimationFrame(() => document.querySelectorAll('.sidebar .nav-section').forEach(sec => {
+      const any = [...sec.querySelectorAll('.nav-item[data-page]')].some(n => n.style.display !== 'none');
+      sec.style.display = any ? '' : 'none';
+    }));
+  }
 
   document.getElementById('user-avatar').textContent = State.user.name.charAt(0).toUpperCase();
   document.getElementById('user-name').textContent = State.user.name;
@@ -3524,15 +3538,15 @@ function hasPerm(page) {
     sales:        false,
     activity:     false,
     pricingrules: false,
-    pricing:      false,
+    pricing:      'pricing',   // Quote Builder (+ sees prices)
     // Tasks are operational: every staff member must SEE what they're meant to
     // do (the backend already allows viewing + status changes for everyone;
     // creating/editing/deleting tasks stays admin-only in the UI + API).
     schedule:     true,
-    videos:       false,
-    kb:           false,
-    notes:        false,
-    labels:       false,
+    videos:       'videos',
+    kb:           'kb',
+    notes:        'notes',     // Notes & follow-ups
+    labels:       'labels',
     mirror:       false,
     bundles:      false,
     costs:        false,
@@ -13841,9 +13855,16 @@ function paintStaff() {
           ${permRow(u, 'videos', 'How-to videos', 'View training videos')}
           ${permRow(u, 'kb', 'Key Information', 'View KB entries')}
           ${permRow(u, 'kbSensitive', 'Sensitive entries', 'Login info, supplier contacts')}
-          <div style="margin:14px 0 10px;padding:10px 12px;background:var(--bg-soft);border-radius:6px;font-size:12px;color:var(--ink-soft);line-height:1.5">
+          ${permRow(u, 'pricing', 'Quote Builder', 'Quote customers and record counter sales — also shows prices')}
+          ${permRow(u, 'labels', 'Labels', 'Print product and location labels')}
+          ${permRow(u, 'notes', 'Notes & follow-ups', 'Shared notes and customer follow-ups')}
+          <div style="margin:12px 0 4px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-outline btn-sm" onclick="applyStaffPreset('${u.id}','pc')" title="Dispatch, eBay messages, stock check, labels, incoming, returns, print station, Quote Builder, VIN search, schedule, notes & follow-ups, key information">🖥 Warehouse PC preset</button>
+            <button class="btn btn-ghost btn-sm" onclick="applyStaffPreset('${u.id}','handheld')" title="Stock check, locations, dispatch, returns, schedule — no prices">📱 Handheld preset</button>
+          </div>
+          <div style="margin:10px 0;padding:10px 12px;background:var(--bg-soft);border-radius:6px;font-size:12px;color:var(--ink-soft);line-height:1.5">
             <strong style="color:var(--ink)">🔒 Admin-only sections</strong><br>
-            Sales, Quote Builder, Listing Mirror, Staff &amp; Access and Settings are reserved for admin accounts. Warehouse staff don't see these pages in their sidebar at all.
+            Sales reports, costs, listings, Listing Mirror, Staff &amp; Access, Books and Settings are reserved for admin accounts. Warehouse staff don't see these pages in their sidebar at all.
           </div>
         `}
 
@@ -13921,6 +13942,22 @@ async function togglePerm(uid, key, val) {
     toast(u.name + ' · ' + key + ' = ' + (val ? 'on' : 'off'), 'success');
     paintStaff();
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+// One-click permission sets. "Warehouse PC" = the shared downstairs computer:
+// dispatch, eBay messages, stock check, labels, incoming, returns, print
+// station, Quote Builder, VIN search, schedule, notes & follow-ups, key info.
+const STAFF_PRESETS = {
+  pc: { inventory: true, scan: true, locations: true, returns: true, dispatch: true, competitors: false, schedule: true, videos: true, kb: true, kbSensitive: false, pricing: true, labels: true, notes: true },
+  handheld: { inventory: true, scan: true, locations: true, returns: true, dispatch: true, competitors: false, schedule: true, videos: false, kb: false, kbSensitive: false, pricing: false, labels: false, notes: false },
+};
+async function applyStaffPreset(uid, which) {
+  const u = State.staff.find(x => x.id == uid); if (!u) return;
+  if (!confirm(`Set ${u.name}'s access to the ${which === 'pc' ? 'Warehouse PC' : 'Handheld'} preset?`)) return;
+  try {
+    await Api.patch('/api/staff/' + uid, { permissions: { ...u.perms, ...STAFF_PRESETS[which] } });
+    await Store.refresh('staff'); paintStaff();
+    toast(`${u.name} → ${which === 'pc' ? 'Warehouse PC' : 'Handheld'} access`, 'success');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
 }
 function editStaff(id) { openStaffModal(id); }
 async function deactivateStaff(id) {
