@@ -2419,6 +2419,7 @@ function enterApp() {
   initCopyTap();            // tap a part number / SKU to copy it
   initMoneyMask();          // hide all £ amounts from non-admin (warehouse) staff
   initNativeApp();          // register device + native push (FCM) when in the APK
+  initAlertWatcher();       // new notifications → sound + phone notification while the app is running
   psInitBackground();       // this computer = print station → prints on ANY page
   initEditingTracker();
   initTableLabeller();
@@ -2681,7 +2682,7 @@ const Sounds = {
   },
 
   // Per-event defaults used until the server prefs load (or if an event is unset).
-  _defaults: { sale: 'chaching', return: 'chime', return_closed: 'pop', low_stock: 'bell' },
+  _defaults: { sale: 'chaching', return: 'chime', return_closed: 'pop', low_stock: 'bell', message: 'ding' },
 
   // Load synced preferences from the server. Called at app start + after saving.
   async loadPrefs() {
@@ -3029,7 +3030,7 @@ function initKiosk() {
 // warehouse workflow: operational pages + Settings only (no marketing/admin
 // management), a bottom quick-bar for one-tap Scan/Inventory/Dispatch/Returns,
 // bigger touch targets, and global hardware-scanner capture.
-const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','qtycheck','iteminfo','locations','returns','dispatch','ebay','notifications','schedule','settings','createlisting','vinsearch']);
+const APP_PAGES = new Set(['dashboard','clock','inventory','incoming','stocktake','qtycheck','iteminfo','locations','returns','dispatch','ebay','notifications','schedule','settings','createlisting','vinsearch','pricecheck']);
 // Pages surfaced in the bottom quick-bar (order = left→right). Home is leftmost.
 // Only shown if the user has permission for them. Scan lives inside Stock Check
 // now (hardware scanner is automatic), so there's no separate Scan tab.
@@ -3135,7 +3136,7 @@ async function initNativeApp() {
         try { await Push.createChannel({ id: 'warehouse_alerts', name: 'Warehouse alerts', description: 'Sales, returns, competitor prices and AI updates', importance: 5, visibility: 1, vibration: true }); } catch (_) {}
         const perm = await Push.requestPermissions();
         if (perm && perm.receive === 'granted') {
-          Push.addListener('registration', (t) => { if (t && t.value) registerDevice(t.value); });
+          Push.addListener('registration', (t) => { if (t && t.value) { State.nativePushOk = true; registerDevice(t.value); } });
           Push.addListener('registrationError', (e) => console.warn('[push] reg error', e));
           Push.addListener('pushNotificationReceived', (n) => {
             // App is open — surface it in-app + play the matching sound.
@@ -3152,6 +3153,60 @@ async function initNativeApp() {
     } catch (e) { console.warn('[push] native register failed:', e.message); }
   } catch (e) { console.warn('[native] init failed:', e.message); }
 }
+// ── Alerts while the app is running ─────────────────────────────────────────
+// Without native push (Firebase not set up — the APK is then built without the
+// push plugin) the phone got no alerts at all. Every 30 s the app asks for new
+// notifications; each one plays its sound, shows in-app and — in the APK, via
+// the local-notifications plugin — raises a real Android notification with
+// sound (works while the app is open or in the background; when it's fully
+// closed only Firebase push can reach it). Skipped when native push works.
+const ALERT_SOUND = { sale: 'sale', return: 'return', return_closed: 'return_closed', low_stock: 'low_stock' };
+function initAlertWatcher() {
+  if (!State.appShell || window._alertWatch) return;
+  window._alertWatch = true;
+  const LN = window.Capacitor?.Plugins?.LocalNotifications;
+  if (LN) {
+    try { LN.requestPermissions?.(); } catch (_) {}
+    try { LN.createChannel?.({ id: 'warehouse_alerts', name: 'Warehouse alerts', description: 'New orders, eBay messages, returns', importance: 5, visibility: 1, vibration: true }); } catch (_) {}
+    try {
+      LN.addListener?.('localNotificationActionPerformed', (a) => {
+        const page = a?.notification?.extra?.page;
+        if (page && typeof routeTo === 'function' && hasPerm(page)) routeTo(page);
+      });
+    } catch (_) {}
+  }
+  let last = null;
+  const pageFor = n => {
+    const t = String(n.type || '');
+    if (t === 'ebay_message') return 'ebay';
+    if (t === 'sale') return State.user?.role === 'admin' ? 'sales' : 'dispatch';
+    if (t.startsWith('return')) return 'returns';
+    if (t.startsWith('shipment_') || t === 'partner_order') return 'dispatch';
+    return 'notifications';
+  };
+  const tick = async () => {
+    if (State.nativePushOk || !State.user) return;
+    let r; try { r = await Api.get('/api/notifications/feed' + (last == null ? '' : '?after=' + last)); } catch (_) { return; }
+    if (last == null) { last = r.latestId || 0; return; }
+    const items = r.items || [];
+    for (const n of items) {
+      last = Math.max(last, n.id);
+      try { if (window.Sounds) Sounds._playDebounced(ALERT_SOUND[n.type] || (String(n.type).startsWith('return') ? 'return' : 'message')); } catch (_) {}
+      if (LN) {
+        try { await LN.schedule({ notifications: [{ id: n.id % 2000000000, title: n.title || 'Warehouse', body: n.body || '', channelId: 'warehouse_alerts', extra: { page: pageFor(n) } }] }); } catch (_) {}
+      }
+    }
+    if (items.length) {
+      const n = items[items.length - 1];
+      toast(items.length > 1 ? `${items.length} new alerts — ${n.title}` : (n.body ? `${n.title} — ${n.body}` : n.title), 'info', 6000);
+      Store.refresh('notifications').catch(() => {});
+    }
+  };
+  tick();
+  setInterval(tick, 30000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+}
+
 function registerDevice(pushToken) {
   try {
     const d = State.device || {};
