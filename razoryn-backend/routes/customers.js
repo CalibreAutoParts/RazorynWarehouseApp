@@ -168,7 +168,14 @@ router.get('/from-sales', requireAdmin, async (req, res) => {
     params.push(`%${q}%`);
     where.push(`(LOWER(s.customer_name) LIKE $${params.length} OR LOWER(s.customer_email) LIKE $${params.length})`);
   }
-  const having = repeatOnly ? 'HAVING COUNT(*) > 1' : '';
+  // eBay buyers are hidden unless asked for (?ebay=1): this list is for people
+  // to talk to directly (e.g. about a trade account) — eBay-only buyers can only
+  // be contacted through eBay.
+  const withEbay = req.query.ebay === '1' || req.query.ebay === 'true';
+  const hav = [];
+  if (repeatOnly) hav.push('COUNT(*) > 1');
+  if (!withEbay) hav.push(`BOOL_OR(channel NOT LIKE 'ebay\\_%')`);
+  const having = hav.length ? 'HAVING ' + hav.join(' AND ') : '';
   const orderBy = sort === 'orders' ? 'order_count DESC, total_spend DESC'
                 : sort === 'recent' ? 'last_order DESC'
                 : 'total_spend DESC, order_count DESC';
@@ -177,14 +184,18 @@ router.get('/from-sales', requireAdmin, async (req, res) => {
   // would be ideal, but MAX() keeps this a single scan and is good enough for display.
   const r = await query(`
     WITH base AS (
-      SELECT s.*,
-        COALESCE(NULLIF(LOWER(TRIM(s.customer_email)), ''), LOWER(TRIM(s.customer_name))) AS grp
+      -- Group on a REAL email, else the name. eBay sends "Invalid Request" (or
+      -- nothing) for buyers' hidden emails — grouping on that lumped every such
+      -- buyer into one "customer".
+      SELECT s.*, ${VALID_EMAIL} AS email_ok,
+        COALESCE(${VALID_EMAIL}, LOWER(TRIM(s.customer_name))) AS grp
       FROM sales s
       WHERE ${where.join(' AND ')}
     )
     SELECT grp,
       (ARRAY_AGG(customer_name ORDER BY occurred_at DESC))[1]                              AS name,
-      (ARRAY_AGG(NULLIF(TRIM(customer_email), '') ORDER BY occurred_at DESC) FILTER (WHERE NULLIF(TRIM(customer_email), '') IS NOT NULL))[1] AS email,
+      (ARRAY_AGG(email_ok ORDER BY occurred_at DESC) FILTER (WHERE email_ok IS NOT NULL))[1] AS email,
+      BOOL_OR(email_ok LIKE '%@members.ebay.%')                                            AS ebay_relay,
       (ARRAY_AGG(NULLIF(TRIM(customer_phone), '') ORDER BY occurred_at DESC) FILTER (WHERE NULLIF(TRIM(customer_phone), '') IS NOT NULL))[1] AS phone,
       COUNT(*)::int                                                                        AS order_count,
       COALESCE(SUM(GREATEST(total - COALESCE(refunded_amount, 0), 0)), 0)                  AS total_spend,
@@ -211,6 +222,8 @@ router.get('/from-sales', requireAdmin, async (req, res) => {
   res.json({ customers, totals });
 });
 
+const VALID_EMAIL = `CASE WHEN TRIM(s.customer_email) ~* '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$' THEN LOWER(TRIM(s.customer_email)) END`;
+
 // GET /api/customers/from-sales/orders?email=&name= — every order for one
 // customer, matched by email (preferred) or name. Powers the expand-row view.
 router.get('/from-sales/orders', requireAdmin, async (req, res) => {
@@ -219,8 +232,11 @@ router.get('/from-sales/orders', requireAdmin, async (req, res) => {
   if (!email && !name) return res.status(400).json({ error: 'email_or_name_required' });
   const params = [];
   const match = [];
-  if (email) { params.push(email); match.push(`LOWER(TRIM(s.customer_email)) = $${params.length}`); }
-  if (name)  { params.push(name);  match.push(`LOWER(TRIM(s.customer_name)) = $${params.length}`); }
+  // A real email matches on email; otherwise the name — but only orders with no
+  // real email of their own, so a shared name doesn't pull in other people.
+  if (email && email.includes('@')) { params.push(email); match.push(`LOWER(TRIM(s.customer_email)) = $${params.length}`); }
+  else if (name) { params.push(name); match.push(`(LOWER(TRIM(s.customer_name)) = $${params.length} AND ${VALID_EMAIL} IS NULL)`); }
+  if (!match.length) return res.status(400).json({ error: 'email_or_name_required' });
   const r = await query(`
     SELECT s.id, s.channel, s.invoice_number, s.payment_reference, s.external_order_id,
            s.customer_name, s.customer_email, s.total, COALESCE(s.refunded_amount, 0) AS refunded_amount,

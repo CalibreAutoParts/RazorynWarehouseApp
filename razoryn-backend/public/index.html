@@ -30,6 +30,7 @@
     --line: #e6e8ec;
     --line-2: #f0f2f5;
     --bg: #fafbfc;
+    --bg-soft: #f5f6f8;   /* soft panel / hover fill (used across the app) */
     --white: #ffffff;
     --green: #1a7f3e;
     --green-light: #e3f4e9;
@@ -58,6 +59,7 @@
     --line: #2a2e36;
     --line-2: #1f232a;
     --bg: #0d0f13;
+    --bg-soft: #1a1e25;
     --white: #161a21;
     --green: #4ade80;
     --green-light: #0e2a18;
@@ -9730,6 +9732,9 @@ function renderCustomers() {
         <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none">
           <input type="checkbox" id="cust-repeat" ${State.custRepeat?'checked':''}> Repeat only
         </label>
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none" title="eBay-only buyers are hidden — they can only be contacted through eBay messages">
+          <input type="checkbox" id="cust-ebay" ${State.custEbay?'checked':''}> Show eBay buyers
+        </label>
         <select id="cust-sort" aria-label="Sort by" title="Sort by" style="padding:6px 8px;font-size:13px">
           ${[['spend','Top spenders'],['orders','Most orders'],['recent','Most recent']].map(([v,l])=>`<option value="${v}" ${State.custSort===v?'selected':''}>${l}</option>`).join('')}
         </select>
@@ -9748,6 +9753,7 @@ function renderCustomers() {
     search.addEventListener('input', () => { State.custSearch = search.value; clearTimeout(t); t = setTimeout(loadCustomers, 300); });
   }
   el('cust-repeat')?.addEventListener('change', (e) => { State.custRepeat = e.target.checked; loadCustomers(); });
+  el('cust-ebay')?.addEventListener('change', (e) => { State.custEbay = e.target.checked; loadCustomers(); });
   el('cust-sort')?.addEventListener('change', (e) => { State.custSort = e.target.value; loadCustomers(); });
   loadCustomers();
 }
@@ -9761,6 +9767,7 @@ async function loadCustomers() {
   const params = new URLSearchParams();
   if (State.custSearch) params.set('q', State.custSearch);
   if (State.custRepeat) params.set('repeat', '1');
+  if (State.custEbay) params.set('ebay', '1');
   params.set('sort', State.custSort || 'spend');
   let data;
   try { data = await Api.get('/api/customers/from-sales?' + params.toString()); }
@@ -9776,7 +9783,7 @@ async function loadCustomers() {
     const channels = [...new Set((c.channels || []).map(ch => CUST_CH_LABEL[ch] || ch))].join(', ');
     return `<tr class="cust-row" style="cursor:pointer" onclick="toggleCustomerOrders(this, '${escapeAttr(key)}')">
       <td><strong>${escapeHtml(c.name || '—')}</strong>${c.is_repeat ? ` <span style="background:var(--green,#16a34a);color:#fff;font-size:10px;font-weight:600;padding:1px 7px;border-radius:10px;margin-left:4px">Repeat</span>` : ''}</td>
-      <td style="font-size:12px;color:var(--ink-soft)">${escapeHtml(c.email || '')}${c.phone ? `<br>${escapeHtml(c.phone)}` : ''}</td>
+      <td style="font-size:12px;color:var(--ink-soft)">${escapeHtml(c.email || '')}${c.ebay_relay ? ` <span class="pill" style="font-size:9px" title="eBay's relay address — eBay reads these emails, so the app never emails it. Message them on eBay.">eBay relay · no emails</span>` : ''}${c.phone ? `<br>${escapeHtml(c.phone)}` : ''}</td>
       <td class="num">${c.order_count}</td>
       <td class="num">${gbp(c.total_spend)}</td>
       <td style="font-size:12px">${custDateShort(c.first_order)}</td>
@@ -9793,7 +9800,7 @@ async function toggleCustomerOrders(row, key) {
   if (next && next.classList.contains('cust-detail')) { next.remove(); return; }
   const detail = document.createElement('tr');
   detail.className = 'cust-detail';
-  detail.innerHTML = `<td colspan="7" style="padding:0;background:var(--bg-soft,#f7f7f8)"><div style="padding:12px 16px;color:var(--ink-soft);font-size:12px">Loading orders…</div></td>`;
+  detail.innerHTML = `<td colspan="7" style="padding:0;background:var(--bg-soft)"><div style="padding:12px 16px;color:var(--ink-soft);font-size:12px">Loading orders…</div></td>`;
   row.after(detail);
   let data;
   try { data = await Api.get('/api/customers/from-sales/orders?' + key); }

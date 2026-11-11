@@ -22,6 +22,16 @@ async function sendEmail({ to, subject, html, from, replyTo, attachments } = {})
     return { ok: false, error: 'email_not_configured' };
   }
   if (!to || !subject || !html) return { ok: false, error: 'missing_fields' };
+  // eBay buyers' relay addresses (…@members.ebay.com / .co.uk): eBay reads that
+  // mail and treats off-eBay contact (trade-account invites, offers…) as a
+  // policy breach. Never email them — talk to eBay buyers through eBay messages.
+  const list = (Array.isArray(to) ? to : [to]).map(x => String(x || '').trim()).filter(Boolean);
+  const relay = list.filter(x => /@members\.ebay\.[a-z.]+>?$/i.test(x));
+  if (relay.length) {
+    console.warn('[email] blocked — eBay relay address:', relay.join(','));
+    if (relay.length === list.length) return { ok: false, error: 'ebay_relay_blocked', message: "That's an eBay buyer's relay address — eBay reads those emails. Message them on eBay instead." };
+    to = list.filter(x => !relay.includes(x));
+  }
   const fromEmail = from || process.env.WAREHOUSE_FROM_EMAIL || `noreply@${brand.domain || 'razoryn.co.uk'}`;
   try {
     const r = await axios.post('https://api.resend.com/emails', {
