@@ -957,15 +957,22 @@ router.put('/channel-colors', requireAdmin, async (req, res) => {
 //      listing linked to that account now (otherwise it applies on the next push).
 router.get('/ebay-limits', requireAdmin, async (req, res) => {
   const ebay = require('../services/ebay');
-  const caps = await require('../lib/ebay-qty-cap').getCaps();
+  const capLib = require('../lib/ebay-qty-cap');
+  const caps = await capLib.getCaps();
+  const rules = await capLib.getRules();
   const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
   const out = [];
   for (const s of stores) {
-    const row = { code: s.code, name: s.name, cap: caps[s.code] || null, limits: null, error: null, linked: 0 };
+    const row = { code: s.code, name: s.name, cap: caps[s.code] || null, refillAt: rules[s.code]?.refillAt ?? null, reserveGbp: rules[s.code]?.reserveGbp ?? null, limits: null, error: null, linked: 0, listedValue: null };
     try { row.limits = await ebay.getSellingLimits(s.code, { fresh: req.query.fresh === '1' }); }
     catch (e) { row.error = e.message; }
     try {
       row.linked = parseInt((await query(`SELECT COUNT(*)::int AS n FROM mirror_links WHERE store_code = $1`, [s.code])).rows[0].n) || 0;
+      // Roughly what's on show: min(stock, cap) × eBay price over the linked parts.
+      const v = (await query(`SELECT COALESCE(SUM(LEAST(GREATEST(${require('../lib/stock-qty').SELLABLE_SQL}, 0), COALESCE($2::int, 99999)) * COALESCE(p.price_ebay, 0)), 0) AS v,
+          COALESCE(SUM(GREATEST(${require('../lib/stock-qty').SELLABLE_SQL}, 0) * COALESCE(p.price_ebay, 0)), 0) AS full
+        FROM (SELECT DISTINCT ON (p.id) p.* FROM mirror_links ml JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text AND p.active = true WHERE ml.store_code = $1) p`, [s.code, caps[s.code] || null])).rows[0];
+      row.listedValue = Math.round(Number(v.v) || 0); row.fullValue = Math.round(Number(v.full) || 0);
     } catch (_) {}
     out.push(row);
   }
@@ -978,9 +985,15 @@ router.put('/ebay-limits', requireAdmin, async (req, res) => {
   const known = new Set(ebay.listStores().map(s => s.code));
   const clean = {};
   for (const [code, v] of Object.entries(caps)) if (known.has(code)) clean[code] = v;
-  const saved = await require('../lib/ebay-qty-cap').saveCaps(clean);
-  await audit(req, 'ebay_qty_caps', null, null, { caps: saved });
-  res.json({ ok: true, caps: saved });
+  const capLib = require('../lib/ebay-qty-cap');
+  const saved = await capLib.saveCaps(clean);
+  let rules = null;
+  if (req.body && req.body.rules) {
+    const r = {}; for (const [code, v] of Object.entries(req.body.rules)) if (known.has(code)) r[code] = v;
+    rules = await capLib.saveRules(r);
+  }
+  await audit(req, 'ebay_qty_caps', null, null, { caps: saved, rules });
+  res.json({ ok: true, caps: saved, rules });
 });
 
 router.post('/ebay-limits/apply/:code', requireAdmin, async (req, res) => {

@@ -598,23 +598,36 @@ async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
   if (!itemId) throw new Error('missing_item_id');
   // Limited accounts show at most their cap; the warehouse keeps the real count.
   const asked = Math.max(0, parseInt(quantity) || 0);
-  let qty = await require('../lib/ebay-qty-cap').applyCap(quantity, resolveStore(storeArg)?.code);
+  const capLib = require('../lib/ebay-qty-cap');
+  const code = resolveStore(storeArg)?.code;
+  let qty = await capLib.applyCap(quantity, code);
   let limitedBy = qty < asked ? 'qty_cap' : null;
+  const rules = await capLib.rulesFor(code);
   // Accounts with monthly selling limits: raising a listing's quantity uses up
-  // allowance too — only raise it as far as the allowance left covers.
+  // allowance too — only raise it as far as the allowance left covers, minus
+  // the amount kept free. With a top-up level, a listing is only raised once
+  // it has sold down to that level.
   const lim = opts.lowering ? null : await getSellingLimits(storeArg).catch(() => null);
-  if (lim && lim.limited && qty > 0) {
+  if (qty > 0 && !opts.lowering && ((lim && lim.limited) || rules.refillAt != null)) {
     try {
       const gx = await tradingCall('GetItem', `<ItemID>${escapeXml(String(itemId))}</ItemID>`, storeArg);
       const curQty = (parseInt(extractOne(gx, 'Quantity') || '0') || 0) - (parseInt(extractOne(extractOne(gx, 'SellingStatus') || '', 'QuantitySold') || '0') || 0);
       const unit = parseFloat(extractOne(extractOne(gx, 'SellingStatus') || '', 'CurrentPrice') || extractOne(gx, 'StartPrice') || '0') || 0;
       if (qty > curQty) {
-        const byQty = lim.qtyRemaining != null ? lim.qtyRemaining : Infinity;
-        const byAmt = (lim.amountRemaining != null && unit > 0) ? Math.floor((lim.amountRemaining + 0.001) / unit) : Infinity;
-        const before = qty;
-        qty = curQty + Math.max(0, Math.min(qty - curQty, byQty, byAmt));
-        if (qty < before) limitedBy = 'selling_limit';
+        if (rules.refillAt != null && curQty > rules.refillAt && !opts.force) {
+          // Not low enough yet — leave it until it sells down to the top-up level.
+          return { ok: true, itemId, quantity: curQty, asked, limitedBy: 'waiting_to_top_up', unchanged: true, storeCode: code };
+        }
+        if (lim && lim.limited) {
+          const byQty = lim.qtyRemaining != null ? lim.qtyRemaining : Infinity;
+          const spare = lim.amountRemaining != null ? lim.amountRemaining - (rules.reserveGbp || 0) : null;
+          const byAmt = (spare != null && unit > 0) ? Math.floor((Math.max(0, spare) + 0.001) / unit) : Infinity;
+          const before = qty;
+          qty = curQty + Math.max(0, Math.min(qty - curQty, byQty, byAmt));
+          if (qty < before) limitedBy = rules.reserveGbp && spare != null && spare < (lim.amountRemaining || 0) && byAmt < byQty ? 'kept_free' : 'selling_limit';
+        }
       }
+      if (qty === curQty) return { ok: true, itemId, quantity: qty, asked, limitedBy, unchanged: true, storeCode: code };
     } catch (_) { /* can't read the listing — push as asked */ }
   }
   const body = `<InventoryStatus><ItemID>${escapeXml(String(itemId))}</ItemID><Quantity>${qty}</Quantity></InventoryStatus>`;

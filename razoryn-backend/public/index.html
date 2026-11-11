@@ -26376,25 +26376,46 @@ async function loadEbayLimits(fresh) {
       : !L.limited ? '<span style="color:var(--green)">No monthly selling limits on this account</span>'
       : `<b>${L.qtyRemaining != null ? L.qtyRemaining : '?'}</b> more items · <b>£${L.amountRemaining != null ? Number(L.amountRemaining).toFixed(2) : '?'}</b> more value this month`
         + (L.amountRemaining != null && L.qtyRemaining ? ` <span style="opacity:.75">(≈ £${(L.amountRemaining / Math.max(1, L.qtyRemaining)).toFixed(2)} avg per item to use it all)</span>` : '');
+    const c = escapeAttr(s.code);
     return `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin-bottom:8px;color:var(--ink)">
-      <div style="min-width:150px"><b>${escapeHtml(s.name)}</b><div style="font-size:11px;color:var(--ink-soft)">${s.linked} linked listing${s.linked === 1 ? '' : 's'}</div></div>
+      <div style="min-width:150px"><b>${escapeHtml(s.name)}</b><div style="font-size:11px;color:var(--ink-soft)">${s.linked} linked listing${s.linked === 1 ? '' : 's'}${s.listedValue != null ? ` · ≈ £${Number(s.listedValue).toLocaleString('en-GB')} on show${s.cap && s.fullValue > s.listedValue ? ` (£${Number(s.fullValue).toLocaleString('en-GB')} uncapped)` : ''}` : ''}</div></div>
       <div style="flex:1;min-width:220px;font-size:12px">${lim}</div>
-      <label style="display:flex;align-items:center;gap:6px;font-size:12px">Show at most
-        <input type="number" min="1" step="1" style="width:70px" id="ebay-cap-${escapeAttr(s.code)}" value="${s.cap || ''}" placeholder="all"> on eBay</label>
-      <button class="btn btn-sm btn-primary" onclick="saveEbayCap('${escapeAttr(s.code)}', this)">Save</button>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px" title="Never list more than this many of one part on this account">Show at most
+        <input type="number" min="1" step="1" style="width:64px" id="ebay-cap-${c}" value="${s.cap || ''}" placeholder="all"></label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px" title="Only raise a listing's quantity again once it has sold down to this many (blank = top up after every sale)">Top up at
+        <input type="number" min="0" step="1" style="width:56px" id="ebay-refill-${c}" value="${s.refillAt ?? ''}" placeholder="—"></label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px" title="Monthly-limit accounts: raising quantities never uses the last £X of eBay's allowance — kept free for new and incoming stock">Keep £
+        <input type="number" min="0" step="500" style="width:84px" id="ebay-reserve-${c}" value="${s.reserveGbp ?? ''}" placeholder="0"> free</label>
+      <button class="btn btn-sm btn-primary" onclick="saveEbayCap('${c}', this)">Save</button>
       ${s.cap ? `<button class="btn btn-sm btn-outline" title="Push min(warehouse stock, cap) to every listing on this account now" onclick="applyEbayCap('${escapeAttr(s.code)}', this)">Apply to live listings</button>` : ''}
     </div>`;
-  }).join('') + `<button class="btn btn-sm btn-outline" onclick="loadEbayLimits(true)">↻ Re-check with eBay</button>`;
+  }).join('') + `<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-sm btn-outline" onclick="loadEbayLimits(true)">↻ Re-check with eBay</button>
+    ${r.stores.length > 1 ? `<button class="btn btn-sm btn-outline" onclick="copyEbayCapToAll()" title="Copy the first account's three settings to every account">Same settings for all accounts</button>` : ''}</div>
+    <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">Example: show at most <b>15</b>, top up at <b>3</b>, keep <b>£30,000</b> free → each part lists up to 15; when it sells down to 3 it goes back up to 15 (if you have the stock); quantities are never raised into the last £30,000 of the monthly allowance, so new stock can always be listed. The warehouse stock itself never changes.</div>`;
+  PC_EBL = r.stores;
 }
 
+let PC_EBL = [];
 async function saveEbayCap(code, btn) {
   const v = el('ebay-cap-' + code)?.value;
-  btn.disabled = true;
+  const refillAt = el('ebay-refill-' + code)?.value, reserveGbp = el('ebay-reserve-' + code)?.value;
+  if (v && refillAt !== '' && parseInt(refillAt) >= parseInt(v)) return toast('"Top up at" must be lower than "Show at most"', 'warn');
+  if (btn) btn.disabled = true;
   try {
-    await Api.put('/api/settings/ebay-limits', { caps: { [code]: v ? parseInt(v) : null } });
-    toast(v ? `Saved — eBay will show at most ${parseInt(v)} on this account` : 'Cap removed — full warehouse stock will show', 'success');
+    await Api.put('/api/settings/ebay-limits', { caps: { [code]: v ? parseInt(v) : null }, rules: { [code]: { refillAt, reserveGbp } } });
+    toast(v ? `Saved — at most ${parseInt(v)}${refillAt !== '' ? `, topped up at ${refillAt}` : ''}${reserveGbp ? `, £${Number(reserveGbp).toLocaleString('en-GB')} kept free` : ''}` : 'Cap removed — full warehouse stock will show', 'success');
     loadEbayLimits();
-  } catch (e) { toast(e.data?.message || e.message, 'error'); btn.disabled = false; }
+  } catch (e) { toast(e.data?.message || e.message, 'error'); if (btn) btn.disabled = false; }
+}
+async function copyEbayCapToAll() {
+  const first = PC_EBL[0]; if (!first) return;
+  const g = id => el(id + first.code)?.value ?? '';
+  const cap = g('ebay-cap-'), refillAt = g('ebay-refill-'), reserveGbp = g('ebay-reserve-');
+  if (!confirm(`Set every eBay account to: show at most ${cap || 'all'}, top up at ${refillAt || '—'}, keep £${reserveGbp || 0} free?`)) return;
+  const caps = {}, rules = {};
+  for (const s of PC_EBL) { caps[s.code] = cap ? parseInt(cap) : null; rules[s.code] = { refillAt, reserveGbp }; }
+  try { await Api.put('/api/settings/ebay-limits', { caps, rules }); toast('Saved for all accounts', 'success'); loadEbayLimits(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
 }
 
 async function applyEbayCap(code, btn) {
