@@ -178,7 +178,12 @@ const COLS = {
 function pick(row, keys) {
   const lower = {};
   for (const k of Object.keys(row)) lower[k.trim().toLowerCase()] = row[k];
-  for (const k of keys) if (lower[k] !== undefined && String(lower[k]).trim() !== '') return String(lower[k]).trim();
+  for (const k of keys) {
+    const v = lower[k];
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (s !== '' && !/^(null|undefined)$/i.test(s)) return s;
+  }
   return '';
 }
 function truthy(v) { return /^(1|true|yes|y|verified|published|ok)$/i.test(String(v || '').trim()); }
@@ -410,6 +415,27 @@ async function importJudgeMe() {
   return importRows(rowsFromJudgeMe(raw), 'import:judgeme');
 }
 
+// Imports before this fix stored a missing reply/title as the text "null".
+// Clear those and rewrite the affected products. Safe to run on every start.
+async function repairNullText() {
+  await ensureSchema();
+  const r = await query(`
+    UPDATE product_reviews SET
+      reply = CASE WHEN reply IN ('null', 'undefined') THEN NULL ELSE reply END,
+      title = CASE WHEN title IN ('null', 'undefined') THEN NULL ELSE title END,
+      product_title = CASE WHEN product_title IN ('null', 'undefined') THEN NULL ELSE product_title END,
+      author_name = CASE WHEN author_name IN ('null', 'undefined') THEN NULL ELSE author_name END
+    WHERE reply IN ('null', 'undefined') OR title IN ('null', 'undefined')
+       OR product_title IN ('null', 'undefined') OR author_name IN ('null', 'undefined')
+    RETURNING shopify_product_id`);
+  const ids = [...new Set(r.rows.map(x => x.shopify_product_id).filter(Boolean))];
+  for (const id of ids) {
+    try { await publishProduct(id); } catch (e) { console.warn('[product-reviews] repair publish', id, e.message); }
+  }
+  if (r.rowCount) console.log(`[product-reviews] repaired ${r.rowCount} review(s), ${ids.length} product(s) rewritten`);
+  return { repaired: r.rowCount, products: ids.length };
+}
+
 // Once per install (Razoryn only): copy the Judge.me reviews in, so they're kept
 // even if Judge.me is uninstalled — and so the nightly eBay sync, which rewrites
 // each product's reviews from this table, never drops them.
@@ -447,5 +473,5 @@ module.exports = {
   ensureSchema, getSettings, saveSettings,
   signSaleToken, verifySaleToken, displayName, validateSubmission, buildProductPayload,
   mapImportRow, rowsFromJudgeMe, parseCsv,
-  submitReview, publishProduct, republishAll, moderate, list, importRows, importJudgeMe, importJudgeMeOnce, setEbaySource,
+  submitReview, publishProduct, republishAll, moderate, list, importRows, importJudgeMe, importJudgeMeOnce, repairNullText, setEbaySource,
 };

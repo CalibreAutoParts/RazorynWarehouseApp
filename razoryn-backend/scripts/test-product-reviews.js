@@ -53,6 +53,8 @@ t('import rows from other apps', () => {
   const jm = pr.rowsFromJudgeMe({ all_reviews: { reviews: [{ uuid: 'u1', rating: 3, body: 'fine', product_url: '/products/wing', verified_buyer: true, is_shop_review: false }] } });
   const mj = pr.mapImportRow(jm[0], 'import:judgeme');
   assert.strictEqual(mj.handle, 'wing'); assert.strictEqual(mj.verified, true); assert.strictEqual(mj.externalId, 'import:judgeme:u1');
+  assert.strictEqual(mj.reply, null, 'a missing reply is not the text "null"');
+  assert.strictEqual(pr.mapImportRow({ rating: 4, body: 'ok', reply: 'null', title: 'undefined' }).reply, null);
 });
 t('CSV parsing keeps quoted commas and line breaks', () => {
   const rows = pr.parseCsv('Rating,Review\n5,"Great, really\nsecond line"\n');
