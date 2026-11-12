@@ -773,7 +773,11 @@ if (cron.validate(reviewsCronExpr)) {
 // requests; only sends inside the configured UK daytime hours.
 require('./lib/review-requests').ensureSchema().catch(e => console.warn('[review-requests] schema:', e.message));
 require('./lib/product-reviews').ensureSchema().catch(e => console.warn('[product-reviews] schema:', e.message));
-setTimeout(() => { require('./lib/product-reviews').importJudgeMeOnce().catch(e => console.warn('[product-reviews] Judge.me import:', e.message)); }, 90 * 1000);
+setTimeout(async () => {
+  const pr = require('./lib/product-reviews');
+  await pr.repairNullText().catch(e => console.warn('[product-reviews] repair:', e.message));
+  await pr.importJudgeMeOnce().catch(e => console.warn('[product-reviews] Judge.me import:', e.message));
+}, 90 * 1000);
 const reviewRequestCronExpr = (process.env.REVIEW_REQUEST_CRON || '40 * * * *').trim();
 if (cron.validate(reviewRequestCronExpr)) {
   cron.schedule(reviewRequestCronExpr, async () => {
