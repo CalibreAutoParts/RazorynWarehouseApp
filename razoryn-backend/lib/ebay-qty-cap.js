@@ -75,14 +75,28 @@ async function getRules() {
     const out = {};
     for (const [code, r] of Object.entries(raw)) {
       const refillAt = parseInt(r?.refillAt), reserveGbp = parseFloat(r?.reserveGbp);
-      out[code] = { refillAt: Number.isFinite(refillAt) && refillAt >= 0 ? refillAt : null, reserveGbp: Number.isFinite(reserveGbp) && reserveGbp > 0 ? reserveGbp : null };
+      out[code] = { refillAt: Number.isFinite(refillAt) && refillAt >= 0 ? refillAt : null, reserveGbp: Number.isFinite(reserveGbp) && reserveGbp > 0 ? reserveGbp : null, tiers: cleanTiers(r?.tiers) };
     }
     _rules = out;
   } catch (_) { _rules = _rules || {}; }
   _rulesAt = Date.now();
   return _rules;
 }
-async function rulesFor(storeCode) { return (storeCode && (await getRules())[storeCode]) || { refillAt: null, reserveGbp: null }; }
+// Price bands: dearer parts use more of the monthly £ allowance per unit, so
+// "over £X → show at most Y, top up at Z". Highest matching band wins.
+function cleanTiers(t) {
+  return (Array.isArray(t) ? t : []).map(x => ({
+    over: parseFloat(x?.over), max: parseInt(x?.max), refillAt: x?.refillAt === '' || x?.refillAt == null ? null : parseInt(x.refillAt),
+  })).filter(x => Number.isFinite(x.over) && x.over >= 0 && Number.isFinite(x.max) && x.max >= 1)
+    .map(x => ({ ...x, refillAt: Number.isFinite(x.refillAt) && x.refillAt >= 0 && x.refillAt < x.max ? x.refillAt : null }))
+    .sort((a, b) => a.over - b.over).slice(0, 5);
+}
+function tierFor(rules, price) {
+  const p = parseFloat(price);
+  if (!rules || !Array.isArray(rules.tiers) || !Number.isFinite(p)) return null;
+  return [...rules.tiers].reverse().find(t => p > t.over) || null;
+}
+async function rulesFor(storeCode) { return (storeCode && (await getRules())[storeCode]) || { refillAt: null, reserveGbp: null, tiers: [] }; }
 async function saveRules(rules = {}) {
   const cur = (await query(`SELECT data FROM app_settings WHERE id = 1`)).rows[0]?.data || {};
   const next = { ...(cur.ebayQtyRules || {}) };
@@ -90,11 +104,12 @@ async function saveRules(rules = {}) {
     if (!r) { delete next[code]; continue; }
     const refillAt = r.refillAt === '' || r.refillAt == null ? null : parseInt(r.refillAt);
     const reserveGbp = r.reserveGbp === '' || r.reserveGbp == null ? null : parseFloat(r.reserveGbp);
-    next[code] = { refillAt: Number.isFinite(refillAt) && refillAt >= 0 ? refillAt : null, reserveGbp: Number.isFinite(reserveGbp) && reserveGbp > 0 ? reserveGbp : null };
+    next[code] = { refillAt: Number.isFinite(refillAt) && refillAt >= 0 ? refillAt : null, reserveGbp: Number.isFinite(reserveGbp) && reserveGbp > 0 ? reserveGbp : null,
+      tiers: r.tiers !== undefined ? cleanTiers(r.tiers) : ((cur.ebayQtyRules || {})[code]?.tiers || []) };
   }
   await query(`UPDATE app_settings SET data = $1::jsonb, updated_at = now() WHERE id = 1`, [JSON.stringify({ ...cur, ebayQtyRules: next })]);
   _rules = null;
   return getRules();
 }
 
-module.exports = { getCaps, capFor, applyCap, saveCaps, getRules, rulesFor, saveRules };
+module.exports = { getCaps, capFor, applyCap, saveCaps, getRules, rulesFor, saveRules, tierFor };

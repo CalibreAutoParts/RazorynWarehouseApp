@@ -11,7 +11,7 @@
 // columns to maintain. Sales.customer_name is fuzzy-matched on lookup.
 
 const express = require('express');
-const { query } = require('../db');
+const { query, withTx } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 
@@ -132,6 +132,14 @@ router.get('/profile', requireAdmin, async (req, res) => {
         LIMIT 500`, [name]);
     const priceMap = {};
     for (const r of prices.rows) priceMap[r.product_id] = parseFloat(r.unit_price);
+    // Prices kept from a customer merge (the lowest we charged across the names).
+    try {
+      await ensureMergeTables();
+      for (const r of (await query(`SELECT product_id, unit_price FROM customer_prices WHERE name_key = $1`, [name.toLowerCase()])).rows) {
+        const p = parseFloat(r.unit_price);
+        if (priceMap[r.product_id] == null || p < priceMap[r.product_id]) priceMap[r.product_id] = p;
+      }
+    } catch (_) {}
     const oc = await query(
       `SELECT COUNT(*)::int AS n FROM sales WHERE LOWER(TRIM(customer_name)) = LOWER($1) AND is_estimate = false`, [name]);
     res.json({
@@ -223,6 +231,85 @@ router.get('/from-sales', requireAdmin, async (req, res) => {
 });
 
 const VALID_EMAIL = `CASE WHEN TRIM(s.customer_email) ~* '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$' THEN LOWER(TRIM(s.customer_email)) END`;
+
+// ── Merge customers ─────────────────────────────────────────────────────────
+// One person entered under several names ("waheed", "waheed - azlon motor"):
+// their orders are moved onto ONE name (and email, when any of them has one),
+// and for every part the LOWEST price we've charged them across the merged
+// names becomes their customer price (what quotes / manual sales pre-fill).
+// Every merge is recorded and can be undone.
+async function ensureMergeTables() {
+  await query(`CREATE TABLE IF NOT EXISTS customer_prices (name_key TEXT NOT NULL, product_id INTEGER NOT NULL, unit_price NUMERIC(12,2) NOT NULL,
+    source TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (name_key, product_id))`);
+  await query(`CREATE TABLE IF NOT EXISTS customer_merges (id SERIAL PRIMARY KEY, target JSONB, sources JSONB, moved JSONB, prices_before JSONB,
+    created_by INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), undone_at TIMESTAMPTZ)`);
+}
+const keyOf = (n) => String(n || '').trim().toLowerCase();
+function groupWhere(g, params) {
+  const email = String(g.email || '').trim().toLowerCase();
+  if (email.includes('@')) { params.push(email); return `LOWER(TRIM(s.customer_email)) = $${params.length}`; }
+  params.push(keyOf(g.name)); return `(LOWER(TRIM(s.customer_name)) = $${params.length} AND ${VALID_EMAIL} IS NULL)`;
+}
+router.post('/from-sales/merge', requireAdmin, async (req, res) => {
+  try {
+    await ensureMergeTables();
+    const b = req.body || {};
+    const groups = (Array.isArray(b.groups) ? b.groups : []).filter(g => g && (g.name || g.email)).slice(0, 20);
+    const name = String(b.name || '').trim().slice(0, 200);
+    if (groups.length < 2) return res.status(400).json({ error: 'pick_two', message: 'Tick at least two customers to merge.' });
+    if (!name) return res.status(400).json({ error: 'name_required', message: 'Choose the name to keep.' });
+    const params = [];
+    const where = groups.map(g => groupWhere(g, params)).join(' OR ');
+    const sales = (await query(`SELECT s.id, s.customer_name, s.customer_email, s.customer_phone FROM sales s WHERE (${where})`, params)).rows;
+    if (!sales.length) return res.status(404).json({ error: 'no_orders', message: 'No orders found for those customers.' });
+    const ids = sales.map(x => x.id);
+    // One real email for all of them (else they'd still be grouped apart).
+    const validEmail = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e || '').trim());
+    const email = validEmail(b.email) ? String(b.email).trim() : (sales.map(x => x.customer_email).find(validEmail) || null);
+    const phone = String(b.phone || '').trim() || sales.map(x => x.customer_phone).find(p => p && String(p).trim()) || null;
+    // Lowest price per part across every merged order.
+    const low = (await query(`SELECT si.product_id, MIN(si.unit_price)::numeric(12,2) AS p FROM sale_items si JOIN sales s ON s.id = si.sale_id
+        WHERE s.id = ANY($1) AND si.product_id IS NOT NULL AND si.unit_price > 0 AND s.is_estimate = false AND s.status NOT IN ('cancelled','refunded')
+        GROUP BY si.product_id`, [ids])).rows;
+    const nk = keyOf(name);
+    const before = (await query(`SELECT product_id, unit_price FROM customer_prices WHERE name_key = $1`, [nk])).rows;
+    await withTx(async (c) => {
+      await c.query(`UPDATE sales SET customer_name = $2, customer_email = $3, customer_phone = COALESCE(NULLIF(TRIM(customer_phone), ''), $4) WHERE id = ANY($1)`, [ids, name, email, phone]);
+      for (const r of low) {
+        await c.query(`INSERT INTO customer_prices (name_key, product_id, unit_price, source) VALUES ($1,$2,$3,'merge')
+          ON CONFLICT (name_key, product_id) DO UPDATE SET unit_price = LEAST(customer_prices.unit_price, EXCLUDED.unit_price), updated_at = now()`, [nk, r.product_id, r.p]);
+      }
+      const m = (await c.query(`INSERT INTO customer_merges (target, sources, moved, prices_before, created_by) VALUES ($1::jsonb,$2::jsonb,$3::jsonb,$4::jsonb,$5) RETURNING id`,
+        [JSON.stringify({ name, email, phone }), JSON.stringify(groups), JSON.stringify(sales), JSON.stringify(before), req.user.id])).rows[0];
+      res.locals.mergeId = m.id;
+    });
+    await audit(req, 'customer_merge', 'customer', null, { name, groups: groups.length, orders: ids.length, prices: low.length });
+    res.json({ ok: true, mergeId: res.locals.mergeId, orders: ids.length, prices: low.length, name, email });
+  } catch (e) { res.status(500).json({ error: 'merge_failed', message: e.message }); }
+});
+router.get('/from-sales/merges', requireAdmin, async (req, res) => {
+  await ensureMergeTables();
+  const rows = (await query(`SELECT m.id, m.target, m.sources, jsonb_array_length(m.moved) AS orders, m.created_at, m.undone_at, u.name AS by_name
+      FROM customer_merges m LEFT JOIN users u ON u.id = m.created_by ORDER BY m.created_at DESC LIMIT 20`)).rows;
+  res.json({ merges: rows });
+});
+router.post('/from-sales/merges/:id/undo', requireAdmin, async (req, res) => {
+  try {
+    await ensureMergeTables();
+    const m = (await query(`SELECT * FROM customer_merges WHERE id = $1`, [req.params.id])).rows[0];
+    if (!m) return res.status(404).json({ error: 'not_found' });
+    if (m.undone_at) return res.status(400).json({ error: 'already_undone', message: 'That merge was already undone.' });
+    await withTx(async (c) => {
+      for (const s of m.moved || []) await c.query(`UPDATE sales SET customer_name = $2, customer_email = $3, customer_phone = $4 WHERE id = $1`, [s.id, s.customer_name, s.customer_email, s.customer_phone]);
+      const nk = keyOf(m.target?.name);
+      await c.query(`DELETE FROM customer_prices WHERE name_key = $1`, [nk]);
+      for (const p of m.prices_before || []) await c.query(`INSERT INTO customer_prices (name_key, product_id, unit_price, source) VALUES ($1,$2,$3,'restored') ON CONFLICT DO NOTHING`, [nk, p.product_id, p.unit_price]);
+      await c.query(`UPDATE customer_merges SET undone_at = now() WHERE id = $1`, [m.id]);
+    });
+    await audit(req, 'customer_merge_undo', 'customer', null, { mergeId: m.id });
+    res.json({ ok: true, orders: (m.moved || []).length });
+  } catch (e) { res.status(500).json({ error: 'undo_failed', message: e.message }); }
+});
 
 // GET /api/customers/from-sales/orders?email=&name= — every order for one
 // customer, matched by email (preferred) or name. Powers the expand-row view.
