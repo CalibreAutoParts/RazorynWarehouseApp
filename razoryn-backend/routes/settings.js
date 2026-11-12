@@ -963,7 +963,7 @@ router.get('/ebay-limits', requireAdmin, async (req, res) => {
   const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
   const out = [];
   for (const s of stores) {
-    const row = { code: s.code, name: s.name, cap: caps[s.code] || null, refillAt: rules[s.code]?.refillAt ?? null, reserveGbp: rules[s.code]?.reserveGbp ?? null, limits: null, error: null, linked: 0, listedValue: null };
+    const row = { code: s.code, name: s.name, cap: caps[s.code] || null, refillAt: rules[s.code]?.refillAt ?? null, reserveGbp: rules[s.code]?.reserveGbp ?? null, tiers: rules[s.code]?.tiers || [], limits: null, error: null, linked: 0, listedValue: null };
     try { row.limits = await ebay.getSellingLimits(s.code, { fresh: req.query.fresh === '1' }); }
     catch (e) { row.error = e.message; }
     try {

@@ -9807,16 +9807,18 @@ function renderCustomers() {
         <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none" title="eBay-only buyers are hidden — they can only be contacted through eBay messages">
           <input type="checkbox" id="cust-ebay" ${State.custEbay?'checked':''}> Show eBay buyers
         </label>
+        <button class="btn btn-outline btn-sm" id="cust-merge-btn" onclick="custMergeOpen()" disabled title="Tick the same person entered under different names, then merge them into one">🔗 Merge selected</button>
+        <a href="#" onclick="custMergesShow();return false" style="font-size:12px">Recent merges</a>
         <select id="cust-sort" aria-label="Sort by" title="Sort by" style="padding:6px 8px;font-size:13px">
           ${[['spend','Top spenders'],['orders','Most orders'],['recent','Most recent']].map(([v,l])=>`<option value="${v}" ${State.custSort===v?'selected':''}>${l}</option>`).join('')}
         </select>
       </div>
       <div class="card"><div class="table-wrap"><table class="table" id="cust-table">
         <thead><tr>
-          <th>Customer</th><th>Contact</th><th class="num">Orders</th><th class="num">Total spent</th>
+          <th style="width:28px"></th><th>Customer</th><th>Contact</th><th class="num">Orders</th><th class="num">Total spent</th>
           <th>First order</th><th>Last order</th><th>Channels</th>
         </tr></thead>
-        <tbody id="cust-tbody"><tr><td colspan="7" style="text-align:center;padding:24px;color:var(--ink-soft)">Loading…</td></tr></tbody>
+        <tbody id="cust-tbody"><tr><td colspan="8" style="text-align:center;padding:24px;color:var(--ink-soft)">Loading…</td></tr></tbody>
       </table></div></div>
     </div>`;
   const search = el('cust-search');
@@ -9845,6 +9847,8 @@ async function loadCustomers() {
   try { data = await Api.get('/api/customers/from-sales?' + params.toString()); }
   catch (e) { tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:24px;color:var(--red)">Couldn't load customers: ${escapeHtml(e.message||'')}</td></tr>`; return; }
   const list = data.customers || [];
+  State.custList = list; State.custSel = new Set();
+  const mb = el('cust-merge-btn'); if (mb) { mb.disabled = true; mb.textContent = '🔗 Merge selected'; }
   const stats = el('cust-stats');
   if (stats) stats.innerHTML = `
     <div class="stat"><div class="label">Customers</div><div class="value">${(data.totals?.customers ?? list.length)}</div><div class="delta">unique buyers</div></div>
@@ -9854,6 +9858,7 @@ async function loadCustomers() {
     const key = c.email ? ('email=' + encodeURIComponent(c.email)) : ('name=' + encodeURIComponent(c.name || ''));
     const channels = [...new Set((c.channels || []).map(ch => CUST_CH_LABEL[ch] || ch))].join(', ');
     return `<tr class="cust-row" style="cursor:pointer" onclick="toggleCustomerOrders(this, '${escapeAttr(key)}')">
+      <td onclick="event.stopPropagation()"><input type="checkbox" onchange="custSelToggle(${list.indexOf(c)}, this.checked)" title="Select to merge"></td>
       <td><strong>${escapeHtml(c.name || '—')}</strong>${c.is_repeat ? ` <span style="background:var(--green,#16a34a);color:#fff;font-size:10px;font-weight:600;padding:1px 7px;border-radius:10px;margin-left:4px">Repeat</span>` : ''}</td>
       <td style="font-size:12px;color:var(--ink-soft)">${escapeHtml(c.email || '')}${c.ebay_relay ? ` <span class="pill" style="font-size:9px" title="eBay's relay address — eBay reads these emails, so the app never emails it. Message them on eBay.">eBay relay · no emails</span>` : ''}${c.phone ? `<br>${escapeHtml(c.phone)}` : ''}</td>
       <td class="num">${c.order_count}</td>
@@ -9865,6 +9870,46 @@ async function loadCustomers() {
   }).join('');
 }
 
+// ── Merge customers (same person, several names) ──
+function custSelToggle(i, on) {
+  State.custSel = State.custSel || new Set();
+  on ? State.custSel.add(i) : State.custSel.delete(i);
+  const b = el('cust-merge-btn'); if (b) { b.disabled = State.custSel.size < 2; b.textContent = State.custSel.size >= 2 ? `🔗 Merge ${State.custSel.size} selected` : '🔗 Merge selected'; }
+}
+function custMergeOpen() {
+  const sel = [...(State.custSel || [])].map(i => State.custList[i]).filter(Boolean);
+  if (sel.length < 2) return toast('Tick at least two customers', 'warn');
+  const tot = sel.reduce((a, c) => a + (+c.total_spend || 0), 0), orders = sel.reduce((a, c) => a + (c.order_count || 0), 0);
+  const emails = [...new Set(sel.map(c => c.email).filter(Boolean))];
+  modal({ title: `Merge ${sel.length} customers into one`, body: `
+    <div style="font-size:13px;margin-bottom:10px">Keep which name? (${orders} orders · ${gbp(tot)} in total)</div>
+    ${sel.map((c, i) => `<label style="display:flex;gap:8px;align-items:center;padding:6px 0;cursor:pointer"><input type="radio" name="cm-name" style="width:auto" value="${escapeAttr(c.name || '')}" ${i === 0 ? 'checked' : ''} onchange="el('cm-name').value=this.value">
+      <span><b>${escapeHtml(c.name || '—')}</b> <span style="color:var(--ink-soft);font-size:12px">${c.order_count} orders · ${gbp(c.total_spend)}${c.email ? ' · ' + escapeHtml(c.email) : ''}${c.phone ? ' · ' + escapeHtml(c.phone) : ''}</span></span></label>`).join('')}
+    <div class="field" style="margin-top:8px"><label>Name to keep</label><input id="cm-name" value="${escapeAttr(sel[0].name || '')}"></div>
+    ${emails.length > 1 ? `<div class="field"><label>Email to keep</label><select id="cm-email">${emails.map(e => `<option>${escapeHtml(e)}</option>`).join('')}</select></div>` : ''}
+    <div style="font-size:12px;color:var(--ink-soft);background:var(--bg-soft);border-radius:8px;padding:8px 10px">All their orders move to this one customer. For every part they've bought, the <b>lowest price</b> you charged them across these names becomes their customer price (pre-filled on quotes and manual sales). You can undo this from "Recent merges".</div>`,
+    actions: [{ label: 'Cancel', onClick: closeModal }, { label: '🔗 Merge', primary: true, onClick: async () => {
+      const name = (el('cm-name')?.value || '').trim(); if (!name) return toast('Enter the name to keep', 'warn');
+      try {
+        const r = await Api.post('/api/customers/from-sales/merge', { name, email: el('cm-email')?.value || emails[0] || null, groups: sel.map(c => ({ name: c.name, email: c.email })) });
+        closeModal(); toast(`Merged into ${r.name} — ${r.orders} orders, ${r.prices} customer price(s) kept at the lowest`, 'success', 8000);
+        loadCustomers();
+      } catch (e) { toast(e.data?.message || e.message, 'error'); }
+    } }] });
+}
+async function custMergesShow() {
+  let r; try { r = await Api.get('/api/customers/from-sales/merges'); } catch (e) { return toast(e.data?.message || e.message, 'error'); }
+  modal({ title: 'Recent customer merges', body: r.merges.length ? r.merges.map(m => `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px">
+      <div><b>${escapeHtml(m.target?.name || '')}</b> ← ${(m.sources || []).map(g => escapeHtml(g.name || g.email || '')).join(', ')}<div style="font-size:11px;color:var(--ink-soft)">${m.orders} orders · ${new Date(m.created_at).toLocaleString('en-GB')}${m.by_name ? ' · ' + escapeHtml(m.by_name) : ''}${m.undone_at ? ' · <b>undone</b>' : ''}</div></div>
+      ${m.undone_at ? '' : `<button class="btn btn-outline btn-sm" onclick="custMergeUndo(${m.id})">↶ Undo</button>`}</div>`).join('') : '<div style="color:var(--ink-soft)">No merges yet.</div>',
+    actions: [{ label: 'Close', onClick: closeModal }] });
+}
+async function custMergeUndo(id) {
+  if (!confirm('Undo this merge? The orders go back to their original names and the merged prices are removed.')) return;
+  try { const r = await Api.post(`/api/customers/from-sales/merges/${id}/undo`, {}); toast(`Undone — ${r.orders} orders restored`, 'success'); closeModal(); loadCustomers(); }
+  catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
+
 // Expand/collapse a customer row to show every order for that customer, fetched
 // lazily from the sales table on first open.
 async function toggleCustomerOrders(row, key) {
@@ -9872,7 +9917,7 @@ async function toggleCustomerOrders(row, key) {
   if (next && next.classList.contains('cust-detail')) { next.remove(); return; }
   const detail = document.createElement('tr');
   detail.className = 'cust-detail';
-  detail.innerHTML = `<td colspan="7" style="padding:0;background:var(--bg-soft)"><div style="padding:12px 16px;color:var(--ink-soft);font-size:12px">Loading orders…</div></td>`;
+  detail.innerHTML = `<td colspan="8" style="padding:0;background:var(--bg-soft)"><div style="padding:12px 16px;color:var(--ink-soft);font-size:12px">Loading orders…</div></td>`;
   row.after(detail);
   let data;
   try { data = await Api.get('/api/customers/from-sales/orders?' + key); }
@@ -13996,7 +14041,14 @@ function openStaffModal(id) {
       <div class="field"><label>Full name</label><input id="s-name" value="${u.name||''}"></div>
       <div class="field"><label>Username</label><input id="s-username" value="${u.username||''}" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. warehouse1"></div>
       <div class="field"><label>Email (optional)</label><input id="s-email" value="${u.email||''}"></div>
-      <div class="field"><label>Role</label><select id="s-role"><option value="warehouse" ${u.role==='warehouse'?'selected':''}>Warehouse</option><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option></select></div>
+      <div class="field"><label>Role</label><select id="s-role" onchange="const w=el('s-preset-wrap');if(w)w.style.display=this.value==='admin'?'none':''"><option value="warehouse" ${u.role==='warehouse'?'selected':''}>Warehouse</option><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option></select></div>
+      <div class="field" id="s-preset-wrap" ${u.role === 'admin' ? 'style="display:none"' : ''}><label>Access <span style="font-weight:400;color:var(--ink-soft)">— which pages they get (fine-tune afterwards on their card)</span></label>
+        <select id="s-preset">
+          ${id ? '<option value="">Keep their current access</option>' : ''}
+          <option value="pc" ${!id ? 'selected' : ''}>🖥 Warehouse PC — dispatch, eBay messages, stock check, labels, incoming, returns, print station, Quote Builder, VIN search, schedule, notes, key info</option>
+          <option value="handheld">📱 Handheld — stock check, locations, dispatch, returns, schedule (no prices)</option>
+          ${!id ? '<option value="">Basic (default warehouse access)</option>' : ''}
+        </select></div>
       <div class="field"><label>Password</label><input id="s-pwd" type="password" autocomplete="new-password" placeholder="${id ? 'Leave blank to keep current' : 'Set a password (min 8 chars)'}"></div>
       <div class="field" style="background:var(--bg-soft);border-radius:8px;padding:10px 12px">
         <label>📧 Emails to this user <span style="font-weight:400;color:var(--ink-soft);font-size:11px">— uses the email above</span></label>
@@ -14027,6 +14079,8 @@ function openStaffModal(id) {
           },
         };
         if (pwd) payload.password = pwd;
+        const preset = payload.role === 'warehouse' ? (el('s-preset')?.value || '') : '';
+        if (preset && STAFF_PRESETS[preset]) payload.permissions = { ...((id && State.staff.find(x => x.id == id)?.perms) || {}), ...STAFF_PRESETS[preset] };
         try {
           if (id) {
             await Api.patch('/api/staff/' + id, payload);
@@ -26680,22 +26734,38 @@ async function loadEbayLimits(fresh) {
       <label style="display:flex;align-items:center;gap:6px;font-size:12px" title="Monthly-limit accounts: raising quantities never uses the last £X of eBay's allowance — kept free for new and incoming stock">Keep £
         <input type="number" min="0" step="500" style="width:84px" id="ebay-reserve-${c}" value="${s.reserveGbp ?? ''}" placeholder="0"> free</label>
       <button class="btn btn-sm btn-primary" onclick="saveEbayCap('${c}', this)">Save</button>
+      <div style="flex-basis:100%;font-size:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-top:1px dashed var(--line);padding-top:8px" title="Dearer parts use more of the monthly £ allowance per unit — give them their own, lower limits">
+        <b>Dearer parts:</b><span id="ebay-tiers-${c}" style="display:contents">${(s.tiers || []).map(t => ebayTierRow(c, t)).join('')}</span>
+        <button class="btn btn-ghost btn-sm" onclick="el('ebay-tiers-${c}').insertAdjacentHTML('beforeend', ebayTierRow('${c}', {}))">+ price band</button>
+        <span style="color:var(--ink-soft)">e.g. over £200 → show at most 4, top up at 1</span>
+      </div>
       ${s.cap ? `<button class="btn btn-sm btn-outline" title="Push min(warehouse stock, cap) to every listing on this account now" onclick="applyEbayCap('${escapeAttr(s.code)}', this)">Apply to live listings</button>` : ''}
     </div>`;
-  }).join('') + `<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-sm btn-outline" onclick="loadEbayLimits(true)">↻ Re-check with eBay</button>
+  }).join('') + `<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-sm btn-outline" onclick="loadEbayLimits(true)" title="Asks eBay again how much of this month's selling allowance is left (items and £). It doesn't change any stock.">↻ Refresh eBay's allowance</button>
     ${r.stores.length > 1 ? `<button class="btn btn-sm btn-outline" onclick="copyEbayCapToAll()" title="Copy the first account's three settings to every account">Same settings for all accounts</button>` : ''}</div>
     <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">Example: show at most <b>15</b>, top up at <b>3</b>, keep <b>£30,000</b> free → each part lists up to 15; when it sells down to 3 it goes back up to 15 (if you have the stock); quantities are never raised into the last £30,000 of the monthly allowance, so new stock can always be listed. The warehouse stock itself never changes.</div>`;
   PC_EBL = r.stores;
 }
 
 let PC_EBL = [];
+function ebayTierRow(c, t) {
+  return `<span data-tier="${c}" style="display:inline-flex;gap:4px;align-items:center;border:1px solid var(--line);border-radius:6px;padding:2px 6px">
+    over £<input type="number" min="0" step="10" style="width:70px" data-t="over" value="${t.over ?? ''}">
+    → at most <input type="number" min="1" step="1" style="width:52px" data-t="max" value="${t.max ?? ''}">
+    top up at <input type="number" min="0" step="1" style="width:48px" data-t="refillAt" value="${t.refillAt ?? ''}">
+    <button class="btn btn-ghost btn-sm" style="padding:0 5px" onclick="this.parentElement.remove()" title="Remove band">✕</button></span>`;
+}
+function ebayTiersOf(c) {
+  return [...document.querySelectorAll(`[data-tier="${c}"]`)].map(r => ({ over: r.querySelector('[data-t=over]').value, max: r.querySelector('[data-t=max]').value, refillAt: r.querySelector('[data-t=refillAt]').value }))
+    .filter(t => t.over !== '' && t.max !== '');
+}
 async function saveEbayCap(code, btn) {
   const v = el('ebay-cap-' + code)?.value;
   const refillAt = el('ebay-refill-' + code)?.value, reserveGbp = el('ebay-reserve-' + code)?.value;
   if (v && refillAt !== '' && parseInt(refillAt) >= parseInt(v)) return toast('"Top up at" must be lower than "Show at most"', 'warn');
   if (btn) btn.disabled = true;
   try {
-    await Api.put('/api/settings/ebay-limits', { caps: { [code]: v ? parseInt(v) : null }, rules: { [code]: { refillAt, reserveGbp } } });
+    await Api.put('/api/settings/ebay-limits', { caps: { [code]: v ? parseInt(v) : null }, rules: { [code]: { refillAt, reserveGbp, tiers: ebayTiersOf(code) } } });
     toast(v ? `Saved — at most ${parseInt(v)}${refillAt !== '' ? `, topped up at ${refillAt}` : ''}${reserveGbp ? `, £${Number(reserveGbp).toLocaleString('en-GB')} kept free` : ''}` : 'Cap removed — full warehouse stock will show', 'success');
     loadEbayLimits();
   } catch (e) { toast(e.data?.message || e.message, 'error'); if (btn) btn.disabled = false; }
@@ -26704,9 +26774,10 @@ async function copyEbayCapToAll() {
   const first = PC_EBL[0]; if (!first) return;
   const g = id => el(id + first.code)?.value ?? '';
   const cap = g('ebay-cap-'), refillAt = g('ebay-refill-'), reserveGbp = g('ebay-reserve-');
-  if (!confirm(`Set every eBay account to: show at most ${cap || 'all'}, top up at ${refillAt || '—'}, keep £${reserveGbp || 0} free?`)) return;
+  if (!confirm(`Set every eBay account to: show at most ${cap || 'all'}, top up at ${refillAt || '—'}, keep £${reserveGbp || 0} free${ebayTiersOf(first.code).length ? ', and the same price bands' : ''}?`)) return;
   const caps = {}, rules = {};
-  for (const s of PC_EBL) { caps[s.code] = cap ? parseInt(cap) : null; rules[s.code] = { refillAt, reserveGbp }; }
+  const tiers = ebayTiersOf(first.code);
+  for (const s of PC_EBL) { caps[s.code] = cap ? parseInt(cap) : null; rules[s.code] = { refillAt, reserveGbp, tiers }; }
   try { await Api.put('/api/settings/ebay-limits', { caps, rules }); toast('Saved for all accounts', 'success'); loadEbayLimits(); }
   catch (e) { toast(e.data?.message || e.message, 'error'); }
 }

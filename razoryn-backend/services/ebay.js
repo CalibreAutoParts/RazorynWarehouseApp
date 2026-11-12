@@ -602,7 +602,19 @@ async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
   const code = resolveStore(storeArg)?.code;
   let qty = await capLib.applyCap(quantity, code);
   let limitedBy = qty < asked ? 'qty_cap' : null;
-  const rules = await capLib.rulesFor(code);
+  let rules = await capLib.rulesFor(code);
+  // Price band (dearer parts): its own max + top-up level.
+  if (rules.tiers && rules.tiers.length) {
+    try {
+      const pr = (await require('../db').query(`SELECT p.price_ebay FROM mirror_links ml JOIN products p ON p.shopify_product_id = ml.shopify_product_id::text
+          WHERE ml.ebay_item_id = $1 LIMIT 1`, [String(itemId)])).rows[0];
+      const tier = capLib.tierFor(rules, pr?.price_ebay);
+      if (tier) {
+        if (qty > tier.max) { qty = tier.max; limitedBy = 'price_band'; }
+        rules = { ...rules, refillAt: tier.refillAt != null ? tier.refillAt : rules.refillAt };
+      }
+    } catch (_) { /* no price → base rules */ }
+  }
   // Accounts with monthly selling limits: raising a listing's quantity uses up
   // allowance too — only raise it as far as the allowance left covers, minus
   // the amount kept free. With a top-up level, a listing is only raised once
