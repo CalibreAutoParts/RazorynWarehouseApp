@@ -866,6 +866,9 @@
   /* Hide on mobile - admin-only desktop features */
   .admin-only { display: none; }
   body.is-admin .admin-only { display: initial; }
+  /* Cards / blocks are block elements — 'initial' made admin-only cards inline,
+     so they lost their box (e.g. Settings → Clock-in QR, VIN Search portal). */
+  body.is-admin div.admin-only, body.is-admin section.admin-only { display: block; }
   body.is-admin .nav-item.admin-only { display: flex; }
   /* Kiosk view — a stripped-back, customer-safe mode. Hides all money/admin info
      (even for an admin) and limits the nav to a few operational pages. Marked
@@ -24374,7 +24377,7 @@ function settingsTabFor(title) {
   if (/quote pricing|price sync/.test(t)) return 'pricing';
   if (/ebay|selling limits|stock cap|category audit|ai suggestions/.test(t)) return 'ebay';
   if (/shopify|storefront/.test(t)) return 'shopify';
-  if (/company|invoice|logo|message templates|channel colours|shops — business/.test(t)) return 'business';
+  if (/company|invoice|logo|message templates|channel colours|shops — business|review/.test(t)) return 'business';
   if (/dropfleet|shipping|carton|returns/.test(t)) return 'delivery';
   if (/clock|stock-take|vin search|knowledge|sounds/.test(t)) return 'warehouse';
   return 'apps';
