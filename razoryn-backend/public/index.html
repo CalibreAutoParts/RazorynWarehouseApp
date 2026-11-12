@@ -24309,6 +24309,31 @@ function renderSettings() {
       </div>
 
       <div class="card admin-only" style="margin-bottom:16px">
+        <div class="card-head"><h3>⭐ Review requests — Trustpilot &amp; Google</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">One “How did we do?” email per order, asking for a review on Trustpilot and/or Google (plus links to rate the parts they bought). It goes the set number of days after the order is <strong>delivered</strong> or <strong>collected</strong> — or, if there's never a delivery scan, that many days after dispatch. Never sent to eBay or OnBuy buyers, for cancelled or refunded orders, more than once in 60 days to the same customer, or to anyone who's unsubscribed.</p>
+          <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="rr-enabled"><span></span></label> Send review requests</label></div>
+          <div class="field"><label>Trustpilot review link</label><input id="rr-trustpilot" placeholder="https://uk.trustpilot.com/evaluate/yourdomain.co.uk"></div>
+          <div class="field"><label>Google review link <span style="font-weight:400;color:var(--ink-soft)">— Google Business Profile → “Ask for reviews” → copy link</span></label><input id="rr-google" placeholder="https://g.page/r/…/review"></div>
+          <div class="grid-2" style="grid-template-columns:1fr 1fr 1fr">
+            <div class="field"><label>Days after delivery</label><input id="rr-days-delivered" type="number" min="0" max="30"></div>
+            <div class="field"><label>Days after collection</label><input id="rr-days-collected" type="number" min="0" max="30"></div>
+            <div class="field"><label>No delivery scan: days after dispatch</label><input id="rr-days-fallback" type="number" min="1" max="30"></div>
+          </div>
+          <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="rr-direct"><span></span></label> Include direct sales (cash / bank / card) that have an email address</label></div>
+          <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="rr-products"><span></span></label> Add “rate this part” links to the product pages</label></div>
+          <div id="rr-status" style="font-size:13px;color:var(--ink-soft);margin:6px 0 12px"></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-primary" onclick="saveReviewRequests(this)">Save review requests</button>
+            <button class="btn btn-outline btn-sm" onclick="previewReviewRequest(this)">👁 Preview email</button>
+            <button class="btn btn-outline btn-sm" onclick="testReviewRequest(this)">✉ Send me a test</button>
+            <button class="btn btn-outline btn-sm" onclick="dueReviewRequests(this)">📋 Who's due now</button>
+          </div>
+          <div id="rr-preview" style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <div class="card admin-only" style="margin-bottom:16px">
         <div class="card-head"><h3>🔎 VIN Search portal</h3></div>
         <div class="card-body">
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">The external VIN lookup portal + its shared login. Everyone gets a <strong>VIN Search</strong> item under Resources (computer + handheld) with a one-tap "open portal" button and the login ready to copy.</p>
@@ -24347,7 +24372,7 @@ function renderSettings() {
   loadFitmentConfig();
   loadDispatchMsgConfig();
   settingsMakeCollapsible();
-  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadClockQr(); loadAiSettings(); loadEbayLimits(); loadStoreVat(); loadChannelColors(); }
+  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadReviewRequests(); loadClockQr(); loadAiSettings(); loadEbayLimits(); loadStoreVat(); loadChannelColors(); }
   // Re-attach to a category audit that's running (or finished) in the background.
   Api.get('/api/listings/category-audit/status?slim=1').then(s => {
     if (!s || s.state === 'idle') return;
@@ -24483,6 +24508,81 @@ async function saveReturnsNotify(btn) {
     toast(r.emails.length ? `Saved — ${r.emails.length} admin${r.emails.length > 1 ? 's' : ''} will get return emails` : 'Saved — every active admin will get return emails', 'success');
   } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
   if (btn) btn.disabled = false;
+}
+
+// ── Review requests ("How did we do?" emails) ──────────────────────────────
+async function loadReviewRequests() {
+  try {
+    const r = await Api.get('/api/review-requests');
+    const c = r.config || {};
+    if (!el('rr-enabled')) return;
+    el('rr-enabled').checked = !!c.enabled;
+    el('rr-trustpilot').value = c.trustpilotUrl || '';
+    el('rr-google').value = c.googleUrl || '';
+    el('rr-days-delivered').value = c.daysAfterDelivery;
+    el('rr-days-collected').value = c.daysAfterCollection;
+    el('rr-days-fallback').value = c.fallbackDays;
+    el('rr-direct').checked = !!c.includeDirect;
+    el('rr-products').checked = !!c.askProductReviews;
+    const s = r.stats || {};
+    el('rr-status').innerHTML = (r.emailConfigured ? '' : '⚠️ Email sending isn\'t set up on this server (RESEND_API_KEY), so nothing will go out.<br>')
+      + `${s.sent30 || 0} sent in the last 30 days · ${s.sentAll || 0} all time · ${s.optouts || 0} unsubscribed${s.failed ? ` · ${s.failed} failed` : ''} · sends between ${c.sendFrom}:00 and ${c.sendTo}:00 UK time`;
+  } catch (_) {}
+}
+function reviewRequestForm() {
+  return {
+    enabled: el('rr-enabled').checked,
+    trustpilotUrl: el('rr-trustpilot').value.trim(),
+    googleUrl: el('rr-google').value.trim(),
+    daysAfterDelivery: el('rr-days-delivered').value,
+    daysAfterCollection: el('rr-days-collected').value,
+    fallbackDays: el('rr-days-fallback').value,
+    includeDirect: el('rr-direct').checked,
+    askProductReviews: el('rr-products').checked,
+  };
+}
+async function saveReviewRequests(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/review-requests', reviewRequestForm());
+    toast(r.config.enabled ? 'Saved — review requests are ON' : 'Saved — review requests are off', 'success');
+    loadReviewRequests();
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
+}
+async function previewReviewRequest(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/review-requests/preview', reviewRequestForm());
+    const box = el('rr-preview');
+    box.innerHTML = `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:6px">Subject: <strong></strong> <span style="font-weight:400">(sample order)</span></div>
+      <iframe title="Review email preview" style="width:100%;height:620px;border:1px solid var(--line);border-radius:8px;background:#fff"></iframe>`;
+    box.querySelector('strong').textContent = r.subject;
+    box.querySelector('iframe').srcdoc = r.html;
+  } catch (e) { toast('Preview failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
+}
+async function testReviewRequest(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/review-requests/test', {});
+    toast(`Test sent to ${r.to} (uses the saved links)`, 'success');
+  } catch (e) { toast('Test failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
+}
+async function dueReviewRequests(btn) {
+  if (btn) btn.disabled = true;
+  const box = el('rr-preview');
+  try {
+    const r = await Api.post('/api/review-requests/run', { dryRun: true });
+    const why = { no_review_links: 'Add a Trustpilot or Google link and save first.' };
+    if (typeof r.skipped === 'string') { box.innerHTML = `<p style="font-size:13px">${escapeHtml(why[r.skipped] || r.skipped)}</p>`; return; }
+    const label = { delivered: 'Delivered', collected: 'Collected', no_delivery_scan: 'No delivery scan' };
+    const rows = (r.due || []).map(d => `<tr><td style="padding:4px 8px 4px 0">${escapeHtml(d.order)}</td><td style="padding:4px 8px">${escapeHtml(label[d.reason] || d.reason)}</td><td style="padding:4px 8px">${d.since ? new Date(d.since).toLocaleDateString('en-GB') : ''}</td></tr>`).join('');
+    box.innerHTML = `<p style="font-size:13px;margin:0 0 6px"><strong>${(r.due || []).length}</strong> due now · ${r.waiting || 0} waiting for their day · ${r.skipped || 0} won't be asked (cancelled, refunded, unsubscribed or asked recently)${el('rr-enabled').checked ? ' — the due ones go out at the next hourly run in sending hours.' : ' — switch on and save to send them.'}</p>`
+      + (rows ? `<table style="font-size:13px;border-collapse:collapse"><thead><tr><th style="text-align:left;padding:4px 8px 4px 0">Order</th><th style="text-align:left;padding:4px 8px">Why</th><th style="text-align:left;padding:4px 8px">Since</th></tr></thead><tbody>${rows}</tbody></table>` : '');
+  } catch (e) { toast('Check failed: ' + (e.data?.message || e.message), 'error'); }
+  finally { if (btn) btn.disabled = false; }
 }
 
 async function loadVinSearchSettings() {

@@ -1481,6 +1481,46 @@ async function applyProductSeo(productGid, { seoTitle, seoDescription, handle, c
 // Write a product's review rating + count metafields (reviews.rating /
 // reviews.rating_count). Storefront themes read exactly these for star displays
 // and aggregateRating JSON-LD. productId may be numeric or a GID.
+// Delivery state + line items for a batch of orders — used by the "how did we
+// do?" review-request emails (lib/review-requests.js). Returns a Map keyed by the
+// numeric order id: { name, firstName, cancelled, deliveredAt, pickedUpAt, items }.
+async function getOrdersForReview(orderIds) {
+  const out = new Map();
+  if (!isConfigured()) return out;
+  const ids = [...new Set((orderIds || []).map(x => String(x).split('/').pop()).filter(Boolean))];
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50).map(id => `gid://shopify/Order/${id}`);
+    const d = await gqlOrThrow(`query($ids: [ID!]!) { nodes(ids: $ids) { ... on Order {
+      id name cancelledAt customer { firstName }
+      fulfillments(first: 10) { displayStatus deliveredAt createdAt }
+      lineItems(first: 20) { nodes { title quantity
+        product { handle onlineStoreUrl featuredMedia { preview { image { url } } } } } }
+    } } }`, { ids: chunk });
+    for (const o of (d.nodes || [])) {
+      if (!o || !o.id) continue;
+      const fl = o.fulfillments || [];
+      const delivered = fl.filter(f => f.displayStatus === 'DELIVERED' || f.deliveredAt);
+      const picked = fl.filter(f => f.displayStatus === 'PICKED_UP');
+      const latest = (arr, key) => arr.map(f => f[key]).filter(Boolean).sort().pop() || null;
+      out.set(o.id.split('/').pop(), {
+        name: o.name || null,
+        firstName: o.customer?.firstName || '',
+        cancelled: !!o.cancelledAt,
+        deliveredAt: delivered.length ? (latest(delivered, 'deliveredAt') || latest(delivered, 'createdAt')) : null,
+        pickedUpAt: picked.length ? latest(picked, 'createdAt') : null,
+        items: (o.lineItems?.nodes || []).map(li => ({
+          title: li.title,
+          qty: li.quantity || 1,
+          handle: li.product?.handle || null,
+          url: li.product?.onlineStoreUrl || null,
+          image: li.product?.featuredMedia?.preview?.image?.url || null,
+        })),
+      });
+    }
+  }
+  return out;
+}
+
 async function setProductRating(productId, rating, count) {
   if (!isConfigured()) throw new Error('shopify_not_configured');
   const gid = String(productId).startsWith('gid://') ? productId : `gid://shopify/Product/${productId}`;
@@ -1512,6 +1552,7 @@ module.exports = {
   searchProducts,
   setProductTag,
   setProductRating,
+  getOrdersForReview,
   getAccessToken,
   getProductSeo,
   findTaxonomyCategory,

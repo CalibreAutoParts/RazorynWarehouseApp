@@ -10,7 +10,8 @@
     "migrate": "node scripts/migrate.js",
     "seed": "node scripts/seed.js",
     "sync:run": "node scripts/sync-cron.js",
-    "competitors:run": "node scripts/competitor-cron.js"
+    "competitors:run": "node scripts/competitor-cron.js",
+    "test:review-requests": "node scripts/test-review-requests.js"
   },
   "engines": {
     "node": ">=20"
