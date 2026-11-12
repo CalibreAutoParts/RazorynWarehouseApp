@@ -1539,6 +1539,41 @@ async function setProductRating(productId, rating, count) {
   return true;
 }
 
+// Product id + title for a storefront handle (reviews imported from other apps
+// only carry the handle). null when no such product.
+async function findProductByHandle(handle) {
+  if (!isConfigured() || !handle) return null;
+  const safe = String(handle).replace(/[^a-z0-9-]/gi, '');
+  if (!safe) return null;
+  const d = await gqlOrThrow(`query($q: String!) { products(first: 1, query: $q) { nodes { id handle title } } }`, { q: `handle:${safe}` });
+  const p = (d.products?.nodes || []).find(x => x.handle === safe);
+  return p ? { id: p.id.split('/').pop(), handle: p.handle, title: p.title } : null;
+}
+
+// Our own product reviews (lib/product-reviews.js buildProductPayload) onto the
+// product: razoryn.reviews (json, rendered by the theme) + the combined
+// reviews.rating / reviews.rating_count (website reviews + eBay feedback). With
+// nothing left to show, the rating metafields are removed rather than left stale.
+async function setProductReviews(productId, payload) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const gid = String(productId).startsWith('gid://') ? productId : `gid://shopify/Product/${productId}`;
+  const metafields = [{ ownerId: gid, namespace: 'razoryn', key: 'reviews', type: 'json', value: JSON.stringify(payload) }];
+  if (payload.total_count > 0) {
+    metafields.push(
+      { ownerId: gid, namespace: 'reviews', key: 'rating', type: 'rating',
+        value: JSON.stringify({ value: payload.total_avg.toFixed(1), scale_min: '1.0', scale_max: '5.0' }) },
+      { ownerId: gid, namespace: 'reviews', key: 'rating_count', type: 'number_integer', value: String(payload.total_count) });
+  }
+  const d = await gqlOrThrow(`mutation($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { userErrors { field message } } }`, { m: metafields });
+  const errs = d.metafieldsSet?.userErrors || [];
+  if (errs.length) throw new Error(errs.map(e => `${(e.field || []).join('.')}: ${e.message}`).join('; '));
+  if (!(payload.total_count > 0)) {
+    await gqlOrThrow(`mutation($m: [MetafieldIdentifierInput!]!) { metafieldsDelete(metafields: $m) { userErrors { field message } } }`,
+      { m: [{ ownerId: gid, namespace: 'reviews', key: 'rating' }, { ownerId: gid, namespace: 'reviews', key: 'rating_count' }] });
+  }
+  return true;
+}
+
 module.exports = {
   isConfigured,
   getOrderShipped,
@@ -1553,6 +1588,8 @@ module.exports = {
   setProductTag,
   setProductRating,
   getOrdersForReview,
+  setProductReviews,
+  findProductByHandle,
   getAccessToken,
   getProductSeo,
   findTaxonomyCategory,

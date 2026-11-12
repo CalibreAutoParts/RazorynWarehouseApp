@@ -24334,6 +24334,27 @@ function renderSettings() {
       </div>
 
       <div class="card admin-only" style="margin-bottom:16px">
+        <div class="card-head"><h3>💬 Product reviews</h3></div>
+        <div class="card-body">
+          <p style="color:var(--ink-soft);font-size:13px;margin-bottom:10px">Reviews customers leave on the website (product page form, or the “rate this part” links in review emails). They're kept here and copied onto each product in Shopify, so they're yours whatever apps you use. Verified buyers are matched to their order. Moderate for spam, abuse or personal details only — low ratings must stay up.</p>
+          <div class="field"><label style="display:flex;align-items:center;gap:10px"><label class="switch"><input type="checkbox" id="pr-auto" onchange="prSaveSettings()"><span></span></label> Publish verified buyers' reviews straight away (others wait here for a check)</label></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+            <select id="pr-status" onchange="loadProductReviews()" style="width:auto">
+              <option value="pending">Waiting for a check</option><option value="published">Published</option><option value="hidden">Hidden</option><option value="all">All</option>
+            </select>
+            <span id="pr-counts" style="font-size:13px;color:var(--ink-soft)"></span>
+          </div>
+          <div id="pr-list" style="margin-bottom:12px"></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-outline btn-sm" onclick="prImportJudgeMe(this)">⇩ Import from Judge.me</button>
+            <label class="btn btn-outline btn-sm" style="cursor:pointer">⇩ Import CSV (SendWILL / TrustWILL / other)<input type="file" accept=".csv,text/csv" style="display:none" onchange="prImportCsv(this)"></label>
+            <button class="btn btn-outline btn-sm" onclick="prRepublish(this)">↻ Rebuild product pages</button>
+          </div>
+          <div id="pr-import-result" style="font-size:13px;margin-top:8px"></div>
+        </div>
+      </div>
+
+      <div class="card admin-only" style="margin-bottom:16px">
         <div class="card-head"><h3>🔎 VIN Search portal</h3></div>
         <div class="card-body">
           <p style="color:var(--ink-soft);font-size:13px;margin-bottom:12px">The external VIN lookup portal + its shared login. Everyone gets a <strong>VIN Search</strong> item under Resources (computer + handheld) with a one-tap "open portal" button and the login ready to copy.</p>
@@ -24372,7 +24393,7 @@ function renderSettings() {
   loadFitmentConfig();
   loadDispatchMsgConfig();
   settingsMakeCollapsible();
-  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadReviewRequests(); loadClockQr(); loadAiSettings(); loadEbayLimits(); loadStoreVat(); loadChannelColors(); }
+  if (State.user?.role === 'admin') { loadShippingSettingsUI(); loadVinSearchSettings(); loadReturnsNotify(); loadReviewRequests(); loadProductReviews(); loadClockQr(); loadAiSettings(); loadEbayLimits(); loadStoreVat(); loadChannelColors(); }
   // Re-attach to a category audit that's running (or finished) in the background.
   Api.get('/api/listings/category-audit/status?slim=1').then(s => {
     if (!s || s.state === 'idle') return;
@@ -24583,6 +24604,90 @@ async function dueReviewRequests(btn) {
       + (rows ? `<table style="font-size:13px;border-collapse:collapse"><thead><tr><th style="text-align:left;padding:4px 8px 4px 0">Order</th><th style="text-align:left;padding:4px 8px">Why</th><th style="text-align:left;padding:4px 8px">Since</th></tr></thead><tbody>${rows}</tbody></table>` : '');
   } catch (e) { toast('Check failed: ' + (e.data?.message || e.message), 'error'); }
   finally { if (btn) btn.disabled = false; }
+}
+
+// ── Product reviews ─────────────────────────────────────────────────────────
+async function loadProductReviews() {
+  const box = el('pr-list'); if (!box) return;
+  const status = el('pr-status')?.value || 'pending';
+  try {
+    const r = await Api.get('/api/product-reviews?status=' + encodeURIComponent(status));
+    if (el('pr-auto')) el('pr-auto').checked = !!r.settings?.autoPublishVerified;
+    const c = r.counts || {};
+    el('pr-counts').textContent = `${c.pending || 0} waiting · ${c.published || 0} published · ${c.hidden || 0} hidden`;
+    const stars = n => '★★★★★'.slice(0, n) + '☆☆☆☆☆'.slice(0, 5 - n);
+    const base = 'https://' + (State.brand?.domain || 'razoryn.co.uk');
+    box.innerHTML = (r.reviews || []).length ? r.reviews.map(v => `
+      <div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+          <div><span style="color:#e6a700;letter-spacing:1px">${stars(v.rating)}</span>
+            <strong style="margin-left:6px">${escapeHtml(v.title || '')}</strong></div>
+          <div style="font-size:12px;color:var(--ink-soft)">${new Date(v.created_at).toLocaleDateString('en-GB')} · ${escapeHtml(v.status)}</div>
+        </div>
+        <div style="font-size:13px;margin:4px 0;white-space:pre-wrap">${escapeHtml(v.body)}</div>
+        <div style="font-size:12px;color:var(--ink-soft)">${escapeHtml(v.author_name || 'Anonymous')}${v.author_email ? ' &lt;' + escapeHtml(v.author_email) + '&gt;' : ''}
+          ${v.verified ? ' · <span style="color:#1a7f37;font-weight:600">✔ Verified buyer</span>' : ' · not matched to an order'}
+          · ${v.is_shop_review ? 'Shop review' : (v.product_handle ? `<a href="${base}/products/${encodeURIComponent(v.product_handle)}" target="_blank" rel="noopener">${escapeHtml(v.product_title || v.product_handle)}</a>` : escapeHtml(v.product_title || 'Product not found'))}
+          · ${escapeHtml(v.source)}</div>
+        ${v.reply ? `<div style="font-size:12px;margin-top:4px;padding-left:8px;border-left:3px solid var(--line)">Our reply: ${escapeHtml(v.reply)}</div>` : ''}
+        <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+          ${v.status !== 'published' ? `<button class="btn btn-primary btn-sm" onclick="prModerate(${v.id},'publish',this)">Publish</button>` : ''}
+          ${v.status !== 'hidden' ? `<button class="btn btn-outline btn-sm" onclick="prModerate(${v.id},'hide',this)">Hide</button>` : ''}
+          <button class="btn btn-outline btn-sm" onclick="prReply(${v.id},this)">Reply</button>
+          <button class="btn btn-outline btn-sm" onclick="if(confirm('Delete this review for good?'))prModerate(${v.id},'delete',this)">Delete</button>
+        </div>
+      </div>`).join('') : `<p style="font-size:13px;color:var(--ink-soft)">Nothing here.</p>`;
+  } catch (e) { box.innerHTML = `<p style="font-size:13px">Couldn't load reviews: ${escapeHtml(e.data?.message || e.message)}</p>`; }
+}
+async function prModerate(id, action, btn, reply) {
+  if (btn) btn.disabled = true;
+  try {
+    await Api.post(`/api/product-reviews/${id}/moderate`, { action, reply });
+    toast({ publish: 'Published — it\'s on the product page', hide: 'Hidden', delete: 'Deleted', reply: 'Reply saved' }[action] || 'Done', 'success');
+    loadProductReviews();
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); if (btn) btn.disabled = false; }
+}
+function prReply(id, btn) {
+  const text = prompt('Your public reply (shown under the review). Leave empty to remove it:');
+  if (text === null) return;
+  prModerate(id, 'reply', btn, text);
+}
+async function prSaveSettings() {
+  try {
+    await Api.post('/api/product-reviews/settings', { autoPublishVerified: !!el('pr-auto')?.checked });
+    toast('Saved', 'success');
+  } catch (e) { toast('Save failed: ' + (e.data?.message || e.message), 'error'); }
+}
+function prImportSummary(r) {
+  return `Imported ${r.imported || 0} new, updated ${r.updated || 0}` + (r.skipped ? `, skipped ${r.skipped} (no rating or text)` : '')
+    + (r.unmatched ? `, ${r.unmatched} couldn't be matched to a product (kept, not shown)` : '') + ` — ${r.products || 0} product page(s) updated.`;
+}
+async function prImportJudgeMe(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/product-reviews/import', { judgeme: true });
+    el('pr-import-result').textContent = 'Judge.me: ' + prImportSummary(r);
+    el('pr-status').value = 'all'; loadProductReviews();
+  } catch (e) { toast('Import failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
+}
+async function prImportCsv(input) {
+  const f = input.files && input.files[0]; if (!f) return;
+  try {
+    const csv = await f.text();
+    const r = await Api.post('/api/product-reviews/import', { csv });
+    el('pr-import-result').textContent = f.name + ': ' + prImportSummary(r);
+    el('pr-status').value = 'all'; loadProductReviews();
+  } catch (e) { toast('Import failed: ' + (e.data?.message || e.message), 'error'); }
+  input.value = '';
+}
+async function prRepublish(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await Api.post('/api/product-reviews/republish', {});
+    toast(`Rebuilt ${r.ok} product page(s)${r.failed ? `, ${r.failed} failed` : ''}`, r.failed ? 'error' : 'success');
+  } catch (e) { toast('Failed: ' + (e.data?.message || e.message), 'error'); }
+  if (btn) btn.disabled = false;
 }
 
 async function loadVinSearchSettings() {

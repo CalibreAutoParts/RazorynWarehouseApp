@@ -164,8 +164,10 @@ function productUrl(item) {
   if (item.handle && brand.domain) return `https://${brand.domain}/products/${item.handle}`;
   return null;
 }
-function reviewLink(url) {
-  return url + (url.includes('?') ? '&' : '?') + 'review=1#rz-reviews';
+// Product page with the review form open. `token` (signed order id) marks the
+// review as a verified purchase without asking for their email again.
+function reviewLink(url, token) {
+  return url + (url.includes('?') ? '&' : '?') + 'review=1' + (token ? `&rt=${encodeURIComponent(token)}` : '') + '#rz-reviews';
 }
 function button(href, label, bg) {
   return `<a href="${esc(href)}" style="display:inline-block;background:${bg};color:#ffffff;text-decoration:none;padding:13px 22px;border-radius:8px;font-weight:700;font-size:15px;margin:0 8px 10px 0">${label}</a>`;
@@ -176,7 +178,7 @@ function button(href, label, bg) {
  *           reason:string, cfg:object, optout:string, company?:object }} o
  * @returns {{ subject:string, html:string }}
  */
-function buildReviewEmail({ firstName, orderRef, items = [], reason, cfg, optout, company = {} }) {
+function buildReviewEmail({ firstName, orderRef, items = [], reason, cfg, optout, company = {}, reviewToken = null }) {
   const name = brand.name || 'Razoryn e-Parts';
   const accent = brand.primaryColor || '#c8202d';
   const hi = firstName ? `Hi ${esc(firstName)},` : 'Hi,';
@@ -203,7 +205,7 @@ function buildReviewEmail({ firstName, orderRef, items = [], reason, cfg, optout
             ? `<img src="${esc(i.image)}" width="48" height="48" alt="" style="display:block;width:48px;height:48px;object-fit:cover;border-radius:6px;border:1px solid #eee">`
             : ''}</td>
           <td style="padding:8px 0;border-top:1px solid #eee;font-size:14px;vertical-align:middle">${esc(i.title)}<br>
-            <a href="${esc(reviewLink(i.link))}" style="color:${accent};font-weight:700;text-decoration:none">&#9734;&#9734;&#9734;&#9734;&#9734; Rate this part &rarr;</a></td>
+            <a href="${esc(reviewLink(i.link, reviewToken))}" style="color:${accent};font-weight:700;text-decoration:none">&#9734;&#9734;&#9734;&#9734;&#9734; Rate this part &rarr;</a></td>
         </tr>`).join('')}
       </table>` : '';
 
@@ -321,6 +323,7 @@ async function runReviewRequests({ dryRun = false, force = false, limit = 25 } =
     const built = buildReviewEmail({
       firstName: (info && info.firstName) ? firstNameOf(info.firstName) : firstNameOf(sale.customer_name),
       orderRef: saleRef(sale, info), items, reason: timing.reason, cfg, optout: optoutUrl(to), company,
+      reviewToken: require('./product-reviews').signSaleToken(sale.id),
     });
     out.due.push({ saleId: sale.id, order: saleRef(sale, info), email: to, reason: timing.reason, since: timing.since });
     if (dryRun) { emailedThisRun.add(to); continue; }
