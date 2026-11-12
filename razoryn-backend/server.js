@@ -125,6 +125,7 @@ app.use('/api/desktop',      require('./routes/desktop'));
 app.use('/api/competitors',  require('./routes/competitors'));
 app.use('/api/reviews',      require('./routes/reviews'));
 app.use('/api/review-requests', require('./routes/review-requests'));   // "how did we do?" emails (+ public opt-out link)
+app.use('/api/product-reviews', require('./routes/product-reviews'));   // our own product reviews (+ public submit for the product page)
 // PUBLIC storefront endpoints (no login, CORS open) — server-side tracking relay
 // + back-in-stock signups. Their routers set their own CORS headers per request.
 app.use('/api/track',        require('./routes/track'));
@@ -771,6 +772,8 @@ if (cron.validate(reviewsCronExpr)) {
 // dispatch with no delivery scan). Off until switched on in Settings → Review
 // requests; only sends inside the configured UK daytime hours.
 require('./lib/review-requests').ensureSchema().catch(e => console.warn('[review-requests] schema:', e.message));
+require('./lib/product-reviews').ensureSchema().catch(e => console.warn('[product-reviews] schema:', e.message));
+setTimeout(() => { require('./lib/product-reviews').importJudgeMeOnce().catch(e => console.warn('[product-reviews] Judge.me import:', e.message)); }, 90 * 1000);
 const reviewRequestCronExpr = (process.env.REVIEW_REQUEST_CRON || '40 * * * *').trim();
 if (cron.validate(reviewRequestCronExpr)) {
   cron.schedule(reviewRequestCronExpr, async () => {

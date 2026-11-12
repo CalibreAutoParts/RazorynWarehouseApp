@@ -69,12 +69,22 @@ async function syncEbayReviews() {
     return { feedback: rows.length, links: itemMap.size, matched: 0, updated: 0, unmatchedItems: unmatchedItemIds.size };
   }
 
+  // Store the eBay aggregate, then write the product's combined rating (eBay
+  // feedback + our own website reviews — lib/product-reviews.js) so neither
+  // source overwrites the other.
+  const productReviews = require('../lib/product-reviews');
   let updated = 0, errors = 0;
   for (const pid of Object.keys(byProduct)) {
     const { sum, count } = byProduct[pid];
-    const rating = Math.round((sum / count) * 10) / 10; // 1 dp
-    try { await shopify.setProductRating(pid, rating, count); updated++; }
-    catch (e) { errors++; console.warn('[reviews-sync] write', pid, e.message); }
+    try {
+      await productReviews.setEbaySource(pid, sum, count);
+      await productReviews.publishProduct(pid);
+      updated++;
+    } catch (e) {
+      // Fall back to the old eBay-only rating so stars never go missing.
+      try { await shopify.setProductRating(pid, Math.round((sum / count) * 10) / 10, count); updated++; }
+      catch (e2) { errors++; console.warn('[reviews-sync] write', pid, e.message, '/', e2.message); }
+    }
   }
   console.log(`[reviews-sync] ${rows.length} feedback rows → ${updated} product(s) updated (${errors} errors)`);
   return { feedback: rows.length, links: itemMap.size, matched: Object.keys(byProduct).length, updated, errors, unmatchedItems: unmatchedItemIds.size };
