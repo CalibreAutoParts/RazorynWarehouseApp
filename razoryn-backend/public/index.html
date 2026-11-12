@@ -23536,7 +23536,7 @@ function renderSettings() {
           </p>
           <div class="perm-row">
             <div><div class="perm-name">Enabled</div><div class="perm-desc">Off by default. Only the accounts and couriers ticked below.</div></div>
-            <label class="switch"><input type="checkbox" id="dm-enabled" onchange="if(this.checked && !confirm('Switch on automatic dispatch messages to eBay buyers?\n\nIn October eBay restricted one of your accounts after automated buyer messages. These go once per order with the tracking only — but leave out any account eBay has restricted.\n\nSwitch on?')) this.checked=false"><span></span></label>
+            <label class="switch"><input type="checkbox" id="dm-enabled" onchange="dmEnabledChanged(this)"><span></span></label>
           </div>
           <div class="field" style="margin-top:10px"><label>Send from these eBay accounts</label><div id="dm-stores" style="display:flex;gap:14px;flex-wrap:wrap;font-size:13px"></div></div>
           <div class="field"><label>For these couriers</label><div id="dm-carriers" style="display:flex;gap:14px;flex-wrap:wrap;font-size:13px"></div></div>
@@ -24129,57 +24129,6 @@ function renderSettings() {
       </div>
 
       <!-- eBay listing defaults — pre-fills the Create-on-eBay modal -->
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-head">
-          <h3>🟦 eBay listing defaults</h3>
-          <div class="card-desc">Default values used by the "+ Create on eBay" button in Listing Mirror. Save once and the modal pre-fills these every time so you don't retype them.</div>
-        </div>
-        <div class="card-body">
-          <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px"><strong>Business policy IDs</strong> come from eBay seller hub → Account → Business policies. They're required — without them eBay rejects new listings. <a href="https://www.ebay.co.uk/sh/settings/business-policies" target="_blank" rel="noopener" style="color:var(--brand-primary)">Open eBay Business Policies ↗</a></div>
-
-          <!-- Brand-wide policy fallback (or single-store brand) -->
-          <div id="ebay-policy-default-block" style="padding:12px;background:var(--bg-soft);border-radius:8px;margin-bottom:10px">
-            <div style="font-weight:600;font-size:13px;margin-bottom:8px">Default policies <span id="ebay-policy-default-suffix" style="font-weight:400;color:var(--ink-soft);font-size:11px"></span></div>
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
-              <div class="field"><label>Payment ID</label><input id="set-ebay-policy-payment" placeholder="e.g. 268523456012"></div>
-              <div class="field"><label>Shipping ID</label><input id="set-ebay-policy-shipping" placeholder="e.g. 268523456013"></div>
-              <div class="field"><label>Return ID</label><input id="set-ebay-policy-return" placeholder="e.g. 268523456014"></div>
-            </div>
-          </div>
-
-          <!-- Per-store overrides — rendered for multi-store brands only -->
-          <div id="ebay-per-store-policies" style="display:none"></div>
-
-          <div style="margin-top:12px;padding:12px;background:var(--bg-soft);border-radius:8px">
-            <div style="font-weight:600;font-size:13px;margin-bottom:8px">Listing defaults</div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-              <div class="field"><label>Default category ID</label><input id="set-ebay-cat" placeholder="e.g. 33744"><div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Most-used category. Per-listing override in the modal. Look up at <a href="https://www.isoldwhat.com" target="_blank" rel="noopener" style="color:var(--brand-primary)">isoldwhat.com</a>.</div></div>
-              <div class="field"><label>Default condition</label>
-                <select id="set-ebay-cond">
-                  <option value="1000">New</option>
-                  <option value="1500">New other (open box)</option>
-                  <option value="1750">New with defects</option>
-                  <option value="2000">Refurbished — Manufacturer</option>
-                  <option value="2500">Refurbished — Seller</option>
-                  <option value="3000">Used</option>
-                  <option value="7000">For parts / not working</option>
-                </select>
-              </div>
-            </div>
-            <div style="font-weight:600;font-size:13px;margin:14px 0 8px">Item location (where it ships from)</div>
-            <div style="display:grid;grid-template-columns:80px 1fr 1fr;gap:8px">
-              <div class="field"><label>Country</label><input id="set-ebay-loc-country" value="GB" maxlength="2" style="text-transform:uppercase"></div>
-              <div class="field"><label>Postcode</label><input id="set-ebay-loc-postcode" placeholder="e.g. WD24 7TE"></div>
-              <div class="field"><label>City / Town</label><input id="set-ebay-loc-city" placeholder="e.g. Watford"></div>
-            </div>
-          </div>
-
-          <div style="margin-top:14px">
-            <button class="btn btn-primary" onclick="saveEbayListingDefaults()">Save eBay defaults</button>
-          </div>
-        </div>
-      </div>
-
       <!-- Message templates editor -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-head">
@@ -24368,9 +24317,55 @@ function renderSettings() {
 // the choice is remembered per browser. The finder filters cards live and
 // opens the matches, so any setting is two keystrokes away instead of a
 // scroll through the whole wall.
+// Settings tabs: each section lives under one tab (eBay, Shopify, …). The
+// finder still searches every tab.
+const SETTINGS_TABS = [
+  ['ebay', 'eBay'], ['shopify', 'Shopify'], ['pricing', 'Pricing'], ['business', 'Business & invoices'],
+  ['delivery', 'Delivery & returns'], ['warehouse', 'Warehouse & staff'], ['apps', 'Apps & AI'],
+];
+function settingsTabFor(title) {
+  const t = String(title || '').toLowerCase();
+  if (/quote pricing|price sync/.test(t)) return 'pricing';
+  if (/ebay|selling limits|stock cap|category audit|ai suggestions/.test(t)) return 'ebay';
+  if (/shopify|storefront/.test(t)) return 'shopify';
+  if (/company|invoice|logo|message templates|channel colours|shops — business/.test(t)) return 'business';
+  if (/dropfleet|shipping|carton|returns/.test(t)) return 'delivery';
+  if (/clock|stock-take|vin search|knowledge|sounds/.test(t)) return 'warehouse';
+  return 'apps';
+}
+// The big "eBay integration" card held several unrelated settings — each
+// sub-block becomes its own section so e.g. the stock cap is easy to find.
+function settingsSplitEbayCard(page) {
+  const card = [...page.querySelectorAll('.card')].find(c => (c.querySelector(':scope > .card-head h3')?.textContent || '').trim() === 'eBay integration');
+  if (!card || card.dataset.split) return;
+  card.dataset.split = '1';
+  const body = card.querySelector(':scope > .card-body'); if (!body) return;
+  let after = card;
+  [...body.children].filter(d => d.tagName === 'DIV' && /border-top/.test(d.getAttribute('style') || '')).forEach(block => {
+    const titles = [...block.querySelectorAll(':scope > div')].filter(d => /font-weight:600;font-size:14px/.test(d.getAttribute('style') || ''));
+    if (!titles.length) return;
+    let name = titles.map(t => t.textContent.trim()).join(' · ');
+    if (/selling limits/i.test(name)) name = '📏 eBay stock cap & selling limits (max per listing, top-up level, £ kept free)';
+    if (titles.length === 1) titles[0].remove();
+    const c = document.createElement('div');
+    c.className = 'card'; c.style.marginBottom = '16px';
+    c.innerHTML = `<div class="card-head"><h3>${escapeHtml(name)}</h3></div><div class="card-body"></div>`;
+    block.style.borderTop = 'none'; block.style.marginTop = '0'; block.style.paddingTop = '0';
+    c.querySelector('.card-body').appendChild(block);
+    after.after(c); after = c;
+  });
+}
+function settingsSetTab(tab) {
+  const page = document.querySelector('#content .page'); if (!page) return;
+  try { localStorage.setItem('rzn_settings_tab', tab); } catch (_) {}
+  page.querySelectorAll('[data-s-tabbtn]').forEach(b => { b.classList.toggle('btn-primary', b.dataset.sTabbtn === tab); b.classList.toggle('btn-outline', b.dataset.sTabbtn !== tab); });
+  page.querySelectorAll('.card[data-s-tab]').forEach(c => { c.style.display = c.dataset.sTab === tab ? '' : 'none'; });
+  const f = el('set-find'); if (f) f.value = '';
+}
 function settingsMakeCollapsible() {
   const page = document.querySelector('#content .page');
   if (!page) return;
+  settingsSplitEbayCard(page);
   let opened = {};
   try { opened = JSON.parse(localStorage.getItem('rzn_settings_open') || '{}'); } catch (_) {}
   page.querySelectorAll('.card').forEach(card => {
@@ -24381,6 +24376,7 @@ function settingsMakeCollapsible() {
     if (!head || !h3) return;
     card.dataset.sCollapsible = '1';
     const key = (h3.textContent || '').trim();
+    card.dataset.sTab = settingsTabFor(key);
     const chev = document.createElement('span');
     chev.className = 's-chev';
     h3.prepend(chev);
@@ -24396,13 +24392,35 @@ function settingsMakeCollapsible() {
       try { localStorage.setItem('rzn_settings_open', JSON.stringify(opened)); } catch (_) {}
     });
   });
+  // eBay tab: most-used first.
+  const ebayOrder = [/^eBay integration$/, /stock cap/, /listing defaults/, /description template/, /eBay shops/, /category audit/, /fitment/, /on its way/];
+  const ebayCards = [...page.querySelectorAll('.card[data-s-tab="ebay"]')];
+  if (ebayCards.length > 1) {
+    const rank = c => { const t = c.querySelector('h3')?.textContent.replace(/^[▸▾]/, '').trim() || ''; const i = ebayOrder.findIndex(r => r.test(t)); return i < 0 ? 99 : i; };
+    const anchor = ebayCards[0].previousElementSibling;
+    ebayCards.sort((x, y) => rank(x) - rank(y));
+    let prev = anchor; for (const c of ebayCards) { if (prev) prev.after(c); prev = c; }
+  }
+  // Tab bar under the finder; only tabs that have sections.
+  const finder = el('set-finder');
+  if (finder && !el('set-tabs')) {
+    const used = new Set([...page.querySelectorAll('.card[data-s-tab]')].map(c => c.dataset.sTab));
+    const bar = document.createElement('div');
+    bar.id = 'set-tabs';
+    bar.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;position:sticky;top:0;z-index:5;background:var(--bg);padding:6px 0';
+    bar.innerHTML = SETTINGS_TABS.filter(([k]) => used.has(k)).map(([k, l]) => `<button class="btn btn-outline btn-sm" data-s-tabbtn="${k}" onclick="settingsSetTab('${k}')">${escapeHtml(l)} <span style="opacity:.6">${page.querySelectorAll(`.card[data-s-tab="${k}"]`).length}</span></button>`).join('');
+    finder.after(bar);
+  }
+  let tab = 'ebay'; try { tab = localStorage.getItem('rzn_settings_tab') || 'ebay'; } catch (_) {}
+  settingsSetTab(page.querySelector(`.card[data-s-tab="${tab}"]`) ? tab : 'ebay');
 }
 function settingsFilter(q) {
   const page = document.querySelector('#content .page');
   if (!page) return;
   q = (q || '').trim().toLowerCase();
+  if (!q) { let tab = 'ebay'; try { tab = localStorage.getItem('rzn_settings_tab') || 'ebay'; } catch (_) {} settingsSetTab(tab); return; }
+  page.querySelectorAll('[data-s-tabbtn]').forEach(b => { b.classList.remove('btn-primary'); b.classList.add('btn-outline'); });
   page.querySelectorAll('.card[data-s-collapsible="1"]').forEach(card => {
-    if (!q) { card.style.display = ''; return; }   // cleared — back to remembered collapse states
     const hit = card.textContent.toLowerCase().includes(q);
     card.style.display = hit ? '' : 'none';
     if (hit && q.length >= 3) {   // open real matches, not single-letter noise
@@ -26495,6 +26513,9 @@ async function applyEbayCap(code, btn) {
   btn.disabled = false; btn.textContent = 'Apply to live listings';
 }
 
+function dmEnabledChanged(cb) {
+  if (cb.checked && !confirm("Switch on automatic dispatch messages to eBay buyers?\n\nIn October eBay restricted one of your accounts after automated buyer messages. These go once per order with the tracking only — but leave out any account eBay has restricted.\n\nSwitch on?")) cb.checked = false;
+}
 async function loadDispatchMsgConfig() {
   try {
     const c = await Api.get('/api/messages/dispatch-msg/config');
