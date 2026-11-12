@@ -52,7 +52,13 @@ function buildCollectionEmail({ sale, items, company }) {
       <p style="margin:6px 0">Hi ${esc(sale.customer_name || 'there')}, your order <strong>${esc(ref(sale))}</strong> is packed and ready for collection.</p>
       <ul style="padding-left:18px;margin:8px 0;font-size:14px">${itemsList(items)}</ul>
       ${addr ? `<p style="margin:12px 0 2px"><strong>Collect from:</strong><br>${addr}</p>` : ''}
-      ${company?.company_phone ? `<p style="font-size:13px;color:#666;margin:6px 0">Please bring your order reference. Call ${esc(company.company_phone)} if you need directions or to arrange a time.</p>` : ''}
+      ${brand.code === 'razoryn' ? `<p style="margin:12px 0 4px"><strong>When you collect, please bring:</strong></p>
+      <ul style="padding-left:18px;margin:4px 0 8px;font-size:14px">
+        <li>this email (on your phone is fine)</li>
+        <li>photo ID that matches the name on the order</li>
+      </ul>
+      <p style="font-size:13px;color:#666;margin:6px 0">Sending someone else? Reply with their name — they'll need their own photo ID. We can't release an order without both.${company?.company_phone ? ` Call ${esc(company.company_phone)} if you need directions or to arrange a time.` : ''}</p>`
+        : (company?.company_phone ? `<p style="font-size:13px;color:#666;margin:6px 0">Please bring your order reference. Call ${esc(company.company_phone)} if you need directions or to arrange a time.</p>` : '')}
     </div>`;
   return { subject: `Your order ${ref(sale)} is ready to collect — ${brand.name || 'Razoryn'}`, html: shell(inner, accent) };
 }

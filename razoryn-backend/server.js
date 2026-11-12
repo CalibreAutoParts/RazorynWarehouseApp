@@ -124,6 +124,7 @@ app.use('/api/customers',    require('./routes/customers'));
 app.use('/api/desktop',      require('./routes/desktop'));
 app.use('/api/competitors',  require('./routes/competitors'));
 app.use('/api/reviews',      require('./routes/reviews'));
+app.use('/api/review-requests', require('./routes/review-requests'));   // "how did we do?" emails (+ public opt-out link)
 // PUBLIC storefront endpoints (no login, CORS open) — server-side tracking relay
 // + back-in-stock signups. Their routers set their own CORS headers per request.
 app.use('/api/track',        require('./routes/track'));
@@ -763,6 +764,22 @@ if (cron.validate(reviewsCronExpr)) {
     }
   });
   console.log(`[boot] eBay reviews sync scheduled: ${reviewsCronExpr}`);
+}
+
+// "How did we do?" emails — ask website (and direct) customers for a Trustpilot /
+// Google review once their order has been delivered or collected (or 10 days after
+// dispatch with no delivery scan). Off until switched on in Settings → Review
+// requests; only sends inside the configured UK daytime hours.
+require('./lib/review-requests').ensureSchema().catch(e => console.warn('[review-requests] schema:', e.message));
+const reviewRequestCronExpr = (process.env.REVIEW_REQUEST_CRON || '40 * * * *').trim();
+if (cron.validate(reviewRequestCronExpr)) {
+  cron.schedule(reviewRequestCronExpr, async () => {
+    try {
+      const r = await require('./lib/review-requests').runReviewRequests();
+      if (r && (r.sent || r.failed)) console.log(`[cron review-requests] sent ${r.sent}, failed ${r.failed}, skipped ${r.skipped}`);
+    } catch (e) { console.error('[cron review-requests] failed:', e.message); }
+  });
+  console.log(`[boot] review-request emails scheduled: ${reviewRequestCronExpr}`);
 }
 
 // Nightly cleanup: permanently delete staff_notes older than 31 days.
