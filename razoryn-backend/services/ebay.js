@@ -769,21 +769,27 @@ async function tradingCall(callName, bodyInner, storeArg) {
 // address) lets eBay fetch the photo from the app instead.
 async function uploadPicture(storeArg, buffer, name = 'photo.jpg', opts = {}) {
   const errors = [];
+  // 1. eBay fetches the photo from the app's public link — the same XML call
+  //    path every other Trading request uses (the file upload below has come
+  //    back 404 from eBay's gateway).
+  if (opts.publicUrl) {
+    for (const set of ['Supersize', 'Standard']) {
+      try {
+        const xml = await tradingCall('UploadSiteHostedPictures', `<ExternalPictureURL>${escapeXml(opts.publicUrl)}</ExternalPictureURL>
+          <PictureName>${escapeXml(String(name).slice(0, 80))}</PictureName><PictureSet>${set}</PictureSet>`, storeArg);
+        const url = extractOne(xml, 'FullURL');
+        if (url) return decodeEntities(url);
+        errors.push(`from link (${set}): ` + (decodeEntities(extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || '') || 'no URL returned'));
+      } catch (e) { errors.push(`from link (${set}): ` + e.message); }
+    }
+  }
+  // 2. Direct file upload.
   for (const set of ['Supersize', 'Standard']) {
     try { return await uploadPictureFile(storeArg, buffer, name, set); }
     catch (e) { errors.push(`${set}: ${e.message}`); }
   }
-  if (opts.publicUrl) {
-    try {
-      const xml = await tradingCall('UploadSiteHostedPictures', `<ExternalPictureURL>${escapeXml(opts.publicUrl)}</ExternalPictureURL>
-        <PictureName>${escapeXml(String(name).slice(0, 80))}</PictureName><PictureSet>Supersize</PictureSet>`, storeArg);
-      const url = extractOne(xml, 'FullURL');
-      if (url) return decodeEntities(url);
-      errors.push('from link: ' + (decodeEntities(extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || '') || 'no URL returned'));
-    } catch (e) { errors.push('from link: ' + e.message); }
-  }
   console.warn('[ebay] photo upload failed:', errors.join(' | '));
-  throw new Error('eBay wouldn\'t take the photo — ' + errors[errors.length - 1]);
+  throw new Error('eBay wouldn\'t take the photo — ' + (errors[0] || 'unknown error'));
 }
 async function uploadPictureFile(storeArg, buffer, name, pictureSet) {
   const token = tokenFor(storeArg);
