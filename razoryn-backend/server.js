@@ -157,6 +157,19 @@ app.get('/public/msg-photo/:file', async (req, res) => {
   } catch (_) { res.status(404).end(); }
 });
 
+// Listing photos reworked to fill eBay's frame (lib/ebay-photo-prep) — eBay
+// fetches them from here when a listing is saved. Unguessable token.
+app.get('/public/photo/:file', async (req, res) => {
+  const token = String(req.params.file || '').replace(/\.\w+$/, '');
+  if (!/^[a-f0-9]{36}$/.test(token)) return res.status(404).end();
+  try {
+    const r = await require('./lib/ebay-photo-prep').serve(token);
+    if (!r) return res.status(404).end();
+    res.set('Content-Type', r.mime || 'image/jpeg'); res.set('Cache-Control', 'public, max-age=604800'); res.send(r.data);
+  } catch (_) { res.status(404).end(); }
+});
+cron.schedule('45 3 * * *', () => { require('./lib/ebay-photo-prep').cleanup().catch(() => {}); });
+
 // ---------- Version: open pages reload themselves after a deploy ----------
 // A screen left open all day (the warehouse PC) would otherwise run the old
 // version until someone refreshes it.

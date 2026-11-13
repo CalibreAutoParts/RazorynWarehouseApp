@@ -14813,6 +14813,23 @@ async function renderCreateListing() {
 // ============ EDIT LISTING — same layout as Create, pre-filled from the live ============
 // listing, and saving pushes the changes to the warehouse, Shopify and eBay.
 function openEditListing(productId) { State._editProductId = productId; routeTo('editlisting'); }
+// Photos that show small on eBay (part in the middle of a big empty canvas):
+// rework them to fill eBay's frame, on every eBay listing of this part.
+async function elFixPhotoSize(btn) {
+  const pid = CL.editProductId; if (!pid) return;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Checking photos…'; }
+  try {
+    const r = await Api.post('/api/listings/fix-photo-size/' + pid, {});
+    const nm = (k) => (State.brand?.stores || []).find(x => x.code === k)?.name || k || 'eBay';
+    const lines = (r.results || []).map(x => x.error
+      ? `${nm(x.storeCode)}: ${x.limit ? "eBay's daily limit for reading listings is used up — try again tomorrow" : x.error}`
+      : x.fixed ? `${nm(x.storeCode)}: ${x.fixed} of ${x.photos} photo${x.photos === 1 ? '' : 's'} fixed`
+      : `${nm(x.storeCode)}: photos already fill the frame — nothing to change`);
+    const anyFixed = (r.results || []).some(x => x.fixed);
+    toast((anyFixed ? '🖼 ' : '') + lines.join(' · '), (r.results || []).some(x => x.error) ? 'warn' : 'success');
+  } catch (e) { toast('Fix photo size failed: ' + e.message, 'error'); }
+  if (btn) { btn.disabled = false; btn.textContent = '🖼 Fix photo size on eBay'; }
+}
 async function renderEditListing() {
   const productId = State._editProductId;
   if (!productId) { toast('No product selected to edit', 'warn'); routeTo('inventory'); return; }
@@ -15311,6 +15328,10 @@ function clCoreHtml() {
         <button type="button" class="btn btn-outline btn-sm" onclick="clFindStudioPhotos()">🎨 Import from photo studio</button>
         <span style="font-size:11px;color:var(--ink-soft)">Finds finished image sets matching the part number / SKU (or title).</span>
       </div>
+      ${editing ? `<div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <button type="button" class="btn btn-outline btn-sm" onclick="elFixPhotoSize(this)">🖼 Fix photo size on eBay</button>
+        <span style="font-size:11px;color:var(--ink-soft)">Photo looks small on eBay? Trims the empty border so the part fills eBay's frame — only the eBay photos change.</span>
+      </div>` : ''}
       <div id="cl-studio-matches" style="margin-top:6px"></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -24470,6 +24491,37 @@ function settingsSplitEbayCard(page) {
     c.querySelector('.card-body').appendChild(block);
     after.after(c); after = c;
   });
+  if (!page.querySelector('#set-photo-size')) {
+    const c = document.createElement('div');
+    c.className = 'card admin-only'; c.style.marginBottom = '16px'; c.id = 'set-photo-size';
+    c.innerHTML = `<div class="card-head"><h3>🖼 eBay photo size (photos showing small on eBay)</h3></div><div class="card-body">
+      <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:8px">eBay shows a photo exactly as it is — a part in the middle of a big empty canvas shows small on the listing (the website zooms it). New listings and photo updates are now fixed automatically. This checks every <strong>live</strong> listing and fixes the photos that need it (only the photos change). eBay limits how many listings can be read a day; if it stops, press it again the next day and it carries on.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn btn-primary btn-sm" onclick="setPhotoSizeRun(this)">🖼 Fix photo size on all eBay listings</button>
+        <button class="btn btn-outline btn-sm" onclick="setPhotoSizeStop()">Stop</button>
+      </div>
+      <div id="set-photo-size-status" style="font-size:12px;margin-top:8px"></div>
+    </div>`;
+    after.after(c);
+    setPhotoSizePoll(true);
+  }
+}
+let _psTimer = null;
+async function setPhotoSizeRun(btn) {
+  if (!confirm("Check every live eBay listing and fix photos that show small?\n\nOnly the photos of listings that need it are changed.")) return;
+  try { await Api.post('/api/listings/fix-photo-size-all', {}); setPhotoSizePoll(); } catch (e) { toast(e.message, 'error'); }
+}
+async function setPhotoSizeStop() { try { await Api.delete('/api/listings/fix-photo-size-all'); } catch (_) {} setPhotoSizePoll(true); }
+async function setPhotoSizePoll(once) {
+  clearTimeout(_psTimer);
+  const box = el('set-photo-size-status'); if (!box) return;
+  let j; try { j = await Api.get('/api/listings/fix-photo-size-all'); } catch (_) { return; }
+  if (!j || j.state === 'idle') { box.innerHTML = ''; return; }
+  const pct = j.total ? Math.round(100 * j.done / j.total) : 0;
+  box.innerHTML = `<div style="height:6px;background:var(--bg-soft);border-radius:4px;overflow:hidden;max-width:420px"><div style="height:100%;width:${pct}%;background:var(--blue)"></div></div>
+    <div style="margin-top:4px">${j.state === 'running' ? '⏳ Checking' : j.state === 'stopped' ? '⏹ Stopped' : '✓ Done'} — ${j.done} / ${j.total} listings checked · <strong>${j.listingsFixed}</strong> listing${j.listingsFixed === 1 ? '' : 's'} fixed (${j.photosFixed} photo${j.photosFixed === 1 ? '' : 's'})${j.errors ? ` · ${j.errors} couldn't be checked` : ''}</div>
+    ${j.stoppedReason ? `<div style="color:var(--amber);margin-top:2px">${escapeHtml(j.stoppedReason)}</div>` : j.sampleError && j.errors ? `<div style="color:var(--ink-soft);margin-top:2px">e.g. ${escapeHtml(j.sampleError.slice(0, 160))}</div>` : ''}`;
+  if (j.state === 'running') _psTimer = setTimeout(() => setPhotoSizePoll(), 3000);
 }
 function settingsSetTab(tab) {
   const page = document.querySelector('#content .page'); if (!page) return;

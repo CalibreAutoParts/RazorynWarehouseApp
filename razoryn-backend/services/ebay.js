@@ -1043,6 +1043,8 @@ async function reviseItem(itemId, { sku, title, price, description, itemSpecific
   if (description != null) fields.push(`<Description><![CDATA[${String(description)}]]></Description>`);
   if (itemSpecifics && itemSpecifics.length) fields.push(buildItemSpecificsXml(itemSpecifics, title || titleHint));
   if (pictureUrls && pictureUrls.length) {
+    // Photos with a wide empty border (or small) are reworked to fill eBay's frame.
+    pictureUrls = await require('../lib/ebay-photo-prep').prepare(pictureUrls.filter(Boolean).slice(0, 24));
     fields.push(`<PictureDetails>${pictureUrls.filter(Boolean).slice(0, 24).map(u => `<PictureURL>${escapeXml(u)}</PictureURL>`).join('')}</PictureDetails>`);
   }
   // Parcel size + weight (metric) — same block as addItem, so editing a product's
@@ -1443,7 +1445,7 @@ async function addItem(storeArg, opts = {}) {
   const {
     sku, title, description = '', categoryId, conditionId = 1000,
     price, quantity = 1, currency = 'GBP',
-    imageUrls = [], businessPolicies = {}, location = {},
+    imageUrls: imageUrlsIn = [], businessPolicies = {}, location = {},
     itemSpecifics = [], brand, mpn,
     // Optional extras — each only added to the XML when supplied, so existing
     // listings (which pass none of these) build exactly as before.
@@ -1529,6 +1531,7 @@ async function addItem(storeArg, opts = {}) {
 
   // PictureDetails — eBay-hosted images. Using PictureURL with public URLs is
   // the simplest path: eBay fetches and hosts them. Max 12 URLs.
+  const imageUrls = (imageUrlsIn || []).length ? await require('../lib/ebay-photo-prep').prepare(imageUrlsIn.slice(0, 12)) : (imageUrlsIn || []);
   const pictureXml = imageUrls.length
     ? `<PictureDetails>${imageUrls.slice(0, 12).map(u => `<PictureURL>${escapeXml(u)}</PictureURL>`).join('')}</PictureDetails>`
     : '';
