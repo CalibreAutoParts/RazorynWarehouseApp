@@ -14860,11 +14860,24 @@ async function renderEditListing() {
   // anywhere → the panel opens in create mode; any store without a working
   // listing gets a "Create eBay listing" button.
   const stores = detail.ebayStores || [];
-  const needStores = stores.filter(x => x.status !== 'live');
-  const noEbay = !stores.some(x => x.status === 'live') && !((detail.ebayLinks || []).some(l => !l.status || l.status === 'live'));
+  // 'unknown' = eBay couldn't be asked just now (daily allowance used up / eBay
+  // down) — NOT a missing listing, so no "Create eBay listing" for those.
+  const needStores = stores.filter(x => x.status !== 'live' && x.status !== 'unknown');
+  const noEbay = !stores.some(x => x.status === 'live' || x.status === 'unknown') && !((detail.ebayLinks || []).some(l => !l.status || l.status === 'live' || l.status === 'unknown'));
+  const unchecked = detail.ebayUnchecked || [];
+  if (unchecked.length) {
+    const nm = (k) => (stores.find(x => x.code === k) || {}).name || k;
+    const when = (t) => t ? new Date(t).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : null;
+    const lim = unchecked.some(u => u.limit);
+    el('el-banner').insertAdjacentHTML('beforeend', `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--amber)"><div class="card-body" style="padding:10px 14px;font-size:12.5px">
+      ⏳ <strong>Couldn't check eBay just now</strong> — ${lim ? "eBay's daily allowance for reading listings is used up (it resets within 24 h)" : 'eBay didn\'t answer'}. Your listings are <strong>not</strong> gone:
+      ${unchecked.map(u => `<div style="margin-top:4px"><strong>${escapeHtml(nm(u.storeCode))}</strong> — listing ${escapeHtml(u.itemId)} ${u.seenAt ? `was live at the last check (${escapeHtml(when(u.seenAt))})` : 'is still linked'}</div>`).join('')}
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">Don't create a new listing for these. Stock and price changes still go through; the form below shows the details saved in the warehouse. Re-open this page later to see eBay's live copy.</div>
+    </div></div>`);
+  }
   CL._editNoEbay = noEbay;
   CL._ebayNeed = needStores;
-  if (warn.length && !needStores.length) el('el-banner').innerHTML = `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--amber)"><div class="card-body" style="padding:10px 14px;font-size:12px;color:var(--ink-soft)">⚠ ${warn.map(escapeHtml).join(' · ')}</div></div>`;
+  if (warn.length && !needStores.length && !unchecked.length) el('el-banner').innerHTML = `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--amber)"><div class="card-body" style="padding:10px 14px;font-size:12px;color:var(--ink-soft)">⚠ ${warn.map(escapeHtml).join(' · ')}</div></div>`;
   const isPh = !!p.is_placeholder;
   let held = p.ebay_prelist_payload;
   if (typeof held === 'string') { try { held = JSON.parse(held); } catch (_) { held = null; } }

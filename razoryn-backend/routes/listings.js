@@ -2226,18 +2226,28 @@ router.get('/listing-detail/:productId', requireAdmin, async (req, res) => {
           try { out.ebay.quantity = await ebay.getQuantityTradingAPI(link.itemId, link.storeCode); } catch (_) {}
         } else if (!out.ebay) { out.ebayEndedDetail = det; }
       } catch (e) {
-        link.status = 'error';
         link.error = e.message;
+        // eBay's daily allowance used up / eBay down: we simply couldn't check —
+        // that's not a missing listing. Go by the account's live list instead.
+        const notFound = /ebay_not_configured|not found|cannot be accessed|invalid item ?id|\[17\]|isn't valid|does not exist/i.test(e.message || '');
+        if (!notFound) {
+          const seen = await require('../lib/ebay-live').lastSeen(link.storeCode, link.itemId);
+          link.status = seen.known && !seen.live ? 'ended' : 'unknown';
+          link.seenAt = seen.seenAt || null;
+          if (seen.qty != null) link.qty = seen.qty;
+          link.limit = ebay.isDailyLimitError(e);
+          if (!out.ebay && link.status === 'unknown' && seen.qty != null) out.ebayCachedQty = seen.qty;
+        } else link.status = 'error';
         if (!out.ebayError) out.ebayError = e.message;
       }
     }
     // Ended listing's details still pre-fill the form (category, specifics…).
     if (!out.ebay && out.ebayEndedDetail) { out.ebay = out.ebayEndedDetail; delete out.ebayEndedDetail; }
     // Active eBay accounts this product has NO working listing on.
-    const healthy = new Set(out.ebayLinks.filter(l => l.status === 'live').map(l => l.storeCode));
+    const healthy = new Set(out.ebayLinks.filter(l => l.status === 'live' || l.status === 'unknown').map(l => l.storeCode));
     out.ebayStores = ebay.listStores().filter(s2 => s2.hasToken && !s2.disabled && String(s2.channelCode || '').startsWith('ebay_'))
       .map(s2 => ({ code: s2.code, name: s2.name, primary: s2.primary,
-        status: healthy.has(s2.code) ? 'live' : (out.ebayLinks.find(l => l.storeCode === s2.code) ? (out.ebayLinks.find(l => l.storeCode === s2.code).status) : 'missing'),
+        status: healthy.has(s2.code) ? (out.ebayLinks.some(l => l.storeCode === s2.code && l.status === 'live') ? 'live' : 'unknown') : (out.ebayLinks.find(l => l.storeCode === s2.code) ? (out.ebayLinks.find(l => l.storeCode === s2.code).status) : 'missing'),
         deadItemId: (out.ebayLinks.find(l => l.storeCode === s2.code && l.status !== 'live') || {}).itemId || null }));
   } catch (e) { out.ebayLinks = []; out.ebayStores = []; }
   try { out.qtyCaps = await require('../lib/ebay-qty-cap').getCaps(); } catch (_) { out.qtyCaps = {}; }
@@ -2254,6 +2264,9 @@ router.get('/listing-detail/:productId', requireAdmin, async (req, res) => {
     out.ebay = { specifics: persisted, categoryId: product.ebay_category_id, conditionId: product.ebay_condition_id,
       description: product.ebay_description || '', quantity: product.qty_on_hand, price: product.price_ebay, fromPersisted: true };
   }
+  if (out.ebay && out.ebay.fromPersisted && out.ebayCachedQty != null) out.ebay.liveQty = out.ebayCachedQty;
+  out.ebayUnchecked = (out.ebayLinks || []).filter(l => l.status === 'unknown')
+    .map(l => ({ itemId: l.itemId, storeCode: l.storeCode, seenAt: l.seenAt || null, limit: !!l.limit }));
 
   res.json(out);
 });
@@ -3030,7 +3043,12 @@ async function runCategoryAudit(trigger = 'manual') {
             // other AI errors: silent per-listing — the plain scan result stands
           }
         }
-      } catch (_) { _catAudit.errors++; }
+      } catch (e) {
+        _catAudit.errors++;
+        // eBay's daily GetItem allowance is used up — stop instead of failing
+        // every remaining listing; the next run carries on.
+        if (ebay.isDailyLimitError(e)) { _catAudit.stoppedReason = 'eBay daily limit reached — run again tomorrow'; console.warn('[ai-audit] stopping: eBay daily GetItem limit'); break; }
+      }
       _catAudit.done++;
       await new Promise(r2 => setTimeout(r2, 350));   // eBay rate-limit headroom
     }
