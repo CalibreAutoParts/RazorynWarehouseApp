@@ -622,9 +622,20 @@ async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
   const lim = opts.lowering ? null : await getSellingLimits(storeArg).catch(() => null);
   if (qty > 0 && !opts.lowering && ((lim && lim.limited) || rules.refillAt != null)) {
     try {
-      const gx = await tradingCall('GetItem', `<ItemID>${escapeXml(String(itemId))}</ItemID>`, storeArg);
-      const curQty = (parseInt(extractOne(gx, 'Quantity') || '0') || 0) - (parseInt(extractOne(extractOne(gx, 'SellingStatus') || '', 'QuantitySold') || '0') || 0);
-      const unit = parseFloat(extractOne(extractOne(gx, 'SellingStatus') || '', 'CurrentPrice') || extractOne(gx, 'StartPrice') || '0') || 0;
+      // Current quantity + price: the cached live list (refreshed every few
+      // hours and after each push) — reading every listing from eBay on every
+      // push used up eBay's daily GetItem allowance.
+      const liveLib = require('../lib/ebay-live');
+      let cur = await liveLib.cachedQty(code, itemId);
+      if (!cur) {
+        const gx = await tradingCall('GetItem', `<ItemID>${escapeXml(String(itemId))}</ItemID>`, storeArg);
+        if (gx.includes('<Ack>Failure</Ack>')) throw new Error('read failed');
+        cur = { qty: (parseInt(extractOne(gx, 'Quantity') || '0') || 0) - (parseInt(extractOne(extractOne(gx, 'SellingStatus') || '', 'QuantitySold') || '0') || 0),
+          price: parseFloat(extractOne(extractOne(gx, 'SellingStatus') || '', 'CurrentPrice') || extractOne(gx, 'StartPrice') || '0') || 0 };
+        liveLib.noteQty(code, itemId, cur.qty, cur.price).catch(() => {});
+      }
+      const curQty = cur.qty;
+      const unit = cur.price || 0;
       if (qty > curQty) {
         if (rules.refillAt != null && curQty > rules.refillAt && !opts.force) {
           // Not low enough yet — leave it until it sells down to the top-up level.
@@ -648,6 +659,7 @@ async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
     const err = extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown';
     throw new Error('eBay ReviseInventoryStatus error: ' + decodeEntities(err));
   }
+  require('../lib/ebay-live').noteQty(code, itemId, qty).catch(() => {});
   return { ok: true, itemId, quantity: qty, asked, limitedBy, storeCode: resolveStore(storeArg)?.code };
 }
 
@@ -692,7 +704,26 @@ const TRADING_BASE = ENV === 'production'
   ? 'https://api.ebay.com/ws/api.dll'
   : 'https://api.sandbox.ebay.com/ws/api.dll';
 
+// eBay's daily per-call allowance (GetItem is 5,000/day for the whole app).
+// Once eBay says it's used up, stop sending that call for a while — every
+// further request would fail anyway — and let callers fall back to the cached
+// live list. Re-tried every 30 min.
+const _callBlocked = {};   // callName → until (ms)
+const LIMIT_RE = /exceeded usage limit|\[518\]|ebay_daily_limit/i;
+function isDailyLimitError(e) { return LIMIT_RE.test(String(e && e.message || e || '')); }
+function callBlockedUntil(callName) { const t = _callBlocked[callName] || 0; return t > Date.now() ? t : 0; }
 async function tradingCall(callName, bodyInner, storeArg) {
+  if (callBlockedUntil(callName)) {
+    throw new Error(`ebay_daily_limit: eBay's daily allowance for ${callName} is used up — paused until ${new Date(_callBlocked[callName]).toISOString().slice(11, 16)} UTC`);
+  }
+  const res = await _tradingCall(callName, bodyInner, storeArg);
+  if (typeof res === 'string' && res.includes('<Ack>Failure</Ack>') && (/<ErrorCode>518<\/ErrorCode>/.test(res) || /exceeded usage limit/i.test(res))) {
+    _callBlocked[callName] = Date.now() + 30 * 60000;
+    console.warn(`[ebay] ${callName}: daily usage limit reached — pausing this call for 30 min`);
+  }
+  return res;
+}
+async function _tradingCall(callName, bodyInner, storeArg) {
   // Two auth options for Trading API:
   //  A. Auth'n'Auth token (legacy User Token) → uses Dev/App/Cert headers
   //     + <RequesterCredentials><eBayAuthToken> in body. Simpler, works without
@@ -2320,6 +2351,8 @@ module.exports = {
   promoteListing,
   getItemDescription,
   getItemDetails,
+  isDailyLimitError,
+  callBlockedUntil,
   getCategorySpecifics,
   getSuggestedCategories,
   getCategoryName,
