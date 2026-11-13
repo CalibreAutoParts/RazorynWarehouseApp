@@ -2271,6 +2271,28 @@ router.get('/listing-detail/:productId', requireAdmin, async (req, res) => {
   res.json(out);
 });
 
+// Photo size on eBay: rework photos with a wide empty border (or too small) so
+// they fill eBay's picture frame — one product's listings, or every listing.
+router.post('/fix-photo-size/:productId', requireAdmin, async (req, res) => {
+  const pr = (await query(`SELECT id, shopify_product_id, sku FROM products WHERE id = $1`, [req.params.productId])).rows[0];
+  if (!pr) return res.status(404).json({ error: 'not_found' });
+  let links = pr.shopify_product_id ? (await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [String(pr.shopify_product_id)])).rows : [];
+  if (!links.length && pr.sku) links = (await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE upper(last_synced_sku) = upper($1)`, [pr.sku])).rows;
+  if (!links.length) return res.status(400).json({ error: 'no_listing', message: 'This part has no eBay listing linked.' });
+  const prep = require('../lib/ebay-photo-prep');
+  const results = [];
+  for (const l of links) {
+    try { results.push(await prep.fixListing(l.ebay_item_id, l.store_code, { force: true })); }
+    catch (e) { results.push({ itemId: l.ebay_item_id, storeCode: l.store_code, error: e.message, limit: ebay.isDailyLimitError(e) }); }
+  }
+  res.json({ results });
+});
+router.post('/fix-photo-size-all', requireAdmin, (req, res) => {
+  res.json(require('../lib/ebay-photo-prep').startFixAll({ storeCode: req.body?.storeCode || null, force: !!req.body?.force }));
+});
+router.get('/fix-photo-size-all', requireAdmin, (req, res) => res.json(require('../lib/ebay-photo-prep').fixAllStatus()));
+router.delete('/fix-photo-size-all', requireAdmin, (req, res) => res.json(require('../lib/ebay-photo-prep').stopFixAll()));
+
 // POST /api/listings/update-listing — EDIT a live listing and push the changes
 // to the warehouse (master), Shopify, and eBay in one go. Mirrors create-listing
 // but for an existing product. Each channel is best-effort so one failure is
