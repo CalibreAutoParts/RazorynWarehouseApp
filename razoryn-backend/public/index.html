@@ -26319,18 +26319,45 @@ async function trPartnerSearch(id) {
   const box = el('trpc-res'); box.innerHTML = '<div style="color:var(--ink-soft);font-size:13px">Searching…</div>';
   try {
     const r = await Api.get(`/api/trade/partners/${id}/catalogue?q=${encodeURIComponent(el('trpc-q').value.trim())}${el('trpc-in').checked ? '&in_stock=1' : ''}`);
-    TR._partnerItems = r.items;
-    box.innerHTML = r.items.length ? `<table class="table" style="margin:0"><thead><tr><th><input type="checkbox" title="Select all shown" onchange="document.querySelectorAll('[data-trimp]:not(:disabled)').forEach(c=>c.checked=this.checked)"></th><th>Part</th><th style="text-align:right">Their stock</th><th style="text-align:right" title="Their trade price to you, before VAT. On a VAT account their invoice adds VAT, which you claim back.">Your cost<div style="font-weight:400;font-size:10px;text-transform:none">ex VAT</div></th><th style="text-align:right" title="Your profit per sale at their retail price, after your fees, VAT, postage and packaging">eBay</th><th style="text-align:right">Shopify</th><th style="text-align:right" title="Bank transfer, posted — VAT applies, no selling fees">Bank</th><th style="text-align:right" title="Cash on collection — no VAT, no postage">Cash</th><th>Here</th><th></th></tr></thead><tbody>
-      ${r.items.map(i => `<tr><td><input type="checkbox" data-trimp="${escapeAttr(i.sku)}" ${i.local?.linked ? 'disabled' : ''}></td>
+    TR._partnerItems = r.items; TR._partnerTotal = r.total; TR._partnerId = id;
+    trPartnerPaint();
+  } catch (e) { box.innerHTML = `<div style="color:var(--red);font-size:13px">${escapeHtml(e.data?.message || e.message)}</div>`; }
+}
+// "Their stock" list, filtered: by default only parts NOT listed yet (new, or
+// in the warehouse but not live on eBay — those can be relisted).
+function trPartnerRelist(id, sku) {
+  document.querySelectorAll('[data-trimp]').forEach(c => { c.checked = c.dataset.trimp === sku; });
+  trBulkList(id);
+}
+function trPartnerStatus(i) {
+  const L = i.local; if (!L) return 'new';
+  if (L.listed) return 'listed';
+  return L.linked ? 'relist' : 'link';
+}
+function trPartnerPaint() {
+  const box = el('trpc-res'); if (!box) return;
+  const id = TR._partnerId, all = TR._partnerItems || [];
+  const show = TR.partnerShow || 'todo';
+  const r = { items: all.filter(i => { const st = trPartnerStatus(i); return show === 'all' ? true : show === 'listed' ? st === 'listed' : st !== 'listed'; }), total: TR._partnerTotal };
+  const nListed = all.filter(i => trPartnerStatus(i) === 'listed').length;
+  const storeName = c => (State.brand?.allStores || State.brand?.stores || []).find(s => s.code === c)?.name || c || 'eBay';
+  const filterBar = `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:12.5px">
+    ${[['todo', `Not listed yet (${all.length - nListed})`], ['listed', `Already listed (${nListed})`], ['all', `Everything (${all.length})`]].map(([k, l]) => `<button class="btn btn-sm ${show === k ? 'btn-primary' : 'btn-outline'}" onclick="TR.partnerShow='${k}';trPartnerPaint()">${l}</button>`).join('')}
+    <span style="color:var(--ink-soft)">Listed parts can't be listed twice — parts in your warehouse that aren't live on eBay can be ticked to <b>relist</b>.</span></div>`;
+  box.innerHTML = filterBar + (r.items.length ? `<table class="table" style="margin:0"><thead><tr><th><input type="checkbox" title="Select all shown" onchange="document.querySelectorAll('[data-trimp]:not(:disabled)').forEach(c=>c.checked=this.checked)"></th><th>Part</th><th style="text-align:right">Their stock</th><th style="text-align:right" title="Their trade price to you, before VAT. On a VAT account their invoice adds VAT, which you claim back.">Your cost<div style="font-weight:400;font-size:10px;text-transform:none">ex VAT</div></th><th style="text-align:right" title="Your profit per sale at their retail price, after your fees, VAT, postage and packaging">eBay</th><th style="text-align:right">Shopify</th><th style="text-align:right" title="Bank transfer, posted — VAT applies, no selling fees">Bank</th><th style="text-align:right" title="Cash on collection — no VAT, no postage">Cash</th><th>Here</th><th></th></tr></thead><tbody>
+      ${r.items.map(i => `<tr style="${trPartnerStatus(i) === 'listed' ? 'opacity:.6' : ''}"><td><input type="checkbox" data-trimp="${escapeAttr(i.sku)}" ${trPartnerStatus(i) === 'listed' ? 'disabled title="Already listed"' : ''}></td>
         <td><b>${escapeHtml(i.sku)}</b><div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(i.title)}</div></td><td style="text-align:right">${escapeHtml(i.available_display)}</td>
         <td style="text-align:right;white-space:nowrap">${trMoney(i.price)} <span style="font-size:10px;color:var(--ink-soft)">ex VAT</span>${i.price != null && Number(i.vat_rate) ? `<div style="font-size:10px;color:var(--ink-soft)">${trMoney(i.price * (1 + Number(i.vat_rate) / 100))} inc VAT</div>` : ''}${i.our_cost != null ? `<div style="font-size:10px;color:var(--ink-soft)">their cost ${trMoney(i.our_cost)}</div>` : ''}</td>
         ${['ebay', 'shopify', 'bank', 'cash'].map(k => { const m = i.margins?.[k]; return `<td style="text-align:right;white-space:nowrap">${m ? `<b style="color:${m.net < 0 ? 'var(--red)' : 'var(--green)'}">${m.net < 0 ? '−' : ''}${trMoney(Math.abs(m.net))}</b><div style="font-size:10px;color:var(--ink-soft)">${m.pct}% · sell ${trMoney(m.price)}</div>` : '<span style="color:var(--ink-soft)">—</span>'}</td>`; }).join('')}
-        <td style="font-size:11px">${i.local ? (i.local.linked ? '✓ linked' : `same SKU (${i.local.qty} in stock) — will link`) : 'new'}</td>
-        <td style="white-space:nowrap">${i.margins ? `<button class="btn btn-ghost btn-sm" onclick="trPartnerBreakdown('${escapeAttr(i.sku)}')" title="Costs and profit on each channel">£ breakdown</button>` : ''}${i.local ? '' : `<button class="btn btn-primary btn-sm" onclick="trPartnerList(${id}, '${escapeAttr(i.sku)}')" title="Open Create listing filled in from their listing — photos, category, specifics, parcel, cost">List</button>`}</td></tr>`).join('')}</tbody></table>
+        <td style="font-size:11px">${(() => { const st = trPartnerStatus(i), L = i.local;
+          if (st === 'listed') return `<span style="color:var(--green);font-weight:600">✓ Listed</span><div style="color:var(--ink-soft)">${L.ebayStores.map(storeName).join(', ')}${L.onShopify ? ' · Shopify' : ''}</div>`;
+          if (st === 'relist') return `<span style="color:var(--amber,#d97706);font-weight:600">In warehouse — not on eBay</span><div style="color:var(--ink-soft)">${L.onShopify ? 'on Shopify · ' : ''}tick or press Relist</div>`;
+          if (st === 'link') return `same SKU (${L.qty} in stock) — will link`;
+          return 'new'; })()}</td>
+        <td style="white-space:nowrap">${i.margins ? `<button class="btn btn-ghost btn-sm" onclick="trPartnerBreakdown('${escapeAttr(i.sku)}')" title="Costs and profit on each channel">£ breakdown</button>` : ''}${trPartnerStatus(i) === 'relist' ? `<button class="btn btn-outline btn-sm" onclick="trPartnerRelist(${id}, '${escapeAttr(i.sku)}')" title="List it on eBay again (it's already in your warehouse)">↻ Relist</button>` : ''}${i.local ? '' : `<button class="btn btn-primary btn-sm" onclick="trPartnerList(${id}, '${escapeAttr(i.sku)}')" title="Open Create listing filled in from their listing — photos, category, specifics, parcel, cost">List</button>`}</td></tr>`).join('')}</tbody></table>
       <div style="font-size:11px;color:var(--ink-soft);margin-top:6px">${r.total} match(es)${r.total > r.items.length ? ' — showing first ' + r.items.length : ''}.
         <b>eBay / Shopify / Bank / Cash</b> = your profit per sale at their retail prices (Shopify, bank and cash use your own % rules), after your fees, VAT, postage and packaging — cash is collected, no VAT. <b>£ breakdown</b> shows every cost line.
-        <b>Your cost is ex VAT.</b> On a VAT account their invoice adds VAT, which you claim back (you're both VAT registered), so the ex-VAT price is your real cost and it's what goes in as cost price. On a cash account there's no VAT to claim — the price is the price.</div>` : '<div style="font-size:13px;color:var(--ink-soft)">No matches.</div>';
-  } catch (e) { box.innerHTML = `<div style="color:var(--red);font-size:13px">${escapeHtml(e.data?.message || e.message)}</div>`; }
+        <b>Your cost is ex VAT.</b> On a VAT account their invoice adds VAT, which you claim back (you're both VAT registered), so the ex-VAT price is your real cost and it's what goes in as cost price. On a cash account there's no VAT to claim — the price is the price.</div>` : '<div style="font-size:13px;color:var(--ink-soft)">No matches.</div>');
 }
 // Full cost breakdown for one partner part on eBay / Shopify / bank / cash.
 // Profit per channel for one partner part — and a tester: change any selling
@@ -26383,14 +26410,16 @@ async function trBulkList(linkId) {
   const skus = [...document.querySelectorAll('[data-trimp]:checked')].map(x => x.dataset.trimp);
   if (!skus.length) return toast('Tick the parts to list first', 'warn');
   BL.linkId = linkId;
-  BL.items = (TR._partnerItems || []).filter(i => skus.includes(i.sku) && !i.local);
+  // New parts, and parts already here but not live on eBay (relist). Parts
+  // already listed are never listed twice.
+  BL.items = (TR._partnerItems || []).filter(i => skus.includes(i.sku) && (!i.local || !i.local.listed));
   const skipped = skus.length - BL.items.length;
-  if (!BL.items.length) return toast('Those parts are already here — open them from Inventory', 'info');
+  if (!BL.items.length) return toast('Those parts are already listed — nothing to do', 'info');
   BL.prices = {}; BL.results = {}; BL.running = false;
   const stores = (State.brand?.stores || []).filter(s => s.channelCode?.startsWith('ebay_') && !s.disabled);
   const brandName = blDefaultBrand();
   modal({ title: `List ${BL.items.length} part${BL.items.length > 1 ? 's' : ''} from ${escapeHtml(TR.partnerName || 'partner')}`, size: 'xl', body: `
-    ${skipped ? `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">${skipped} ticked part(s) are already in your warehouse — skipped.</div>` : ''}
+    ${skipped ? `<div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">${skipped} ticked part(s) are already listed — skipped.</div>` : ''}
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:12px">
       <div class="field" style="margin:0"><label>eBay price</label>
         <div style="display:flex;gap:6px;align-items:center">
@@ -26547,7 +26576,10 @@ async function blRun() {
         .filter(s => String(s.value).trim() !== '' && !/^brand$/i.test(s.name));
       if (brandName) specs.push({ name: 'Brand', value: brandName });
       if (!specs.some(s => /^manufacturer part number$/i.test(s.name))) specs.push({ name: 'Manufacturer Part Number', value: d.part_number || d.sku });
-      const created = await Api.post('/api/listings/create-listing', {
+      // Already in the warehouse (listing ended, or never put on eBay) → RELIST:
+      // no new product, just the eBay listing(s) on accounts it isn't live on.
+      const relist = !!i.local;
+      const created = relist ? { productId: i.local.id, shopifySkipped: true } : await Api.post('/api/listings/create-listing', {
         sku: d.sku, title: d.title, partNumber: d.part_number || d.sku, ebayPrice: price, qty: 0, status: shopStatus,
         // OUR description — never theirs (it carries their shop name and links to their listings).
         costPrice: d.price, description: blShopifyDescription(d, specs), imageUrls: imgs,
@@ -26557,8 +26589,9 @@ async function blRun() {
         partnerLinkId: BL.linkId, partnerSku: d.sku, partnerQty: d.available ?? 0,
       });
       const pid = created.productId;
-      const bits = ['warehouse' + (created.shopifySkipped ? '' : ' + Shopify')];
+      const bits = [relist ? 'relisted (already in warehouse)' : 'warehouse' + (created.shopifySkipped ? '' : ' + Shopify')];
       for (const a of accts) {
+        if (relist && (i.local.ebayStores || []).includes(a.code)) { bits.push(`${(State.brand?.stores || []).find(s => s.code === a.code)?.name || a.code} already live`); continue; }
         try {
           const r2 = await Api.post('/api/listings/create-ebay', { productId: pid, storeCode: a.code, categoryId: L.ebay_category_id || undefined, conditionId: 1000,
             // No description passed: eBay gets OUR branded template (spec table, our related listings).

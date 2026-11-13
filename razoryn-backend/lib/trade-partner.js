@@ -96,12 +96,26 @@ async function catalogue(link, { q = '', inStock = false, offset = 0 } = {}) {
   const r = await call(link, 'GET', '/stock?' + p);
   const skus = r.items.map(i => i.sku);
   const local = skus.length ? (await query(`
-    SELECT id, sku, part_number, qty_on_hand, partner_link_id, partner_sku FROM products
+    SELECT id, sku, part_number, qty_on_hand, partner_link_id, partner_sku, active, shopify_product_id FROM products
      WHERE (partner_link_id = $1 AND partner_sku = ANY($2)) OR upper(sku) = ANY($3)`,
     [link.id, skus, skus.map(s => s.toUpperCase())])).rows : [];
+  // Where each local part is LISTED: eBay accounts with a live listing (ended
+  // / relisted item numbers don't count once the live list is known) + Shopify.
+  const listed = new Map();
+  const sids = local.map(l => l.shopify_product_id).filter(Boolean).map(String);
+  if (sids.length) {
+    const rows = (await query(`SELECT ml.shopify_product_id::text AS sid, ml.store_code, ml.ebay_item_id,
+        (NOT EXISTS (SELECT 1 FROM ebay_live_refresh lr WHERE lr.store_code = ml.store_code AND lr.count > 0)
+          OR EXISTS (SELECT 1 FROM ebay_live_items li WHERE li.store_code = ml.store_code AND li.ebay_item_id = ml.ebay_item_id)) AS live
+        FROM mirror_links ml WHERE ml.shopify_product_id::text = ANY($1)`, [sids]).catch(async () =>
+        query(`SELECT shopify_product_id::text AS sid, store_code, ebay_item_id, true AS live FROM mirror_links WHERE shopify_product_id::text = ANY($1)`, [sids]))).rows;
+    for (const x of rows) if (x.live) { if (!listed.has(x.sid)) listed.set(x.sid, new Set()); listed.get(x.sid).add(x.store_code || ''); }
+  }
   r.items = r.items.map(i => {
     const l = local.find(x => x.partner_link_id === link.id && x.partner_sku === i.sku) || local.find(x => x.sku.toUpperCase() === i.sku.toUpperCase());
-    return { ...i, local: l ? { id: l.id, sku: l.sku, qty: l.qty_on_hand, linked: l.partner_link_id === link.id } : null };
+    const ebayStores = l && l.shopify_product_id ? [...(listed.get(String(l.shopify_product_id)) || [])] : [];
+    return { ...i, local: l ? { id: l.id, sku: l.sku, qty: l.qty_on_hand, linked: l.partner_link_id === link.id, active: l.active !== false,
+      onShopify: !!l.shopify_product_id, ebayStores, listed: ebayStores.length > 0 } : null };
   });
   try { r.items = await withMargins(r.items); } catch (e) { console.warn('[partner] margins:', e.message); }
   return r;
