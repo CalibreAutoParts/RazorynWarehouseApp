@@ -310,7 +310,7 @@ async function orderForMessage(row) {
 }
 
 // Photos for a reply: bytes → eBay Picture Services. Returns [{url,name}].
-async function uploadPhotos(rowId, files = []) {
+async function uploadPhotos(rowId, files = [], baseUrl = null) {
   await ensureSchema();
   const row = (await query(`SELECT store_code FROM ebay_messages WHERE id = $1`, [rowId])).rows[0];
   if (!row) throw Object.assign(new Error('Message not found'), { status: 404 });
@@ -321,7 +321,7 @@ async function uploadPhotos(rowId, files = []) {
     const buf = Buffer.from(m[2], 'base64');
     if (buf.length > 7 * 1024 * 1024) throw Object.assign(new Error(`${f.name || 'Photo'} is over 7MB`), { status: 400 });
     // A public copy for 1 day, so eBay can fetch it if the direct upload fails.
-    const publicUrl = await tempPublicPhoto(buf, m[1]).catch(() => null);
+    const publicUrl = await tempPublicPhoto(buf, m[1], baseUrl).catch(() => null);
     try {
       out.push({ url: await ebay().uploadPicture(row.store_code, buf, f.name || 'photo.jpg', { publicUrl }), name: String(f.name || 'Photo').slice(0, 60) });
     } catch (e) { throw Object.assign(new Error(`${f.name || 'Photo'}: ${e.message}`), { status: 502 }); }
@@ -329,8 +329,14 @@ async function uploadPhotos(rowId, files = []) {
   return out;
 }
 // Short-lived public copy of a reply photo (served by /public/msg-photo/:token).
-async function tempPublicPhoto(buf, ext) {
-  const base = (process.env.PUBLIC_BASE_URL || (process.env.CORS_ORIGIN || '').split(',').map(s => s.trim()).find(s => /^https:\/\//i.test(s)) || '').replace(/\/+$/, '');
+async function tempPublicPhoto(buf, ext, baseUrl) {
+  // The app's public https address: set explicitly, else the address the
+  // request came in on, else Railway's domain, else warehouse.<brand domain>.
+  const brandDomain = (() => { try { return require('./brand').domain || ''; } catch (_) { return ''; } })();
+  const base = (process.env.PUBLIC_BASE_URL || baseUrl
+    || (process.env.RAILWAY_PUBLIC_DOMAIN ? 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN : '')
+    || (process.env.CORS_ORIGIN || '').split(',').map(s => s.trim()).find(s => /^https:\/\//i.test(s))
+    || (brandDomain ? 'https://warehouse.' + brandDomain.replace(/^https?:\/\//, '') : '')).replace(/\/+$/, '');
   if (!base) return null;
   await query(`CREATE TABLE IF NOT EXISTS ebay_msg_photos (token TEXT PRIMARY KEY, mime TEXT, data BYTEA, created_at TIMESTAMPTZ DEFAULT now())`);
   await query(`DELETE FROM ebay_msg_photos WHERE created_at < now() - interval '1 day'`);

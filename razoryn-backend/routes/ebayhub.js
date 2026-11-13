@@ -121,7 +121,10 @@ router.get('/messages/:id', requirePermission('dispatch'), aw(async (req, res) =
 
 // Photos for a reply → eBay Picture Services; returns their eBay URLs.
 router.post('/messages/:id/photos', requirePermission('dispatch'), express.json({ limit: '40mb' }), aw(async (req, res) => {
-  res.json({ photos: await hub.uploadPhotos(parseInt(req.params.id), Array.isArray(req.body?.files) ? req.body.files : []) });
+  // Public address eBay can fetch the photo from = the host this request came in on.
+  const host = String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
+  const base = host && !/^(localhost|127\.|0\.0\.0\.0)/.test(host) ? 'https://' + host : null;
+  res.json({ photos: await hub.uploadPhotos(parseInt(req.params.id), Array.isArray(req.body?.files) ? req.body.files : [], base) });
 }));
 router.post('/messages/:id/reply', requirePermission('dispatch'), aw(async (req, res) => {
   const media = (Array.isArray(req.body?.media) ? req.body.media : []).filter(x => x && /^https:\/\/i\.ebayimg\.com\//.test(String(x.url || '')));
