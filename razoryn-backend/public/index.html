@@ -14935,6 +14935,8 @@ async function renderEditListing() {
   set('cl-title', sh.title || p.title || '');
   set('cl-desc', sh.description || '');
   set('cl-subpn', (detail.subPartNumbers || []).join('\n'));
+  CL.photosCleanTouched = false;
+  if (el('cl-photos-clean')) el('cl-photos-clean').checked = !!p.trade_photos_ok;
   // Cost: the landed cost (goods + freight/duty) when known, else the goods cost.
   {
     const c = p.landed_cost != null ? +p.landed_cost : (p.cost_price != null ? +p.cost_price : null);
@@ -15239,6 +15241,8 @@ async function submitUnifiedUpdate(btn) {
       images: CL.imagesDirty ? (CL.images || []) : undefined,
       ebayImages: CL.imagesDirty ? (clStudioEbayImages() || undefined) : undefined,
       imagesChanged: !!CL.imagesDirty,
+      // Watermark-free photos (supplier / own) — partners can use them.
+      photosClean: (el('cl-photos-clean') && (CL.photosCleanTouched || CL.imagesDirty)) ? !!el('cl-photos-clean').checked : undefined,
       // Cost + parcel: only sent when filled, so a blank box never wipes a saved figure.
       costPrice: (el('cl-cost')?.value || '') !== '' ? parseFloat(el('cl-cost').value) : undefined,
       costCurrency: el('cl-cost-cur')?.value || 'GBP',
@@ -15328,7 +15332,10 @@ function clCoreHtml() {
         <button type="button" class="btn btn-outline btn-sm" onclick="clFindStudioPhotos()">🎨 Import from photo studio</button>
         <span style="font-size:11px;color:var(--ink-soft)">Finds finished image sets matching the part number / SKU (or title).</span>
       </div>
-      ${editing ? `<div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      ${editing ? `<label style="margin-top:8px;display:flex;align-items:flex-start;gap:6px;font-size:12px;cursor:pointer">
+        <input type="checkbox" id="cl-photos-clean" onchange="CL.photosCleanTouched = true" style="margin-top:2px">
+        <span><b>No watermark on these photos</b> (supplier / own photos) — trade partners selling this part can use them as they are.</span></label>
+      <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <button type="button" class="btn btn-outline btn-sm" onclick="elFixPhotoSize(this)">🖼 Fix photo size on eBay</button>
         <span style="font-size:11px;color:var(--ink-soft)">Photo looks small on eBay? Trims the empty border so the part fills eBay's frame — only the eBay photos change.</span>
       </div>` : ''}
@@ -16192,6 +16199,8 @@ async function clAddPhotos(input) {
   const files = [...(input.files || [])].filter(f => /^image\//.test(f.type));
   input.value = '';
   if (!files.length) return;
+  // Photos added by hand are usually the supplier's (no watermark).
+  if (el('cl-photos-clean') && !CL.photosCleanTouched && !(clStudioEbayImages() || []).length) el('cl-photos-clean').checked = true;
   CL.images = CL.images || [];
   for (const f of files) {
     try {
@@ -16266,6 +16275,7 @@ async function clImportStudioPhotos(setId, btn) {
     CL.images.push(...urls);
     CL.studio = { shop, ebay };
     CL.imagesDirty = true;
+    if (el('cl-photos-clean') && !CL.photosCleanTouched) el('cl-photos-clean').checked = false;   // studio renders carry your watermark
     clRenderPhotos();
     // Everything captured at photo time flows into the listing: the title
     // fills the eBay title if empty (Shopify mirrors it when blank), the
@@ -25826,7 +25836,7 @@ async function trppLoad() {
       <th style="text-align:right">They pay (ex VAT)</th><th style="text-align:right">Margin</th><th>Item price</th>${r.mode === 'selected' ? '<th>Shared</th>' : ''}</tr></thead><tbody>
     ${r.items.map(x => `<tr style="${r.mode === 'selected' && !x.picked ? 'opacity:.6' : ''}">
       <td><input type="checkbox" class="trpp-cb" data-id="${x.id}" ${TRPP.sel.has(x.id) ? 'checked' : ''} onchange="this.checked?TRPP.sel.add(${x.id}):TRPP.sel.delete(${x.id});trppBar()"></td>
-      <td style="${x.excluded ? 'opacity:.55' : ''}"><div style="font-weight:600;max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(x.title || '')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(x.sku || '')}${x.excluded ? ' <span class="pill red" style="font-size:9.5px;font-family:inherit">🚫 not for trade</span>' : ''}${x.photosHidden ? ' <span class="pill" style="font-size:9.5px;font-family:inherit" title="Listing photos are watermarked — only Thumbnail Maker photos are shared">🙈 listing photos not shared</span>' : ''}</div></td>
+      <td style="${x.excluded ? 'opacity:.55' : ''}"><div style="font-weight:600;max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(x.title || '')}</div><div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(x.sku || '')}${x.excluded ? ' <span class="pill red" style="font-size:9.5px;font-family:inherit">🚫 not for trade</span>' : ''}${x.photosHidden ? ' <span class="pill" style="font-size:9.5px;font-family:inherit" title="Listing photos are watermarked — only Thumbnail Maker photos are shared">🙈 listing photos not shared</span>' : ''}${x.photosOk ? ' <span class="pill green" style="font-size:9.5px;font-family:inherit" title="Listing photos have no watermark — partners can use them">✓ photos no watermark</span>' : ''}</div></td>
       <td style="text-align:right">${x.qty ?? 0}</td>
       <td style="text-align:right">${x.cost != null ? trMoney(x.cost) : '<span style="color:var(--ink-soft)">—</span>'}</td>
       <td style="text-align:right">${x.retail ? trMoney(x.retail) : '—'}</td>
@@ -25853,12 +25863,22 @@ function trppBar() {
     <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trppExclude(false)" title="Offer the ticked parts to trade again">Allow for trade</button><span style="width:10px"></span>
     <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trppPhotosHide(true)" title="Clean-photo accounts get Thumbnail Maker photos first, else your listing photos. Use this where the listing photos carry your watermark — they'll then only get studio photos.">🙈 Don't share listing photos</button>
     <button class="btn btn-ghost btn-sm" ${n ? '' : 'disabled'} onclick="trppPhotosHide(false)" title="Share their listing photos again (when there are no studio photos)">undo</button><span style="width:10px"></span>
+    <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trppPhotosOk(true)" title="The ticked parts' listing photos have NO watermark (supplier / own photos) — partner apps use them as clean photos and are told they've changed">✓ Photos have no watermark</button>
+    <button class="btn btn-ghost btn-sm" ${n ? '' : 'disabled'} onclick="trppPhotosOk(false)" title="Their listing photos do carry a watermark">undo</button><span style="width:10px"></span>
     <button class="btn btn-outline btn-sm" ${n ? '' : 'disabled'} onclick="trCleanFromStudio([...TRPP.sel])" title="Fetch the ticked parts' photos from the photo studio with no watermark, logo or vehicle — what accounts on 'clean photos' get">📸 Clean photos from studio</button><span style="width:10px"></span>
     <span>Price ticked:</span>
     <select id="trpp-kind" onchange="el('trpp-val').style.display=this.value==='default'?'none':'';el('trpp-val').placeholder=this.value==='fixed'?'£ each':'%'">
       <option value="markup">Our cost + %</option><option value="discount">% off retail</option><option value="fixed">Fixed £ (ex VAT)</option><option value="default">Back to account default</option></select>
     <input id="trpp-val" type="number" step="0.01" min="0" placeholder="%" style="width:90px">
     <button class="btn btn-primary btn-sm" ${n ? '' : 'disabled'} onclick="trppPrice()">Apply to ${n}</button>`;
+}
+async function trppPhotosOk(ok) {
+  const ids = [...TRPP.sel];
+  try {
+    await Api.post('/api/trade/photos-ok', { productIds: ids, ok });
+    toast(ok ? `${ids.length} part(s): photos marked watermark-free — partner apps will show them as new photos to update` : `${ids.length} part(s): photos marked as watermarked`, 'success', 6000);
+    TRPP.sel.clear(); trppLoad();
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
 }
 async function trppPhotosHide(hide) {
   const ids = [...TRPP.sel];

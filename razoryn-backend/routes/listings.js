@@ -2458,6 +2458,13 @@ router.post('/update-listing', requireAdmin, async (req, res) => {
     ebayPictureUrls = ebayWebsiteUrls || (ebayImages.length ? ebayImages : undefined);
     if (ebayImages.length) await require('../lib/ebay-photos').saveStudioSet(productId, ebayImages).catch(() => {});
   }
+  // Trade partners: new photos (and whether they carry a watermark).
+  if (imagesChanged || b.photosClean !== undefined) {
+    try {
+      await require('../lib/trade').photosChanged(productId, {
+        clean: b.photosClean !== undefined ? !!b.photosClean : (ebayImages.length ? false : undefined) });
+    } catch (_) {}
+  }
 
   // 3) eBay — revise every linked listing. CRITICAL: eBay's ReviseItem treats a
   // submitted <ItemSpecifics> block as a FULL REPLACEMENT, so we must send the

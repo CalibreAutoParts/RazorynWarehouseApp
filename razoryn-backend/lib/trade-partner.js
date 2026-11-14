@@ -525,6 +525,7 @@ async function photosFor(link, product) {
   const clean = (it.images_public || []).filter(u => /^https:\/\//i.test(u));
   if (clean.length) return { source: 'partner_clean', label: `${link.name}'s clean photos`, shopify: clean, website: clean, ebayStudio: [], watermarked: false, seen: it.photos_updated_at || null };
   const theirs = (it.images || []).map(x => x && x.url).filter(u => /^https:\/\//i.test(String(u || '')));
+  if (theirs.length && it.images_no_watermark) return { source: 'partner_clean', label: `${link.name}'s photos (no watermark)`, shopify: theirs, website: theirs, ebayStudio: [], watermarked: false, seen: it.photos_updated_at || null };
   if (theirs.length) return { source: 'partner_listing', label: `${link.name}'s listing photos`, shopify: theirs, website: theirs, ebayStudio: [], watermarked: true, seen: it.photos_updated_at || null };
   return { source: null, shopify: [], website: [], ebayStudio: [], seen: it.photos_updated_at || null };
 }
