@@ -407,7 +407,7 @@ async function productBySku(sku, account = null) {
 // Clean = photos without our branding/watermark, only for customers allowed them.
 async function brandedImages(p) {
   const c = (await query(`SELECT urls, fetched_at FROM trade_image_cache WHERE product_id = $1`, [p.id])).rows[0];
-  if (c && Date.now() - new Date(c.fetched_at).getTime() < 24 * 3600 * 1000 && Array.isArray(c.urls)) return c.urls;
+  if (c && Date.now() - new Date(c.fetched_at).getTime() < 3600 * 1000 && Array.isArray(c.urls)) return c.urls;
   let urls = p.image_url ? [p.image_url] : [];
   try {
     const shopify = require('../services/shopify');
@@ -419,6 +419,18 @@ async function brandedImages(p) {
   await query(`INSERT INTO trade_image_cache (product_id, urls, fetched_at) VALUES ($1, $2::jsonb, now())
     ON CONFLICT (product_id) DO UPDATE SET urls = EXCLUDED.urls, fetched_at = now()`, [p.id, JSON.stringify(urls)]).catch(() => {});
   return urls;
+}
+// A part's photos changed (edit listing, studio push): drop the cached list so
+// partners get the new ones straight away, and stamp the time so partner apps
+// see "new photos". clean = true/false records whether the listing photos carry
+// a watermark (manual supplier photos don't; studio renders do).
+async function photosChanged(productId, { clean } = {}) {
+  if (!productId) return;
+  await query(`DELETE FROM trade_image_cache WHERE product_id = $1`, [productId]).catch(() => {});
+  await query(`UPDATE products SET photos_updated_at = now(),
+      trade_photos_ok = COALESCE($2::boolean, trade_photos_ok),
+      trade_photos_hide = CASE WHEN $2::boolean THEN false ELSE trade_photos_hide END WHERE id = $1`,
+    [productId, clean === undefined ? null : !!clean]).catch(() => {});
 }
 // Clean photos sent by the photo studio (its signed /public/clean/ links):
 // replace the studio's previous set, keep anything added by hand after them.
@@ -1053,6 +1065,7 @@ async function detectChanges() {
 }
 
 module.exports = {
+  photosChanged,
   ensureSchema, getSettings, saveSettings, vatRateFor,
   issueApiKey, accountByKey, hashKey, sign,
   costOf, priceFor, priceBreaks, loadRules, pickRule, availableFor, present, stockList, productBySku, visibleTo,

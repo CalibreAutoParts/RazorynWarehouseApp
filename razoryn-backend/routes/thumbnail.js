@@ -456,7 +456,7 @@ router.post('/products/:sku/images', async (req, res) => {
     [cdnUrls[0], product.id]);
   // Trade partners selling this part are told its photos changed (they can
   // update their listings — Trade → partner → Update photos).
-  await query(`UPDATE products SET photos_updated_at = now() WHERE id = $1`, [product.id]).catch(() => {});
+  try { await require('../lib/trade').photosChanged(product.id, { clean: false }); } catch (_) {}
 
   // 2) eBay: revise pictures on every linked listing (same guts as
   //    /api/listings/repush-ebay-images).

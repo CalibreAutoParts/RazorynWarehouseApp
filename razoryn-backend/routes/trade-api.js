@@ -113,6 +113,8 @@ router.get('/stock/:sku', aw(async (req, res) => {
   out.images = imgs.urls.map((u, i) => ({ n: i + 1, url: /^https?:\/\//.test(u) ? u : `/api/trade/v1/images/${encodeURIComponent(p.sku)}/${i + 1}` }));
   out.images_clean = imgs.clean;
   out.images_listing_fallback = !!imgs.fallback;
+  // The listing photos carry no watermark (supplier / own photos, marked here).
+  out.images_no_watermark = !!imgs.clean || !!p.trade_photos_ok;
   if (imgs.clean || imgs.fallback || imgs.missing) out.image = imgs.urls.find(u => /^https:\/\//.test(u)) || null;
   // Clean photos stored here have no public URL — hand out signed public links
   // so a partner can list with them directly (they add their own watermark).
