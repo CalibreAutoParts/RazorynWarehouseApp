@@ -786,6 +786,13 @@ if (cron.validate(reviewsCronExpr)) {
 // requests; only sends inside the configured UK daytime hours.
 require('./lib/review-requests').ensureSchema().catch(e => console.warn('[review-requests] schema:', e.message));
 require('./lib/product-reviews').ensureSchema().catch(e => console.warn('[product-reviews] schema:', e.message));
+// Website listing copy: tidy the whole Shopify catalogue once after this ships
+// (Razoryn), then nightly so new or edited listings never keep a blank or
+// eBay-template description (lib/catalog-copy.js).
+setTimeout(() => { require('./lib/catalog-copy').runOnce().catch(e => console.warn('[catalog-copy] first run:', e.message)); }, 4 * 60 * 1000);
+cron.schedule(process.env.CATALOG_COPY_CRON || '40 3 * * *', async () => {
+  try { await require('./lib/catalog-copy').run({}); } catch (e) { console.warn('[cron catalog-copy]', e.message); }
+}, { timezone: 'Europe/London' });
 setTimeout(async () => {
   const pr = require('./lib/product-reviews');
   await pr.repairNullText().catch(e => console.warn('[product-reviews] repair:', e.message));

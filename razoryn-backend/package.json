@@ -12,7 +12,8 @@
     "sync:run": "node scripts/sync-cron.js",
     "competitors:run": "node scripts/competitor-cron.js",
     "test:review-requests": "node scripts/test-review-requests.js",
-    "test:product-reviews": "node scripts/test-product-reviews.js"
+    "test:product-reviews": "node scripts/test-product-reviews.js",
+    "test:listing-copy": "node scripts/test-listing-copy.js"
   },
   "engines": {
     "node": ">=20"

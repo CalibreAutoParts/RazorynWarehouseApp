@@ -451,6 +451,15 @@ async function createProduct({ title, sku, price, imageUrls = [], imageData = []
     images: [...imgs.map(src => ({ src })), ...attachments.map(attachment => ({ attachment }))]
       .map((img, i) => ({ ...img, position: i + 1 })),
   };
+  // No description from the listing form / eBay mirror → write the website copy
+  // (lib/listing-copy.js) instead of leaving it blank: the website, Shop app and
+  // AI shopping agents all read it. Same for a missing product type (POS search).
+  const listingCopy = require('../lib/listing-copy');
+  const pnField = (metafields || []).find(m => m && m.namespace === 'custom' && m.key === 'part_number');
+  if (description == null || !String(description).trim() || listingCopy.needsNewDescription(description)) {
+    description = listingCopy.buildDescriptionHtml({ title, partNumber: pnField ? pnField.value : sku, tags });
+  }
+  if (!productType) productType = listingCopy.productTypeFor(title);
   if (description != null) productPayload.body_html = description;
   if (productType) productPayload.product_type = String(productType).slice(0, 255); // e.g. eBay category leaf ("Grilles")
   if (tags) productPayload.tags = tags; // comma-separated string
@@ -1550,6 +1559,47 @@ async function findProductByHandle(handle) {
   return p ? { id: p.id.split('/').pop(), handle: p.handle, title: p.title } : null;
 }
 
+// ── Website listing copy (lib/catalog-copy.js) ─────────────────────────────
+// One page (50) of active products with what the copy optimiser needs.
+async function listProductsForCopy(after = null) {
+  const d = await gqlOrThrow(`query($after: String) { products(first: 50, after: $after, query: "status:active") {
+    pageInfo { hasNextPage endCursor }
+    nodes { id title descriptionHtml productType tags
+      category { id fullName }
+      seo { title description }
+      pn: metafield(namespace: "custom", key: "part_number") { value }
+      alt: metafield(namespace: "custom", key: "alternate_part_numbers") { value }
+      pos: metafield(namespace: "custom", key: "position") { value }
+      pos2: metafield(namespace: "custom", key: "secondary_position") { value }
+      fin: metafield(namespace: "custom", key: "finish") { value }
+      backup: metafield(namespace: "razoryn", key: "description_backup") { id }
+    } } }`, { after });
+  return d.products;
+}
+
+// Write the copy changes for one product. The old description is kept in the
+// metafield razoryn.description_backup (first replacement only) so it can be restored.
+async function updateProductCopy(productGid, { descriptionHtml, productType, categoryId, seo, backupHtml } = {}) {
+  if (!isConfigured()) throw new Error('shopify_not_configured');
+  const input = { id: String(productGid).startsWith('gid://') ? productGid : `gid://shopify/Product/${productGid}` };
+  if (descriptionHtml != null) input.descriptionHtml = descriptionHtml;
+  if (productType) input.productType = String(productType).slice(0, 255);
+  if (categoryId) input.category = categoryId;
+  if (seo && (seo.title || seo.description)) input.seo = seo;
+  if (backupHtml) input.metafields = [{ namespace: 'razoryn', key: 'description_backup', type: 'multi_line_text_field', value: String(backupHtml).slice(0, 60000) }];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const d = await gqlOrThrow(`mutation($input: ProductInput!) { productUpdate(input: $input) { product { id } userErrors { field message } } }`, { input });
+      const ue = d.productUpdate?.userErrors || [];
+      if (ue.length) throw new Error(ue.map(e => e.message).join('; '));
+      return true;
+    } catch (e) {
+      if (attempt < 2 && /throttl/i.test(e.message)) { await new Promise(r => setTimeout(r, 2000 * (attempt + 1))); continue; }
+      throw e;
+    }
+  }
+}
+
 // Our own product reviews (lib/product-reviews.js buildProductPayload) onto the
 // product: razoryn.reviews (json, rendered by the theme) + the combined
 // reviews.rating / reviews.rating_count (website reviews + eBay feedback). With
@@ -1590,6 +1640,8 @@ module.exports = {
   getOrdersForReview,
   setProductReviews,
   findProductByHandle,
+  listProductsForCopy,
+  updateProductCopy,
   getAccessToken,
   getProductSeo,
   findTaxonomyCategory,
