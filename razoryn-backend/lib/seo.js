@@ -133,7 +133,12 @@ function buildSeo(product = {}, brandCfg = {}) {
   //    No business-name suffix — the title should say what the item is.
   let pageTitle = polishTitle(product.title, partNo);
   if (!pageTitle) pageTitle = String(product.sku || '').trim();
-  if (pageTitle.length > 70) pageTitle = pageTitle.slice(0, 70).replace(/\s+\S*$/, '').trim();
+  if (pageTitle.length > 70) {
+    pageTitle = pageTitle.slice(0, 70).replace(/\s+\S*$/, '').trim();
+    // Never end mid-bracket: "Bumper Textured (with pdc &" → "Bumper Textured".
+    if ((pageTitle.match(/\(/g) || []).length > (pageTitle.match(/\)/g) || []).length) pageTitle = pageTitle.slice(0, pageTitle.lastIndexOf('(')).trim();
+    pageTitle = pageTitle.replace(/[\s,&\-–/]+$/, '').trim();
+  }
 
   // ── Handle: the same as the page title, as a clean URL slug.
   let handle = slugify(pageTitle);
