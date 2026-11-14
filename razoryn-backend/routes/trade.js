@@ -411,6 +411,7 @@ router.put('/products/:id/clean-images', aw(async (req, res) => {
   }
   await query(`INSERT INTO product_clean_images (product_id, urls, updated_at) VALUES ($1, $2::jsonb, now())
     ON CONFLICT (product_id) DO UPDATE SET urls = EXCLUDED.urls, updated_at = now()`, [pid, JSON.stringify(urls.slice(0, 30))]);
+  await query(`UPDATE products SET photos_updated_at = now() WHERE id = $1`, [pid]).catch(() => {});
   await audit(req, 'trade_clean_images', 'product', pid, { count: urls.length });
   res.json({ ok: true, count: urls.length });
 }));
@@ -483,6 +484,7 @@ router.put('/partners/:id', aw(async (req, res) => {
   if (b.autoOrder !== undefined) {
     await query(`UPDATE trade_partner_links SET auto_order = $2, auto_order_since = CASE WHEN $2 AND NOT auto_order THEN now() ELSE auto_order_since END WHERE id = $1`, [l.id, !!b.autoOrder]);
   }
+  if (b.autoPhotos !== undefined) await query(`UPDATE trade_partner_links SET auto_photos = $2 WHERE id = $1`, [l.id, !!b.autoPhotos]);
   if (b.autoOrderDelivery && ['collect', 'ship', 'dropship'].includes(b.autoOrderDelivery)) {
     await query(`UPDATE trade_partner_links SET auto_order_delivery = $2 WHERE id = $1`, [l.id, b.autoOrderDelivery]);
   }
@@ -536,10 +538,19 @@ router.post('/partners/:id/push-stock/:productId', aw(async (req, res) => {
   if (!p) return res.status(404).json({ error: 'not_found', message: 'That part is not linked to this partner.' });
   try { res.json(await partner.pushOne(p.id)); } catch (e) { fail(res, e); }
 }));
+// POST /api/trade/partners/:id/photos/:productId — put the best photos (our
+// studio's, else theirs) on this part's Shopify product + eBay listings.
+router.post('/partners/:id/photos/:productId', aw(async (req, res) => {
+  const link = await partner.getLink(req.params.id);
+  const p = (await query(`SELECT id FROM products WHERE id = $1 AND partner_link_id = $2`, [req.params.productId, link.id])).rows[0];
+  if (!p) return res.status(404).json({ error: 'not_found', message: 'That part is not linked to this partner.' });
+  try { res.json(await partner.refreshPhotos(link, p.id)); } catch (e) { fail(res, e); }
+}));
 router.get('/partners/:id/linked', aw(async (req, res) => {
   const rows = (await query(`SELECT id, sku, title, qty_on_hand, partner_sku, partner_qty, partner_cost, partner_location, partner_barcode,
       partner_synced_at, cost_price, price_shopify, price_ebay, (source_partner_id = $1) AS sourced,
       shopify_inventory_id IS NOT NULL AS on_shopify, stock_pushed_at, stock_push_result,
+      (partner_photos_seen > COALESCE(partner_photos_applied, 'epoch')) AS photos_new, partner_photos_seen, partner_photos_result,
       ${require('../lib/stock-qty').SELLABLE_SQL.replace(/\bp\./g, 'products.')} AS sellable_qty,
       (SELECT count(*)::int FROM mirror_links ml WHERE ml.shopify_product_id::text = products.shopify_product_id::text
          OR (products.shopify_product_id IS NULL AND upper(ml.last_synced_sku) = upper(products.sku))) AS ebay_listings

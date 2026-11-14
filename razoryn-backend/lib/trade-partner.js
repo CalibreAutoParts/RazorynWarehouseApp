@@ -37,6 +37,8 @@ function ensureSchema() {
     await query(`ALTER TABLE trade_partner_links ADD COLUMN IF NOT EXISTS auto_order BOOLEAN NOT NULL DEFAULT false`);
     await query(`ALTER TABLE trade_partner_links ADD COLUMN IF NOT EXISTS auto_order_delivery TEXT NOT NULL DEFAULT 'collect'`);   // collect | ship | dropship
     await query(`ALTER TABLE trade_partner_links ADD COLUMN IF NOT EXISTS auto_order_since TIMESTAMPTZ`);
+    // Put their new photos on our listings automatically when they change them.
+    await query(`ALTER TABLE trade_partner_links ADD COLUMN IF NOT EXISTS auto_photos BOOLEAN NOT NULL DEFAULT false`);
     await query(`CREATE TABLE IF NOT EXISTS partner_auto_orders (
       sale_item_id INTEGER PRIMARY KEY, link_id INTEGER NOT NULL, sale_id INTEGER, product_id INTEGER,
       qty INTEGER NOT NULL DEFAULT 0, partner_ref TEXT, delivery TEXT, note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
@@ -171,6 +173,12 @@ async function withMargins(items) {
 // stocked from that partner).
 async function applyItem(link, productId, item, { setCost = false } = {}) {
   const loc = item.location ? [item.location.code, item.location.name || item.location.note].filter(Boolean).join(' · ') : null;
+  // Their photo time: the first one we see is the baseline (the photos we
+  // listed with); a later one means they've changed the photos since.
+  if (item.photos_updated_at) {
+    await query(`UPDATE products SET partner_photos_seen = $2::timestamptz,
+        partner_photos_applied = COALESCE(partner_photos_applied, $2::timestamptz) WHERE id = $1`, [productId, item.photos_updated_at]).catch(() => {});
+  }
   await query(`UPDATE products SET partner_qty = $2::int, partner_cost = $3::numeric, partner_location = COALESCE($4::text, partner_location),
       partner_barcode = COALESCE($5::text, partner_barcode), barcode = COALESCE(NULLIF(barcode,''), $5::text), partner_synced_at = now(),
       cost_price = CASE WHEN $6::boolean AND $3::numeric IS NOT NULL THEN $3::numeric ELSE cost_price END,
@@ -262,6 +270,11 @@ async function sync(link) {
     }
     await query(`UPDATE trade_partner_links SET last_sync_at = now(), last_error = NULL WHERE id = $1`, [link.id]);
     pushPartnerStock(changedStock);
+    // Their photos changed → put them on our listings (when switched on).
+    if (link.auto_photos) {
+      const ids = (await query(`SELECT id FROM products WHERE partner_link_id = $1 AND partner_photos_seen > COALESCE(partner_photos_applied, 'epoch')`, [link.id])).rows.map(r => r.id);
+      if (ids.length) setImmediate(async () => { for (const id of ids) { try { await refreshPhotos(link, id); } catch (e) { console.warn('[partner] photos:', e.message); } } });
+    }
   } catch (e) {
     await query(`UPDATE trade_partner_links SET last_error = $2 WHERE id = $1`, [link.id, e.message.slice(0, 300)]);
     throw e;
@@ -483,6 +496,82 @@ async function pushOne(productId) {
   return out;
 }
 
+// ─── Listing photos for a part we sell from a partner ─────────────────────
+// Best photos for OUR listings, in order:
+//   1. our own photo studio's set for the part number (our watermark);
+//   2. the partner's clean (unbranded) photos;
+//   3. the partner's listing photos (these carry THEIR watermark — flagged).
+async function photosFor(link, product) {
+  // 1. Our studio.
+  const pn = product.part_number || product.sku;
+  try {
+    const { studioFetch } = require('../routes/thumbnail');
+    const r = await studioFetch(`/photo-sets?part_number=${encodeURIComponent(pn)}`);
+    if (r.ok) {
+      const norm = x => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const sets = ((await r.json().catch(() => ({}))).photo_sets || []).filter(x => x.image_count > 0);
+      const set = sets.find(x => norm(x.part_number) === norm(pn) || norm(x.sku) === norm(product.sku)) || null;
+      if (set) {
+        const u = await studioFetch(`/photo-sets/${parseInt(set.id, 10)}/image-urls?sku=${encodeURIComponent(product.sku)}`, { method: 'POST' });
+        const b = u.ok ? await u.json().catch(() => ({})) : {};
+        const https = l => (Array.isArray(l) ? l : []).filter(x => /^https:\/\//i.test(String(x || '')));
+        const shop = https(b.shopifyImages || b.images), eb = https(b.ebayImages || b.images);
+        if (shop.length || eb.length) return { source: 'studio', label: 'your photo studio', shopify: shop.length ? shop : eb, ebayStudio: eb, website: shop.length ? shop : eb, watermarked: false };
+      }
+    }
+  } catch (_) { /* studio not linked — use theirs */ }
+  // 2 / 3. The partner's photos.
+  const it = await call(link, 'GET', '/stock/' + encodeURIComponent(product.partner_sku || product.sku));
+  const clean = (it.images_public || []).filter(u => /^https:\/\//i.test(u));
+  if (clean.length) return { source: 'partner_clean', label: `${link.name}'s clean photos`, shopify: clean, website: clean, ebayStudio: [], watermarked: false, seen: it.photos_updated_at || null };
+  const theirs = (it.images || []).map(x => x && x.url).filter(u => /^https:\/\//i.test(String(u || '')));
+  if (theirs.length) return { source: 'partner_listing', label: `${link.name}'s listing photos`, shopify: theirs, website: theirs, ebayStudio: [], watermarked: true, seen: it.photos_updated_at || null };
+  return { source: null, shopify: [], website: [], ebayStudio: [], seen: it.photos_updated_at || null };
+}
+
+// Put the best photos on this part's Shopify product and every eBay listing.
+// → { productId, sku, source, label, watermarked, photos, shopify: {ok|error|skipped}, ebay: [{itemId, store, ok|error}] }
+async function refreshPhotos(link, productId) {
+  await ensureSchema();
+  const ebay = require('../services/ebay');
+  const shopify = require('../services/shopify');
+  const product = (await query(`SELECT * FROM products WHERE id = $1`, [productId])).rows[0];
+  if (!product) throw new Error('product_not_found');
+  const ph = await photosFor(link, product);
+  const out = { productId: product.id, sku: product.sku, source: ph.source, label: ph.label || null, watermarked: !!ph.watermarked,
+    photos: ph.shopify.length, shopify: null, ebay: [], at: new Date().toISOString() };
+  if (!ph.source) {
+    out.error = `No photos found — not in your photo studio and ${link.name} has none to share for this part`;
+  } else {
+    if (ph.source === 'studio' && ph.ebayStudio.length) { try { await require('./ebay-photos').saveStudioSet(product.id, ph.ebayStudio); } catch (_) {} }
+    if (!product.shopify_product_id) out.shopify = { skipped: 'not on Shopify' };
+    else if (!shopify.isConfigured()) out.shopify = { skipped: 'Shopify not connected' };
+    else {
+      try { await shopify.setProductImages(product.shopify_product_id, ph.shopify); out.shopify = { ok: true }; }
+      catch (e) { out.shopify = { error: String(e.message || e).slice(0, 200) }; }
+    }
+    let links = [];
+    if (product.shopify_product_id) links = (await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id::text = $1`, [String(product.shopify_product_id)])).rows;
+    if (!links.length && product.sku) links = (await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE upper(last_synced_sku) = upper($1)`, [product.sku]).catch(() => ({ rows: [] }))).rows;
+    for (const l of links) {
+      const row = { itemId: l.ebay_item_id, store: l.store_code || null };
+      try {
+        const pics = await require('./ebay-photos').forStore(l.store_code, { studio: ph.ebayStudio, website: ph.website }) || ph.website;
+        await ebay.reviseItem(l.ebay_item_id, { pictureUrls: pics }, l.store_code || undefined);
+        row.ok = true;
+      } catch (e) { row.error = String(e.message || e).slice(0, 200); }
+      out.ebay.push(row);
+    }
+    const first = ph.shopify[0] || null;
+    if (first) await query(`UPDATE products SET image_url = $2 WHERE id = $1`, [product.id, first]).catch(() => {});
+  }
+  const okAll = !out.error && !(out.shopify && out.shopify.error) && !out.ebay.some(x => x.error);
+  await query(`UPDATE products SET partner_photos_result = $2::jsonb,
+      partner_photos_applied = CASE WHEN $3 THEN GREATEST(COALESCE(partner_photos_seen, now()), COALESCE($4::timestamptz, partner_photos_seen, now())) ELSE partner_photos_applied END
+    WHERE id = $1`, [product.id, JSON.stringify(out), okAll, ph.seen || null]).catch(() => {});
+  return out;
+}
+
 // Partner pushed an event to us (signature checked by the caller).
 async function handleEvent(link, evt) {
   if (evt.event === 'stock.updated') {
@@ -515,4 +604,4 @@ async function handleEvent(link, evt) {
   return { ignored: true };
 }
 
-module.exports = { ensureSchema, call, getLink, publicLink, connect, catalogue, importItems, sync, syncAll, placeOrder, handleEvent, origin, autoOrderSweep, pushPartnerStock, pushOne };
+module.exports = { ensureSchema, call, getLink, publicLink, connect, catalogue, importItems, sync, syncAll, placeOrder, handleEvent, origin, autoOrderSweep, pushPartnerStock, pushOne, refreshPhotos, photosFor };
