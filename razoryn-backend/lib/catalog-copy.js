@@ -32,10 +32,13 @@ function planChanges(p, brandCfg = brand) {
   if (!String(p.productType || '').trim() && info.partType) out.productType = info.partType;
   const levels = String(p.category?.fullName || '').split('>').filter(s => s.trim()).length;
   if (levels < 3 && info.categoryQuery) out.categoryQuery = info.categoryQuery;
+  // Shopify reports an SEO title that's the same as the product title as empty,
+  // so only write a title when ours differs — otherwise it'd be rewritten nightly.
   const curTitle = p.seo?.title || '', curDesc = p.seo?.description || '';
-  if (!curTitle || !curDesc) {
-    const s = seo.buildSeo({ title, part_number: pn }, brandCfg);
-    out.seo = { title: curTitle || s.pageTitle, description: curDesc || s.metaDescription };
+  const s = (!curTitle || !curDesc) ? seo.buildSeo({ title, part_number: pn }, brandCfg) : null;
+  const needTitle = s && !curTitle && s.pageTitle && s.pageTitle !== title.trim();
+  if (s && (!curDesc || needTitle)) {
+    out.seo = { ...(needTitle ? { title: s.pageTitle } : (curTitle ? { title: curTitle } : {})), description: curDesc || s.metaDescription };
   }
   return Object.keys(out).length ? out : null;
 }

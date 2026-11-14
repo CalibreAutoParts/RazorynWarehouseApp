@@ -53,8 +53,12 @@ t('optimiser plan: only what is missing or wrong', () => {
   assert.ok(plan.descriptionHtml && plan.backupHtml.includes('eBay'));
   assert.strictEqual(plan.productType, 'Headlight');
   assert.strictEqual(plan.categoryQuery, 'Headlights');
-  assert.ok(plan.seo.title && plan.seo.description);
+  assert.ok(plan.seo.description && plan.seo.title === undefined, 'meta description filled; SEO title left to default to the product title');
   assert.ok(!cc.planChanges({ ...ebay, backup: { id: 'b' } }).backupHtml, 'backup written only once');
+  // SEO title equal to the product title reads back empty from Shopify — not a change.
+  assert.strictEqual(cc.planChanges({ ...good, seo: { title: null, description: 'y' } }), null);
+  const long = cc.planChanges({ ...good, title: 'Peugeot Partner 2024-2026 Front Lower Bumper Textured (with pdc & park assist hole)', seo: { title: null, description: null } });
+  assert.strictEqual(long.seo.title, 'Peugeot Partner 2024-2026 Front Lower Bumper Textured', 'no title cut mid-bracket');
 });
 console.log(`${n} passed`);
 process.exit(0);
