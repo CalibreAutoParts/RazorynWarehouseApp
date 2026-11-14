@@ -161,6 +161,11 @@ async function _migrate() {
     'partner_link_id INTEGER', 'source_partner_id INTEGER', 'partner_sku TEXT', 'partner_qty INTEGER', 'partner_cost NUMERIC(12,4)',
     'partner_location TEXT', 'partner_barcode TEXT', 'partner_synced_at TIMESTAMPTZ',
     'stock_pushed_at TIMESTAMPTZ', 'stock_push_result JSONB',
+    // When this part's photos last changed (studio push / clean photos) — so a
+    // partner selling it knows to update its listing photos.
+    'photos_updated_at TIMESTAMPTZ',
+    // Buyer side: the partner's photo time we last saw / last put on our listings.
+    'partner_photos_seen TIMESTAMPTZ', 'partner_photos_applied TIMESTAMPTZ', 'partner_photos_result JSONB',
   ]) await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ${col}`);
 }
 
@@ -289,7 +294,7 @@ const PRODUCT_COLS = `p.id, p.sku, p.title, p.brand, p.model, p.part_number, p.p
   ts.changed_at AS stock_changed_at,
   p.pkg_length_cm, p.pkg_width_cm, p.pkg_height_cm, p.pkg_weight_g, p.packaging_included, p.packaging_cost,
   p.shipping_band, p.shipping_cost, p.large_panel, p.postage_in_price, p.ebay_category_id, p.ebay_item_specifics, p.ebay_description,
-  p.trade_photos_ok, p.trade_photos_hide`;
+  p.trade_photos_ok, p.trade_photos_hide, p.photos_updated_at`;
 
 // One product as a trade customer sees it.
 function present(account, p, rules, settings, { detail = false } = {}) {
@@ -309,6 +314,7 @@ function present(account, p, rules, settings, { detail = false } = {}) {
     rrp: num(p.price_shopify) || num(p.price_ebay),
     rrp_ebay: num(p.price_ebay), rrp_shopify: num(p.price_shopify),
     updated_at: p.stock_changed_at || p.updated_at,
+    photos_updated_at: p.photos_updated_at || null,
   };
   if (account.show_cost) {
     out.our_cost = pr.cost != null ? round2(pr.cost) : null;
@@ -423,6 +429,7 @@ async function setStudioCleanImages(productId, urls) {
   const manual = (await cleanImages(productId)).filter(u => !isStudioClean(u));
   await query(`INSERT INTO product_clean_images (product_id, urls, updated_at) VALUES ($1, $2::jsonb, now())
     ON CONFLICT (product_id) DO UPDATE SET urls = EXCLUDED.urls, updated_at = now()`, [productId, JSON.stringify([...studio, ...manual].slice(0, 30))]);
+  await query(`UPDATE products SET photos_updated_at = now() WHERE id = $1`, [productId]).catch(() => {});
   return studio.length;
 }
 async function cleanImages(productId) {
