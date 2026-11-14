@@ -1602,6 +1602,20 @@ router.post('/seo/preview', requireAdmin, async (req, res) => {
   res.json({ items: out, count: out.length });
 });
 
+// ── Website listing copy (lib/catalog-copy.js) ─────────────────────────────
+// POST /api/products/catalog-copy { dryRun?: bool } — fix empty / eBay-template
+// descriptions, missing product types, categories and SEO on every live Shopify
+// listing (runs in the background; poll the status). dryRun only counts + samples.
+router.post('/catalog-copy', requireAdmin, async (req, res) => {
+  const cc = require('../lib/catalog-copy');
+  const dryRun = req.body?.dryRun !== false;
+  if (cc.getStatus().state === 'running') return res.json({ ok: true, started: false, status: cc.getStatus() });
+  cc.run({ dryRun }).catch(e => console.warn('[catalog-copy]', e.message));
+  await audit(req, 'catalog_copy', 'product', null, { dryRun });
+  res.json({ ok: true, started: true, dryRun });
+});
+router.get('/catalog-copy/status', requireAdmin, (req, res) => res.json(require('../lib/catalog-copy').getStatus()));
+
 // POST /api/products/seo/apply  { items: [{ shopifyProductId, pageTitle, metaDescription, handle, categoryId }] }
 // Writes the (user-reviewed) SEO fields to Shopify. Each item is applied
 // independently so one failure doesn't abort the batch.

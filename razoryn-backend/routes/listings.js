@@ -5281,8 +5281,18 @@ router.post('/restyle-descriptions', requireAdmin, async (req, res) => {
           await ebay.reviseItem(row.ebay_item_id, { description: html, ...(makeFixed && cleaned.length ? { itemSpecifics: cleaned, titleHint: row.title } : {}) }, store.code);
           if (makeFixed) await query(`UPDATE products SET ebay_item_specifics = $1::jsonb WHERE id = $2`, [JSON.stringify(cleaned), row.id]).catch(() => {});
           await query(`UPDATE products SET ebay_description = $1, updated_at = now() WHERE id = $2`, [html, row.id]).catch(() => {});
+          // The eBay HTML is NOT copied to the website any more (its eBay wording and
+          // related-item cards with prices are wrong there). With "include Shopify",
+          // a blank or eBay-template website description gets the website copy instead.
           if (includeShopify && row.shopify_product_id && shopify.isConfigured()) {
-            try { await shopify.updateProduct(row.shopify_product_id, { description: html, imageUrls: [] }); } catch (_) {}
+            try {
+              const listingCopy = require('../lib/listing-copy');
+              const cur = await shopify.getShopifyProductFull(row.shopify_product_id).catch(() => null);
+              if (!cur || listingCopy.needsNewDescription(cur.description)) {
+                const site = listingCopy.buildDescriptionHtml({ title: row.title, partNumber: row.part_number });
+                await shopify.updateProduct(row.shopify_product_id, { description: site, imageUrls: [] });
+              }
+            } catch (_) {}
           }
           restyleStatus.ok++;
         } catch (e) {
