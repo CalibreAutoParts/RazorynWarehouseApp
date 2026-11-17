@@ -472,8 +472,10 @@ function mapTradingOrderXml(oXml) {
     };
   });
 
+  let shipTerms = null;
+  try { shipTerms = require('../lib/ship-terms').fromEbayXml(oXml); } catch (_) {}
   return {
-    orderId, creationDate,
+    orderId, creationDate, shipTerms,
     buyer: { username: buyerUserId || null, name: buyerName, email: buyerEmail, phone: buyerPhone },
     shippingAddress,
     pricingSummary: {

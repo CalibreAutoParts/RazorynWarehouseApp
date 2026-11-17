@@ -8919,6 +8919,24 @@ function paintDispatchApp() {
   }).join('')}</div></div>`;
 }
 
+// The delivery the customer chose and paid for: service, postage paid, the
+// delivery window they were promised (eBay's estimate; estimated from the
+// service for Shopify) and the dispatch-by day — to pick the right label.
+function dispatchShipTerms(s) {
+  if (!s.ship_service && !s.eta_max && !s.ship_by) return '';
+  const day = (t) => { const d = new Date(t); const today = new Date(); const tom = new Date(); tom.setDate(today.getDate() + 1);
+    const same = (a, b) => a.toDateString() === b.toDateString();
+    return same(d, today) ? 'today' : same(d, tom) ? 'tomorrow' : d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }); };
+  const endToday = new Date(); endToday.setHours(23, 59, 59, 999);
+  const shipLate = s.ship_by && new Date(s.ship_by) <= endToday;
+  const window = s.eta_max ? (s.eta_min && new Date(s.eta_min).toDateString() !== new Date(s.eta_max).toDateString() ? `${day(s.eta_min)} – ${day(s.eta_max)}` : day(s.eta_max)) : null;
+  const svc = s.ship_service ? escapeHtml(s.ship_service) : 'Delivery';
+  return `<div style="margin-top:4px;display:flex;flex-direction:column;gap:2px;font-size:11px;line-height:1.3">
+    <div><span class="pill ${s.ship_express ? 'red' : ''}" style="font-size:10px" title="${escapeAttr(s.ship_service_code || '')}">${s.ship_express ? '🚀 ' : '📦 '}${svc}${s.ship_paid != null ? ` · ${Number(s.ship_paid) > 0 ? gbp(s.ship_paid) : 'free'}` : ''}</span></div>
+    ${window ? `<div style="color:var(--ink-soft)" title="${s.eta_estimated ? 'Estimated from the delivery service (Shopify gives no date)' : 'Delivery estimate eBay showed the buyer'}">Arrives ${s.eta_estimated ? '≈ ' : ''}<b style="color:var(--ink)">${window}</b></div>` : ''}
+    ${s.ship_by ? `<div style="color:${shipLate ? 'var(--red)' : 'var(--ink-soft)'};font-weight:${shipLate ? 600 : 400}">Dispatch by ${day(s.ship_by)}</div>` : ''}
+  </div>`;
+}
 function renderDispatchRow(s, kind) {
   const ref = s.invoice_number || s.payment_reference || s.external_order_id || '#' + s.id;
   const itemLabel = s.first_item_title
@@ -8939,7 +8957,7 @@ function renderDispatchRow(s, kind) {
           ${s.dropfleet_pushed_at ? `<div style="margin-top:3px"><span class="pill green" style="font-size:9px" title="Sent to DropFleet ${escapeAttr(fmtDate(s.dropfleet_pushed_at))}">🚚 Sent to DropFleet</span></div>` : ''}
         </td>
         <td>${channelPill(s.channel, s)}</td>
-        <td>${escapeHtml(s.customer_name || '—')}</td>
+        <td>${escapeHtml(s.customer_name || '—')}${dispatchShipTerms(s)}</td>
         <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div>${s.first_item_sku ? `<div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(s.first_item_sku)}${s.first_item_pn && s.first_item_pn !== s.first_item_sku ? ' · PN ' + escapeHtml(s.first_item_pn) : ''}${s.first_item_loc ? ' · 📍 ' + escapeHtml(s.first_item_loc) : ''}</div>` : ''}</td>
         <td class="num"><strong>${gbp(s.total)}</strong></td>
         <td>${ageBadge}</td>
@@ -24515,6 +24533,33 @@ function settingsSplitEbayCard(page) {
     after.after(c);
     setPhotoSizePoll(true);
   }
+  if (!page.querySelector('#set-shopify-perms')) {
+    const c = document.createElement('div');
+    c.className = 'card admin-only'; c.style.marginBottom = '16px'; c.id = 'set-shopify-perms';
+    c.innerHTML = `<div class="card-head"><h3>🔑 Shopify permissions (tracking numbers / fulfilment)</h3></div><div class="card-body">
+      <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:8px">To mark Shopify orders as shipped with a tracking number, the app's Shopify connection needs the fulfilment permissions. This checks what Shopify has actually granted it.</div>
+      <button class="btn btn-outline btn-sm" onclick="setShopifyPermsCheck(this)">Check Shopify permissions</button>
+      <div id="set-shopify-perms-out" style="font-size:12.5px;margin-top:8px"></div></div>`;
+    (page.querySelector('.card[data-s-tab="shopify"]') || page.querySelector('#set-photo-size') || page.lastElementChild).after(c);
+  }
+}
+async function setShopifyPermsCheck(btn) {
+  const out = el('set-shopify-perms-out'); if (btn) btn.disabled = true;
+  out.textContent = 'Checking…';
+  try {
+    const r = await Api.get('/api/settings/shopify-permissions');
+    if (!r.configured) out.innerHTML = '<span style="color:var(--amber)">Shopify isn\'t connected.</span>';
+    else if (r.error) out.innerHTML = `<span style="color:var(--red)">Couldn't check: ${escapeHtml(r.error)}</span>`;
+    else if (r.ok) out.innerHTML = '<span style="color:var(--green)">✓ The app can ship Shopify orders — tracking numbers will upload.</span>';
+    else out.innerHTML = `<div style="color:var(--red);font-weight:600">✗ Missing: ${r.missing.map(escapeHtml).join(', ')}</div>
+      <ol style="margin:6px 0 0 18px;padding:0;line-height:1.6">
+        <li>Open the warehouse app's Shopify app (<b>Razoryn Warehouse</b>): in the <b>Shopify Dev Dashboard</b> (dev.shopify.com → Apps → the app → Versions → <i>Create version</i>), or if it was made in the store: Shopify admin → Settings → Apps and sales channels → <b>Develop apps</b> → the app → Configuration → Admin API integration.</li>
+        <li>Tick / add these scopes: <code>read_merchant_managed_fulfillment_orders</code>, <code>write_merchant_managed_fulfillment_orders</code>, <code>read_fulfillments</code>, <code>write_fulfillments</code>.</li>
+        <li><b>Release</b> the new version (Dev Dashboard) or <b>Save</b>, then approve the update in Shopify admin when it asks.</li>
+        <li>Come back here and press Check again. (If the app uses a fixed admin token and Shopify gives a new one, put it in Railway as SHOPIFY_ADMIN_TOKEN.)</li></ol>
+      <div style="margin-top:6px;color:var(--ink-soft)">Granted now: ${(r.have || []).map(escapeHtml).join(', ') || 'none'}</div>`;
+  } catch (e) { out.innerHTML = `<span style="color:var(--red)">${escapeHtml(e.message)}</span>`; }
+  if (btn) btn.disabled = false;
 }
 let _psTimer = null;
 async function setPhotoSizeRun(btn) {

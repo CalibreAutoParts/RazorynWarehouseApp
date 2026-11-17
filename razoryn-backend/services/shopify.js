@@ -1172,9 +1172,10 @@ async function fulfillOrder(opts = {}) {
     let st = null; try { st = await getOrderShipped(orderId); } catch (_) {}
     if (st && st.shipped) return { ok: true, alreadyFulfilled: true, tracking: st.tracking, carrier: st.carrier };
     if (!fulfillmentOrders.length) {
-      throw new Error("Shopify didn't let the app see this order's fulfilment — the warehouse app's Shopify connection needs the "
-        + "'merchant-managed fulfillment orders' permission (read_merchant_managed_fulfillment_orders + write_merchant_managed_fulfillment_orders). "
-        + 'Add them to the app in Shopify (Settings → Apps → Develop apps → the warehouse app → Configuration) and reinstall / update the token.');
+      throw new Error("Shopify won't let the warehouse app ship orders — its Shopify app (\"Razoryn Warehouse\") is missing the fulfilment permissions: "
+        + 'read_merchant_managed_fulfillment_orders, write_merchant_managed_fulfillment_orders, read_fulfillments, write_fulfillments. '
+        + 'Add them to the app\'s access scopes (Shopify Dev Dashboard → the app → Versions → new version with those scopes → Release; or Settings → Apps → Develop apps → the app → Configuration → Admin API scopes → Save), '
+        + 'then approve the update in Shopify admin. Settings → Shopify → "Check Shopify permissions" shows what is still missing.');
     }
     throw new Error(`Nothing Shopify can fulfil on this order (fulfilment status: ${fulfillmentOrders.map(f => f.status).join(', ')})`);
   }
@@ -1624,7 +1625,29 @@ async function setProductReviews(productId, payload) {
   return true;
 }
 
+// A few orders by id (shipping lines etc.) — status any.
+async function getOrdersByIds(ids, fields = 'id,name,created_at,shipping_lines') {
+  const list = (ids || []).map(String).filter(x => /^\d+$/.test(x)).slice(0, 250);
+  if (!list.length) return [];
+  const r = await shopifyRequest('GET', `/orders.json?status=any&limit=250&ids=${list.join(',')}&fields=${encodeURIComponent(fields)}`);
+  return r.data?.orders || [];
+}
+// Which Admin API permissions this app's token actually has.
+async function accessScopes() {
+  const token = await getAccessToken();
+  const r = await axios.get(`https://${STORE}/admin/oauth/access_scopes.json`, { headers: { 'X-Shopify-Access-Token': token }, timeout: 15000 });
+  return (r.data?.access_scopes || []).map(x => x.handle);
+}
+const FULFIL_SCOPES = ['write_merchant_managed_fulfillment_orders', 'write_fulfillments'];
+async function fulfilmentScopeCheck() {
+  const have = await accessScopes();
+  // write_* implies read_*; either fulfilment write scope lets the app ship our own orders.
+  const ok = have.includes('write_merchant_managed_fulfillment_orders') || have.includes('write_fulfillments');
+  return { ok, have, missing: ok ? [] : ['read_merchant_managed_fulfillment_orders', 'write_merchant_managed_fulfillment_orders', 'read_fulfillments', 'write_fulfillments'] };
+}
+
 module.exports = {
+  getOrdersByIds, accessScopes, fulfilmentScopeCheck,
   isConfigured,
   getOrderShipped,
   addProductImages,

@@ -955,6 +955,13 @@ router.put('/channel-colors', requireAdmin, async (req, res) => {
 // PUT  /api/settings/ebay-limits           { caps: { storeCode: n | null } }
 // POST /api/settings/ebay-limits/apply/:code → push min(warehouse, cap) to every
 //      listing linked to that account now (otherwise it applies on the next push).
+// GET /api/settings/shopify-permissions — can the app ship Shopify orders?
+router.get('/shopify-permissions', requireAdmin, async (req, res) => {
+  const shopify = require('../services/shopify');
+  if (!shopify.isConfigured()) return res.json({ configured: false });
+  try { res.json({ configured: true, ...(await shopify.fulfilmentScopeCheck()) }); }
+  catch (e) { res.json({ configured: true, error: e.response?.status ? `Shopify HTTP ${e.response.status}` : e.message }); }
+});
 router.get('/ebay-limits', requireAdmin, async (req, res) => {
   const ebay = require('../services/ebay');
   const capLib = require('../lib/ebay-qty-cap');
