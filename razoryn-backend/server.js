@@ -170,6 +170,8 @@ app.get('/public/photo/:file', async (req, res) => {
 });
 cron.schedule('45 3 * * *', () => { require('./lib/ebay-photo-prep').cleanup().catch(() => {}); });
 
+require('./lib/ship-terms').ensureColumns().catch(e => console.warn('[ship-terms] columns:', e.message));
+
 // ---------- Version: open pages reload themselves after a deploy ----------
 // A screen left open all day (the warehouse PC) would otherwise run the old
 // version until someone refreshes it.

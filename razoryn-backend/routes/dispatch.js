@@ -140,6 +140,8 @@ async function sendCustomerShippingEmail(saleId, kind) {
 // ──────────────────────────────────────────────────────────────────────────
 router.get('/outstanding', requirePermission('dispatch'), async (req, res) => {
   await ensureDispatchColumns();
+  // Delivery service + ETA for orders imported before that was recorded.
+  try { await require('../lib/ship-terms').ensureColumns(); require('../lib/ship-terms').backfill().catch(e => console.warn('[ship-terms]', e.message)); } catch (_) {}
   const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 10));
   try {
     // Outstanding orders to ship. Excludes:

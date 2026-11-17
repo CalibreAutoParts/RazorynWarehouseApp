@@ -369,6 +369,9 @@ async function pullShopify(opts = {}) {
           shopify.orderDiscountLabel(order),
         ]
       );
+      // Delivery the customer chose (Next-day / Standard…) for the Dispatch list.
+      try { await require('../lib/ship-terms').save(sale.rows[0].id, require('../lib/ship-terms').fromShopifyOrder(order), c); }
+      catch (e) { console.warn('[sync] ship terms:', e.message); }
 
       for (const li of order.line_items || []) {
         const matched = await resolveProductBySku(c, li.sku);
@@ -594,6 +597,8 @@ async function importEbayOrderRow(order, store, { vatRegistered, vatRate, adjust
        'ebay', paymentRef, order.orderId, paymentRef,
        order.fulfillmentMethod === 'collect' ? 'collect' : 'ship']);
     newSaleId = sale.rows[0].id;
+    // Delivery the buyer chose + eBay's delivery estimate (Dispatch list).
+    if (order.shipTerms) { try { await require('../lib/ship-terms').save(newSaleId, order.shipTerms, c); } catch (e) { console.warn('[sync] ship terms:', e.message); } }
     for (const li of order.lineItems || []) {
       const matched = await resolveProductBySku(c, li.sku);
       const productId = matched?.id || null;
