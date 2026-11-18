@@ -998,15 +998,46 @@ router.post('/:id/mark-paid', requireAdmin, async (req, res) => {
   res.json({ ok: true, sale: upd.rows[0] });
 });
 
-// Flip an invoice back to unpaid (correct a mistake / chase again). Estimates excluded.
+// After a payment is removed: amount paid = what's left in the ledger; below the
+// total → unpaid again (a sale that only became 'paid' by being marked paid
+// goes back to 'pending' so it shows up to chase).
+async function recomputePaid(saleId) {
+  const s = (await query(`SELECT total, status FROM sales WHERE id = $1`, [saleId])).rows[0];
+  const sum = parseFloat((await query(`SELECT COALESCE(SUM(amount),0)::numeric AS s FROM sale_payments WHERE sale_id = $1`, [saleId])).rows[0].s) || 0;
+  const total = parseFloat(s.total) || 0;
+  const fully = total > 0 && sum >= total - 0.005;
+  const upd = await query(`UPDATE sales SET amount_paid = $2,
+      is_paid = $3, paid_at = CASE WHEN $3 THEN paid_at ELSE NULL END,
+      status = CASE WHEN NOT $3 AND status = 'paid' THEN 'pending' ELSE status END
+    WHERE id = $1 RETURNING *`, [saleId, Math.round(sum * 100) / 100, fully]);
+  return upd.rows[0];
+}
+
+// Flip an invoice back to unpaid (correct a mistake / chase again). Estimates
+// excluded. Removes the "Marked paid" ledger entry too, so the books match.
 router.post('/:id/mark-unpaid', requireAdmin, async (req, res) => {
   await ensurePaidColumn();
+  await ensurePaymentsTable();
   const s = await query(`SELECT id, is_estimate FROM sales WHERE id = $1`, [req.params.id]);
   if (!s.rows[0]) return res.status(404).json({ error: 'not_found' });
   if (s.rows[0].is_estimate) return res.status(400).json({ error: 'is_estimate' });
-  const upd = await query(`UPDATE sales SET is_paid = false, paid_at = NULL WHERE id = $1 RETURNING *`, [req.params.id]);
-  await audit(req, 'sale_mark_unpaid', 'sale', req.params.id, null);
-  res.json({ ok: true, sale: upd.rows[0] });
+  const del = await query(`DELETE FROM sale_payments WHERE sale_id = $1 AND notes = 'Marked paid' RETURNING amount`, [req.params.id]);
+  await query(`UPDATE sales SET is_paid = false, paid_at = NULL WHERE id = $1`, [req.params.id]);
+  const sale = await recomputePaid(req.params.id);
+  await audit(req, 'sale_mark_unpaid', 'sale', req.params.id, { removedPayments: del.rows.map(r => Number(r.amount)) });
+  res.json({ ok: true, sale });
+});
+
+// DELETE /api/sales/:id/payments/:paymentId — remove a payment recorded by
+// mistake; the order goes back to unpaid / part-paid to match.
+router.delete('/:id/payments/:paymentId', requireAdmin, async (req, res) => {
+  await ensurePaidColumn();
+  await ensurePaymentsTable();
+  const p = (await query(`DELETE FROM sale_payments WHERE id = $1 AND sale_id = $2 RETURNING *`, [req.params.paymentId, req.params.id])).rows[0];
+  if (!p) return res.status(404).json({ error: 'not_found', message: 'That payment is not on this order.' });
+  const sale = await recomputePaid(req.params.id);
+  await audit(req, 'sale_payment_removed', 'sale', req.params.id, { amount: Number(p.amount), method: p.method, paidAt: p.paid_at, notes: p.notes });
+  res.json({ ok: true, sale, removed: { amount: Number(p.amount) } });
 });
 
 // POST /api/sales/:id/retry-invoice-push — manually re-send a direct bank/cash

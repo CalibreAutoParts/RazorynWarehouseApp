@@ -10803,6 +10803,17 @@ function autoOpenInvoice(id) {
 // a second top-level definition there shadows anything here, so there is a single
 // source of truth. This earlier duplicate was removed to avoid confusion.
 
+// Undo a payment recorded by mistake (e.g. "Mark paid" pressed on the wrong order).
+async function saleRemovePayment(saleId, paymentId, amount) {
+  if (!confirm(`Remove this £${Number(amount).toFixed(2)} payment?\n\nThe order goes back to unpaid (or part-paid) and shows up to chase again. Any receipt already emailed is not recalled.`)) return;
+  try {
+    const r = await Api.delete(`/api/sales/${saleId}/payments/${paymentId}`);
+    toast(`Payment removed — order is now ${r.sale?.is_paid ? 'paid' : Number(r.sale?.amount_paid) > 0 ? 'part-paid' : 'unpaid'}`, 'success', 5000);
+    closeModal();
+    openSaleDetail(saleId);
+    if (typeof loadSales === 'function') loadSales();
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
 async function openSaleDetail(id) {
   let data;
   try {
@@ -10936,6 +10947,7 @@ async function openSaleDetail(id) {
               ${p.method ? ` · ${escape(p.method)}` : ''}${p.notes ? ` · <span style="color:var(--ink-soft)">${escape(p.notes)}</span>` : ''}
             </div>
             <div style="color:var(--ink-soft);white-space:nowrap">${p.paid_at ? new Date(p.paid_at).toLocaleDateString('en-GB') : ''}</div>
+            ${State.user?.role === 'admin' ? `<button class="btn btn-ghost btn-sm" style="padding:0 6px;color:var(--red);font-size:11px" title="Recorded by mistake? Remove this payment — the order goes back to unpaid" onclick="saleRemovePayment(${data.sale?.id ?? id}, ${p.id}, ${Number(p.amount)})">✕ Remove</button>` : ''}
           </div>`).join('')}
       </div>` : ''}
 
