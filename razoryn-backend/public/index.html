@@ -4103,9 +4103,13 @@ function summarizeChannelPushShort(cp) {
     // skipped (no inventory id / not configured) → omit silently
   }
   const eb = Array.isArray(cp.ebay) ? cp.ebay : [];
-  const ok = eb.filter(x => x.ok).length;
+  const why = { qty_cap: 'max per listing', price_band: 'price band max', selling_limit: 'eBay selling limit', kept_free: '£ kept free', waiting_to_top_up: 'waiting to top up' };
+  // Listings that show a different number from the count (a limit you set) — say so.
+  const held = eb.filter(x => x.ok && x.sent != null && x.qty != null && Number(x.sent) !== Number(x.qty));
+  const ok = eb.filter(x => x.ok).length - held.length;
   const failed = eb.filter(x => x.error).length;
   if (ok) parts.push(`eBay ✓${ok > 1 ? ` (${ok})` : ''}`);
+  for (const h of held) parts.push(`eBay shows ${h.sent}${why[h.limitedBy] ? ` (${why[h.limitedBy]})` : ''}`);
   if (failed) parts.push(`eBay ✕ (${failed})`);
   if (!ok && !failed && eb.some(x => x.skipped === 'no_ebay_links' || x.skipped)) parts.push('eBay: not listed');
   return parts.length ? parts.join(' · ') : 'channels updated';

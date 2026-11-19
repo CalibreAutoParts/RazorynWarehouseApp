@@ -989,7 +989,6 @@ async function pushAllStockToBoth(onProgress, opts = {}) {
     ? `SELECT p.id, p.sku, p.title, p.qty_on_hand, p.shopify_inventory_id, p.shopify_product_id
          FROM products p
          WHERE p.active = true
-           AND (p.shopify_inventory_id IS NOT NULL OR p.shopify_product_id IS NOT NULL)
            AND EXISTS (
              SELECT 1 FROM stock_checks sc
              WHERE sc.product_id = p.id
@@ -1025,6 +1024,22 @@ async function pushAllStockToBoth(onProgress, opts = {}) {
   const ebayOk = ebay.isConfigured();
   let i = 0;
   for (const p of rows) {
+    // Counted stock: the same exact push a stock check does (reads each eBay
+    // listing live, finds eBay-only listings by SKU, records what each took).
+    if (countedOnly) {
+      try {
+        const r = await require('../routes/products').pushProductStockToChannels(p.id, { exact: true });
+        if (r.shopify?.ok) out.shopify.pushed++; else if (r.shopify?.error) out.shopify.errors++;
+        for (const x of r.ebay || []) {
+          if (x.ok) out.ebay.pushed++;
+          else if (x.error) recordFail({ itemId: x.itemId, store: x.store, sku: p.sku, error: x.error });
+          else if (x.skipped) recordSkip(p, x.skipped);
+        }
+      } catch (e) { recordFail({ sku: p.sku, error: e.message }); }
+      out.done = ++i;
+      if (typeof onProgress === 'function' && (i % 25 === 0 || i === rows.length)) { try { onProgress(out); } catch (_) {} }
+      continue;
+    }
     if (shopOk && p.shopify_inventory_id) {
       try { await shopify.pushStockForProduct(p); out.shopify.pushed++; }
       catch (e) { out.shopify.errors++; }

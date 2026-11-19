@@ -106,7 +106,7 @@ router.post('/', requirePermission('scan'), async (req, res) => {
   if (result.variance !== 0 || forcePush) {
     try {
       const { pushProductStockToChannels } = require('./products');
-      channelPush = await pushProductStockToChannels(productId);
+      channelPush = await pushProductStockToChannels(productId, { exact: true });
     } catch (e) { channelPush = { error: e.message }; }
   }
   res.status(201).json({ ...result, channelPush });
