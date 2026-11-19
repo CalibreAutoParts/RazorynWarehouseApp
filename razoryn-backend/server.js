@@ -171,6 +171,13 @@ app.get('/public/photo/:file', async (req, res) => {
 cron.schedule('45 3 * * *', () => { require('./lib/ebay-photo-prep').cleanup().catch(() => {}); });
 
 require('./lib/ship-terms').ensureColumns().catch(e => console.warn('[ship-terms] columns:', e.message));
+// Re-read eBay orders changed in the last 14 days so ones wrongly zeroed by a
+// cancel REQUEST (later withdrawn) come back. Once, shortly after start.
+setTimeout(() => {
+  require('./services/sync').reconcileModifiedEbayOrders(new Date(Date.now() - 14 * 86400000).toISOString())
+    .then(r => console.log('[boot] eBay order states re-checked:', JSON.stringify(r)))
+    .catch(e => console.warn('[boot] eBay order re-check:', e.message));
+}, 3 * 60 * 1000);
 
 // ---------- Version: open pages reload themselves after a deploy ----------
 // A screen left open all day (the warehouse PC) would otherwise run the old

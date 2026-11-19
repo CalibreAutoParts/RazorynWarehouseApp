@@ -208,7 +208,24 @@ router.get('/outstanding', requirePermission('dispatch'), async (req, res) => {
       LIMIT 200
     `);
 
+    // Orders cancelled / fully refunded on the channel before they were sent —
+    // listed so staff know NOT to ship them (they're off the to-ship list).
+    let cancelled = { rows: [] };
+    try {
+      cancelled = await query(`
+        SELECT s.id, s.channel, s.invoice_number, s.payment_reference, s.external_order_id, s.order_number, s.customer_name, s.total,
+               s.refunded_amount, s.refunded_at, s.status,
+               (SELECT title FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_title,
+               (SELECT sku FROM sale_items WHERE sale_id = s.id ORDER BY id LIMIT 1) AS first_item_sku
+          FROM sales s
+         WHERE s.is_estimate = false AND s.dispatched_at IS NULL
+           AND s.status IN ('refunded','cancelled')
+           AND COALESCE(s.refunded_at, s.occurred_at) >= now() - interval '7 days'
+         ORDER BY COALESCE(s.refunded_at, s.occurred_at) DESC LIMIT 50`);
+    } catch (_) {}
+
     res.json({
+      cancelled: cancelled.rows,
       summary: {
         toShip: toShip.rows.length,
         toCollect: toCollect.rows.length,

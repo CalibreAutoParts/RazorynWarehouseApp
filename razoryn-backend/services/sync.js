@@ -560,17 +560,54 @@ async function pushInvoiceLinksToShopify({ limit = 40 } = {}) {
   return { pending: rows.length, pushed, failed, lastError };
 }
 
+// eBay is the source of truth for an eBay order's refunds / cancellation: its
+// current refund figure replaces ours (a cancel request that was withdrawn puts
+// the order back to live), and a pending cancel request is flagged — not
+// treated as cancelled — so Dispatch warns instead of hiding the order.
+let _cancelCols = false;
+async function reconcileEbayOrderState(saleId, order) {
+  if (!_cancelCols) {
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT false`);
+    await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS channel_cancel_state TEXT`);
+    _cancelCols = true;
+  }
+  const info = ebay.orderRefundInfo(order);
+  const cur = (await query(`SELECT COALESCE(channel_refunded_amount, 0) AS cr FROM sales WHERE id = $1`, [saleId]).catch(() => ({ rows: [] }))).rows[0];
+  if (info.amount > 0 || (cur && Number(cur.cr) > 0)) {
+    await reconcileSaleRefund(saleId, { channelRefund: info.amount, authoritative: true });
+  }
+  const state = order.cancelStatus?.cancelState || null;
+  const requested = !!order.cancelRequested || /IN_PROGRESS/i.test(String(state || ''));
+  await query(`UPDATE sales SET cancel_requested = $2, channel_cancel_state = $3 WHERE id = $1`,
+    [saleId, requested, order.cancelStatusRaw || state]).catch(() => {});
+}
+
+// Orders changed on eBay since the last sync (cancel requested / withdrawn /
+// refunded after the order was imported) — the normal pull only reads NEW orders.
+async function reconcileModifiedEbayOrders(sinceISO) {
+  const brand = require('../lib/brand');
+  const out = { checked: 0 };
+  for (const store of brand.stores.filter(s => s.token)) {
+    try {
+      const orders = await ebay.getOrdersModifiedSince(sinceISO, store);
+      for (const o of orders) {
+        const s = await query(`SELECT id FROM sales WHERE external_order_id = $1`, [o.orderId]);
+        if (s.rows[0]) { await reconcileEbayOrderState(s.rows[0].id, o); out.checked++; }
+      }
+    } catch (e) { console.warn(`[sync] modified orders (${store.code}):`, e.message); }
+  }
+  return out;
+}
+
 // Import ONE eBay order into a sale (dedup on external_order_id). Shared by the
 // normal pull and the backfill. Returns 'skipped' | 'existing' | 'inserted'.
 async function importEbayOrderRow(order, store, { vatRegistered, vatRate, adjustStock = true }) {
   if (await isExternalOrderSuppressed(order.orderId)) return 'skipped';
   const existing = await query(`SELECT id FROM sales WHERE external_order_id = $1`, [order.orderId]);
   if (existing.rows.length) {
-    // Already imported — net any refund/cancellation the order now reports.
-    try {
-      const info = ebay.orderRefundInfo(order);
-      if (info.amount > 0) await reconcileSaleRefund(existing.rows[0].id, { channelRefund: info.amount });
-    } catch (e) { console.warn('[sync] ebay refund reconcile:', e.message); }
+    // Already imported — bring its refund / cancellation state in line with eBay.
+    try { await reconcileEbayOrderState(existing.rows[0].id, order); }
+    catch (e) { console.warn('[sync] ebay refund reconcile:', e.message); }
     return 'existing';
   }
   const brand = require('../lib/brand');
@@ -626,8 +663,8 @@ async function importEbayOrderRow(order, store, { vatRegistered, vatRate, adjust
   });
   if (adjustStock) { for (const li of order.lineItems || []) { try { const m = await resolveProductBySku(null, li.sku); if (m) await handleStockOutIfIncoming(m.id); } catch (_) {} } }
   try {
-    const info = ebay.orderRefundInfo(order);
-    if (info.amount > 0) { const s = await query(`SELECT id FROM sales WHERE external_order_id = $1`, [order.orderId]); if (s.rows[0]) await reconcileSaleRefund(s.rows[0].id, { channelRefund: info.amount }); }
+    const s = await query(`SELECT id FROM sales WHERE external_order_id = $1`, [order.orderId]);
+    if (s.rows[0]) await reconcileEbayOrderState(s.rows[0].id, order);
   } catch (_) {}
   // Fire the automated fitment-confirmation message the moment a LIVE order lands
   // (not on backfill). Fire-and-forget + fully guarded (enabled/eligible) inside.
@@ -752,6 +789,12 @@ async function pullEbay(opts = {}) {
     totalInserted += inserted;
     perStore.push({ code: store.code, orders: orders.length, inserted });
   }
+
+  // Orders changed since the last run (cancel requests made / withdrawn, refunds).
+  try {
+    const modSince = new Date(new Date(since).getTime() - 60 * 60 * 1000).toISOString();
+    await reconcileModifiedEbayOrders(modSince);
+  } catch (e) { console.warn('[sync.pullEbay] modified orders:', e.message); }
 
   await setCursor('ebay', { lastSyncedAt: new Date(), status: 'ok' });
   return { channel: 'ebay', since, orders: totalOrders, inserted: totalInserted, stores: perStore };
@@ -1075,6 +1118,7 @@ async function pushAllStockToBoth(onProgress, opts = {}) {
 }
 
 module.exports = {
+  reconcileModifiedEbayOrders,
   runFullSync,
   pullShopify,
   pushInvoiceLinksToShopify,

@@ -47,8 +47,11 @@ async function reconcileSaleRefund(saleId, opts = {}) {
   await ensureRefundColumns();
   if (opts.channelRefund != null) {
     const cr = Math.max(0, round2(opts.channelRefund));
-    await query(
-      `UPDATE sales SET channel_refunded_amount = GREATEST(COALESCE(channel_refunded_amount, 0), $2::numeric) WHERE id = $1`,
+    // authoritative: the channel's own current figure (e.g. eBay after a cancel
+    // request was withdrawn → 0) replaces ours; otherwise it only ever grows.
+    await query(opts.authoritative
+      ? `UPDATE sales SET channel_refunded_amount = $2::numeric WHERE id = $1`
+      : `UPDATE sales SET channel_refunded_amount = GREATEST(COALESCE(channel_refunded_amount, 0), $2::numeric) WHERE id = $1`,
       [saleId, cr]);
   }
   const r = await query(
@@ -71,9 +74,13 @@ async function reconcileSaleRefund(saleId, opts = {}) {
         refunded_at = CASE WHEN $2::numeric > 0 AND refunded_at IS NULL THEN now()
                            WHEN $2::numeric = 0 THEN NULL ELSE refunded_at END,
         status = CASE WHEN $3::boolean AND status NOT IN ('refunded','cancelled') THEN 'refunded'
+                      -- No longer refunded (the channel reversed it — e.g. a cancel
+                      -- request withdrawn): the order is live again.
+                      WHEN NOT $3::boolean AND $4::boolean AND status = 'refunded'
+                        THEN CASE WHEN dispatched_at IS NOT NULL THEN 'dispatched' ELSE 'paid' END
                       ELSE status END
       WHERE id = $1`,
-    [saleId, refunded, fully]);
+    [saleId, refunded, fully, !!opts.authoritative]);
   return { refunded, fully, total };
 }
 
