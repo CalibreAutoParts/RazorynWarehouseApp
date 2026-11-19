@@ -628,14 +628,19 @@ async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
       // hours and after each push) — reading every listing from eBay on every
       // push used up eBay's daily GetItem allowance.
       const liveLib = require('../lib/ebay-live');
-      let cur = await liveLib.cachedQty(code, itemId);
-      if (!cur) {
+      const readLive = async () => {
         const gx = await tradingCall('GetItem', `<ItemID>${escapeXml(String(itemId))}</ItemID>`, storeArg);
         if (gx.includes('<Ack>Failure</Ack>')) throw new Error('read failed');
-        cur = { qty: (parseInt(extractOne(gx, 'Quantity') || '0') || 0) - (parseInt(extractOne(extractOne(gx, 'SellingStatus') || '', 'QuantitySold') || '0') || 0),
-          price: parseFloat(extractOne(extractOne(gx, 'SellingStatus') || '', 'CurrentPrice') || extractOne(gx, 'StartPrice') || '0') || 0 };
-        liveLib.noteQty(code, itemId, cur.qty, cur.price).catch(() => {});
-      }
+        const c = { qty: (parseInt(extractOne(gx, 'Quantity') || '0') || 0) - (parseInt(extractOne(extractOne(gx, 'SellingStatus') || '', 'QuantitySold') || '0') || 0),
+          price: parseFloat(extractOne(extractOne(gx, 'SellingStatus') || '', 'CurrentPrice') || extractOne(gx, 'StartPrice') || '0') || 0, live: true };
+        liveLib.noteQty(code, itemId, c.qty, c.price).catch(() => {});
+        return c;
+      };
+      // A stock count (exact) reads the listing live; other pushes use the
+      // cached figure, re-read live when it's over an hour old and we'd raise.
+      let cur = opts.exact ? null : await liveLib.cachedQty(code, itemId);
+      if (cur && qty > cur.qty && cur.ageMin > 60) cur = null;
+      if (!cur) { try { cur = await readLive(); } catch (e) { cur = await liveLib.cachedQty(code, itemId); if (!cur) throw e; } }
       const curQty = cur.qty;
       const unit = cur.price || 0;
       if (qty > curQty) {
@@ -652,7 +657,8 @@ async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
           if (qty < before) limitedBy = rules.reserveGbp && spare != null && spare < (lim.amountRemaining || 0) && byAmt < byQty ? 'kept_free' : 'selling_limit';
         }
       }
-      if (qty === curQty) return { ok: true, itemId, quantity: qty, asked, limitedBy, unchanged: true, storeCode: code };
+      // Only skip when the listing was read live — a cached figure may be stale.
+      if (qty === curQty && cur.live) return { ok: true, itemId, quantity: qty, asked, limitedBy, unchanged: true, storeCode: code };
     } catch (_) { /* can't read the listing — push as asked */ }
   }
   const body = `<InventoryStatus><ItemID>${escapeXml(String(itemId))}</ItemID><Quantity>${qty}</Quantity></InventoryStatus>`;

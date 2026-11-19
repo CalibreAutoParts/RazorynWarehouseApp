@@ -72,9 +72,9 @@ async function cachedQty(storeCode, itemId) {
   if (!storeCode || !itemId) return null;
   try {
     await ensureSchema();
-    const r = (await query(`SELECT qty_available, price FROM ebay_live_items
+    const r = (await query(`SELECT qty_available, price, EXTRACT(EPOCH FROM (now() - qty_at)) / 60 AS age_min FROM ebay_live_items
         WHERE store_code = $1 AND ebay_item_id = $2 AND qty_available IS NOT NULL AND qty_at > now() - interval '8 hours'`, [storeCode, String(itemId)])).rows[0];
-    return r ? { qty: r.qty_available, price: r.price != null ? Number(r.price) : null } : null;
+    return r ? { qty: r.qty_available, price: r.price != null ? Number(r.price) : null, ageMin: Number(r.age_min) || 0 } : null;
   } catch (_) { return null; }
 }
 async function noteQty(storeCode, itemId, qty, price) {

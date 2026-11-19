@@ -1078,11 +1078,15 @@ async function pushProductStockToChannels(productId, _opts = {}) {
   // (Trading API) which works for Calibre's legacy listings.
   try {
     const ebay = require('../services/ebay');
-    const links = await query(
+    let links = await query(
       `SELECT ebay_item_id, store_code FROM mirror_links
        WHERE shopify_product_id::text = $1`,
       [product.shopify_product_id]
     );
+    // Listed on eBay without a Shopify product: the link carries the SKU only.
+    if (!links.rows.length && product.sku) {
+      links = await query(`SELECT ebay_item_id, store_code FROM mirror_links WHERE shopify_product_id IS NULL AND upper(last_synced_sku) = upper($1)`, [product.sku]);
+    }
     for (const link of links.rows) {
       // Skip stores with no token / disabled
       const stores = ebay.listStores().filter(s => s.hasToken && !s.disabled);
@@ -1093,8 +1097,11 @@ async function pushProductStockToChannels(productId, _opts = {}) {
         continue;
       }
       try {
-        await ebay.setQuantityTradingAPI(link.ebay_item_id, pushQty, store.code);
-        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true, qty: pushQty });
+        // A stock count is exact: read the listing live and don't wait for the
+        // top-up level — the account's max-per-listing / selling limits still apply.
+        const r = await ebay.setQuantityTradingAPI(link.ebay_item_id, pushQty, store.code, _opts.exact ? { exact: true, force: true } : {});
+        result.ebay.push({ itemId: link.ebay_item_id, store: store.code, ok: true, qty: pushQty,
+          sent: r && r.quantity != null ? r.quantity : pushQty, limitedBy: (r && r.limitedBy) || null, unchanged: !!(r && r.unchanged) });
       } catch (e) {
         result.ebay.push({ itemId: link.ebay_item_id, store: store.code, error: e.message });
       }
@@ -1103,6 +1110,15 @@ async function pushProductStockToChannels(productId, _opts = {}) {
   } catch (e) {
     result.ebay.push({ error: e.message });
   }
+
+  // Keep what each channel took on the product (Stock Check shows mismatches).
+  try {
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_pushed_at TIMESTAMPTZ`).catch(() => {});
+    await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_push_result JSONB`).catch(() => {});
+    await query(`UPDATE products SET stock_pushed_at = now(), stock_push_result = $2::jsonb WHERE id = $1`,
+      [productId, JSON.stringify({ qty: pushQty, own: product.qty_on_hand, at: new Date().toISOString(), shopify: result.shopify,
+        ebay: result.ebay.map(e => ({ itemId: e.itemId, store: e.store, sent: e.sent, limitedBy: e.limitedBy, error: e.error, skipped: e.skipped })) })]);
+  } catch (_) {}
 
   // This product's stock just changed — refresh any bundle that uses it as a
   // component so the bundle's eBay quantity tracks the scarcest part.
@@ -1122,7 +1138,7 @@ async function pushProductStockToChannels(productId, _opts = {}) {
       const siblings = [];
       for (const s of sibs.rows) {
         await query(`UPDATE products SET qty_on_hand = $1, updated_at = now() WHERE id = $2`, [qty, s.id]);
-        try { await pushProductStockToChannels(s.id, { skipGroup: true }); siblings.push({ id: s.id, ok: true }); }
+        try { await pushProductStockToChannels(s.id, { skipGroup: true, exact: !!_opts.exact }); siblings.push({ id: s.id, ok: true }); }
         catch (e) { siblings.push({ id: s.id, error: e.message }); }
       }
       result.group = { groupId: product.stock_group_id, qty, siblings };
