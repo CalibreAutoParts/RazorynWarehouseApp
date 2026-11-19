@@ -4126,6 +4126,51 @@ async function doCreateEbay(b, { req } = {}) {
   const store = brand.getStore(b.storeCode);
   if (!store) throw httpErr(400, { error: 'unknown_store', message: `No eBay store configured with code "${b.storeCode}". Available: ${brand.stores.map(s => s.code).join(', ')}` });
 
+  // Never list the same part twice on one account: refuse when it already has a
+  // LIVE listing there (linked, or a live listing with its SKU), or a create for
+  // it is still running. allowDuplicate (or replacing a dead link) overrides.
+  if (!b.preview && !b.allowDuplicate) {
+    const dupe = await existingLiveListing(product, store.code, b.replaceItemId || b.deadItemId || null);
+    if (dupe) throw httpErr(409, { error: 'already_listed', itemId: dupe.itemId,
+      message: `${product.sku} is already listed on ${store.name || store.code} (item ${dupe.itemId}${dupe.via === 'sku' ? ', found by SKU' : ''}). Not listed again — open that listing to change it.` });
+    const key = `${product.id}:${store.code}`;
+    if (_creatingNow.has(key)) throw httpErr(409, { error: 'in_progress', message: `${product.sku} is already being listed on ${store.name || store.code} — wait for that to finish.` });
+    _creatingNow.add(key);
+    try { return await doCreateEbayInner(b, { req, product, store }); }
+    finally { _creatingNow.delete(key); }
+  }
+  return doCreateEbayInner(b, { req, product, store });
+}
+
+// Live listing of this part on an account: a mirror link that's on the account's
+// live list (or any link when no live list is known yet), or a live listing
+// with the same SKU (made on eBay by hand).
+const _creatingNow = new Set();
+async function existingLiveListing(product, storeCode, ignoreItemId = null) {
+  try {
+    await require('../lib/ebay-live').ensureSchema();
+    const hasList = await require('../lib/ebay-live').hasList(storeCode);
+    const links = product.shopify_product_id
+      ? (await query(`SELECT ebay_item_id FROM mirror_links WHERE shopify_product_id::text = $1 AND store_code = $2`, [String(product.shopify_product_id), storeCode])).rows : [];
+    for (const l of links) {
+      if (ignoreItemId && String(l.ebay_item_id) === String(ignoreItemId)) continue;
+      if (!hasList) return { itemId: l.ebay_item_id, via: 'link' };
+      const live = (await query(`SELECT 1 FROM ebay_live_items WHERE store_code = $1 AND ebay_item_id = $2`, [storeCode, String(l.ebay_item_id)])).rows.length;
+      if (live) return { itemId: l.ebay_item_id, via: 'link' };
+    }
+    if (product.sku && hasList) {
+      const bySku = (await query(`SELECT ebay_item_id FROM ebay_live_items WHERE store_code = $1 AND upper(sku) = upper($2) LIMIT 1`, [storeCode, product.sku])).rows[0];
+      if (bySku && String(bySku.ebay_item_id) !== String(ignoreItemId || '')) return { itemId: bySku.ebay_item_id, via: 'sku' };
+    }
+  } catch (_) { /* can't tell — don't block */ }
+  return null;
+}
+
+async function doCreateEbayInner(b, { req, product, store }) {
+  const ebay = require('../services/ebay');
+  const shopify = require('../services/shopify');
+  const brand = require('../lib/brand');
+
   // Pull eBay listing defaults from app_settings (per-store policies + location).
   // The settings UI lets the user save these once so they don't have to type them
   // for every new listing.

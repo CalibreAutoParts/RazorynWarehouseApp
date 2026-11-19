@@ -1028,6 +1028,25 @@ router.post('/:id/mark-unpaid', requireAdmin, async (req, res) => {
   res.json({ ok: true, sale });
 });
 
+// POST /api/sales/:id/restore — an order marked cancelled / refunded that's
+// going ahead after all (e.g. the buyer withdrew their eBay cancel request):
+// clear the channel refund and put it back to live (paid, or dispatched if it
+// has been sent). Refunds booked through Returns are left as they are.
+router.post('/:id/restore', requireAdmin, async (req, res) => {
+  const { reconcileSaleRefund, ensureRefundColumns } = require('../lib/refunds');
+  await ensureRefundColumns();
+  const s = (await query(`SELECT id, status, total FROM sales WHERE id = $1`, [req.params.id])).rows[0];
+  if (!s) return res.status(404).json({ error: 'not_found' });
+  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+  await query(`UPDATE sales SET cancel_requested = false,
+      status = CASE WHEN status = 'cancelled' THEN (CASE WHEN dispatched_at IS NOT NULL THEN 'dispatched' ELSE 'paid' END) ELSE status END
+    WHERE id = $1`, [s.id]);
+  const r = await reconcileSaleRefund(s.id, { channelRefund: 0, authoritative: true });
+  const sale = (await query(`SELECT * FROM sales WHERE id = $1`, [s.id])).rows[0];
+  await audit(req, 'sale_restored', 'sale', s.id, { from: s.status, to: sale.status, stillRefunded: r?.refunded || 0 });
+  res.json({ ok: true, sale, stillRefunded: r?.refunded || 0 });
+});
+
 // DELETE /api/sales/:id/payments/:paymentId — remove a payment recorded by
 // mistake; the order goes back to unpaid / part-paid to match.
 router.delete('/:id/payments/:paymentId', requireAdmin, async (req, res) => {

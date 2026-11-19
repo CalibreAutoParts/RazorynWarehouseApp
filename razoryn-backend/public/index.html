@@ -8806,6 +8806,18 @@ function paintDispatch() {
       </div>
     </div>
 
+    ${(data.cancelled || []).length ? `
+    <details class="card" style="margin-bottom:16px;border-left:3px solid var(--red)">
+      <summary style="cursor:pointer;padding:14px 18px;font-weight:600;font-size:14px">🚫 Cancelled / refunded before dispatch — don't ship (${data.cancelled.length}, last 7 days)</summary>
+      <div class="card-body" style="padding:0;border-top:1px solid var(--line)"><table class="table"><thead><tr><th>Order</th><th>Channel</th><th>Customer</th><th>Item</th><th class="num">Refunded</th><th></th></tr></thead><tbody>
+        ${data.cancelled.map(c => `<tr style="cursor:pointer" onclick="openSaleDetail(${c.id})"><td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(c.invoice_number || c.payment_reference || c.external_order_id || '#' + c.id)}</td>
+          <td>${channelPill(c.channel, c)}</td><td>${escapeHtml(c.customer_name || '—')}</td>
+          <td><div style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(c.first_item_title || '')}</div><div style="font-size:11px;color:var(--ink-soft)">${escapeHtml(c.first_item_sku || '')}</div></td>
+          <td class="num">${gbp(c.refunded_amount || c.total)}</td>
+          <td style="font-size:11px;color:var(--ink-soft)">Buyer still wants it? Open it → <b>Restore order</b></td></tr>`).join('')}
+      </tbody></table></div>
+    </details>` : ''}
+
     <!-- COLLECTIONS -->
     ${toCollect.length > 0 ? `
     <div class="card" style="margin-bottom:16px">
@@ -8961,7 +8973,7 @@ function renderDispatchRow(s, kind) {
           ${s.dropfleet_pushed_at ? `<div style="margin-top:3px"><span class="pill green" style="font-size:9px" title="Sent to DropFleet ${escapeAttr(fmtDate(s.dropfleet_pushed_at))}">🚚 Sent to DropFleet</span></div>` : ''}
         </td>
         <td>${channelPill(s.channel, s)}</td>
-        <td>${escapeHtml(s.customer_name || '—')}${dispatchShipTerms(s)}</td>
+        <td>${escapeHtml(s.customer_name || '—')}${s.cancel_requested ? `<div style="margin-top:4px"><span class="pill red" style="font-size:10px" title="eBay: ${escapeAttr(s.channel_cancel_state || 'cancel requested')}">⚠ Buyer asked to cancel — check eBay before shipping</span></div>` : ''}${dispatchShipTerms(s)}</td>
         <td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel}</div>${s.first_item_sku ? `<div style="font-size:11px;color:var(--ink-soft);font-family:ui-monospace,monospace">${escapeHtml(s.first_item_sku)}${s.first_item_pn && s.first_item_pn !== s.first_item_sku ? ' · PN ' + escapeHtml(s.first_item_pn) : ''}${s.first_item_loc ? ' · 📍 ' + escapeHtml(s.first_item_loc) : ''}</div>` : ''}</td>
         <td class="num"><strong>${gbp(s.total)}</strong></td>
         <td>${ageBadge}</td>
@@ -10807,6 +10819,17 @@ function autoOpenInvoice(id) {
 // a second top-level definition there shadows anything here, so there is a single
 // source of truth. This earlier duplicate was removed to avoid confusion.
 
+// A cancelled / refunded order that's going ahead after all (buyer withdrew the
+// cancel request): back to live, full value, on Dispatch if not yet sent.
+async function saleRestore(id) {
+  if (!confirm('Restore this order?\n\nUse this when the cancellation didn\'t go through (e.g. the buyer withdrew the request) and the order is being sent. Its value comes back and, if not yet sent, it returns to Dispatch.\n\nIf eBay really did refund it, the next sync will mark it refunded again.')) return;
+  try {
+    const r = await Api.post(`/api/sales/${id}/restore`, {});
+    toast(r.stillRefunded ? `Restored — £${Number(r.stillRefunded).toFixed(2)} is still refunded through a return` : '↺ Order restored', 'success', 5000);
+    closeModal(); openSaleDetail(id);
+    if (typeof loadSales === 'function') loadSales();
+  } catch (e) { toast(e.data?.message || e.message, 'error'); }
+}
 // Undo a payment recorded by mistake (e.g. "Mark paid" pressed on the wrong order).
 async function saleRemovePayment(saleId, paymentId, amount) {
   if (!confirm(`Remove this £${Number(amount).toFixed(2)} payment?\n\nThe order goes back to unpaid (or part-paid) and shows up to chase again. Any receipt already emailed is not recalled.`)) return;
@@ -10983,6 +11006,7 @@ async function openSaleDetail(id) {
       ...(!s.is_estimate ? [{ label: '↩ Log return', onClick: () => openReturnFromSale(id) }] : []),
       ...(!s.is_estimate && hasRefund ? [{ label: '↩ Undo returns / reopen', onClick: () => undoReturnsForSale(id) }] : []),
       ...(data.customerInvoiceUrl ? [{ label: '🔗 Copy customer link', onClick: () => copyCustomerInvoiceLink(data.customerInvoiceUrl) }] : []),
+      ...((['refunded', 'cancelled'].includes(data.sale?.status) && State.user?.role === 'admin') ? [{ label: '↺ Restore order', onClick: () => saleRestore(data.sale.id) }] : []),
       { label: '✉ Email', onClick: () => { closeModal(); emailSingleInvoice(id); } },
       { label: '🖨 Print / PDF', primary: true, onClick: () => { closeModal(); printSingleInvoice(id); } },
     ],
@@ -15167,6 +15191,7 @@ async function elOfferCreateEbay(productId, opts = {}) {
           closeModal();
           let ok = false;
           await submitCreateEbayListing(productId, {
+            replaceItemId: opts.deadItemId || null,
             imageUrls: (CL.images || []).filter(u => /^https?:/i.test(u)),
             onSuccess: (res) => { ok = true; toast(`🛒 Listed on eBay — ItemID ${res.itemId} · linked to this product (warehouse, Shopify & eBay now in sync)`, 'success', 10000); },
           });
@@ -16390,10 +16415,21 @@ async function loadBulkShopify(force) {
 }
 function renderBulkShopify() {
   const wrap = el('bulk-shopify'); if (!wrap) return;
-  const products = (State.linkStatus?.products) || [];
-  // On Shopify, not yet on eBay = ready to export to eBay.
+  const rowsRaw = (State.linkStatus?.products) || [];
+  // link-status has one row per eBay link — group to one per product with the
+  // accounts it's listed on.
+  const byId = new Map();
+  for (const r of rowsRaw) {
+    if (!byId.has(r.id)) byId.set(r.id, { ...r, stores: new Set() });
+    if (r.ebay_item_id) byId.get(r.id).stores.add(r.store_code || '');
+  }
+  const products = [...byId.values()];
+  const ebayStores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_') && s.connected !== false);
+  const acct = MirrorState.shopifyAcct || '';
+  // On Shopify, not yet on eBay (anywhere — or on the chosen account) = ready to export.
   const onShopify = products.filter(p => p.shopify_product_id);
-  const ready = onShopify.filter(p => !p.ebay_item_id);
+  const ready = acct ? onShopify.filter(p => !p.stores.has(acct)) : onShopify.filter(p => !p.stores.size);
+  const acctName = acct ? (ebayStores.find(s => s.code === acct)?.name || acct) : null;
   const q = (MirrorState.shopifyFilter || '').toLowerCase().trim();
   let list = ready;
   if (q) list = list.filter(p => matchesKeywords(q, p.title, p.sku, p.part_number));
@@ -16403,13 +16439,21 @@ function renderBulkShopify() {
         <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escapeHtml(p.sku || '')}</div></td>
       <td style="white-space:nowrap;font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-soft)">${escapeHtml(p.shopify_product_id || '')}</td>
       <td style="white-space:nowrap">
-        <button class="btn btn-primary btn-sm" onclick="openCreateEbayListing(${p.id})" title="Create a new eBay listing from this product's Shopify data" style="margin-right:4px">+ Create on eBay</button>
+        ${p.stores.size ? `<div style="font-size:10.5px;color:var(--ink-soft);margin-bottom:3px">On: ${[...p.stores].map(c => escapeHtml(ebayStores.find(s => s.code === c)?.name || c || 'eBay')).join(', ')}</div>` : ''}
+        <button class="btn btn-primary btn-sm" onclick="openCreateEbayListing(${p.id}${acct ? `, { storeCode: '${escapeAttr(acct)}' }` : ''})" title="Create a new eBay listing from this product's Shopify data" style="margin-right:4px">+ Create on ${acctName ? escapeHtml(acctName) : 'eBay'}</button>
         <button class="btn btn-outline btn-sm" onclick="openLinkProductToEbay(${p.id})" title="Link to an eBay listing you already created manually">🔗 Link existing</button>
       </td>
     </tr>`).join('');
   wrap.innerHTML = `
     <div class="card" style="margin-bottom:10px"><div class="card-body" style="padding:10px 14px;font-size:12px;color:var(--ink-soft)">
-      ${ready.length} Shopify product${ready.length === 1 ? '' : 's'} not yet on eBay (of ${onShopify.length} on Shopify). Create the eBay listing from the Shopify data, or link one you made manually.
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="font-size:12px;display:flex;gap:6px;align-items:center">eBay account
+          <select onchange="MirrorState.shopifyAcct=this.value; renderBulkShopify()">
+            <option value="" ${!acct ? 'selected' : ''}>Not on any eBay account</option>
+            ${ebayStores.map(s => `<option value="${escapeAttr(s.code)}" ${acct === s.code ? 'selected' : ''}>Not on ${escapeHtml(s.name || s.code)}</option>`).join('')}
+          </select></label>
+        <span>${ready.length} Shopify product${ready.length === 1 ? '' : 's'} not yet on ${acctName ? escapeHtml(acctName) : 'eBay'} (of ${onShopify.length} on Shopify). Create the eBay listing from the Shopify data, or link one you made manually. A part already live on an account can't be listed there twice.</span>
+      </div>
     </div></div>
     <div class="card" style="margin-bottom:10px"><div class="card-body" style="padding:10px 14px">
       <input id="bulk-shopify-search" class="search-input" placeholder="Filter by title, SKU, part #…" value="${escapeAttr(MirrorState.shopifyFilter || '')}" oninput="MirrorState.shopifyFilter=this.value; renderBulkShopify(); const i=el('bulk-shopify-search'); if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length);}" style="width:100%">
@@ -20829,7 +20873,7 @@ async function openCreateEbayListing(productId, opts = {}) {
   catch (e) { cfg = State.pricingConfig || {}; }
 
   const stores = (State.brand?.stores || []).filter(s => s.channelCode && s.channelCode.startsWith('ebay_'));
-  const defaultStoreCode = stores.find(s => s.primary)?.code || stores[0]?.code || '';
+  const defaultStoreCode = (opts.storeCode && stores.some(s => s.code === opts.storeCode) ? opts.storeCode : null) || stores.find(s => s.primary)?.code || stores[0]?.code || '';
   const policies = cfg.ebayPerStorePolicies?.[defaultStoreCode] || {};
   const policiesConfigured = !!(policies.payment || cfg.ebayPolicyPayment) || !!(policies.shipping || cfg.ebayPolicyShipping);
 
@@ -21521,9 +21565,16 @@ async function submitCreateEbayListing(productId, opts = {}) {
   if (!inp._mpnFilled && !confirm('No Manufacturer Part Number (MPN) entered. eBay usually rejects car-part listings without it. Continue anyway?')) return;
   if (promote.enabled && (!promote.percent || promote.percent < 2)) { toast('Promoted listing ad rate must be at least 2%', 'warn'); return; }
 
+  // One create at a time per part — a second click while eBay is still
+  // answering would list it twice.
+  const lockKey = productId + ':' + storeCode;
+  window._ceCreating = window._ceCreating || new Set();
+  if (!preview && window._ceCreating.has(lockKey)) { toast('Already listing this part on that account — wait a moment', 'warn'); return; }
+  if (!preview) window._ceCreating.add(lockKey);
   const taskId = Task.start(preview ? 'Validating listing…' : 'Creating eBay listing…');
   try {
     const r = await Api.post('/api/listings/create-ebay', {
+      replaceItemId: opts.replaceItemId || undefined,
       productId, storeCode, categoryId, conditionId: inp.conditionId,
       price, quantity: inp.quantity, titleOverride: title,
       useShopifyDescription: inp.useShopifyDescription, descriptionOverride: inp.descriptionOverride,
@@ -21550,6 +21601,9 @@ async function submitCreateEbayListing(productId, opts = {}) {
       if (r.promotion.ok) toast(`✓ Promoted at ${r.promotion.bidPercent}% ad rate`, 'success', 6000);
       else toast(`Listing is live, but promotion didn’t apply: ${r.promotion.message}`, 'warn', 11000);
     }
+    window._ceCreating.delete(lockKey);
+    // The Shopify → eBay list must drop it straight away, or it can be listed twice.
+    if (el('bulk-shopify')) loadBulkShopify(true);
     if (opts.onSuccess) { opts.onSuccess(r); return; }
     closeModal();
     // Refresh whichever Listing Links view is open so the new eBay link shows.
@@ -21557,8 +21611,10 @@ async function submitCreateEbayListing(productId, opts = {}) {
     else if (typeof refreshLinkStatus === 'function') await refreshLinkStatus();
     else if (typeof renderLinkStatus === 'function') renderLinkStatus();
   } catch (e) {
+    window._ceCreating && window._ceCreating.delete(lockKey);
     Task.fail(taskId, 'Failed');
     const msg = e.data?.message || e.message || 'Unknown error';
+    if (e.data?.error === 'already_listed' || e.data?.error === 'in_progress') { toast('⛔ ' + msg, 'warn', 12000); if (el('bulk-shopify')) loadBulkShopify(true); return; }
     if (e.data?.error === 'missing_item_specifics') {
       toast('eBay needs these item specifics: ' + (e.data.missing || []).join(', ') + '. Add them in inventory, or they may need filling per-category.', 'error', 12000);
     } else if (msg.includes('Insufficient permissions') || msg.includes('21916')) {

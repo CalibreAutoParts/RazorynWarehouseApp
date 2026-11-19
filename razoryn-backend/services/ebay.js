@@ -423,8 +423,14 @@ function mapTradingOrderXml(oXml) {
   const orderStatusRaw = (extractOne(oXml, 'OrderStatus') || '').trim();
   const cancelStatusRaw = (extractOne(oXml, 'CancelStatus') || '').trim();
   const eBayPaymentStatus = (extractOne(oXml, 'eBayPaymentStatus') || '').trim();
-  const isCancelled = /^(Cancelled|Inactive|CancelPending)$/i.test(orderStatusRaw)
-    || (/Cancel/i.test(cancelStatusRaw) && !/NotApplicable/i.test(cancelStatusRaw));
+  // Only a COMPLETED cancellation counts. A buyer's cancel REQUEST (CancelPending /
+  // CancelRequested) is not a cancellation — the buyer can withdraw it and the
+  // order ships as normal; a rejected / closed-without-refund request
+  // (CancelRejected, CancelClosedNoRefund, CancelClosedForCommitment…) leaves a
+  // live order. Treating those as cancelled zeroed real orders.
+  const isCancelled = /^(Cancelled|Inactive)$/i.test(orderStatusRaw)
+    || /^(CancelComplete|CancelClosedWithRefund)$/i.test(cancelStatusRaw);
+  const cancelRequested = !isCancelled && (/^CancelPending$/i.test(orderStatusRaw) || /^(CancelPending|CancelRequested)$/i.test(cancelStatusRaw));
   const isRefunded = /Refund/i.test(eBayPaymentStatus);
   // Refund amount from MonetaryDetails/Refund entries, if present.
   let refundTotal = 0;
@@ -487,9 +493,27 @@ function mapTradingOrderXml(oXml) {
     // Normalised so orderRefundInfo() works the same for Trading + Fulfillment orders.
     orderStatus: orderStatusRaw || null,
     orderPaymentStatus: isRefunded ? 'FULLY_REFUNDED' : null,
-    cancelStatus: isCancelled ? { cancelState: 'CANCELED' } : null,
+    cancelStatus: isCancelled ? { cancelState: 'CANCELED' } : cancelRequested ? { cancelState: 'IN_PROGRESS' } : { cancelState: 'NONE_REQUESTED' },
+    cancelRequested, cancelStatusRaw: cancelStatusRaw || null,
     paymentSummary: refundTotal > 0 ? { refunds: [{ amount: { value: refundTotal } }] } : null,
   };
+}
+
+// Orders CHANGED since a time (cancel requested / withdrawn / refunded) — the
+// normal pull only reads newly created orders. Trading GetOrders by ModTime.
+async function getOrdersModifiedSince(sinceISO, storeArg) {
+  if (!isConfigured(storeArg)) return [];
+  const from = new Date(Math.max(new Date(sinceISO).getTime(), Date.now() - 29 * 86400000)).toISOString();
+  const all = [];
+  for (let page = 1; page <= 10; page++) {
+    const xml = await tradingCall('GetOrders', `<ModTimeFrom>${from}</ModTimeFrom><ModTimeTo>${new Date().toISOString()}</ModTimeTo>
+      <OrderStatus>All</OrderStatus><Pagination><EntriesPerPage>100</EntriesPerPage><PageNumber>${page}</PageNumber></Pagination><DetailLevel>ReturnAll</DetailLevel>`, storeArg);
+    if (xml.includes('<Ack>Failure</Ack>')) throw new Error('eBay GetOrders error: ' + decodeEntities(extractOne(xml, 'LongMessage') || extractOne(xml, 'ShortMessage') || 'unknown'));
+    for (const oXml of extractAll(extractOne(xml, 'OrderArray') || '', 'Order')) all.push(mapTradingOrderXml(oXml));
+    const tp = parseInt(extractOne(extractOne(xml, 'PaginationResult') || '', 'TotalNumberOfPages') || '1');
+    if (page >= tp) break;
+  }
+  return all;
 }
 
 async function getRecentOrdersTrading(sinceISO, storeArg) {
@@ -649,6 +673,13 @@ async function setQuantityTradingAPI(itemId, quantity, storeArg, opts = {}) {
           return { ok: true, itemId, quantity: curQty, asked, limitedBy: 'waiting_to_top_up', unchanged: true, storeCode: code };
         }
         if (lim && lim.limited) {
+          // Out-of-date allowance would hold the raise back — re-read it first.
+          const room = (l) => Math.min(l.qtyRemaining != null ? l.qtyRemaining : Infinity,
+            l.amountRemaining != null && unit > 0 ? Math.floor((Math.max(0, l.amountRemaining - (rules.reserveGbp || 0)) + 0.001) / unit) : Infinity);
+          if (room(lim) < qty - curQty && Date.now() - new Date(lim.checkedAt || 0).getTime() > 2 * 60 * 1000) {
+            const fresh = await getSellingLimits(storeArg, { fresh: true }).catch(() => null);
+            if (fresh) Object.assign(lim, fresh);
+          }
           const byQty = lim.qtyRemaining != null ? lim.qtyRemaining : Infinity;
           const spare = lim.amountRemaining != null ? lim.amountRemaining - (rules.reserveGbp || 0) : null;
           const byAmt = (spare != null && unit > 0) ? Math.floor((Math.max(0, spare) + 0.001) / unit) : Infinity;
@@ -1481,12 +1512,18 @@ async function addItem(storeArg, opts = {}) {
     (() => { const q = parseInt(quantity); return Number.isFinite(q) && q >= 0 ? q : 1; })(), storeCode);
   let listQty = requestedQty;
   if (!verify && listQty > 0) {
-    const lim = await getSellingLimits(storeArg).catch(() => null);
+    let lim = await getSellingLimits(storeArg).catch(() => null);
+    const unit = parseFloat(price);
+    const fitFor = (l) => Math.min(listQty, l.qtyRemaining != null ? l.qtyRemaining : Infinity,
+      l.amountRemaining != null ? Math.floor((l.amountRemaining + 0.001) / unit) : Infinity);
+    // The remembered allowance can be out of date (sales and ended listings free
+    // it up) — ask eBay again before refusing or trimming anything.
+    if (lim && lim.limited && fitFor(lim) < listQty && Date.now() - new Date(lim.checkedAt || 0).getTime() > 30 * 1000) {
+      lim = await getSellingLimits(storeArg, { fresh: true }).catch(() => lim);
+    }
     if (lim && lim.limited) {
-      const unit = parseFloat(price);
       const byQty = lim.qtyRemaining != null ? lim.qtyRemaining : Infinity;
-      const byAmt = lim.amountRemaining != null ? Math.floor((lim.amountRemaining + 0.001) / unit) : Infinity;
-      const fits = Math.min(listQty, byQty, byAmt);
+      const fits = fitFor(lim);
       if (fits < 1) {
         const e = new Error(byQty < 1
           ? `eBay selling limit: this account can't list any more items this month. Request higher limits on eBay.`
@@ -1660,7 +1697,7 @@ async function getSellingLimits(storeArg, { fresh = false } = {}) {
   const store = resolveStore(storeArg);
   const code = store?.code || '_';
   const hit = _sellingLimitsCache[code];
-  if (!fresh && hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.value;
+  if (!fresh && hit && Date.now() - hit.at < 5 * 60 * 1000) return hit.value;
   if (!isConfigured(storeArg)) throw new Error('ebay_not_configured');
   const xml = await tradingCall('GetMyeBaySelling', `
     <SellingSummary><Include>true</Include></SellingSummary>
@@ -2362,6 +2399,7 @@ module.exports = {
   promoteListing,
   getItemDescription,
   getItemDetails,
+  getOrdersModifiedSince, mapTradingOrderXml,
   isDailyLimitError,
   callBlockedUntil,
   getCategorySpecifics,
